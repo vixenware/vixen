@@ -196,6 +196,81 @@ fn test_const_bool() {
     assert_eq!(frag.call(&[]).unwrap(), FragmentResult::Bool(true));
 }
 
+#[test]
+fn test_bool_identity() {
+    let func = StrictFunction {
+        name: "bool_identity".to_owned(),
+        params: vec![param(0, "flag", StrictType::Bool)],
+        locals: vec![],
+        return_type: StrictType::Bool,
+        return_ownership: StringOwnership::Static,
+        body: vec![StrictStmt::Return(Some(StrictExpr::Local(local(0))))],
+    };
+    let frag = compile(&func).expect("bool identity should compile");
+    assert_eq!(
+        frag.call(&[FragmentArg::Bool(true)]).unwrap(),
+        FragmentResult::Bool(true)
+    );
+    assert_eq!(
+        frag.call(&[FragmentArg::Bool(false)]).unwrap(),
+        FragmentResult::Bool(false)
+    );
+}
+
+#[test]
+fn test_bool_word_abi_in_mixed_signature() {
+    let func = StrictFunction {
+        name: "bool_middle_param".to_owned(),
+        params: vec![
+            param(0, "lhs", StrictType::U64),
+            param(1, "flag", StrictType::Bool),
+            param(2, "rhs", StrictType::U64),
+        ],
+        locals: vec![],
+        return_type: StrictType::Bool,
+        return_ownership: StringOwnership::Static,
+        body: vec![StrictStmt::If {
+            condition: StrictExpr::Local(local(1)),
+            then_body: vec![StrictStmt::Return(Some(StrictExpr::Binary {
+                op: StrictBinOp::Eq,
+                lhs: Box::new(StrictExpr::Local(local(0))),
+                rhs: Box::new(StrictExpr::Local(local(2))),
+            }))],
+            else_body: vec![StrictStmt::Return(Some(StrictExpr::Literal(
+                StrictLiteral::Bool(false),
+            )))],
+        }],
+    };
+    let frag = compile(&func).expect("mixed bool ABI should compile");
+    assert_eq!(
+        frag.call(&[
+            FragmentArg::U64(7),
+            FragmentArg::Bool(true),
+            FragmentArg::U64(7),
+        ])
+        .unwrap(),
+        FragmentResult::Bool(true)
+    );
+    assert_eq!(
+        frag.call(&[
+            FragmentArg::U64(7),
+            FragmentArg::Bool(true),
+            FragmentArg::U64(8),
+        ])
+        .unwrap(),
+        FragmentResult::Bool(false)
+    );
+    assert_eq!(
+        frag.call(&[
+            FragmentArg::U64(7),
+            FragmentArg::Bool(false),
+            FragmentArg::U64(7),
+        ])
+        .unwrap(),
+        FragmentResult::Bool(false)
+    );
+}
+
 // --- const String ---
 
 #[test]

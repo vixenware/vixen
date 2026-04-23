@@ -69,7 +69,10 @@ fn build_signature(module: &JITModule, func: &StrictFunction) -> Signature {
     for param in &func.params {
         match param.ty {
             StrictType::U64 => sig.params.push(AbiParam::new(I64)),
-            StrictType::Bool => sig.params.push(AbiParam::new(I8)),
+            // The raw trampoline passes scalar slots as u64 words, so Bool uses
+            // the same word-sized ABI at the function boundary and is narrowed
+            // after entry.
+            StrictType::Bool => sig.params.push(AbiParam::new(I64)),
             StrictType::String => {
                 sig.params.push(AbiParam::new(I64)); // ptr
                 sig.params.push(AbiParam::new(I64)); // len
@@ -78,7 +81,7 @@ fn build_signature(module: &JITModule, func: &StrictFunction) -> Signature {
     }
     match func.return_type {
         StrictType::U64 => sig.returns.push(AbiParam::new(I64)),
-        StrictType::Bool => sig.returns.push(AbiParam::new(I8)),
+        StrictType::Bool => sig.returns.push(AbiParam::new(I64)),
         StrictType::String => {
             sig.returns.push(AbiParam::new(I64)); // ptr
             sig.returns.push(AbiParam::new(I64)); // len
@@ -176,12 +179,20 @@ fn declare_and_compile(
         let mut param_word_idx = 0;
         for param in &func.params {
             match param.ty {
-                StrictType::U64 | StrictType::Bool => {
+                StrictType::U64 => {
                     let v = entry_params[param_word_idx];
                     param_word_idx += 1;
                     let slot = local_vars[&param.local];
                     let var = slot.single();
                     builder.def_var(var, v);
+                }
+                StrictType::Bool => {
+                    let v = entry_params[param_word_idx];
+                    param_word_idx += 1;
+                    let narrowed = builder.ins().ireduce(I8, v);
+                    let slot = local_vars[&param.local];
+                    let var = slot.single();
+                    builder.def_var(var, narrowed);
                 }
                 StrictType::String => {
                     let vp = entry_params[param_word_idx];
@@ -204,6 +215,7 @@ fn declare_and_compile(
                 local_vars: &local_vars,
                 alloc_ref,
                 memcpy_ref,
+                return_type: func.return_type,
             };
             emit_stmts(&mut cx, &func.body);
         }
@@ -268,6 +280,7 @@ struct CodegenCtx<'a, 'b> {
     local_vars: &'a HashMap<LocalId, LocalSlot>,
     alloc_ref: cranelift_codegen::ir::FuncRef,
     memcpy_ref: cranelift_codegen::ir::FuncRef,
+    return_type: StrictType,
 }
 
 fn emit_stmts(cx: &mut CodegenCtx<'_, '_>, stmts: &[StrictStmt]) {
@@ -342,6 +355,10 @@ fn emit_stmt(cx: &mut CodegenCtx<'_, '_>, stmt: &StrictStmt) {
             Some(e) => {
                 let val = emit_expr(cx, e);
                 match val {
+                    ExprVal::Single(v) if cx.return_type == StrictType::Bool => {
+                        let widened = cx.builder.ins().uextend(I64, v);
+                        cx.builder.ins().return_(&[widened]);
+                    }
                     ExprVal::Single(v) => {
                         cx.builder.ins().return_(&[v]);
                     }
