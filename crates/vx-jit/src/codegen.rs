@@ -77,6 +77,7 @@ pub fn compile_with_dump(
     let PreparedFunction {
         func_id,
         mut context,
+        literal_storage,
     } = declare_and_build_context(func, &mut module).map_err(|error| CompileFailure {
         error,
         clif_dump: None,
@@ -99,7 +100,7 @@ pub fn compile_with_dump(
     let func_ptr = module.get_finalized_function(func_id);
 
     Ok(CompileOutput {
-        fragment: CompiledFragment::new(func_ptr, func, Arc::new(module)),
+        fragment: CompiledFragment::new(func_ptr, func, Arc::new(module), literal_storage),
         clif_dump,
     })
 }
@@ -133,6 +134,7 @@ fn build_signature(module: &JITModule, func: &StrictFunction) -> Signature {
 struct PreparedFunction {
     func_id: FuncId,
     context: Context,
+    literal_storage: Vec<Box<[u8]>>,
 }
 
 fn declare_and_build_context(
@@ -167,12 +169,13 @@ fn declare_and_build_context(
 
     context.func = Function::with_name_signature(UserFuncName::user(0, func_id.as_u32()), sig);
 
-    {
+    let literal_storage = {
         let mut builder = FunctionBuilder::new(&mut context.func, &mut func_ctx);
 
         // Allocate Cranelift Variables for each local.
         // String locals use two Variables: one for ptr, one for len.
         let mut local_vars: HashMap<LocalId, LocalSlot> = HashMap::new();
+        let mut literal_storage = Vec::new();
 
         let alloc_var = |builder: &mut FunctionBuilder<'_>, ty: types::Type| -> Variable {
             builder.declare_var(ty)
@@ -261,14 +264,20 @@ fn declare_and_build_context(
                 alloc_ref,
                 memcpy_ref,
                 return_type: func.return_type,
+                literal_storage: &mut literal_storage,
             };
             emit_stmts(&mut cx, &func.body);
         }
 
         builder.finalize();
-    }
+        literal_storage
+    };
 
-    Ok(PreparedFunction { func_id, context })
+    Ok(PreparedFunction {
+        func_id,
+        context,
+        literal_storage,
+    })
 }
 
 /// Either a single Cranelift Variable (U64/Bool) or a (ptr, len) Variable pair (String).
@@ -322,6 +331,7 @@ struct CodegenCtx<'a, 'b> {
     alloc_ref: cranelift_codegen::ir::FuncRef,
     memcpy_ref: cranelift_codegen::ir::FuncRef,
     return_type: StrictType,
+    literal_storage: &'a mut Vec<Box<[u8]>>,
 }
 
 fn emit_stmts(cx: &mut CodegenCtx<'_, '_>, stmts: &[StrictStmt]) {
@@ -460,10 +470,10 @@ fn emit_literal(cx: &mut CodegenCtx<'_, '_>, lit: &StrictLiteral) -> ExprVal {
             ExprVal::Single(val)
         }
         StrictLiteral::String(s) => {
-            // Leak the string bytes as static data — Static ownership.
-            let leaked: &'static [u8] = Box::leak(s.as_bytes().to_vec().into_boxed_slice());
-            let ptr_val = cx.builder.ins().iconst(I64, leaked.as_ptr() as i64);
-            let len_val = cx.builder.ins().iconst(I64, leaked.len() as i64);
+            let bytes = s.as_bytes().to_vec().into_boxed_slice();
+            let ptr_val = cx.builder.ins().iconst(I64, bytes.as_ptr() as i64);
+            let len_val = cx.builder.ins().iconst(I64, bytes.len() as i64);
+            cx.literal_storage.push(bytes);
             ExprVal::String {
                 ptr: ptr_val,
                 len: len_val,

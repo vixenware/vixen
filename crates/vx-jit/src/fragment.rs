@@ -28,6 +28,7 @@ pub struct CompiledFragment {
     pub(crate) return_type: StrictType,
     pub(crate) return_ownership: StringOwnership,
     pub(crate) param_types: Vec<StrictType>,
+    pub(crate) _literal_storage: Vec<Box<[u8]>>,
     // Keeps the JIT module (and therefore the generated code) alive.
     _module: Arc<JITModule>,
 }
@@ -38,12 +39,18 @@ unsafe impl Send for CompiledFragment {}
 unsafe impl Sync for CompiledFragment {}
 
 impl CompiledFragment {
-    pub(crate) fn new(func_ptr: *const u8, func: &StrictFunction, module: Arc<JITModule>) -> Self {
+    pub(crate) fn new(
+        func_ptr: *const u8,
+        func: &StrictFunction,
+        module: Arc<JITModule>,
+        literal_storage: Vec<Box<[u8]>>,
+    ) -> Self {
         Self {
             func_ptr,
             return_type: func.return_type,
             return_ownership: func.return_ownership,
             param_types: func.params.iter().map(|p| p.ty).collect(),
+            _literal_storage: literal_storage,
             _module: module,
         }
     }
@@ -110,6 +117,11 @@ impl CompiledFragment {
                 Ok(FragmentResult::String(s))
             }
         }
+    }
+
+    #[cfg(test)]
+    pub(crate) fn literal_storage_len(&self) -> usize {
+        self._literal_storage.len()
     }
 }
 

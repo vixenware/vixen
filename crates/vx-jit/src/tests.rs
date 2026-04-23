@@ -303,6 +303,7 @@ fn test_const_string() {
         )))],
     };
     let frag = compile(&func).expect("const string should compile");
+    assert_eq!(frag.literal_storage_len(), 1);
     assert_eq!(
         frag.call(&[]).unwrap(),
         FragmentResult::String("hello".to_owned())
@@ -528,6 +529,7 @@ fn test_string_select() {
         }],
     };
     let frag = compile(&func).expect("string select should compile");
+    assert_eq!(frag.literal_storage_len(), 2);
     assert_eq!(
         frag.call(&[FragmentArg::Bool(true)]).unwrap(),
         FragmentResult::String("yes".to_owned())
