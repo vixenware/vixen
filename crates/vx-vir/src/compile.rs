@@ -243,6 +243,17 @@ fn probe() #discover -> String (
 )
 "#;
 
+    const SOURCE_EXEC_WRITABLE: &str = r#"
+fn probe() #discover -> String (
+  let sh = discover(executor_class("default"), (host) => host.which("sh"));
+  exec [sh, "-c", "printf hello > out/greeting.txt"] where {
+    writable: [@out],
+    create_dirs: [@out],
+    observer: (proc, _vfs) => proc.stdout.collect()
+  }
+)
+"#;
+
     fn semantically_analyze(source: &str) -> crate::build::VirProgram {
         let parsed = vx_parser::parse_source_file(source);
         assert!(parsed.errors().is_empty(), "source should parse");
@@ -333,6 +344,19 @@ fn probe() #discover -> String (
                 .values()
                 .any(|node| node.kind == RuntimeBoundaryKind::Exec),
             "expected exec runtime boundary in typed lowering output"
+        );
+    }
+
+    #[test]
+    fn semantic_pipeline_resolves_exec_writable_keywords_from_stdlib() {
+        let lowered = super::compile_source(SOURCE_EXEC_WRITABLE, "probe")
+            .expect("exec source with writable keywords should compile through lowering");
+        assert!(
+            lowered
+                .runtime_nodes
+                .values()
+                .any(|node| node.kind == RuntimeBoundaryKind::Exec),
+            "expected exec runtime boundary in lowered program"
         );
     }
 

@@ -1025,6 +1025,7 @@ impl<'a, 'ctx> VirBodyLowering<'a, 'ctx> {
         }
         let mut mounts = Vec::new();
         let mut writable_roots = Vec::new();
+        let mut create_dirs = Vec::new();
         let mut coarse_mounts = Vec::new();
 
         if let Some(keyword_expr) = keyword_expr {
@@ -1034,6 +1035,7 @@ impl<'a, 'ctx> VirBodyLowering<'a, 'ctx> {
                 &mut positional_inputs,
                 &mut mounts,
                 &mut writable_roots,
+                &mut create_dirs,
                 &mut coarse_mounts,
             )?;
         }
@@ -1051,6 +1053,7 @@ impl<'a, 'ctx> VirBodyLowering<'a, 'ctx> {
             positional_inputs: positional_inputs.clone(),
             mounts: mounts.clone(),
             writable_roots: writable_roots.clone(),
+            create_dirs: create_dirs.clone(),
             coarse_mounts: coarse_mounts.clone(),
         });
 
@@ -1061,6 +1064,7 @@ impl<'a, 'ctx> VirBodyLowering<'a, 'ctx> {
                     has_where_clause,
                     has_mounts: !mounts.is_empty(),
                     has_writable: !writable_roots.is_empty(),
+                    has_create_dirs: !create_dirs.is_empty(),
                     has_coarse_mounts: !coarse_mounts.is_empty(),
                 })
             }
@@ -1097,6 +1101,7 @@ impl<'a, 'ctx> VirBodyLowering<'a, 'ctx> {
         positional_inputs: &mut Vec<RuntimeBoundaryInputSpec>,
         mounts: &mut Vec<(crate::exec_types::TreeFilePath, RuntimeBoundaryInputSpec)>,
         writable_roots: &mut Vec<crate::exec_types::TreeFilePath>,
+        create_dirs: &mut Vec<crate::exec_types::TreeFilePath>,
         coarse_mounts: &mut Vec<RuntimeBoundaryInputSpec>,
     ) -> Result<(), LowerError> {
         let ExprKind::Record(record) = self.arena()[keyword_expr].kind.clone() else {
@@ -1112,6 +1117,9 @@ impl<'a, 'ctx> VirBodyLowering<'a, 'ctx> {
                     "mounts" => mounts.extend(self.lower_boundary_mounts(field.value)?),
                     "writable" => {
                         writable_roots.extend(self.lower_boundary_writable_roots(field.value)?)
+                    }
+                    "create_dirs" => {
+                        create_dirs.extend(self.lower_boundary_writable_roots(field.value)?)
                     }
                     "coarse_mounts" => {
                         coarse_mounts.extend(self.lower_boundary_array_items(field.value)?)

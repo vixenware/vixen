@@ -755,6 +755,7 @@ impl<'a> ProgramEvaluator<'a> {
                 positional_inputs,
                 mounts,
                 writable_roots,
+                create_dirs,
                 coarse_mounts,
                 ..
             } => {
@@ -764,6 +765,7 @@ impl<'a> ProgramEvaluator<'a> {
                     positional_inputs,
                     mounts,
                     writable_roots,
+                    create_dirs,
                     coarse_mounts,
                     producers,
                     slots,
@@ -983,6 +985,7 @@ impl<'a> ProgramEvaluator<'a> {
         positional_inputs: &[RuntimeBoundaryInputSpec],
         mounts: &[(vx_vir::exec_types::TreeFilePath, RuntimeBoundaryInputSpec)],
         writable_roots: &[vx_vir::exec_types::TreeFilePath],
+        create_dirs: &[vx_vir::exec_types::TreeFilePath],
         coarse_mounts: &[RuntimeBoundaryInputSpec],
         producers: &HashMap<SlotId, &KernelOp>,
         slots: &mut BTreeMap<SlotId, EvalValue>,
@@ -1009,30 +1012,32 @@ impl<'a> ProgramEvaluator<'a> {
                         detail: "exec boundary is missing argv input".to_owned(),
                     }
                 })?;
-                let argv = if mounts.is_empty() && writable_roots.is_empty() {
-                    self.resolve_exec_argv(function_name, input, producers, slots)
-                        .await?
-                } else {
-                    let (access_path, prefix) = self
-                        .prepare_local_exec_vfs(
+                let argv =
+                    if mounts.is_empty() && writable_roots.is_empty() && create_dirs.is_empty() {
+                        self.resolve_exec_argv(function_name, input, producers, slots)
+                            .await?
+                    } else {
+                        let (access_path, prefix) = self
+                            .prepare_local_exec_vfs(
+                                function_name,
+                                node,
+                                mounts,
+                                writable_roots,
+                                create_dirs,
+                                producers,
+                                slots,
+                            )
+                            .await?;
+                        self.resolve_exec_argv_for_prefix(
                             function_name,
-                            node,
-                            mounts,
-                            writable_roots,
+                            input,
                             producers,
                             slots,
+                            &access_path,
+                            &prefix,
                         )
-                        .await?;
-                    self.resolve_exec_argv_for_prefix(
-                        function_name,
-                        input,
-                        producers,
-                        slots,
-                        &access_path,
-                        &prefix,
-                    )
-                    .await?
-                };
+                        .await?
+                    };
                 if argv.is_empty() {
                     return Err(RuntimeEvalError::UnsupportedBoundary {
                         function: function_name.to_owned(),
@@ -1224,6 +1229,7 @@ impl<'a> ProgramEvaluator<'a> {
         node: vx_vir::exec_types::RuntimeNodeId,
         mounts: &[(vx_vir::exec_types::TreeFilePath, RuntimeBoundaryInputSpec)],
         writable_roots: &[vx_vir::exec_types::TreeFilePath],
+        create_dirs: &[vx_vir::exec_types::TreeFilePath],
         producers: &HashMap<SlotId, &KernelOp>,
         slots: &mut BTreeMap<SlotId, EvalValue>,
     ) -> Result<(String, String), RuntimeEvalError> {
@@ -1250,6 +1256,17 @@ impl<'a> ProgramEvaluator<'a> {
                         "failed to create writable root `{}`: {error}",
                         writable_root.0
                     ),
+                })?;
+        }
+
+        for dir in create_dirs {
+            self.emit_phase(format!("creating sandbox dir `{}`", dir.0))
+                .await;
+            vfsd.mkdir(format!("/{prefix}/{}", dir.0))
+                .await
+                .map_err(|error| RuntimeEvalError::UnsupportedBoundary {
+                    function: function_name.to_owned(),
+                    detail: format!("failed to create sandbox dir `{}`: {error}", dir.0),
                 })?;
         }
 
@@ -1658,6 +1675,17 @@ fn probe() #discover -> String (
 )
 "#;
 
+    const SOURCE_EXEC_WRITABLE: &str = r#"
+fn probe() #discover -> String (
+  let sh = discover(executor_class("default"), (host) => host.which("sh"));
+  exec [sh, "-c", "printf hello > out/greeting.txt"] where {
+    writable: [@out],
+    create_dirs: [@out],
+    observer: (proc, _vfs) => proc.stdout.collect()
+  }
+)
+"#;
+
     const SOURCE_CRANELIFT_SYMBOL_COLLISION: &str = r#"
 fn __vx_alloc(name: String) -> String (
   `{name}!`
@@ -1857,7 +1885,6 @@ fn __vx_alloc(name: String) -> String (
     }
 
     #[tokio::test]
-    #[ignore = "VIR pipeline does not yet resolve runtime boundary builtins (discover/exec) — work items 014, 016"]
     async fn evaluates_local_discover_host_which() {
         let output = evaluate_source_text_function(
             &RuntimeEvalContext::default(),
@@ -1884,7 +1911,6 @@ fn __vx_alloc(name: String) -> String (
     }
 
     #[tokio::test]
-    #[ignore = "VIR pipeline does not yet resolve runtime boundary builtins (discover/exec) — work items 014, 016"]
     async fn evaluates_local_exec_stdout_observer() {
         let output = evaluate_source_text_function(
             &RuntimeEvalContext::default(),
@@ -1902,5 +1928,33 @@ fn __vx_alloc(name: String) -> String (
         .expect("probe should evaluate");
 
         assert_eq!(output.value, RuntimeValue::String("hello".to_owned()));
+    }
+
+    #[tokio::test]
+    async fn exec_writable_keywords_need_hosted_vfsd() {
+        let result = evaluate_source_text_function(
+            &RuntimeEvalContext::default(),
+            EvalRequest {
+                source: SOURCE_EXEC_WRITABLE,
+                function_name: "probe",
+                args: &[],
+                backend: StrictEvalBackend::Interpreter,
+                include_strict_fragment_dump: false,
+                include_clif_dump: false,
+            },
+            None,
+        )
+        .await;
+
+        match result {
+            Ok(_) => panic!("writable exec should require a hosted vfsd"),
+            Err(RuntimeEvalError::UnsupportedBoundary { detail, .. }) => {
+                assert!(
+                    detail.contains("hosted vfsd"),
+                    "unexpected error detail: {detail}"
+                );
+            }
+            Err(other) => panic!("expected hosted-vfsd boundary error, got {other:?}"),
+        }
     }
 }

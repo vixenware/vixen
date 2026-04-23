@@ -141,6 +141,7 @@ pub struct ExecBoundaryPayload {
     pub has_where_clause: bool,
     pub has_mounts: bool,
     pub has_writable: bool,
+    pub has_create_dirs: bool,
     pub has_coarse_mounts: bool,
 }
 
@@ -383,6 +384,7 @@ pub enum KernelOp {
         positional_inputs: Vec<RuntimeBoundaryInputSpec>,
         mounts: Vec<(TreeFilePath, RuntimeBoundaryInputSpec)>,
         writable_roots: Vec<TreeFilePath>,
+        create_dirs: Vec<TreeFilePath>,
         coarse_mounts: Vec<RuntimeBoundaryInputSpec>,
     },
 }
