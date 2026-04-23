@@ -3514,6 +3514,7 @@ dependencies = [
  "tokio",
  "tracing",
  "vox-core",
+ "vox-jit",
  "vox-postcard",
  "vox-service-macros",
  "vox-stream",
@@ -3534,10 +3535,36 @@ dependencies = [
  "smallvec 1.15.1",
  "tokio",
  "tracing",
+ "vox-jit",
  "vox-postcard",
  "vox-types",
  "wasm-bindgen-futures",
  "zerocopy",
+]
+
+[[package]]
+name = "vox-jit"
+version = "0.4.0"
+dependencies = [
+ "cranelift-codegen",
+ "cranelift-frontend",
+ "cranelift-jit",
+ "cranelift-module",
+ "cranelift-native",
+ "facet",
+ "facet-core",
+ "vox-jit-abi",
+ "vox-jit-cal",
+ "vox-postcard",
+ "vox-schema",
+]
+
+[[package]]
+name = "vox-jit-abi"
+version = "0.4.0"
+dependencies = [
+ "facet-core",
+ "vox-jit-cal",
 ]
 
 [[package]]

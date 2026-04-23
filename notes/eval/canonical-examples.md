@@ -2,16 +2,16 @@
 
 Status: planning draft.
 
-This note turns "slice 0" from
-[`execution-model.md`](/Users/amos/bearcove/vixen/docs/design/execution-model.md) into a concrete
-proof target.
+This note turns the first small evaluator slice from
+[`execution-model.md`](execution-model.md) into a concrete proof target.
 
-Companion note:
-[`slice0-abi.md`](/Users/amos/bearcove/vixen/docs/design/runtime-abi.md),
-[`slice0-observations.md`](/Users/amos/bearcove/vixen/docs/design/observations.md),
-[`slice0-lowering.md`](/Users/amos/bearcove/vixen/docs/design/compiler-pipeline.md),
-[`slice0-lazy-core.md`](/Users/amos/bearcove/vixen/docs/design/lazy-core.md),
-[`slice0-oracle.md`](/Users/amos/bearcove/vixen/docs/design/reference-harness.md).
+Companion notes:
+
+- [`runtime-abi.md`](runtime-abi.md)
+- [`observations.md`](observations.md)
+- [`compiler-pipeline.md`](compiler-pipeline.md)
+- [`lazy-core.md`](lazy-core.md)
+- [`reference-harness.md`](reference-harness.md)
 
 Slice 0 is intentionally below current zoo build/solver semantics.
 
@@ -397,8 +397,9 @@ Planning is complete when these artifacts exist:
 1. This note, with the subset frozen.
 2. A tiny observation-lattice note for the included types.
 3. A tiny ABI/object-layout note for `Ref<T>`, closures, products, and thunks.
-4. A tiny reference runner or oracle model for the four canonical programs.
-5. A lowering sketch from typed Vixen subset into Kajit-facing IR/strict fragments.
+4. A tiny reference runner or reference-harness model for the four canonical
+   programs.
+5. A lowering sketch from typed Vixen subset into JIT-facing strict fragments.
 
 If any of those are missing, slice 0 is still underplanned.
 

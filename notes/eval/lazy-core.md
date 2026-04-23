@@ -2,6 +2,17 @@
 
 Status: planning draft.
 
+This note is an older internal-layer sketch for the first small evaluator
+slice.
+
+Read [`execution-model.md`](execution-model.md),
+[`implementation-plan.md`](implementation-plan.md), and
+[`testing-strategy.md`](testing-strategy.md) first.
+
+The naming here is still in flux. Where this note says `Kajit`, read that as
+`JIT` or "backend-facing strict-fragment IR". The semantic intent still matters
+more than the old backend name.
+
 This note defines the internal lazy core used by slice 0.
 
 It sits between:

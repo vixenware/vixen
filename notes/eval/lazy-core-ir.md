@@ -2,6 +2,15 @@
 
 Status: planning draft.
 
+This note is an older IR sketch for the internal execution layer.
+
+Read [`execution-model.md`](execution-model.md),
+[`implementation-plan.md`](implementation-plan.md), and
+[`testing-strategy.md`](testing-strategy.md) first.
+
+Where this note says `Kajit`, read that as `JIT` or "backend-facing
+strict-fragment IR".
+
 This note makes
 [`slice0-lazy-core.md`](/Users/amos/bearcove/vixen/docs/design/lazy-core.md)
 concrete.

@@ -1,11 +1,12 @@
-# eval3 analysis plan
+# analysis plan
 
 Status: planning draft.
 
-This note defines the first artifact that matters for `eval3` implementation.
+This note defines the first artifact that matters for evaluator implementation.
 
-The compiler should not lower raw expressions directly into lazy core or Kajit.
-It should first produce an analysis result that explains:
+The compiler should not lower raw expressions directly into the internal
+execution layer or the JIT backend. It should first produce an analysis result
+that explains:
 
 - what is demanded
 - what is local strict work
@@ -15,12 +16,12 @@ It should first produce an analysis result that explains:
 ## Input
 
 The input to this phase is the frontend bridge described in
-[`frontend-bridge.md`](/Users/amos/bearcove/vixen/docs/design/frontend-bridge.md).
+[`frontend-bridge.md`](frontend-bridge.md).
 
-For slice 0, that means the analysis can assume access to:
+For the first slice, that means the analysis can assume access to:
 
 - typed function and closure bodies
-- stable expression IDs
+- stable expression ids
 - binding sites and use sites
 - call sites
 - projection and product-construction sites
@@ -56,7 +57,7 @@ Every extracted node should carry a reason such as:
 - captured by closure environment
 - becomes a field of a lazy product
 - crosses a host/runtime boundary
-- later: crosses a solver/shared-node boundary
+- later, crosses a keyed/shared-search boundary
 
 ### Strict-fragment entrypoints
 
@@ -69,110 +70,31 @@ Every extracted node should carry a reason such as:
 
 - closure environment layouts
 - thunk/frame layouts
-- any product layouts that analysis must commit to before lazy-core lowering
+- any product layouts that analysis must commit to before lowering
 
 ## Invariants
 
-The analysis result must make these facts explicit.
+The analysis result must make these facts explicit:
 
 1. Every extracted node has a reason.
 2. Every strict fragment has a well-defined demanded result observation.
-3. Sibling lazy work is not accidentally pulled into a strict fragment without demand.
+3. Sibling lazy work is not accidentally pulled into a strict fragment without
+   demand.
 4. Shared work is not duplicated silently.
-5. Closure capture is derived from real bindings, not guessed later in lowering.
-6. The lazy core should not need to rediscover any of the above.
+5. Closure capture is derived from real bindings, not guessed later.
+6. The internal execution layer does not need to rediscover any of the above.
 
 ## What analysis is allowed to postpone
 
 This phase does not need to settle:
 
-- exact runtime object layout bytes
-- exact helper-call names in lazy core
-- exact Kajit HIR instruction selection
+- exact runtime object-layout bytes
+- exact helper-call names in the internal execution layer
+- exact JIT IR instruction selection
 - backend ABI details
 
 It may also postpone the full shared-search implementation, but not the shape
-needed to admit it later. In particular, the analysis result must be able to
-grow a distinct class of extracted runtime nodes for keyed/shared search work.
-
-Those belong to later stages.
-
-## How the four canonical programs exercise the analysis
-
-### Program A
-
-```vx
-fn bomb() -> U64 = trap("bomb")
-
-fn main() -> U64 {
-  let pair = (41 + 1, bomb());
-  pair.0
-}
-```
-
-The analysis must conclude:
-
-- the result demand on `pair` is only field `0`
-- field `1` remains latent
-- `41 + 1` can stay in local strict work
-- `bomb()` must not be pulled into the demanded cone
-
-### Program B
-
-```vx
-fn main(n: U64) -> U64 {
-  let add_n = (x) => x + n;
-  let pair = (add_n(1), add_n(2));
-  pair.1
-}
-```
-
-The analysis must conclude:
-
-- `add_n` captures `n`
-- that capture requires a closure environment layout
-- only the second sibling call is on the demanded path
-- the first sibling call remains latent
-
-### Program C
-
-```vx
-fn plus_one(n: U64) -> U64 {
-  n + 1
-}
-
-fn main(n: U64) -> U64 {
-  let x = plus_one(n);
-  x + x
-}
-```
-
-The analysis must conclude:
-
-- `x` is shared
-- `x` therefore needs lazy identity
-- the call result should be extracted once and reused
-- `plus_one`'s local arithmetic can still become compiled strict-fragment work
-
-### Program D
-
-```vx
-fn apply(f: Fn(U64) -> U64, x: U64) -> U64 {
-  f(x)
-}
-
-fn main(n: U64) -> U64 {
-  let add_n = (x) => x + n;
-  apply(add_n, 41)
-}
-```
-
-The analysis must conclude:
-
-- `add_n` captures `n`
-- `apply` receives a callable value, not an erased interpreter object
-- callability demand is explicit
-- argument passing stays lazy by ref
+needed to admit it later.
 
 ## Why this is the centerpiece
 
@@ -183,32 +105,3 @@ If this artifact is missing, one of two bad things happens:
    accident
 
 The analysis plan is the thing that prevents both failures.
-
-## Pressure from Cargo-style search
-
-The first implementation slice can stay smaller than full package resolution,
-but the analysis model must already be compatible with it.
-
-Cargo-style resolution adds one more kind of extracted node pressure:
-
-- repeated requests should meet at keyed shared nodes
-- joined demand must be represented explicitly
-- local candidate filtering can still remain strict-fragment-local
-- conflict production must remain structured
-
-So the long-term model is still the same:
-
-- strict fragments own local straight-line work
-- runtime nodes own shared identity, boundaries, and later keyed search state
-
-The first slice only proves the local/boundary split.
-The next slice should prove that the same analysis model extends cleanly to
-shared search.
-
-## Suggested implementation order
-
-1. define the Rust data structures for the analysis result
-2. build the smallest possible frontend-bridge adapter for Programs A-D
-3. populate the analysis result for those four programs
-4. check the result with structural assertions
-5. only then lower that analysis result into lazy core IR
