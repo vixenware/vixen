@@ -1,148 +1,119 @@
-use std::collections::HashMap;
+use vx_jit::{FragmentArg, FragmentResult};
+use vx_rt::RtValue;
 
-use facet::Facet;
-use thiserror::Error;
-
-pub mod eval;
-
-/// Expected result value, tagged in styx as @u64"42", @string"hello", @bool"true"
-#[derive(Debug, Facet, PartialEq)]
-#[repr(u8)]
-#[facet(rename_all = "kebab-case")]
-pub enum ExpectedValue {
+/// A scalar value that both the interpreter and Cranelift backends can produce.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum ScalarResult {
     U64(u64),
     Bool(bool),
     String(String),
 }
 
-/// Trace assertions — which functions were / weren't entered
-#[derive(Debug, Default, Facet)]
-pub struct TraceAssertions {
-    pub entered: Option<Vec<String>>,
-    pub not_entered: Option<Vec<String>>,
-    pub entered_once: Option<Vec<String>>,
+#[derive(Debug)]
+pub enum EvalError {
+    Lowering(String),
+    Interpreter(String),
+    Cranelift(String),
 }
 
-/// A test fixture parsed from a .styx file
-#[derive(Debug, Facet)]
-pub struct TestFixture {
-    pub source: String,
-    pub entry: String,
-    pub expect: ExpectedValue,
-    pub trace: Option<TraceAssertions>,
-}
-
-/// Actual result from the evaluator
-#[derive(Debug, PartialEq)]
-pub enum EvalResult {
-    U64(u64),
-    Bool(bool),
-    String(String),
-}
-
-/// Trace recorded during evaluation
-#[derive(Debug, Default)]
-pub struct EvalTrace {
-    /// How many times each function was entered
-    pub enter_counts: HashMap<String, usize>,
-}
-
-impl EvalTrace {
-    pub fn record_enter(&mut self, name: &str) {
-        *self.enter_counts.entry(name.to_owned()).or_default() += 1;
-    }
-
-    pub fn was_entered(&self, name: &str) -> bool {
-        self.enter_counts.get(name).copied().unwrap_or(0) > 0
-    }
-
-    pub fn enter_count(&self, name: &str) -> usize {
-        self.enter_counts.get(name).copied().unwrap_or(0)
-    }
-}
-
-#[derive(Debug, Error)]
-pub enum FixtureError {
-    #[error("parse error: {0}")]
-    Parse(String),
-    #[error("eval error: {0}")]
-    Eval(String),
-    #[error("expected {expected:?}, got {actual:?}")]
-    ValueMismatch {
-        expected: ExpectedValue,
-        actual: EvalResult,
-    },
-    #[error("trace assertion failed: {0}")]
-    TraceFailed(String),
-}
-
-/// Parse a .styx fixture file
-pub fn parse_fixture(content: &str) -> Result<TestFixture, FixtureError> {
-    facet_styx::from_str(content).map_err(|e| FixtureError::Parse(e.to_string()))
-}
-
-/// Run a parsed fixture: evaluate and check assertions
-pub fn run_fixture(fixture: &TestFixture) -> Result<(), FixtureError> {
-    let (result, trace) =
-        eval::evaluate(&fixture.source, &fixture.entry).map_err(FixtureError::Eval)?;
-
-    // Check expected value
-    let matches = match (&fixture.expect, &result) {
-        (ExpectedValue::U64(e), EvalResult::U64(a)) => e == a,
-        (ExpectedValue::Bool(e), EvalResult::Bool(a)) => e == a,
-        (ExpectedValue::String(e), EvalResult::String(a)) => e == a,
-        _ => false,
-    };
-    if !matches {
-        return Err(FixtureError::ValueMismatch {
-            expected: fixture.expect.clone(),
-            actual: result,
-        });
-    }
-
-    // Check trace assertions
-    if let Some(assertions) = &fixture.trace {
-        if let Some(entered) = &assertions.entered {
-            for name in entered {
-                if !trace.was_entered(name) {
-                    return Err(FixtureError::TraceFailed(format!(
-                        "expected `{name}` to be entered, but it wasn't"
-                    )));
-                }
-            }
-        }
-        if let Some(not_entered) = &assertions.not_entered {
-            for name in not_entered {
-                if trace.was_entered(name) {
-                    return Err(FixtureError::TraceFailed(format!(
-                        "expected `{name}` NOT to be entered, but it was (entered {} time(s))",
-                        trace.enter_count(name)
-                    )));
-                }
-            }
-        }
-        if let Some(entered_once) = &assertions.entered_once {
-            for name in entered_once {
-                let count = trace.enter_count(name);
-                if count != 1 {
-                    return Err(FixtureError::TraceFailed(format!(
-                        "expected `{name}` to be entered exactly once, but it was entered {count} time(s)"
-                    )));
-                }
-            }
-        }
-    }
-
-    Ok(())
-}
-
-// Need PartialEq clone for error reporting
-impl Clone for ExpectedValue {
-    fn clone(&self) -> Self {
+impl std::fmt::Display for EvalError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
-            Self::U64(v) => Self::U64(*v),
-            Self::Bool(v) => Self::Bool(*v),
-            Self::String(v) => Self::String(v.clone()),
+            EvalError::Lowering(e) => write!(f, "lowering: {e}"),
+            EvalError::Interpreter(e) => write!(f, "interpreter: {e}"),
+            EvalError::Cranelift(e) => write!(f, "cranelift: {e}"),
         }
     }
+}
+
+/// Evaluate `source` at `function_name` with `args` using the interpreter.
+///
+/// Returns `None` if the program uses features the interpreter doesn't support
+/// (e.g. runtime boundaries), rather than an error.
+pub fn eval_interpreter(
+    source: &str,
+    function_name: &str,
+    args: &[ScalarResult],
+) -> Result<Option<ScalarResult>, EvalError> {
+    let rt_args: Vec<RtValue> = args.iter().map(scalar_to_rt).collect();
+    match vx_rt::eval_source(source, function_name, &rt_args) {
+        Ok(val) => rt_to_scalar(val).map(Some).map_err(EvalError::Interpreter),
+        Err(vx_rt::RtError::Unsupported(_)) => Ok(None),
+        Err(e) => Err(EvalError::Interpreter(e.to_string())),
+    }
+}
+
+/// Evaluate `source` at `function_name` with `args` using the Cranelift backend.
+///
+/// Returns `None` if the function cannot be strict-lowered (i.e. it is not
+/// strict-compatible — uses lazy features, runtime boundaries, etc.).
+pub fn eval_cranelift(
+    source: &str,
+    function_name: &str,
+    args: &[ScalarResult],
+) -> Result<Option<ScalarResult>, EvalError> {
+    let frag_args: Vec<FragmentArg> = args.iter().map(scalar_to_frag).collect();
+
+    let output = vx_vir::compile::compile_source_with_types(source, function_name)
+        .map_err(|e| EvalError::Lowering(e.to_string()))?;
+
+    let entry = output.program.entry;
+    let body = output
+        .program
+        .bodies
+        .get(&entry)
+        .ok_or_else(|| EvalError::Lowering("missing entry body".to_owned()))?;
+
+    let mut func = match vx_jit::lower_to_strict::try_strict_lower(
+        body,
+        &output.slot_types,
+        output.original_body_count,
+    ) {
+        Some(f) => f,
+        None => return Ok(None),
+    };
+    func.name = function_name.to_owned();
+
+    let compiled = vx_jit::compile(&func).map_err(|e| EvalError::Cranelift(e.to_string()))?;
+
+    let result = compiled
+        .call(&frag_args)
+        .map_err(|e| EvalError::Cranelift(e.to_string()))?;
+
+    fragment_to_scalar(result)
+        .map(Some)
+        .map_err(EvalError::Cranelift)
+}
+
+fn scalar_to_rt(v: &ScalarResult) -> RtValue {
+    match v {
+        ScalarResult::U64(n) => RtValue::U64(*n),
+        ScalarResult::Bool(b) => RtValue::Bool(*b),
+        ScalarResult::String(s) => RtValue::String(s.clone()),
+    }
+}
+
+fn scalar_to_frag(v: &ScalarResult) -> FragmentArg {
+    match v {
+        ScalarResult::U64(n) => FragmentArg::U64(*n),
+        ScalarResult::Bool(b) => FragmentArg::Bool(*b),
+        ScalarResult::String(s) => FragmentArg::String(s.clone()),
+    }
+}
+
+fn rt_to_scalar(val: RtValue) -> Result<ScalarResult, String> {
+    match val {
+        RtValue::U64(n) => Ok(ScalarResult::U64(n)),
+        RtValue::Bool(b) => Ok(ScalarResult::Bool(b)),
+        RtValue::String(s) => Ok(ScalarResult::String(s)),
+        other => Err(format!("interpreter returned non-scalar: {other:?}")),
+    }
+}
+
+fn fragment_to_scalar(val: FragmentResult) -> Result<ScalarResult, String> {
+    Ok(match val {
+        FragmentResult::U64(n) => ScalarResult::U64(n),
+        FragmentResult::Bool(b) => ScalarResult::Bool(b),
+        FragmentResult::String(s) => ScalarResult::String(s),
+    })
 }

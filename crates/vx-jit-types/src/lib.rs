@@ -1,164 +1,99 @@
-//! Vixen-side typed AST used by the Kajit lowering bridge.
-//!
-//! These types are owned by Vixen because they describe the strict fragment
-//! frontend model produced by Vixen analysis and consumed by Kajit lowering.
+//! Vixen strict IR types consumed by the Cranelift backend.
 
-use kajit_reprs::hir::{BinaryOp, Literal, LocalId, Type, TypeDefId};
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub struct LocalId(pub u32);
 
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub struct VixenCoreTypes {
-    pub string: Type,
-    pub node: Type,
-    pub edge: Type,
-    pub fact: Type,
-    pub crate_graph: Type,
-    pub crate_node: Type,
-    pub crate_id: Type,
-    pub crate_type: Type,
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum StrictType {
+    U64,
+    Bool,
+    String,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum VixenBuiltin {
-    EmitNode,
-    EmitEdge,
-    EmitFact,
-    RustCrateGraph,
-    RustRoot,
-    GraphLookupCrate,
-    CargoRegistryPackageExists,
-}
-
-impl VixenBuiltin {
-    pub const fn callable_name(self) -> &'static str {
-        match self {
-            Self::EmitNode => "emit.node",
-            Self::EmitEdge => "emit.edge",
-            Self::EmitFact => "emit.fact",
-            Self::RustCrateGraph => "rust.crate_graph",
-            Self::RustRoot => "rust.root",
-            Self::GraphLookupCrate => "graph.lookup_crate",
-            Self::CargoRegistryPackageExists => "cargo.registry_package_exists",
-        }
-    }
+pub enum StringOwnership {
+    /// Pointer into static/leaked data. Never freed.
+    Static,
+    /// Slice of another string (e.g. result of StringSlice). Never freed.
+    Borrowed,
+    /// Heap-allocated by ConcatStrings. Caller must free after use.
+    Owned,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
-pub enum VixenCallableRef {
-    Builtin(VixenBuiltin),
-    Named(String),
+pub struct LocalInfo {
+    pub id: LocalId,
+    pub ty: StrictType,
+    pub ownership: StringOwnership,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
-pub enum VixenTypedExpr {
-    Literal(Literal),
-    TypedLiteral {
-        literal: Literal,
-        ty: Type,
-    },
+pub enum StrictLiteral {
+    U64(u64),
+    Bool(bool),
+    /// Static string data; ownership = Static.
+    String(String),
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum StrictBinOp {
+    Add,
+    Sub,
+    Eq,
+    Ne,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum StrictExpr {
+    Literal(StrictLiteral),
     Local(LocalId),
-    Field {
-        base: Box<VixenTypedExpr>,
-        field: String,
-    },
-    Struct {
-        def: TypeDefId,
-        fields: Vec<(String, VixenTypedExpr)>,
-    },
-    Variant {
-        def: TypeDefId,
-        variant: String,
-        fields: Vec<(String, VixenTypedExpr)>,
-    },
     Binary {
-        op: BinaryOp,
-        lhs: Box<VixenTypedExpr>,
-        rhs: Box<VixenTypedExpr>,
+        op: StrictBinOp,
+        lhs: Box<StrictExpr>,
+        rhs: Box<StrictExpr>,
     },
-    Call {
-        callee: VixenCallableRef,
-        args: Vec<VixenTypedExpr>,
+    StringLen {
+        value: Box<StrictExpr>,
     },
-    MethodCall {
-        receiver: Box<VixenTypedExpr>,
-        method: String,
-        args: Vec<VixenTypedExpr>,
+    StringSlice {
+        value: Box<StrictExpr>,
+        start: Box<StrictExpr>,
+        end: Box<StrictExpr>,
     },
-    If {
-        condition: Box<VixenTypedExpr>,
-        then_expr: Box<VixenTypedExpr>,
-        else_expr: Box<VixenTypedExpr>,
+    ConcatStrings {
+        parts: Vec<StrictExpr>,
     },
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
-pub struct VixenTypedParam {
-    pub local: LocalId,
-    pub name: String,
-    pub ty: Type,
-}
-
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub struct VixenTypedLocal {
-    pub local: LocalId,
-    pub name: String,
-    pub ty: Type,
-}
-
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub enum VixenTypedStmt {
+pub enum StrictStmt {
     Let {
         local: LocalId,
-        value: VixenTypedExpr,
+        value: StrictExpr,
     },
-    Expr(VixenTypedExpr),
     If {
-        condition: VixenTypedExpr,
-        then_body: Vec<VixenTypedStmt>,
-        else_body: Vec<VixenTypedStmt>,
+        condition: StrictExpr,
+        then_body: Vec<StrictStmt>,
+        else_body: Vec<StrictStmt>,
     },
-    Return(Option<VixenTypedExpr>),
+    Return(Option<StrictExpr>),
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
-pub struct VixenTypedFunction {
+pub struct StrictParam {
+    pub local: LocalId,
     pub name: String,
-    pub params: Vec<VixenTypedParam>,
-    pub locals: Vec<VixenTypedLocal>,
-    pub return_type: Type,
-    pub body: Vec<VixenTypedStmt>,
-    pub comment: Option<String>,
+    pub ty: StrictType,
+    // String params are always Borrowed — no ownership field needed.
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
-pub enum VixenLoweringError {
-    MissingCallable {
-        builtin: VixenBuiltin,
-    },
-    MissingNamedCallable {
-        name: String,
-    },
-    MissingMethod {
-        method: String,
-        receiver_ty: Type,
-    },
-    AmbiguousMethod {
-        method: String,
-        receiver_ty: Type,
-        candidates: Vec<String>,
-    },
-    UnknownLocalType {
-        local: LocalId,
-    },
-    UnknownFieldType {
-        field: String,
-        base: Type,
-    },
-    CannotInferExprType {
-        expr: &'static str,
-    },
-    IfBranchTypeMismatch {
-        then_ty: Type,
-        else_ty: Type,
-    },
-    NonStatementIfExpr,
+pub struct StrictFunction {
+    pub name: String,
+    pub params: Vec<StrictParam>,
+    pub locals: Vec<LocalInfo>,
+    pub return_type: StrictType,
+    /// Meaningful only when return_type == String.
+    pub return_ownership: StringOwnership,
+    pub body: Vec<StrictStmt>,
 }

@@ -261,15 +261,25 @@ fn emit_eval_daemon_note(address: &str, status: &vx_services::DaemonStatus) -> e
     Ok(())
 }
 
+fn parse_backend(s: &str) -> eyre::Result<StrictEvalBackend> {
+    match s {
+        "interpreter" => Ok(StrictEvalBackend::Interpreter),
+        "cranelift" => Ok(StrictEvalBackend::Cranelift),
+        other => eyre::bail!(
+            "unknown backend `{other}`; valid options are `interpreter` and `cranelift`"
+        ),
+    }
+}
+
 async fn eval(args: EvalArgs) -> eyre::Result<()> {
     let source_text = std::fs::read_to_string(args.file.as_std_path())?;
-    let backend = parse_backend(&args.backend)?;
     let raw_args = args.args.unwrap_or_default();
     let values = raw_args
         .iter()
         .map(|arg| parse_value(arg))
         .collect::<eyre::Result<Vec<_>>>()?;
     let values = default_eval_args(&args.function, values)?;
+    let backend = parse_backend(&args.backend)?;
 
     let daemon = ensure_daemon_available(&args.target, args.fresh_daemon).await?;
     emit_eval_daemon_note(&daemon.address, &daemon.status)?;
@@ -288,8 +298,7 @@ async fn eval(args: EvalArgs) -> eyre::Result<()> {
             args: values,
             backend,
             include_strict_fragment_dump: args.strict_fragment_dump,
-            include_hir: args.hir,
-            include_ir: args.ir,
+            include_clif_dump: args.clif_dump,
         }, progress_tx)
         .await
         .map_err(|error| {
@@ -305,29 +314,23 @@ async fn eval(args: EvalArgs) -> eyre::Result<()> {
 
     match result {
         EvalFunctionResult::Ok(success) => {
+            if let Some(dump) = &success.strict_fragment_dump {
+                eprintln!("[strict-fragment-dump]\n{dump}");
+            }
+            if let Some(dump) = &success.clif_dump {
+                eprintln!("[clif-dump]\n{dump}");
+            }
             println!("{}", format_value(&success.value));
-            if let Some(strict_fragment_dump) = success.strict_fragment_dump {
-                println!("\n** Strict Fragment\n{strict_fragment_dump}");
-            }
-            if let Some(hir) = success.hir {
-                println!("\n** HIR\n{hir}");
-            }
-            if let Some(ir) = success.ir {
-                println!("\n** IR\n{ir}");
-            }
             Ok(())
         }
         EvalFunctionResult::Err(failure) => {
+            if let Some(dump) = &failure.strict_fragment_dump {
+                eprintln!("[strict-fragment-dump]\n{dump}");
+            }
+            if let Some(dump) = &failure.clif_dump {
+                eprintln!("[clif-dump]\n{dump}");
+            }
             eprintln!("error: {}", failure.message);
-            if let Some(strict_fragment_dump) = failure.strict_fragment_dump {
-                eprintln!("\n** Strict Fragment\n{strict_fragment_dump}");
-            }
-            if let Some(hir) = failure.hir {
-                eprintln!("\n** HIR\n{hir}");
-            }
-            if let Some(ir) = failure.ir {
-                eprintln!("\n** IR\n{ir}");
-            }
             std::process::exit(1);
         }
     }
@@ -356,14 +359,6 @@ async fn mount(args: MountArgs) -> eyre::Result<()> {
         .map_err(|error| eyre::eyre!("failed to query hosted vfs access path: {error}"))?;
     println!("{access_path}/{mount_name}");
     Ok(())
-}
-
-fn parse_backend(value: &str) -> eyre::Result<StrictEvalBackend> {
-    match value {
-        "interpreter" => Ok(StrictEvalBackend::Interpreter),
-        "kajit" => Ok(StrictEvalBackend::Kajit),
-        other => eyre::bail!("unsupported backend `{other}`; expected `interpreter` or `kajit`"),
-    }
 }
 
 fn parse_tree_hash(value: &str) -> eyre::Result<Blake3Hash> {
@@ -938,10 +933,9 @@ daemon {
             fresh_daemon: true,
             file: camino::Utf8PathBuf::from("zoo/rustc-hello.vx"),
             function: "build".to_owned(),
-            backend: "interpreter".to_owned(),
+            backend: "cranelift".to_owned(),
             strict_fragment_dump: false,
-            hir: false,
-            ir: false,
+            clif_dump: false,
             args: None,
         };
 

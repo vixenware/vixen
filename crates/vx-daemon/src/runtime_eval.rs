@@ -9,7 +9,7 @@ use tokio::sync::mpsc;
 use async_recursion::async_recursion;
 use thiserror::Error;
 use vox::Tx;
-use vx_jit::{StrictFragmentValue, execute_source_text_unified};
+use vx_jit::{FragmentArg, FragmentResult};
 use vx_services::EvalProgressEvent;
 use vx_services::{
     BlobRef, DirectoryEntryKind, NodeHash, RuntimeValue, StoreClient, StrictEvalBackend,
@@ -91,59 +91,148 @@ pub enum RuntimeEvalError {
     },
 }
 
+/// Output from a successful evaluation, including optional debug dumps.
+pub struct EvalOutput {
+    pub value: RuntimeValue,
+    pub strict_fragment_dump: Option<String>,
+    pub clif_dump: Option<String>,
+}
+
+pub struct EvalRequest<'a> {
+    pub source: &'a str,
+    pub function_name: &'a str,
+    pub args: &'a [RuntimeValue],
+    pub backend: StrictEvalBackend,
+    pub include_strict_fragment_dump: bool,
+    pub include_clif_dump: bool,
+}
+
 pub async fn evaluate_source_text_function(
     context: &RuntimeEvalContext,
-    source: &str,
-    function_name: &str,
-    args: &[RuntimeValue],
-    backend: StrictEvalBackend,
+    request: EvalRequest<'_>,
     progress: Option<Tx<EvalProgressEvent>>,
-) -> Result<RuntimeValue, RuntimeEvalError> {
-    if let Some(value) =
-        try_execute_strict_fragment_fast_path(source, function_name, args, backend)?
-    {
-        return Ok(value);
+) -> Result<EvalOutput, RuntimeEvalError> {
+    if request.backend == StrictEvalBackend::Cranelift {
+        if let Some(output) = try_cranelift_fast_path(&request)? {
+            return Ok(output);
+        }
     }
 
-    let program = vx_vir::compile::compile_source(source, function_name)?;
+    let program = vx_vir::compile::compile_source(request.source, request.function_name)?;
     let body_id = program.entry;
 
-    let args = args
+    let eval_args = request
+        .args
         .iter()
         .cloned()
         .map(eval_value_from_runtime)
         .collect::<Vec<_>>();
     let mut evaluator = ProgramEvaluator::new(context, &program, progress);
     let result = async {
-        let value = evaluator.eval_body(function_name, body_id, &args).await?;
-        let value = evaluator.finalize_value(function_name, value).await?;
-        runtime_value_from_eval(function_name, value)
+        let value = evaluator
+            .eval_body(request.function_name, body_id, &eval_args)
+            .await?;
+        let value = evaluator
+            .finalize_value(request.function_name, value)
+            .await?;
+        runtime_value_from_eval(request.function_name, value)
     }
     .await;
     evaluator.cleanup_exec_prefixes().await;
-    result
+    result.map(|value| EvalOutput {
+        value,
+        strict_fragment_dump: None,
+        clif_dump: None,
+    })
 }
 
-fn try_execute_strict_fragment_fast_path(
-    source: &str,
-    function_name: &str,
-    args: &[RuntimeValue],
-    _backend: StrictEvalBackend,
-) -> Result<Option<RuntimeValue>, RuntimeEvalError> {
-    let args = match args
+fn try_cranelift_fast_path(
+    request: &EvalRequest<'_>,
+) -> Result<Option<EvalOutput>, RuntimeEvalError> {
+    let frag_args = match request
+        .args
         .iter()
         .cloned()
-        .map(strict_fragment_value_from_runtime)
+        .map(fragment_arg_from_runtime)
         .collect::<Result<Vec<_>, _>>()
     {
-        Ok(args) => args,
+        Ok(a) => a,
         Err(_) => return Ok(None),
     };
 
-    match unsafe { execute_source_text_unified(source, function_name, &args) } {
-        Ok(value) => runtime_value_from_strict_fragment(value).map(Some),
+    let output =
+        match vx_vir::compile::compile_source_with_types(request.source, request.function_name) {
+            Ok(o) => o,
+            Err(_) => return Ok(None),
+        };
+
+    let entry = output.program.entry;
+    let body = match output.program.bodies.get(&entry) {
+        Some(b) => b,
+        None => return Ok(None),
+    };
+
+    let mut func = match vx_jit::lower_to_strict::try_strict_lower(
+        body,
+        &output.slot_types,
+        output.original_body_count,
+    ) {
+        Some(f) => f,
+        None => return Ok(None),
+    };
+    func.name = request.function_name.to_owned();
+
+    let strict_fragment_dump =
+        if request.include_strict_fragment_dump || std::env::var_os("VX_STRICT_DUMP").is_some() {
+            let dump = format!("{:#?}", func);
+            if std::env::var_os("VX_STRICT_DUMP").is_some() {
+                eprintln!(
+                    "[vx-jit] strict fragment for `{}`:\n{dump}",
+                    request.function_name
+                );
+            }
+            Some(dump)
+        } else {
+            None
+        };
+
+    let compiled = match vx_jit::compile(&func) {
+        Ok(c) => c,
+        Err(_) => return Ok(None),
+    };
+
+    // Cranelift textual IR dumps are not yet exposed by vx_jit::compile.
+    let _ = request.include_clif_dump;
+
+    match compiled.call(&frag_args) {
+        Ok(result) => runtime_value_from_fragment_result(result).map(|value| {
+            Some(EvalOutput {
+                value,
+                strict_fragment_dump,
+                clif_dump: None,
+            })
+        }),
         Err(_) => Ok(None),
     }
+}
+
+fn fragment_arg_from_runtime(value: RuntimeValue) -> Result<FragmentArg, ()> {
+    Ok(match value {
+        RuntimeValue::U64(v) => FragmentArg::U64(v),
+        RuntimeValue::Bool(v) => FragmentArg::Bool(v),
+        RuntimeValue::String(v) => FragmentArg::String(v),
+        _ => return Err(()),
+    })
+}
+
+fn runtime_value_from_fragment_result(
+    result: FragmentResult,
+) -> Result<RuntimeValue, RuntimeEvalError> {
+    Ok(match result {
+        FragmentResult::U64(v) => RuntimeValue::U64(v),
+        FragmentResult::Bool(v) => RuntimeValue::Bool(v),
+        FragmentResult::String(v) => RuntimeValue::String(v),
+    })
 }
 
 fn eval_value_from_runtime(value: RuntimeValue) -> EvalValue {
@@ -186,50 +275,6 @@ fn runtime_value_from_eval(
             kind: other.kind_name(),
         }),
     }
-}
-
-fn strict_fragment_value_from_runtime(
-    value: RuntimeValue,
-) -> Result<StrictFragmentValue, RuntimeEvalError> {
-    Ok(match value {
-        RuntimeValue::U64(value) => StrictFragmentValue::U64(value),
-        RuntimeValue::Bool(value) => StrictFragmentValue::Bool(value),
-        RuntimeValue::String(value) => StrictFragmentValue::String(value),
-        RuntimeValue::Path(_) => {
-            return Err(RuntimeEvalError::UnsupportedResultKind {
-                function: "strict-fragment-arg".to_owned(),
-                kind: "path",
-            });
-        }
-        RuntimeValue::StringArray(_) => {
-            return Err(RuntimeEvalError::UnsupportedResultKind {
-                function: "strict-fragment-arg".to_owned(),
-                kind: "string-array",
-            });
-        }
-        RuntimeValue::StringMap(_) => {
-            return Err(RuntimeEvalError::UnsupportedResultKind {
-                function: "strict-fragment-arg".to_owned(),
-                kind: "string-map",
-            });
-        }
-        RuntimeValue::Tree(_) => {
-            return Err(RuntimeEvalError::UnsupportedResultKind {
-                function: "strict-fragment-arg".to_owned(),
-                kind: "tree",
-            });
-        }
-    })
-}
-
-fn runtime_value_from_strict_fragment(
-    value: StrictFragmentValue,
-) -> Result<RuntimeValue, RuntimeEvalError> {
-    Ok(match value {
-        StrictFragmentValue::U64(value) => RuntimeValue::U64(value),
-        StrictFragmentValue::Bool(value) => RuntimeValue::Bool(value),
-        StrictFragmentValue::String(value) => RuntimeValue::String(value),
-    })
 }
 
 struct ProgramEvaluator<'a> {
@@ -1442,7 +1487,7 @@ fn find_host_tool(name: &str) -> Option<String> {
 mod tests {
     use vx_services::{RuntimeValue, StrictEvalBackend};
 
-    use super::{RuntimeEvalContext, evaluate_source_text_function};
+    use super::{EvalRequest, RuntimeEvalContext, evaluate_source_text_function};
 
     const SOURCE_NON_STRICT_CALL: &str = r#"
 fn greet(name: String) -> String (
@@ -1489,68 +1534,84 @@ fn probe() #discover -> String (
 
     #[tokio::test]
     async fn evaluates_non_strict_top_level_body_call() {
-        let value = evaluate_source_text_function(
+        let output = evaluate_source_text_function(
             &RuntimeEvalContext::default(),
-            SOURCE_NON_STRICT_CALL,
-            "build",
-            &[RuntimeValue::String("serde".to_owned())],
-            StrictEvalBackend::Interpreter,
+            EvalRequest {
+                source: SOURCE_NON_STRICT_CALL,
+                function_name: "build",
+                args: &[RuntimeValue::String("serde".to_owned())],
+                backend: StrictEvalBackend::Interpreter,
+                include_strict_fragment_dump: false,
+                include_clif_dump: false,
+            },
             None,
         )
         .await
         .expect("build should evaluate");
 
-        assert_eq!(value, RuntimeValue::String("hello serde".to_owned()));
+        assert_eq!(output.value, RuntimeValue::String("hello serde".to_owned()));
     }
 
     #[tokio::test]
     async fn evaluates_non_strict_string_len_via_local_call() {
-        let value = evaluate_source_text_function(
+        let output = evaluate_source_text_function(
             &RuntimeEvalContext::default(),
-            SOURCE_NON_STRICT_STRING_HELPERS,
-            "build_len",
-            &[RuntimeValue::String("serde".to_owned())],
-            StrictEvalBackend::Interpreter,
+            EvalRequest {
+                source: SOURCE_NON_STRICT_STRING_HELPERS,
+                function_name: "build_len",
+                args: &[RuntimeValue::String("serde".to_owned())],
+                backend: StrictEvalBackend::Interpreter,
+                include_strict_fragment_dump: false,
+                include_clif_dump: false,
+            },
             None,
         )
         .await
         .expect("build_len should evaluate");
 
-        assert_eq!(value, RuntimeValue::U64(5));
+        assert_eq!(output.value, RuntimeValue::U64(5));
     }
 
     #[tokio::test]
     #[ignore = "VIR pipeline does not yet support range syntax (0..2) — work item 018"]
     async fn evaluates_non_strict_string_slice_via_local_call() {
-        let value = evaluate_source_text_function(
+        let output = evaluate_source_text_function(
             &RuntimeEvalContext::default(),
-            SOURCE_NON_STRICT_STRING_HELPERS,
-            "build_slice",
-            &[RuntimeValue::String("serde".to_owned())],
-            StrictEvalBackend::Interpreter,
+            EvalRequest {
+                source: SOURCE_NON_STRICT_STRING_HELPERS,
+                function_name: "build_slice",
+                args: &[RuntimeValue::String("serde".to_owned())],
+                backend: StrictEvalBackend::Interpreter,
+                include_strict_fragment_dump: false,
+                include_clif_dump: false,
+            },
             None,
         )
         .await
         .expect("build_slice should evaluate");
 
-        assert_eq!(value, RuntimeValue::String("se".to_owned()));
+        assert_eq!(output.value, RuntimeValue::String("se".to_owned()));
     }
 
     #[tokio::test]
     #[ignore = "VIR pipeline does not yet resolve runtime boundary builtins (discover/exec) — work items 014, 016"]
     async fn evaluates_local_discover_host_which() {
-        let value = evaluate_source_text_function(
+        let output = evaluate_source_text_function(
             &RuntimeEvalContext::default(),
-            SOURCE_DISCOVER_WHICH,
-            "probe",
-            &[],
-            StrictEvalBackend::Interpreter,
+            EvalRequest {
+                source: SOURCE_DISCOVER_WHICH,
+                function_name: "probe",
+                args: &[],
+                backend: StrictEvalBackend::Interpreter,
+                include_strict_fragment_dump: false,
+                include_clif_dump: false,
+            },
             None,
         )
         .await
         .expect("probe should evaluate");
 
-        match value {
+        match output.value {
             RuntimeValue::String(path) => {
                 assert!(path.starts_with('/'), "expected absolute path, got {path}");
                 assert!(path.ends_with("sh"), "expected shell path, got {path}");
@@ -1562,17 +1623,21 @@ fn probe() #discover -> String (
     #[tokio::test]
     #[ignore = "VIR pipeline does not yet resolve runtime boundary builtins (discover/exec) — work items 014, 016"]
     async fn evaluates_local_exec_stdout_observer() {
-        let value = evaluate_source_text_function(
+        let output = evaluate_source_text_function(
             &RuntimeEvalContext::default(),
-            SOURCE_EXEC_STDOUT,
-            "probe",
-            &[],
-            StrictEvalBackend::Interpreter,
+            EvalRequest {
+                source: SOURCE_EXEC_STDOUT,
+                function_name: "probe",
+                args: &[],
+                backend: StrictEvalBackend::Interpreter,
+                include_strict_fragment_dump: false,
+                include_clif_dump: false,
+            },
             None,
         )
         .await
         .expect("probe should evaluate");
 
-        assert_eq!(value, RuntimeValue::String("hello".to_owned()));
+        assert_eq!(output.value, RuntimeValue::String("hello".to_owned()));
     }
 }

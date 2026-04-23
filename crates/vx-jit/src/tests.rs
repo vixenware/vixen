@@ -1,500 +1,447 @@
-use crate::{
-    StrictFragmentAbiLayout, StrictFragmentValue, compile_source_text_unified,
-    execute_compiled_copying_strict_fragment_strings, execute_compiled_unmanaged_strict_fragment,
-    execute_source_text_unified, lower_source_text_unified,
+use vx_jit_types::{
+    LocalId, LocalInfo, StrictBinOp, StrictExpr, StrictFunction, StrictLiteral, StrictParam,
+    StrictStmt, StrictType, StringOwnership,
 };
 
-const SOURCE_ADD_U64: &str = r#"
-fn add(lhs: U64, rhs: U64) -> U64 (
-  lhs + rhs
-)
-"#;
+use crate::{FragmentArg, FragmentResult, compile};
 
-const SOURCE_SPARSE_PREFIX: &str = r#"
-fn sparse_prefix(name: String) -> String (
-  let len = name.len();
-  if len == 1 (
-    "1"
-  ) else (
-    if len == 2 (
-      "2"
-    ) else (
-      if len == 3 (
-        `3/{name.slice(0..1)}`
-      ) else (
-        `{name.slice(0..2)}/{name.slice(2..4)}`
-      )
-    )
-  )
-)
-"#;
-
-const SOURCE_STR_LEN: &str = r#"
-fn str_len(name: String) -> U64 (
-  name.len()
-)
-"#;
-
-const SOURCE_STR_SLICE: &str = r#"
-fn str_slice(name: String, start: U64, end: U64) -> String (
-  name.slice(start..end)
-)
-"#;
-
-const SOURCE_ONE: &str = r#"
-fn one() -> String (
-  "1"
-)
-"#;
-
-const SOURCE_PICK: &str = r#"
-fn pick(flag: U64) -> String (
-  if flag == 1 (
-    "yes"
-  ) else (
-    "no"
-  )
-)
-"#;
-
-const SOURCE_JOIN: &str = r#"
-fn join(a: String, b: String) -> String (
-  `{a}{b}`
-)
-"#;
-
-const CARGO_RESOLVE_SOURCE: &str = include_str!("../../../zoo/cargo-resolve.vx");
-
-fn cargo_resolve_function_source(function_name: &str) -> String {
-    let needle = format!("fn {function_name}(");
-    let start = CARGO_RESOLVE_SOURCE
-        .find(&needle)
-        .unwrap_or_else(|| panic!("missing {function_name} in cargo-resolve.vx"));
-    let tail = &CARGO_RESOLVE_SOURCE[start..];
-    let end = tail.find("\nfn ").unwrap_or(tail.len());
-    tail[..end].trim().to_owned() + "\n"
+fn local(id: u32) -> LocalId {
+    LocalId(id)
 }
 
-/// Helper: lower source through unified path, find the named function body,
-/// assert it's strict, compile via Kajit, return the compiled function pointer.
-fn unified_compile(source: &str, function_name: &str) -> kajit::CompiledFunction {
-    let bridge = crate::legacy::SingleSourceBridge::from_source_text(source);
-    let analysis = crate::legacy::build_minimal_analysis(&bridge);
-    let program = crate::legacy::lower::lower_executable_program(&analysis, &bridge)
-        .expect("unified lowering should succeed");
-
-    let body = program
-        .bodies
-        .values()
-        .find(|b| {
-            matches!(&b.kernel_kind, crate::legacy::KernelKind::Strict { vtf } if vtf.name == function_name)
-        })
-        .unwrap_or_else(|| {
-            panic!(
-                "`{function_name}` should be strict. Bodies: {:?}",
-                program
-                    .bodies
-                    .values()
-                    .map(|b| format!("{:?}: {:?}", b.id, std::mem::discriminant(&b.kernel_kind)))
-                    .collect::<Vec<_>>()
-            )
-        });
-
-    let crate::legacy::KernelKind::Strict { vtf } = &body.kernel_kind else {
-        unreachable!();
-    };
-
-    let lowerer = crate::legacy::lower_strict::StrictLowerer::new();
-    let module = lowerer
-        .module
-        .lower_vixen_typed_function_into_module(vtf)
-        .unwrap_or_else(|e| panic!("HIR lowering of `{function_name}` failed: {e:?}"));
-    kajit::compile_hir_module(&module)
+fn local_info(id: u32, ty: StrictType) -> LocalInfo {
+    LocalInfo {
+        id: local(id),
+        ty,
+        ownership: match ty {
+            StrictType::String => StringOwnership::Borrowed,
+            _ => StringOwnership::Static,
+        },
+    }
 }
 
-// --- Unified path: marks strict ---
-
-#[test]
-fn unified_path_marks_strict_add_as_strict() {
-    let bridge = crate::legacy::SingleSourceBridge::from_source_text(SOURCE_ADD_U64);
-    let analysis = crate::legacy::build_minimal_analysis(&bridge);
-    let program = crate::legacy::lower::lower_executable_program(&analysis, &bridge)
-        .expect("unified lowering should succeed");
-
-    let body = program.bodies.values().next().expect("should have a body");
-    assert!(
-        matches!(body.kernel_kind, crate::legacy::KernelKind::Strict { .. }),
-        "add(U64, U64) -> U64 should be lowered as strict, got {:?}",
-        body.kernel_kind
-    );
+fn param(id: u32, name: &str, ty: StrictType) -> StrictParam {
+    StrictParam {
+        local: local(id),
+        name: name.to_owned(),
+        ty,
+    }
 }
 
-// --- Unified path: low-level compiled execution ---
+// --- add(U64, U64) -> U64 ---
 
-#[test]
-fn unified_executes_u64_add() {
-    let compiled = unified_compile(SOURCE_ADD_U64, "add");
-    let add: unsafe extern "C" fn(u64, u64) -> u64 =
-        unsafe { core::mem::transmute(compiled.as_ptr()) };
-    assert_eq!(unsafe { add(41, 1) }, 42);
-    assert_eq!(unsafe { add(0, 0) }, 0);
-    assert_eq!(unsafe { add(100, 200) }, 300);
+fn make_add_func() -> StrictFunction {
+    // fn add(p0: U64, p1: U64) -> U64 { return p0 + p1 }
+    StrictFunction {
+        name: "add".to_owned(),
+        params: vec![
+            param(0, "lhs", StrictType::U64),
+            param(1, "rhs", StrictType::U64),
+        ],
+        locals: vec![],
+        return_type: StrictType::U64,
+        return_ownership: StringOwnership::Static,
+        body: vec![StrictStmt::Return(Some(StrictExpr::Binary {
+            op: StrictBinOp::Add,
+            lhs: Box::new(StrictExpr::Local(local(0))),
+            rhs: Box::new(StrictExpr::Local(local(1))),
+        }))],
+    }
 }
 
 #[test]
-fn unified_executes_string_len() {
-    let compiled = unified_compile(SOURCE_STR_LEN, "str_len");
-    let str_len: unsafe extern "C" fn(u64, u64) -> u64 =
-        unsafe { core::mem::transmute(compiled.as_ptr()) };
-    let input = "hello";
+fn test_u64_add() {
+    let frag = compile(&make_add_func()).expect("add should compile");
     assert_eq!(
-        unsafe { str_len(input.as_ptr() as u64, input.len() as u64) },
-        5
+        frag.call(&[FragmentArg::U64(41), FragmentArg::U64(1)])
+            .unwrap(),
+        FragmentResult::U64(42)
     );
-    let empty = "";
     assert_eq!(
-        unsafe { str_len(empty.as_ptr() as u64, empty.len() as u64) },
-        0
+        frag.call(&[FragmentArg::U64(0), FragmentArg::U64(0)])
+            .unwrap(),
+        FragmentResult::U64(0)
     );
-}
-
-#[test]
-fn unified_executes_string_slice() {
-    let compiled = unified_compile(SOURCE_STR_SLICE, "str_slice");
-    let str_slice: unsafe extern "C" fn(u64, u64, u64, u64) -> (u64, u64) =
-        unsafe { core::mem::transmute(compiled.as_ptr()) };
-    let input = "hello world";
-    let (ptr, len) = unsafe { str_slice(input.as_ptr() as u64, input.len() as u64, 0, 5) };
-    let output = unsafe {
-        std::str::from_utf8(std::slice::from_raw_parts(ptr as *const u8, len as usize)).unwrap()
-    };
-    assert_eq!(output, "hello");
-}
-
-#[test]
-fn unified_executes_string_literal_return() {
-    let compiled = unified_compile(SOURCE_ONE, "one");
-    let one: unsafe extern "C" fn() -> (u64, u64) =
-        unsafe { core::mem::transmute(compiled.as_ptr()) };
-    let (ptr, len) = unsafe { one() };
-    let output = unsafe {
-        std::str::from_utf8(std::slice::from_raw_parts(ptr as *const u8, len as usize)).unwrap()
-    };
-    assert_eq!(output, "1");
-}
-
-#[test]
-fn unified_executes_string_if_return() {
-    let compiled = unified_compile(SOURCE_PICK, "pick");
-    let pick: unsafe extern "C" fn(u64) -> (u64, u64) =
-        unsafe { core::mem::transmute(compiled.as_ptr()) };
-    let (ptr, len) = unsafe { pick(1) };
-    let yes = unsafe {
-        std::str::from_utf8(std::slice::from_raw_parts(ptr as *const u8, len as usize)).unwrap()
-    };
-    assert_eq!(yes, "yes");
-    let (ptr, len) = unsafe { pick(0) };
-    let no = unsafe {
-        std::str::from_utf8(std::slice::from_raw_parts(ptr as *const u8, len as usize)).unwrap()
-    };
-    assert_eq!(no, "no");
-}
-
-#[test]
-fn unified_executes_string_concat() {
-    let compiled = unified_compile(SOURCE_JOIN, "join");
-    let join: unsafe extern "C" fn(u64, u64, u64, u64) -> (u64, u64) =
-        unsafe { core::mem::transmute(compiled.as_ptr()) };
-    let a = "hello";
-    let b = " world";
-    let (ptr, len) = unsafe {
-        join(
-            a.as_ptr() as u64,
-            a.len() as u64,
-            b.as_ptr() as u64,
-            b.len() as u64,
-        )
-    };
-    let output = unsafe {
-        std::str::from_utf8(std::slice::from_raw_parts(ptr as *const u8, len as usize)).unwrap()
-    };
-    assert_eq!(output, "hello world");
-    unsafe {
-        std::alloc::dealloc(
-            ptr as *mut u8,
-            std::alloc::Layout::from_size_align(len as usize, 1).unwrap(),
-        );
-    }
-}
-
-#[test]
-fn unified_executes_sparse_prefix() {
-    let compiled = unified_compile(SOURCE_SPARSE_PREFIX, "sparse_prefix");
-    let sparse_prefix: unsafe extern "C" fn(u64, u64) -> (u64, u64) =
-        unsafe { core::mem::transmute(compiled.as_ptr()) };
-
-    let input = "abc";
-    let (ptr, len) = unsafe { sparse_prefix(input.as_ptr() as u64, input.len() as u64) };
-    let output = unsafe {
-        std::str::from_utf8(std::slice::from_raw_parts(ptr as *const u8, len as usize)).unwrap()
-    };
-    assert_eq!(output, "3/a");
-
-    let input = "serde";
-    let (ptr, len) = unsafe { sparse_prefix(input.as_ptr() as u64, input.len() as u64) };
-    let output = unsafe {
-        std::str::from_utf8(std::slice::from_raw_parts(ptr as *const u8, len as usize)).unwrap()
-    };
-    assert_eq!(output, "se/rd");
-}
-
-#[test]
-fn unified_executes_registry_entry_key() {
-    let source = cargo_resolve_function_source("registry_entry_key");
-    let compiled = unified_compile(&source, "registry_entry_key");
-    let registry_entry_key: unsafe extern "C" fn(u64, u64, u64, u64) -> (u64, u64) =
-        unsafe { core::mem::transmute(compiled.as_ptr()) };
-    let package_name = "serde";
-    let version = "1.0.228";
-    let (ptr, len) = unsafe {
-        registry_entry_key(
-            package_name.as_ptr() as u64,
-            package_name.len() as u64,
-            version.as_ptr() as u64,
-            version.len() as u64,
-        )
-    };
-    let output = unsafe {
-        std::str::from_utf8(std::slice::from_raw_parts(ptr as *const u8, len as usize)).unwrap()
-    };
-    assert_eq!(output, "entry:registry:serde@1.0.228");
-    unsafe {
-        std::alloc::dealloc(
-            ptr as *mut u8,
-            std::alloc::Layout::from_size_align(len as usize, 1).unwrap(),
-        );
-    }
-}
-
-// --- High-level unified API tests ---
-
-#[test]
-fn high_level_unified_u64_add() {
-    let result = unsafe {
-        execute_source_text_unified(
-            SOURCE_ADD_U64,
-            "add",
-            &[StrictFragmentValue::U64(30), StrictFragmentValue::U64(12)],
-        )
-    }
-    .expect("unified u64 add should execute");
-    assert_eq!(result, StrictFragmentValue::U64(42));
-}
-
-#[test]
-fn high_level_unified_string_slice() {
-    let result = unsafe {
-        execute_source_text_unified(
-            SOURCE_STR_SLICE,
-            "str_slice",
-            &[
-                StrictFragmentValue::String("serde".to_owned()),
-                StrictFragmentValue::U64(1),
-                StrictFragmentValue::U64(4),
-            ],
-        )
-    }
-    .expect("unified str_slice should execute");
-    assert_eq!(result, StrictFragmentValue::String("erd".to_owned()));
-}
-
-#[test]
-fn high_level_unified_sparse_prefix() {
-    let result = unsafe {
-        execute_source_text_unified(
-            SOURCE_SPARSE_PREFIX,
-            "sparse_prefix",
-            &[StrictFragmentValue::String("serde".to_owned())],
-        )
-    }
-    .expect("unified sparse_prefix should execute");
-    assert_eq!(result, StrictFragmentValue::String("se/rd".to_owned()));
-}
-
-#[test]
-fn abi_layout_word_counts() {
-    assert_eq!(StrictFragmentAbiLayout::U64.word_count(), 1);
-    assert_eq!(StrictFragmentAbiLayout::Bool.word_count(), 1);
-    assert_eq!(StrictFragmentAbiLayout::String.word_count(), 2);
-}
-
-#[test]
-fn abi_bridge_u64_add() {
-    let (compiled, vtf) =
-        compile_source_text_unified(SOURCE_ADD_U64, "add").expect("add should compile");
-
-    let result = unsafe {
-        execute_compiled_unmanaged_strict_fragment(
-            &vtf,
-            &compiled,
-            &[StrictFragmentValue::U64(30), StrictFragmentValue::U64(12)],
-        )
-    }
-    .expect("abi bridge should execute add");
-
     assert_eq!(
-        result,
-        crate::CompiledStrictFragmentOutput::Value(StrictFragmentValue::U64(42))
+        frag.call(&[FragmentArg::U64(100), FragmentArg::U64(200)])
+            .unwrap(),
+        FragmentResult::U64(300)
     );
 }
 
+// --- sub(U64, U64) -> U64 ---
+
 #[test]
-fn abi_bridge_string_literal() {
-    let (compiled, vtf) =
-        compile_source_text_unified(SOURCE_ONE, "one").expect("one should compile");
-
-    let result = unsafe { execute_compiled_unmanaged_strict_fragment(&vtf, &compiled, &[]) }
-        .expect("abi bridge should execute one");
-
-    let crate::CompiledStrictFragmentOutput::UnmanagedString(result) = result else {
-        panic!("expected unmanaged string return");
+fn test_u64_sub() {
+    let func = StrictFunction {
+        name: "sub".to_owned(),
+        params: vec![
+            param(0, "lhs", StrictType::U64),
+            param(1, "rhs", StrictType::U64),
+        ],
+        locals: vec![],
+        return_type: StrictType::U64,
+        return_ownership: StringOwnership::Static,
+        body: vec![StrictStmt::Return(Some(StrictExpr::Binary {
+            op: StrictBinOp::Sub,
+            lhs: Box::new(StrictExpr::Local(local(0))),
+            rhs: Box::new(StrictExpr::Local(local(1))),
+        }))],
     };
-    let output = unsafe { result.to_owned_string() }.expect("result should be utf-8");
-    assert_eq!(output, "1");
+    let frag = compile(&func).expect("sub should compile");
+    assert_eq!(
+        frag.call(&[FragmentArg::U64(10), FragmentArg::U64(3)])
+            .unwrap(),
+        FragmentResult::U64(7)
+    );
 }
 
+// --- eq(U64, U64) -> Bool ---
+
 #[test]
-fn abi_bridge_string_slice_copying() {
-    let (compiled, vtf) = compile_source_text_unified(SOURCE_STR_SLICE, "str_slice")
-        .expect("str_slice should compile");
-
-    let result = unsafe {
-        execute_compiled_copying_strict_fragment_strings(
-            &vtf,
-            &compiled,
-            &[
-                StrictFragmentValue::String("serde".to_owned()),
-                StrictFragmentValue::U64(1),
-                StrictFragmentValue::U64(4),
-            ],
-        )
-    }
-    .expect("abi bridge should execute str_slice");
-
-    assert_eq!(result, StrictFragmentValue::String("erd".to_owned()));
+fn test_eq() {
+    let func = StrictFunction {
+        name: "eq".to_owned(),
+        params: vec![
+            param(0, "a", StrictType::U64),
+            param(1, "b", StrictType::U64),
+        ],
+        locals: vec![],
+        return_type: StrictType::Bool,
+        return_ownership: StringOwnership::Static,
+        body: vec![StrictStmt::Return(Some(StrictExpr::Binary {
+            op: StrictBinOp::Eq,
+            lhs: Box::new(StrictExpr::Local(local(0))),
+            rhs: Box::new(StrictExpr::Local(local(1))),
+        }))],
+    };
+    let frag = compile(&func).expect("eq should compile");
+    assert_eq!(
+        frag.call(&[FragmentArg::U64(5), FragmentArg::U64(5)])
+            .unwrap(),
+        FragmentResult::Bool(true)
+    );
+    assert_eq!(
+        frag.call(&[FragmentArg::U64(5), FragmentArg::U64(6)])
+            .unwrap(),
+        FragmentResult::Bool(false)
+    );
 }
 
-#[test]
-fn lower_source_text_unified_returns_vtf() {
-    let lowered = lower_source_text_unified(SOURCE_ADD_U64, "add")
-        .expect("add should lower through unified path");
-    assert_eq!(lowered.vtf.name, "add");
-    assert_eq!(lowered.vtf.params.len(), 2);
-}
+// --- ne(U64, U64) -> Bool ---
 
 #[test]
-fn debug_string_len_condition() {
-    // Minimal test: string param → len → if len == 5 return "yes" else "no"
-    let source = r#"
-fn check(name: String) -> String (
-  if name.len() == 5 (
-    "yes"
-  ) else (
-    "no"
-  )
-)
-"#;
-    let result = unsafe {
-        execute_source_text_unified(
-            source,
-            "check",
-            &[StrictFragmentValue::String("serde".to_owned())],
-        )
-    }
-    .expect("check should execute");
-    assert_eq!(result, StrictFragmentValue::String("yes".to_owned()));
+fn test_ne() {
+    let func = StrictFunction {
+        name: "ne".to_owned(),
+        params: vec![
+            param(0, "a", StrictType::U64),
+            param(1, "b", StrictType::U64),
+        ],
+        locals: vec![],
+        return_type: StrictType::Bool,
+        return_ownership: StringOwnership::Static,
+        body: vec![StrictStmt::Return(Some(StrictExpr::Binary {
+            op: StrictBinOp::Ne,
+            lhs: Box::new(StrictExpr::Local(local(0))),
+            rhs: Box::new(StrictExpr::Local(local(1))),
+        }))],
+    };
+    let frag = compile(&func).expect("ne should compile");
+    assert_eq!(
+        frag.call(&[FragmentArg::U64(5), FragmentArg::U64(6)])
+            .unwrap(),
+        FragmentResult::Bool(true)
+    );
+    assert_eq!(
+        frag.call(&[FragmentArg::U64(5), FragmentArg::U64(5)])
+            .unwrap(),
+        FragmentResult::Bool(false)
+    );
 }
 
-#[test]
-fn debug_nested_if() {
-    let source = r#"
-fn classify(name: String) -> String (
-  let len = name.len();
-  if len == 1 (
-    "one"
-  ) else (
-    if len == 5 (
-      "five"
-    ) else (
-      "other"
-    )
-  )
-)
-"#;
-    let result = unsafe {
-        execute_source_text_unified(
-            source,
-            "classify",
-            &[StrictFragmentValue::String("serde".to_owned())],
-        )
-    }
-    .expect("classify should execute");
-    assert_eq!(result, StrictFragmentValue::String("five".to_owned()));
-}
+// --- const U64 ---
 
 #[test]
-fn debug_nested_if_u64() {
-    let source = r#"
-fn classify(n: U64) -> U64 (
-  if n == 1 ( 10 ) else (
-    if n == 5 ( 50 ) else ( 0 )
-  )
-)
-"#;
-    let result =
-        unsafe { execute_source_text_unified(source, "classify", &[StrictFragmentValue::U64(5)]) }
-            .expect("classify u64 should execute");
-    assert_eq!(result, StrictFragmentValue::U64(50));
+fn test_const_u64() {
+    let func = StrictFunction {
+        name: "forty_two".to_owned(),
+        params: vec![],
+        locals: vec![],
+        return_type: StrictType::U64,
+        return_ownership: StringOwnership::Static,
+        body: vec![StrictStmt::Return(Some(StrictExpr::Literal(
+            StrictLiteral::U64(42),
+        )))],
+    };
+    let frag = compile(&func).expect("const u64 should compile");
+    assert_eq!(frag.call(&[]).unwrap(), FragmentResult::U64(42));
 }
 
-#[test]
-fn debug_nested_if_string_no_concat() {
-    let source = r#"
-fn classify(name: String) -> String (
-  let len = name.len();
-  if len == 1 ( "one" ) else (
-    if len == 5 ( "five" ) else ( "other" )
-  )
-)
-"#;
-    let result = unsafe {
-        execute_source_text_unified(
-            source,
-            "classify",
-            &[StrictFragmentValue::String("serde".to_owned())],
-        )
-    }
-    .expect("classify should execute");
-    assert_eq!(result, StrictFragmentValue::String("five".to_owned()));
-}
+// --- const Bool ---
 
 #[test]
-fn debug_nested_if_with_concat() {
-    let source = r#"
-fn classify(name: String) -> String (
-  let len = name.len();
-  if len == 1 ( "one" ) else (
-    if len == 3 ( `3/{name.slice(0..1)}` ) else ( "other" )
-  )
-)
-"#;
-    let result = unsafe {
-        execute_source_text_unified(
-            source,
-            "classify",
-            &[StrictFragmentValue::String("serde".to_owned())],
-        )
-    }
-    .expect("classify should execute");
-    assert_eq!(result, StrictFragmentValue::String("other".to_owned()));
+fn test_const_bool() {
+    let func = StrictFunction {
+        name: "true_func".to_owned(),
+        params: vec![],
+        locals: vec![],
+        return_type: StrictType::Bool,
+        return_ownership: StringOwnership::Static,
+        body: vec![StrictStmt::Return(Some(StrictExpr::Literal(
+            StrictLiteral::Bool(true),
+        )))],
+    };
+    let frag = compile(&func).expect("const bool should compile");
+    assert_eq!(frag.call(&[]).unwrap(), FragmentResult::Bool(true));
+}
+
+// --- const String ---
+
+#[test]
+fn test_const_string() {
+    let func = StrictFunction {
+        name: "hello".to_owned(),
+        params: vec![],
+        locals: vec![],
+        return_type: StrictType::String,
+        return_ownership: StringOwnership::Static,
+        body: vec![StrictStmt::Return(Some(StrictExpr::Literal(
+            StrictLiteral::String("hello".to_owned()),
+        )))],
+    };
+    let frag = compile(&func).expect("const string should compile");
+    assert_eq!(
+        frag.call(&[]).unwrap(),
+        FragmentResult::String("hello".to_owned())
+    );
+}
+
+// --- alias ---
+
+#[test]
+fn test_alias() {
+    // fn alias(x: U64) -> U64 { let y = x; return y }
+    let func = StrictFunction {
+        name: "alias".to_owned(),
+        params: vec![param(0, "x", StrictType::U64)],
+        locals: vec![local_info(1, StrictType::U64)],
+        return_type: StrictType::U64,
+        return_ownership: StringOwnership::Static,
+        body: vec![
+            StrictStmt::Let {
+                local: local(1),
+                value: StrictExpr::Local(local(0)),
+            },
+            StrictStmt::Return(Some(StrictExpr::Local(local(1)))),
+        ],
+    };
+    let frag = compile(&func).expect("alias should compile");
+    assert_eq!(
+        frag.call(&[FragmentArg::U64(99)]).unwrap(),
+        FragmentResult::U64(99)
+    );
+}
+
+// --- select (via If + Return) ---
+
+#[test]
+fn test_select_u64() {
+    // fn pick(flag: Bool) -> U64 { if flag { 1 } else { 0 } }
+    let func = StrictFunction {
+        name: "pick".to_owned(),
+        params: vec![param(0, "flag", StrictType::Bool)],
+        locals: vec![],
+        return_type: StrictType::U64,
+        return_ownership: StringOwnership::Static,
+        body: vec![StrictStmt::If {
+            condition: StrictExpr::Local(local(0)),
+            then_body: vec![StrictStmt::Return(Some(StrictExpr::Literal(
+                StrictLiteral::U64(1),
+            )))],
+            else_body: vec![StrictStmt::Return(Some(StrictExpr::Literal(
+                StrictLiteral::U64(0),
+            )))],
+        }],
+    };
+    let frag = compile(&func).expect("select u64 should compile");
+    assert_eq!(
+        frag.call(&[FragmentArg::Bool(true)]).unwrap(),
+        FragmentResult::U64(1)
+    );
+    assert_eq!(
+        frag.call(&[FragmentArg::Bool(false)]).unwrap(),
+        FragmentResult::U64(0)
+    );
+}
+
+// --- string_len ---
+
+#[test]
+fn test_string_len() {
+    // fn str_len(s: String) -> U64 { return s.len }
+    let func = StrictFunction {
+        name: "str_len".to_owned(),
+        params: vec![param(0, "s", StrictType::String)],
+        locals: vec![],
+        return_type: StrictType::U64,
+        return_ownership: StringOwnership::Static,
+        body: vec![StrictStmt::Return(Some(StrictExpr::StringLen {
+            value: Box::new(StrictExpr::Local(local(0))),
+        }))],
+    };
+    let frag = compile(&func).expect("str_len should compile");
+    assert_eq!(
+        frag.call(&[FragmentArg::String("hello".to_owned())])
+            .unwrap(),
+        FragmentResult::U64(5)
+    );
+    assert_eq!(
+        frag.call(&[FragmentArg::String("".to_owned())]).unwrap(),
+        FragmentResult::U64(0)
+    );
+}
+
+// --- string_slice ---
+
+#[test]
+fn test_string_slice() {
+    // fn str_slice(s: String, start: U64, end: U64) -> String { return s[start..end] }
+    let func = StrictFunction {
+        name: "str_slice".to_owned(),
+        params: vec![
+            param(0, "s", StrictType::String),
+            param(1, "start", StrictType::U64),
+            param(2, "end", StrictType::U64),
+        ],
+        locals: vec![],
+        return_type: StrictType::String,
+        return_ownership: StringOwnership::Borrowed,
+        body: vec![StrictStmt::Return(Some(StrictExpr::StringSlice {
+            value: Box::new(StrictExpr::Local(local(0))),
+            start: Box::new(StrictExpr::Local(local(1))),
+            end: Box::new(StrictExpr::Local(local(2))),
+        }))],
+    };
+    let frag = compile(&func).expect("str_slice should compile");
+    assert_eq!(
+        frag.call(&[
+            FragmentArg::String("serde".to_owned()),
+            FragmentArg::U64(1),
+            FragmentArg::U64(4),
+        ])
+        .unwrap(),
+        FragmentResult::String("erd".to_owned())
+    );
+}
+
+// --- string_concat ---
+
+#[test]
+fn test_string_concat() {
+    // fn join(a: String, b: String) -> String { return concat(a, b) }
+    let func = StrictFunction {
+        name: "join".to_owned(),
+        params: vec![
+            param(0, "a", StrictType::String),
+            param(1, "b", StrictType::String),
+        ],
+        locals: vec![],
+        return_type: StrictType::String,
+        return_ownership: StringOwnership::Owned,
+        body: vec![StrictStmt::Return(Some(StrictExpr::ConcatStrings {
+            parts: vec![StrictExpr::Local(local(0)), StrictExpr::Local(local(1))],
+        }))],
+    };
+    let frag = compile(&func).expect("concat should compile");
+    assert_eq!(
+        frag.call(&[
+            FragmentArg::String("hello".to_owned()),
+            FragmentArg::String(" world".to_owned()),
+        ])
+        .unwrap(),
+        FragmentResult::String("hello world".to_owned())
+    );
+}
+
+// --- nested if (sparse_prefix-style) ---
+
+#[test]
+fn test_nested_if_select() {
+    // fn classify(n: U64) -> U64 { if n == 1 { 10 } else { if n == 5 { 50 } else { 0 } } }
+    let func = StrictFunction {
+        name: "classify".to_owned(),
+        params: vec![param(0, "n", StrictType::U64)],
+        locals: vec![],
+        return_type: StrictType::U64,
+        return_ownership: StringOwnership::Static,
+        body: vec![StrictStmt::If {
+            condition: StrictExpr::Binary {
+                op: StrictBinOp::Eq,
+                lhs: Box::new(StrictExpr::Local(local(0))),
+                rhs: Box::new(StrictExpr::Literal(StrictLiteral::U64(1))),
+            },
+            then_body: vec![StrictStmt::Return(Some(StrictExpr::Literal(
+                StrictLiteral::U64(10),
+            )))],
+            else_body: vec![StrictStmt::If {
+                condition: StrictExpr::Binary {
+                    op: StrictBinOp::Eq,
+                    lhs: Box::new(StrictExpr::Local(local(0))),
+                    rhs: Box::new(StrictExpr::Literal(StrictLiteral::U64(5))),
+                },
+                then_body: vec![StrictStmt::Return(Some(StrictExpr::Literal(
+                    StrictLiteral::U64(50),
+                )))],
+                else_body: vec![StrictStmt::Return(Some(StrictExpr::Literal(
+                    StrictLiteral::U64(0),
+                )))],
+            }],
+        }],
+    };
+    let frag = compile(&func).expect("nested if should compile");
+    assert_eq!(
+        frag.call(&[FragmentArg::U64(1)]).unwrap(),
+        FragmentResult::U64(10)
+    );
+    assert_eq!(
+        frag.call(&[FragmentArg::U64(5)]).unwrap(),
+        FragmentResult::U64(50)
+    );
+    assert_eq!(
+        frag.call(&[FragmentArg::U64(99)]).unwrap(),
+        FragmentResult::U64(0)
+    );
+}
+
+// --- smoke: string if-select returning different string literals ---
+
+#[test]
+fn test_string_select() {
+    // fn pick(flag: Bool) -> String { if flag { "yes" } else { "no" } }
+    let func = StrictFunction {
+        name: "pick_str".to_owned(),
+        params: vec![param(0, "flag", StrictType::Bool)],
+        locals: vec![],
+        return_type: StrictType::String,
+        return_ownership: StringOwnership::Static,
+        body: vec![StrictStmt::If {
+            condition: StrictExpr::Local(local(0)),
+            then_body: vec![StrictStmt::Return(Some(StrictExpr::Literal(
+                StrictLiteral::String("yes".to_owned()),
+            )))],
+            else_body: vec![StrictStmt::Return(Some(StrictExpr::Literal(
+                StrictLiteral::String("no".to_owned()),
+            )))],
+        }],
+    };
+    let frag = compile(&func).expect("string select should compile");
+    assert_eq!(
+        frag.call(&[FragmentArg::Bool(true)]).unwrap(),
+        FragmentResult::String("yes".to_owned())
+    );
+    assert_eq!(
+        frag.call(&[FragmentArg::Bool(false)]).unwrap(),
+        FragmentResult::String("no".to_owned())
+    );
 }

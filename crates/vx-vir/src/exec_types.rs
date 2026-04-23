@@ -4,7 +4,6 @@
 //! evaluator (vx-rt) and the JIT compiler (vx-jit).
 
 use std::collections::BTreeMap;
-use vx_jit_types::VixenTypedFunction;
 
 // ---------------------------------------------------------------------------
 // IDs
@@ -71,15 +70,10 @@ pub struct ExecutableProgram {
     pub runtime_nodes: BTreeMap<RuntimeNodeId, ExecutableRuntimeNode>,
 }
 
-/// Whether this kernel was compiled to a strict fragment (ready for Kajit)
-/// or lowered to interpreted KernelOp bytecode.
 #[derive(Debug, Clone, PartialEq, Eq, Default)]
 pub enum KernelKind {
     #[default]
     Interpreted,
-    Strict {
-        vtf: VixenTypedFunction,
-    },
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]

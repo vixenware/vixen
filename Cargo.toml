@@ -49,7 +49,7 @@ repository = "https://github.com/bearcove/vx"
 
 [workspace.dependencies]
 # instrumentation
-moire = { version = "1.0.0" }
+moire = { version = "1.0.0", git = "https://github.com/bearcove/moire", rev = "cf162e7" }
 vx-services = { path = "crates/vx-services" }
 margin = { path = "crates-plus/margin" }
 margin-term = { path = "crates-plus/margin-term" }
@@ -65,14 +65,12 @@ vx-vir = { path = "crates/vx-vir" }
 vx-types = { path = "crates/vx-types" }
 vx-diagnostics = { path = "crates/vx-diagnostics" }
 vxd = { path = "crates/vx-daemon", package = "vx-daemon" }
-kajit = { git = "https://github.com/bearcove/kajit", rev = "5e11f00" }
-kajit-hir = { git = "https://github.com/bearcove/kajit", rev = "5e11f00" }
 
 # facet ecosystem
-facet = { version = "0.44.1", features = ["jiff02", "camino"] }
-facet-error = { version = "0.44.1" }
-facet-json = { version = "0.44.1" }
-facet-postcard = { version = "0.44.1", features = ["jiff02", "camino"] }
+facet = { version = "0.46", features = ["jiff02", "camino"] }
+facet-error = { version = "0.46" }
+facet-json = { version = "0.46" }
+facet-postcard = { version = "0.46", features = ["jiff02", "camino"] }
 facet-styx = "3.0.0"
 datatest-stable = "0.3"
 
@@ -81,7 +79,7 @@ datatest-stable = "0.3"
 figue = { version = "2.0.1" }
 
 # vox RPC framework
-vox = { version = "0.3.1", features = ["transport-tcp", "transport-local"] }
+vox = { version = "0.4", features = ["transport-tcp", "transport-local"] }
 
 # process management
 
@@ -90,6 +88,13 @@ blake3 = "1"
 
 # content-defined chunking (pin version for CDC boundary stability)
 fastcdc = "3"
+
+# Cranelift JIT
+cranelift-jit = "0.131.0"
+cranelift-module = "0.131.0"
+cranelift-codegen = "0.131.0"
+cranelift-frontend = "0.131.0"
+cranelift-native = "0.131.0"
 
 # error handling
 eyre = "0.6"
