@@ -3557,6 +3557,7 @@ dependencies = [
  "vox-jit-cal",
  "vox-postcard",
  "vox-schema",
+ "vox-types",
 ]
 
 [[package]]

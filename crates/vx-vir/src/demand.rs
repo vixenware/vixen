@@ -229,8 +229,14 @@ fn collect_call_edges(
                 call_expr: expr_id,
                 callee: target,
             });
-            // Recurse into callee subtree (may contain nested calls).
-            collect_call_edges(arena, body_id, call.callee, edges);
+            // Only recurse into non-trivial callees. A direct name-ref callee is
+            // already accounted for by the call edge above; recursing into it
+            // would incorrectly treat ordinary direct calls as function-as-value
+            // reachability and pull declaration-only stdlib bodies into the
+            // reachable set.
+            if !matches!(arena[call.callee].kind, ExprKind::NameRef(_)) {
+                collect_call_edges(arena, body_id, call.callee, edges);
+            }
             // Recurse into args.
             for arg in &call.args {
                 collect_call_edges(arena, body_id, arg.expr, edges);
@@ -243,8 +249,9 @@ fn collect_call_edges(
                 call_expr: expr_id,
                 callee: target,
             });
-            // Recurse into callee subtree.
-            collect_call_edges(arena, body_id, inv.callee, edges);
+            if !matches!(arena[inv.callee].kind, ExprKind::NameRef(_)) {
+                collect_call_edges(arena, body_id, inv.callee, edges);
+            }
         }
         ExprKind::Where(w) => {
             // Check if callee is a Call or Invoke.
@@ -387,7 +394,12 @@ fn collect_call_edges(
             // Function-as-value: if a NameRef resolves to a function item,
             // that function's body is reachable (it may be called indirectly).
             if let Some(DefTarget::Item(item_id)) = nr.resolved {
-                if let ItemKind::Function(ref f) = arena[item_id].kind {
+                if let ItemKind::Function(ref f) = arena[item_id].kind
+                    && !matches!(
+                        arena[arena[f.body].root_expr].kind,
+                        crate::expr::ExprKind::Error
+                    )
+                {
                     edges.push(VirCallEdge {
                         call_expr: expr_id,
                         callee: VirCallTarget::Body(f.body),
@@ -462,7 +474,16 @@ fn resolve_callee(arena: &crate::VirArena, callee_expr: ExprId) -> VirCallTarget
     match &arena[callee_expr].kind {
         ExprKind::NameRef(nr) => match nr.resolved {
             Some(DefTarget::Item(item_id)) => match &arena[item_id].kind {
-                ItemKind::Function(f) => VirCallTarget::Body(f.body),
+                ItemKind::Function(f) => {
+                    if matches!(
+                        arena[arena[f.body].root_expr].kind,
+                        crate::expr::ExprKind::Error
+                    ) {
+                        VirCallTarget::Unknown
+                    } else {
+                        VirCallTarget::Body(f.body)
+                    }
+                }
                 _ => VirCallTarget::Unknown,
             },
             Some(DefTarget::Binding(bid)) => {

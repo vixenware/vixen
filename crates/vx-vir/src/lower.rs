@@ -193,12 +193,14 @@ pub fn lower_vir_program(
         .first()
         .ok_or(LowerError::NoEntryPoint)?;
 
-    // Collect user source IDs so we can distinguish stdlib functions.
+    // The primary source unit is the user program. Later source units come from
+    // the injected stdlib and should remain eligible for runtime-boundary
+    // classification.
     let user_sources: HashSet<vx_resolve::SourceId> = program
         .source_units
-        .iter()
-        .map(|su_id| program.arena[*su_id].source)
-        .collect();
+        .first()
+        .map(|su_id| HashSet::from([program.arena[*su_id].source]))
+        .unwrap_or_default();
 
     let original_body_count = program.arena.bodies.len() as u32;
     let mut ctx = LoweringContext::new(&program.arena, demand, user_sources);
@@ -340,6 +342,17 @@ impl<'a, 'ctx> VirBodyLowering<'a, 'ctx> {
         source_expr(self.body_id, expr)
     }
 
+    fn body_debug_label(&self) -> String {
+        match &self.arena()[self.body_id].owner {
+            crate::body::BodyOwner::Function { item } => match &self.arena()[*item].kind {
+                ItemKind::Function(f) => format!("function {}", f.name),
+                _ => format!("function item {:?}", item),
+            },
+            crate::body::BodyOwner::Closure => "closure".to_owned(),
+            crate::body::BodyOwner::TopLevel { source } => format!("top-level source {:?}", source),
+        }
+    }
+
     // -----------------------------------------------------------------------
     // Binding materialization
     // -----------------------------------------------------------------------
@@ -455,7 +468,12 @@ impl<'a, 'ctx> VirBodyLowering<'a, 'ctx> {
             ExprKind::Map(_) => Err(LowerError::UnsupportedShape(
                 "map (not in executable slice)".into(),
             )),
-            ExprKind::Error => Err(LowerError::UnsupportedShape("error node".into())),
+            ExprKind::Error => Err(LowerError::UnsupportedShape(format!(
+                "error node in {} ({:?}) expr {:?}",
+                self.body_debug_label(),
+                self.body_id,
+                expr_id
+            ))),
         }
     }
 
@@ -810,9 +828,11 @@ impl<'a, 'ctx> VirBodyLowering<'a, 'ctx> {
                 // Passthrough — no runtime effect.
                 self.lower_expr(top.expr)
             }
-            crate::expr::TypeOpKind::As => Err(LowerError::UnsupportedShape(
-                "type cast (as) not in executable slice".into(),
-            )),
+            crate::expr::TypeOpKind::As => {
+                // For representation-preserving conversions such as newtypes,
+                // the current evaluator keeps the same runtime value.
+                self.lower_expr(top.expr)
+            }
             crate::expr::TypeOpKind::Is => Err(LowerError::UnsupportedShape(
                 "type test (is) not in executable slice".into(),
             )),
@@ -969,6 +989,9 @@ impl<'a, 'ctx> VirBodyLowering<'a, 'ctx> {
             let input = self.lower_boundary_input(arg.expr)?;
             positional_inputs.push(input);
         }
+        let has_closure_arg = positional_inputs
+            .iter()
+            .any(|input| matches!(input, RuntimeBoundaryInputSpec::Closure { .. }));
 
         let dst = self.alloc_typed_temp(expr_id);
         self.ops.push(KernelOp::AwaitRuntime {
@@ -994,7 +1017,7 @@ impl<'a, 'ctx> VirBodyLowering<'a, 'ctx> {
             RuntimeBoundaryKind::Discover => {
                 RuntimeBoundaryPayload::Discover(crate::exec_types::DiscoverBoundaryPayload {
                     positional_arg_count: positional_inputs.len(),
-                    has_closure_arg: false,
+                    has_closure_arg,
                 })
             }
             RuntimeBoundaryKind::SharedKeyed => {
@@ -1023,6 +1046,7 @@ impl<'a, 'ctx> VirBodyLowering<'a, 'ctx> {
     ) -> Result<RuntimeBoundaryInputSpec, LowerError> {
         let kind = self.arena()[expr_id].kind.clone();
         match kind {
+            ExprKind::Closure(cl) => self.lower_boundary_closure(expr_id, &cl),
             ExprKind::Literal(lit) => match &lit.value {
                 LitKind::Int { raw } => {
                     let value: i64 = raw
@@ -1073,6 +1097,39 @@ impl<'a, 'ctx> VirBodyLowering<'a, 'ctx> {
                 })
             }
         }
+    }
+
+    fn lower_boundary_closure(
+        &mut self,
+        expr_id: ExprId,
+        cl: &crate::expr::ClosureExpr,
+    ) -> Result<RuntimeBoundaryInputSpec, LowerError> {
+        let captures = self.arena()[cl.body].captures.clone();
+        if !captures.is_empty() {
+            return Err(LowerError::UnsupportedShape(
+                "runtime boundary closure captures are not supported yet".into(),
+            ));
+        }
+
+        self.lower_closure_body(cl.body, &captures)?;
+        let exec_body = self
+            .ctx
+            .synth_bodies
+            .remove(&a_body(cl.body))
+            .ok_or_else(|| {
+                LowerError::UnsupportedShape(
+                    "failed to materialize runtime boundary closure body".into(),
+                )
+            })?;
+
+        Ok(RuntimeBoundaryInputSpec::Closure {
+            source: self.source_for(expr_id),
+            closure: crate::exec_types::ExecutableClosure {
+                params: exec_body.params,
+                ops: exec_body.ops,
+                result_source: exec_body.result_source,
+            },
+        })
     }
 
     // -----------------------------------------------------------------------

@@ -1,5 +1,7 @@
 /// Construct an executor class selector value.
-fn executor_class(label: String) -> ExecutorClass;
+fn executor_class(label: String) -> ExecutorClass (
+  label as ExecutorClass
+)
 
 /// Evaluate a build entry function through the runtime.
 fn build[T](

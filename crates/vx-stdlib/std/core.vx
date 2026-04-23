@@ -21,7 +21,7 @@ type Yaml;
 /// Marker namespace for HTTP access.
 type Http;
 /// A class of equivalent executor environments.
-type ExecutorClass;
+newtype ExecutorClass of String;
 /// Executor-local host inspection capability.
 type Host;
 

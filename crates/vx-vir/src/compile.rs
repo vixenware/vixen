@@ -281,11 +281,14 @@ fn probe() #discover -> String (
             cap_result.errors
         );
 
+        let lowered = super::compile_source(SOURCE_DISCOVER_WHICH, "probe")
+            .expect("discover source should now compile through lowering");
         assert!(
-            super::compile_source(SOURCE_DISCOVER_WHICH, "probe")
-                .err()
-                .is_some_and(|error| matches!(error, super::CompileError::Lowering(_))),
-            "discover source should now make it past resolution and fail later in lowering"
+            lowered
+                .runtime_nodes
+                .values()
+                .any(|node| node.kind == RuntimeBoundaryKind::Discover),
+            "expected discover runtime boundary in lowered program"
         );
     }
 
