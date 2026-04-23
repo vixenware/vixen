@@ -74,11 +74,15 @@ impl OrchestratorService {
                 strict_fragment_dump: output.strict_fragment_dump,
                 clif_dump: output.clif_dump,
             }),
-            Err(error) => EvalStrictFunctionResult::Err(EvalStrictFunctionFailure {
-                message: error.to_string(),
-                strict_fragment_dump: None,
-                clif_dump: None,
-            }),
+            Err(error) => {
+                let strict_fragment_dump = error.strict_fragment_dump().cloned();
+                let clif_dump = error.clif_dump().cloned();
+                EvalStrictFunctionResult::Err(EvalStrictFunctionFailure {
+                    message: error.to_string(),
+                    strict_fragment_dump,
+                    clif_dump,
+                })
+            }
         }
     }
 
@@ -124,11 +128,15 @@ impl OrchestratorService {
                 strict_fragment_dump: output.strict_fragment_dump,
                 clif_dump: output.clif_dump,
             }),
-            Err(error) => EvalFunctionResult::Err(EvalStrictFunctionFailure {
-                message: error.to_string(),
-                strict_fragment_dump: None,
-                clif_dump: None,
-            }),
+            Err(error) => {
+                let strict_fragment_dump = error.strict_fragment_dump().cloned();
+                let clif_dump = error.clif_dump().cloned();
+                EvalFunctionResult::Err(EvalStrictFunctionFailure {
+                    message: error.to_string(),
+                    strict_fragment_dump,
+                    clif_dump,
+                })
+            }
         }
     }
 }

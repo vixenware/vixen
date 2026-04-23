@@ -3,7 +3,7 @@ use vx_jit_types::{
     StrictStmt, StrictType, StringOwnership,
 };
 
-use crate::{FragmentArg, FragmentResult, compile};
+use crate::{FragmentArg, FragmentResult, compile, compile_with_dump};
 
 fn local(id: u32) -> LocalId {
     LocalId(id)
@@ -66,6 +66,23 @@ fn test_u64_add() {
         frag.call(&[FragmentArg::U64(100), FragmentArg::U64(200)])
             .unwrap(),
         FragmentResult::U64(300)
+    );
+}
+
+#[test]
+fn test_compile_with_clif_dump() {
+    let output = compile_with_dump(&make_add_func(), true).expect("add should compile with dump");
+
+    assert!(output.clif_dump.is_some(), "expected Cranelift IR dump");
+    let dump = output.clif_dump.unwrap();
+    assert!(dump.contains("function"), "unexpected dump: {dump}");
+    assert!(dump.contains("add"), "unexpected dump: {dump}");
+    assert_eq!(
+        output
+            .fragment
+            .call(&[FragmentArg::U64(20), FragmentArg::U64(22)])
+            .unwrap(),
+        FragmentResult::U64(42)
     );
 }
 

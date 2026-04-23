@@ -68,9 +68,19 @@ pub enum RuntimeEvalError {
         kind: &'static str,
     },
     #[error("Cranelift compilation failed for `{function}`: {detail}")]
-    CraneliftCompile { function: String, detail: String },
+    CraneliftCompile {
+        function: String,
+        detail: String,
+        strict_fragment_dump: Option<String>,
+        clif_dump: Option<String>,
+    },
     #[error("Cranelift execution failed for `{function}`: {detail}")]
-    CraneliftExecute { function: String, detail: String },
+    CraneliftExecute {
+        function: String,
+        detail: String,
+        strict_fragment_dump: Option<String>,
+        clif_dump: Option<String>,
+    },
     #[error("arity mismatch in `{function}`: expected {expected} args, got {actual}")]
     ArityMismatch {
         function: String,
@@ -100,6 +110,30 @@ pub enum RuntimeEvalError {
         function: String,
         kind: &'static str,
     },
+}
+
+impl RuntimeEvalError {
+    pub fn strict_fragment_dump(&self) -> Option<&String> {
+        match self {
+            RuntimeEvalError::CraneliftCompile {
+                strict_fragment_dump,
+                ..
+            }
+            | RuntimeEvalError::CraneliftExecute {
+                strict_fragment_dump,
+                ..
+            } => strict_fragment_dump.as_ref(),
+            _ => None,
+        }
+    }
+
+    pub fn clif_dump(&self) -> Option<&String> {
+        match self {
+            RuntimeEvalError::CraneliftCompile { clif_dump, .. }
+            | RuntimeEvalError::CraneliftExecute { clif_dump, .. } => clif_dump.as_ref(),
+            _ => None,
+        }
+    }
 }
 
 /// Output from a successful evaluation, including optional debug dumps.
@@ -204,25 +238,31 @@ fn evaluate_with_cranelift(request: &EvalRequest<'_>) -> Result<EvalOutput, Runt
             None
         };
 
-    let compiled = vx_jit::compile(&func).map_err(|error| RuntimeEvalError::CraneliftCompile {
-        function: request.function_name.to_owned(),
-        detail: error.to_string(),
-    })?;
-
-    // Cranelift textual IR dumps are not yet exposed by vx_jit::compile.
-    let _ = request.include_clif_dump;
-
-    let result = compiled
-        .call(&frag_args)
-        .map_err(|error| RuntimeEvalError::CraneliftExecute {
-            function: request.function_name.to_owned(),
-            detail: error.to_string(),
+    let compiled =
+        vx_jit::compile_with_dump(&func, request.include_clif_dump).map_err(|failure| {
+            RuntimeEvalError::CraneliftCompile {
+                function: request.function_name.to_owned(),
+                detail: failure.error.to_string(),
+                strict_fragment_dump: strict_fragment_dump.clone(),
+                clif_dump: failure.clif_dump,
+            }
         })?;
+
+    let result =
+        compiled
+            .fragment
+            .call(&frag_args)
+            .map_err(|error| RuntimeEvalError::CraneliftExecute {
+                function: request.function_name.to_owned(),
+                detail: error.to_string(),
+                strict_fragment_dump: strict_fragment_dump.clone(),
+                clif_dump: compiled.clif_dump.clone(),
+            })?;
 
     runtime_value_from_fragment_result(result).map(|value| EvalOutput {
         value,
         strict_fragment_dump,
-        clif_dump: None,
+        clif_dump: compiled.clif_dump,
     })
 }
 
@@ -1535,6 +1575,12 @@ fn build(name: String) -> String (
 )
 "#;
 
+    const SOURCE_STRICT_ADD: &str = r#"
+fn add(a: U64, b: U64) -> U64 (
+  a + b
+)
+"#;
+
     const SOURCE_NON_STRICT_STRING_HELPERS: &str = r#"
 fn measure(name: String) -> U64 (
   name.len()
@@ -1686,6 +1732,63 @@ fn __vx_alloc(name: String) -> String (
             RuntimeEvalError::CraneliftCompile { function, .. }
             if function == "__vx_alloc"
         ));
+    }
+
+    #[tokio::test]
+    async fn explicit_cranelift_returns_clif_dump_on_success() {
+        let output = evaluate_source_text_function(
+            &RuntimeEvalContext::default(),
+            EvalRequest {
+                source: SOURCE_STRICT_ADD,
+                function_name: "add",
+                args: &[RuntimeValue::U64(20), RuntimeValue::U64(22)],
+                backend: StrictEvalBackend::Cranelift,
+                include_strict_fragment_dump: false,
+                include_clif_dump: true,
+            },
+            None,
+        )
+        .await
+        .expect("Cranelift should produce an IR dump on success");
+
+        assert_eq!(output.value, RuntimeValue::U64(42));
+        let dump = output.clif_dump.expect("missing Cranelift IR dump");
+        assert!(dump.contains("function"), "unexpected dump: {dump}");
+        assert!(dump.contains("add"), "unexpected dump: {dump}");
+    }
+
+    #[tokio::test]
+    async fn explicit_cranelift_returns_clif_dump_on_execute_failure() {
+        let error = match evaluate_source_text_function(
+            &RuntimeEvalContext::default(),
+            EvalRequest {
+                source: SOURCE_STRICT_ADD,
+                function_name: "add",
+                args: &[RuntimeValue::U64(7)],
+                backend: StrictEvalBackend::Cranelift,
+                include_strict_fragment_dump: false,
+                include_clif_dump: true,
+            },
+            None,
+        )
+        .await
+        {
+            Ok(_) => panic!("Cranelift compile failures should be reported"),
+            Err(error) => error,
+        };
+
+        match error {
+            RuntimeEvalError::CraneliftExecute {
+                function,
+                clif_dump: Some(dump),
+                ..
+            } => {
+                assert_eq!(function, "add");
+                assert!(dump.contains("function"), "unexpected dump: {dump}");
+                assert!(dump.contains("add"), "unexpected dump: {dump}");
+            }
+            other => panic!("expected Cranelift execute error with dump, got {other:?}"),
+        }
     }
 
     #[tokio::test]

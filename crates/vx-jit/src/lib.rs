@@ -4,7 +4,7 @@ mod codegen;
 mod fragment;
 pub mod lower_to_strict;
 
-pub use codegen::compile;
+pub use codegen::{CompileFailure, CompileOutput, compile, compile_with_dump};
 pub use fragment::{CompiledFragment, FragmentArg, FragmentResult};
 
 pub use vx_jit_types::{

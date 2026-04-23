@@ -1,6 +1,7 @@
 use std::collections::HashMap;
 use std::sync::Arc;
 
+use cranelift_codegen::Context;
 use cranelift_codegen::ir::{
     AbiParam, Function, InstBuilder, Signature, UserFuncName, Value,
     condcodes::IntCC,
@@ -9,13 +10,24 @@ use cranelift_codegen::ir::{
 use cranelift_codegen::settings::{self, Configurable};
 use cranelift_frontend::{FunctionBuilder, FunctionBuilderContext, Variable};
 use cranelift_jit::{JITBuilder, JITModule};
-use cranelift_module::{Linkage, Module};
+use cranelift_module::{FuncId, Linkage, Module};
 use thiserror::Error;
 use vx_jit_types::{
     LocalId, StrictBinOp, StrictExpr, StrictFunction, StrictLiteral, StrictStmt, StrictType,
 };
 
 use crate::fragment::CompiledFragment;
+
+pub struct CompileOutput {
+    pub fragment: CompiledFragment,
+    pub clif_dump: Option<String>,
+}
+
+#[derive(Debug)]
+pub struct CompileFailure {
+    pub error: CompileError,
+    pub clif_dump: Option<String>,
+}
 
 #[derive(Debug, Error)]
 pub enum CompileError {
@@ -37,6 +49,15 @@ impl From<cranelift_module::ModuleError> for CompileError {
 
 /// Compile a StrictFunction into a CompiledFragment.
 pub fn compile(func: &StrictFunction) -> Result<CompiledFragment, CompileError> {
+    compile_with_dump(func, false)
+        .map(|output| output.fragment)
+        .map_err(|failure| failure.error)
+}
+
+pub fn compile_with_dump(
+    func: &StrictFunction,
+    include_clif_dump: bool,
+) -> Result<CompileOutput, CompileFailure> {
     let mut flag_builder = settings::builder();
     flag_builder.set("use_colocated_libcalls", "false").unwrap();
     flag_builder.set("is_pic", "false").unwrap();
@@ -53,15 +74,34 @@ pub fn compile(func: &StrictFunction) -> Result<CompiledFragment, CompileError> 
 
     let mut module = JITModule::new(jit_builder);
 
-    let func_id = declare_and_compile(func, &mut module)?;
+    let PreparedFunction {
+        func_id,
+        mut context,
+    } = declare_and_build_context(func, &mut module).map_err(|error| CompileFailure {
+        error,
+        clif_dump: None,
+    })?;
+
+    let clif_dump = include_clif_dump.then(|| context.func.display().to_string());
 
     module
-        .finalize_definitions()
-        .map_err(|e| CompileError::Module(e.to_string()))?;
+        .define_function(func_id, &mut context)
+        .map_err(|e| CompileFailure {
+            error: CompileError::Module(e.to_string()),
+            clif_dump: clif_dump.clone(),
+        })?;
+
+    module.finalize_definitions().map_err(|e| CompileFailure {
+        error: CompileError::Module(e.to_string()),
+        clif_dump: clif_dump.clone(),
+    })?;
 
     let func_ptr = module.get_finalized_function(func_id);
 
-    Ok(CompiledFragment::new(func_ptr, func, Arc::new(module)))
+    Ok(CompileOutput {
+        fragment: CompiledFragment::new(func_ptr, func, Arc::new(module)),
+        clif_dump,
+    })
 }
 
 fn build_signature(module: &JITModule, func: &StrictFunction) -> Signature {
@@ -90,10 +130,15 @@ fn build_signature(module: &JITModule, func: &StrictFunction) -> Signature {
     sig
 }
 
-fn declare_and_compile(
+struct PreparedFunction {
+    func_id: FuncId,
+    context: Context,
+}
+
+fn declare_and_build_context(
     func: &StrictFunction,
     module: &mut JITModule,
-) -> Result<cranelift_module::FuncId, CompileError> {
+) -> Result<PreparedFunction, CompileError> {
     let sig = build_signature(module, func);
     let func_id = module.declare_function(&func.name, Linkage::Export, &sig)?;
 
@@ -117,13 +162,13 @@ fn declare_and_compile(
     };
     let memcpy_id = module.declare_function("__vx_memcpy_advance", Linkage::Import, &memcpy_sig)?;
 
-    let mut ctx = module.make_context();
+    let mut context = module.make_context();
     let mut func_ctx = FunctionBuilderContext::new();
 
-    ctx.func = Function::with_name_signature(UserFuncName::user(0, func_id.as_u32()), sig);
+    context.func = Function::with_name_signature(UserFuncName::user(0, func_id.as_u32()), sig);
 
     {
-        let mut builder = FunctionBuilder::new(&mut ctx.func, &mut func_ctx);
+        let mut builder = FunctionBuilder::new(&mut context.func, &mut func_ctx);
 
         // Allocate Cranelift Variables for each local.
         // String locals use two Variables: one for ptr, one for len.
@@ -223,11 +268,7 @@ fn declare_and_compile(
         builder.finalize();
     }
 
-    module
-        .define_function(func_id, &mut ctx)
-        .map_err(|e| CompileError::Module(e.to_string()))?;
-
-    Ok(func_id)
+    Ok(PreparedFunction { func_id, context })
 }
 
 /// Either a single Cranelift Variable (U64/Bool) or a (ptr, len) Variable pair (String).
