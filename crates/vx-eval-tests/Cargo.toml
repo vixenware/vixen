@@ -11,10 +11,6 @@ vx-rt = { path = "../vx-rt" }
 vx-vir = { workspace = true }
 
 [dev-dependencies]
-datatest-stable = { workspace = true }
-facet = { workspace = true }
-facet-styx = { workspace = true }
-thiserror = { workspace = true }
 
 [lints]
 workspace = true
