@@ -27,9 +27,5 @@ vx-io = { workspace = true }
 vx-io = { path = "../vx-io" }
 vx-services = { path = "../vx-services" }
 
-[features]
-default = []
-diagnostics = ["moire/diagnostics"]
-
 [lints]
 workspace = true

@@ -27,10 +27,6 @@ vx-lsp = { path = "../vx-lsp" }
 vx-vfs = { workspace = true }
 vx-vfsd = { workspace = true }
 
-[features]
-default = []
-diagnostics = ["moire/diagnostics", "vx-vfs/diagnostics"]
-
 [dev-dependencies]
 tempfile = { workspace = true }
 
