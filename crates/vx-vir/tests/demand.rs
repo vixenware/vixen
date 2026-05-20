@@ -1,12 +1,10 @@
 //! Tests for VIR demand analysis.
 
-use std::collections::BTreeSet;
-
 use vx_parser::parse_source_file;
 use vx_resolve::SourceId;
 use vx_vir::BodyId;
 use vx_vir::build::{VirBuilder, VirProgram};
-use vx_vir::demand::{LazyField, Observation, VirCallTarget, VirDemandResult, analyze_demand};
+use vx_vir::demand::{Observation, VirCallTarget, VirDemandResult, analyze_demand};
 use vx_vir::expr::FieldKey;
 use vx_vir::resolve::resolve_names;
 
@@ -23,12 +21,11 @@ fn analyze_source(source: &str) -> (VirProgram, VirDemandResult) {
 /// Find a function body by name.
 fn fn_body(program: &VirProgram, name: &str) -> Option<BodyId> {
     for (i, body) in program.arena.bodies.iter().enumerate() {
-        if let vx_vir::body::BodyOwner::Function { item } = body.owner {
-            if let vx_vir::item::ItemKind::Function(f) = &program.arena[item].kind {
-                if f.name == name {
-                    return Some(BodyId(i as u32));
-                }
-            }
+        if let vx_vir::body::BodyOwner::Function { item } = body.owner
+            && let vx_vir::item::ItemKind::Function(f) = &program.arena[item].kind
+            && f.name == name
+        {
+            return Some(BodyId(i as u32));
         }
     }
     None
@@ -441,7 +438,7 @@ fn lazy_destructuring_limitation() {
     // The outer tuple might get lazy seeding for its fields from local projection,
     // but p._0 can't trace through to the inner tuple.
     // This is a known limitation.
-    let inner_lazy: Vec<_> = result
+    let _inner_lazy: Vec<_> = result
         .lazy_fields
         .iter()
         .filter(|lf| {

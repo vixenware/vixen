@@ -256,9 +256,7 @@ pub fn lookup_at(
         }
 
         // Climb to parent scope.
-        let Some(parent) = scope.parent else {
-            return None;
-        };
+        let parent = scope.parent?;
         cutoff = scope.visibility_cutoff.unwrap_or(u32::MAX);
         scope_id = parent;
     }

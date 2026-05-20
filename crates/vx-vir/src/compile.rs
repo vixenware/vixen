@@ -132,10 +132,10 @@ pub fn compile_source(
         .items
         .iter()
         .find_map(|&item_id| {
-            if let ItemKind::Function(ref f) = program.arena[item_id].kind {
-                if f.name == function_name {
-                    return Some(f.body);
-                }
+            if let ItemKind::Function(ref f) = program.arena[item_id].kind
+                && f.name == function_name
+            {
+                return Some(f.body);
             }
             None
         })
@@ -203,10 +203,10 @@ pub fn compile_source_with_types(
         .items
         .iter()
         .find_map(|&item_id| {
-            if let ItemKind::Function(ref f) = program.arena[item_id].kind {
-                if f.name == function_name {
-                    return Some(f.body);
-                }
+            if let ItemKind::Function(ref f) = program.arena[item_id].kind
+                && f.name == function_name
+            {
+                return Some(f.body);
             }
             None
         })

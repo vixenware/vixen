@@ -26,14 +26,14 @@ fn build_and_type(source: &str) -> VirArena {
 /// Helper: get the tail expression of a named function's root block.
 fn fn_tail_expr(arena: &VirArena, su_id: vx_vir::SourceUnitId, name: &str) -> vx_vir::ExprId {
     for &item_id in &arena[su_id].items {
-        if let ItemKind::Function(f) = &arena[item_id].kind {
-            if f.name == name {
-                let root = &arena[arena[f.body].root_expr];
-                if let ExprKind::Block(b) = &root.kind {
-                    return b.tail.expect("function should have tail expression");
-                }
-                panic!("function root is not a block");
+        if let ItemKind::Function(f) = &arena[item_id].kind
+            && f.name == name
+        {
+            let root = &arena[arena[f.body].root_expr];
+            if let ExprKind::Block(b) = &root.kind {
+                return b.tail.expect("function should have tail expression");
             }
+            panic!("function root is not a block");
         }
     }
     panic!("function '{}' not found", name);
@@ -356,16 +356,16 @@ fn body_result_type_from_root_expr() {
     let su_id = vx_vir::SourceUnitId::from_index(0);
 
     for &item_id in &arena[su_id].items {
-        if let ItemKind::Function(f) = &arena[item_id].kind {
-            if f.name == "add" {
-                let result_ty = body_result_ty(&arena, f.body);
-                assert_eq!(
-                    result_ty,
-                    Some(&Ty::Scalar(Scalar::U64)),
-                    "body result type should be U64"
-                );
-                return;
-            }
+        if let ItemKind::Function(f) = &arena[item_id].kind
+            && f.name == "add"
+        {
+            let result_ty = body_result_ty(&arena, f.body);
+            assert_eq!(
+                result_ty,
+                Some(&Ty::Scalar(Scalar::U64)),
+                "body result type should be U64"
+            );
+            return;
         }
     }
     panic!("function 'add' not found");

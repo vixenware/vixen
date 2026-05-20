@@ -103,7 +103,7 @@ pub fn type_check_vir(arena: &mut VirArena, types: &TypeCollection) -> TypeCheck
 
     // Walk all source units.
     let su_ids: Vec<SourceUnitId> = (0..checker.arena.source_units.len())
-        .map(|i| SourceUnitId::from_index(i))
+        .map(SourceUnitId::from_index)
         .collect();
     for su_id in su_ids {
         let body_id = checker.arena[su_id].top_level_body;

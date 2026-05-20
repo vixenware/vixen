@@ -56,7 +56,7 @@ pub fn check_capabilities_vir(
     };
 
     let su_ids: Vec<SourceUnitId> = (0..arena.source_units.len())
-        .map(|i| SourceUnitId::from_index(i))
+        .map(SourceUnitId::from_index)
         .collect();
 
     // Pass 1: collect declared function capabilities.
@@ -382,15 +382,15 @@ impl CapChecker<'_> {
                 continue;
             }
             // Fall back to positional params by name.
-            if let Some(pos_param) = sig.positional_params.iter().find(|p| p.name == field.name) {
-                if let Ty::Function(ref fn_ty) = pos_param.ty {
-                    let mask = caps_from_fn_ty_capabilities(&fn_ty.capabilities);
-                    self.check_closure_mask(
-                        field.value,
-                        mask,
-                        &format!("{} {}", callee_name, pos_param.name),
-                    );
-                }
+            if let Some(pos_param) = sig.positional_params.iter().find(|p| p.name == field.name)
+                && let Ty::Function(ref fn_ty) = pos_param.ty
+            {
+                let mask = caps_from_fn_ty_capabilities(&fn_ty.capabilities);
+                self.check_closure_mask(
+                    field.value,
+                    mask,
+                    &format!("{} {}", callee_name, pos_param.name),
+                );
             }
         }
     }
@@ -623,12 +623,11 @@ impl CapChecker<'_> {
         }
         // Also check fn_caps for NameRef callees.
         let callee_kind = self.arena[call.callee].kind.clone();
-        if let ExprKind::NameRef(nr) = callee_kind {
-            if let Some(DefTarget::Item(item_id)) = nr.resolved {
-                if let Some(&fn_caps) = self.fn_caps.get(&item_id) {
-                    caps = caps.union(fn_caps);
-                }
-            }
+        if let ExprKind::NameRef(nr) = callee_kind
+            && let Some(DefTarget::Item(item_id)) = nr.resolved
+            && let Some(&fn_caps) = self.fn_caps.get(&item_id)
+        {
+            caps = caps.union(fn_caps);
         }
 
         // Arg caps (skip closures).

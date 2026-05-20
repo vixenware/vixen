@@ -85,10 +85,10 @@ pub fn substitute_bound_type_params(ty: &Ty, substitutions: &[Option<Ty>]) -> Ty
 pub fn bind_type_params(expected: &Ty, actual: &Ty, substitutions: &mut [Option<Ty>]) {
     match expected {
         Ty::Param(param) => {
-            if let Some(slot) = substitutions.get_mut(param.index as usize) {
-                if slot.is_none() {
-                    *slot = Some(actual.clone());
-                }
+            if let Some(slot) = substitutions.get_mut(param.index as usize)
+                && slot.is_none()
+            {
+                *slot = Some(actual.clone());
             }
         }
         Ty::Optional(inner) => {

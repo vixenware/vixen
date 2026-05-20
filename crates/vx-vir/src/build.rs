@@ -866,8 +866,7 @@ impl VirBuilder {
                 let mut items = Vec::new();
                 // PASS 1: Build all items and predeclare them in the namespace scope.
                 let children: Vec<_> = body.syntax().children().collect();
-                let mut order: u32 = 0;
-                for child in &children {
+                for (order, child) in (0_u32..).zip(children.iter()) {
                     if let Some(item_node) = vx_parser::Item::cast(child.clone()) {
                         let item_id = this.build_item(&item_node);
                         items.push(item_id);
@@ -887,7 +886,6 @@ impl VirBuilder {
                             kind: ItemKind::Error,
                         }));
                     }
-                    order += 1;
                 }
                 items
             })
@@ -1145,7 +1143,7 @@ impl VirBuilder {
                 // Check that no semicolon follows this node in the token stream.
                 let has_trailing_semi = last_child
                     .next_sibling_or_token()
-                    .map_or(false, |t| t.kind() == vx_parser::SyntaxKind::SEMICOLON);
+                    .is_some_and(|t| t.kind() == vx_parser::SyntaxKind::SEMICOLON);
                 if has_trailing_semi {
                     None
                 } else {
@@ -2184,16 +2182,14 @@ impl VirBuilder {
             kind: ExprKind::TypeOp(VirTypeOpExpr {
                 expr,
                 op: {
-                    let op_kind = top
-                        .operator_token()
+                    top.operator_token()
                         .map(|t| match t.kind() {
                             SyntaxKind::AS_KW => expr::TypeOpKind::As,
                             SyntaxKind::IS_KW => expr::TypeOpKind::Is,
                             SyntaxKind::COLON2 => expr::TypeOpKind::Ascription,
                             _ => expr::TypeOpKind::As, // fallback
                         })
-                        .unwrap_or(expr::TypeOpKind::As);
-                    op_kind
+                        .unwrap_or(expr::TypeOpKind::As)
                 },
                 ty,
             }),
@@ -3118,14 +3114,13 @@ impl VirBuilder {
             } else if child.kind() == SyntaxKind::CAPABILITY_LIST {
                 // Extract capability tags from the capability list's syntax children.
                 for tag_node in child.children() {
-                    if tag_node.kind() == SyntaxKind::CAPABILITY_TAG {
-                        if let Some(name_token) = tag_node
+                    if tag_node.kind() == SyntaxKind::CAPABILITY_TAG
+                        && let Some(name_token) = tag_node
                             .children_with_tokens()
                             .filter_map(|c| c.into_token())
                             .find(|t| t.kind() == SyntaxKind::LOWER_IDENT)
-                        {
-                            capabilities.push(name_token.text().to_string());
-                        }
+                    {
+                        capabilities.push(name_token.text().to_string());
                     }
                 }
             } else if child.kind() == SyntaxKind::KEYWORD_PARAMETER_LIST {

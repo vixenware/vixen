@@ -1,5 +1,5 @@
 use std::collections::HashMap;
-use std::sync::Arc;
+use std::rc::Rc;
 
 use cranelift_codegen::Context;
 use cranelift_codegen::ir::{
@@ -100,7 +100,7 @@ pub fn compile_with_dump(
     let func_ptr = module.get_finalized_function(func_id);
 
     Ok(CompileOutput {
-        fragment: CompiledFragment::new(func_ptr, func, Arc::new(module), literal_storage),
+        fragment: CompiledFragment::new(func_ptr, func, Rc::new(module), literal_storage),
         clif_dump,
     })
 }
@@ -254,8 +254,8 @@ fn declare_and_build_context(
             }
         }
 
-        let alloc_ref = module.declare_func_in_func(alloc_id, &mut builder.func);
-        let memcpy_ref = module.declare_func_in_func(memcpy_id, &mut builder.func);
+        let alloc_ref = module.declare_func_in_func(alloc_id, builder.func);
+        let memcpy_ref = module.declare_func_in_func(memcpy_id, builder.func);
 
         {
             let mut cx = CodegenCtx {

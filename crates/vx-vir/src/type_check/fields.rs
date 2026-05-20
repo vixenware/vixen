@@ -14,12 +14,11 @@ pub(crate) fn infer_field(tc: &mut TypeChecker, _expr_id: ExprId, f: &FieldExpr)
     let FieldKey::Name(ref field_name) = f.field else {
         // Tuple index access.
         let receiver_ty = tc.infer_expr(f.receiver);
-        if let Ty::Tuple(ref tuple_ty) = receiver_ty {
-            if let FieldKey::Index(idx) = f.field {
-                if let Some(elem) = tuple_ty.elements.get(idx as usize) {
-                    return elem.clone();
-                }
-            }
+        if let Ty::Tuple(ref tuple_ty) = receiver_ty
+            && let FieldKey::Index(idx) = f.field
+            && let Some(elem) = tuple_ty.elements.get(idx as usize)
+        {
+            return elem.clone();
         }
         return Ty::Poison;
     };
@@ -41,12 +40,11 @@ pub(crate) fn infer_field(tc: &mut TypeChecker, _expr_id: ExprId, f: &FieldExpr)
     }
 
     // Check struct fields.
-    if let Ty::Struct(ref struct_ty) = receiver_ty {
-        if let vx_types::TypeDef::Struct(ref s) = tc.types.env[struct_ty.id] {
-            if let Some(field_def) = s.fields.iter().find(|fd| fd.name == *field_name) {
-                return field_def.ty.clone();
-            }
-        }
+    if let Ty::Struct(ref struct_ty) = receiver_ty
+        && let vx_types::TypeDef::Struct(ref s) = tc.types.env[struct_ty.id]
+        && let Some(field_def) = s.fields.iter().find(|fd| fd.name == *field_name)
+    {
+        return field_def.ty.clone();
     }
 
     Ty::Poison
@@ -72,12 +70,11 @@ fn infer_static_namespace_field(tc: &mut TypeChecker, f: &FieldExpr) -> Option<T
 
     // Find a child function matching field_name.
     for &child_id in &ns.items {
-        if let ItemKind::Function(ref child_f) = tc.arena[child_id].kind {
-            if child_f.name == *field_name {
-                if let Some(sig) = tc.types.def_to_fn_sig.get(&child_f.name_span) {
-                    return Some(tc.function_ty_from_sig(sig));
-                }
-            }
+        if let ItemKind::Function(ref child_f) = tc.arena[child_id].kind
+            && child_f.name == *field_name
+            && let Some(sig) = tc.types.def_to_fn_sig.get(&child_f.name_span)
+        {
+            return Some(tc.function_ty_from_sig(sig));
         }
     }
 
@@ -94,10 +91,10 @@ fn resolve_method_on_receiver(
 
     // Look up the namespace item in the arena by scanning all items.
     let ns_item_id = tc.arena.items.iter().enumerate().find_map(|(i, item)| {
-        if let ItemKind::Namespace(_) = item.kind {
-            if tc.arena.item_name(crate::ItemId::from_index(i)) == namespace_name {
-                return Some(crate::ItemId::from_index(i));
-            }
+        if let ItemKind::Namespace(_) = item.kind
+            && tc.arena.item_name(crate::ItemId::from_index(i)) == namespace_name
+        {
+            return Some(crate::ItemId::from_index(i));
         }
         None
     })?;
@@ -108,12 +105,11 @@ fn resolve_method_on_receiver(
 
     // Find the method in the namespace.
     for &child_id in &ns.items {
-        if let ItemKind::Function(ref f) = tc.arena[child_id].kind {
-            if f.name == method_name {
-                if let Some(sig) = tc.types.def_to_fn_sig.get(&f.name_span) {
-                    return instantiate_method_sig(tc, receiver_ty, sig, &[]);
-                }
-            }
+        if let ItemKind::Function(ref f) = tc.arena[child_id].kind
+            && f.name == method_name
+            && let Some(sig) = tc.types.def_to_fn_sig.get(&f.name_span)
+        {
+            return instantiate_method_sig(tc, receiver_ty, sig, &[]);
         }
     }
 
@@ -156,37 +152,39 @@ pub(crate) fn instantiate_method_sig(
     }
 
     // Special methods.
-    if sig.name == "flatten" && params.is_empty() {
-        if let Ty::Stream(inner) = receiver_ty {
-            let ret = match inner.as_ref() {
-                Ty::Array(item) => Ty::Stream(item.clone()),
-                Ty::Stream(item) => Ty::Stream(item.clone()),
-                _ => return None,
-            };
-            return Some(BoundMethodSig {
-                params: Vec::new(),
-                ret,
-                capabilities: sig.capabilities.clone(),
-            });
-        }
+    if sig.name == "flatten"
+        && params.is_empty()
+        && let Ty::Stream(inner) = receiver_ty
+    {
+        let ret = match inner.as_ref() {
+            Ty::Array(item) => Ty::Stream(item.clone()),
+            Ty::Stream(item) => Ty::Stream(item.clone()),
+            _ => return None,
+        };
+        return Some(BoundMethodSig {
+            params: Vec::new(),
+            ret,
+            capabilities: sig.capabilities.clone(),
+        });
     }
-    if sig.name == "to_map" && params.is_empty() {
-        if let Ty::Stream(inner) = receiver_ty {
-            let Ty::Tuple(ref tuple) = **inner else {
-                return None;
-            };
-            if tuple.elements.len() != 2 {
-                return None;
-            }
-            return Some(BoundMethodSig {
-                params: Vec::new(),
-                ret: Ty::Map(
-                    Box::new(tuple.elements[0].clone()),
-                    Box::new(tuple.elements[1].clone()),
-                ),
-                capabilities: sig.capabilities.clone(),
-            });
+    if sig.name == "to_map"
+        && params.is_empty()
+        && let Ty::Stream(inner) = receiver_ty
+    {
+        let Ty::Tuple(ref tuple) = **inner else {
+            return None;
+        };
+        if tuple.elements.len() != 2 {
+            return None;
         }
+        return Some(BoundMethodSig {
+            params: Vec::new(),
+            ret: Ty::Map(
+                Box::new(tuple.elements[0].clone()),
+                Box::new(tuple.elements[1].clone()),
+            ),
+            capabilities: sig.capabilities.clone(),
+        });
     }
 
     let mut substitutions = vec![None; sig.type_params.len()];
@@ -215,15 +213,16 @@ pub(crate) fn instantiate_method_sig(
     let mut ret = substitute_bound_type_params(&sig.ret, &substitutions);
 
     // flat_map special case.
-    if sig.name == "flat_map" && params.len() == 1 {
-        if let Some(Ty::Function(function)) = arg_tys.first() {
-            let flattened = match function.ret.as_ref() {
-                Ty::Array(item) => item.clone(),
-                Ty::Stream(item) => item.clone(),
-                _ => return None,
-            };
-            ret = Ty::Stream(flattened);
-        }
+    if sig.name == "flat_map"
+        && params.len() == 1
+        && let Some(Ty::Function(function)) = arg_tys.first()
+    {
+        let flattened = match function.ret.as_ref() {
+            Ty::Array(item) => item.clone(),
+            Ty::Stream(item) => item.clone(),
+            _ => return None,
+        };
+        ret = Ty::Stream(flattened);
     }
 
     if ret.is_poison() || bound_params.iter().any(|p| p.ty.is_poison()) {
@@ -247,10 +246,10 @@ pub(crate) fn resolve_method_for_call(
     let namespace_name = namespace_name_for_receiver(receiver_ty, &tc.types.env)?;
 
     let ns_item_id = tc.arena.items.iter().enumerate().find_map(|(i, item)| {
-        if let ItemKind::Namespace(ref _ns) = item.kind {
-            if tc.arena.item_name(crate::ItemId::from_index(i)) == namespace_name {
-                return Some(crate::ItemId::from_index(i));
-            }
+        if let ItemKind::Namespace(ref _ns) = item.kind
+            && tc.arena.item_name(crate::ItemId::from_index(i)) == namespace_name
+        {
+            return Some(crate::ItemId::from_index(i));
         }
         None
     })?;
@@ -265,14 +264,13 @@ pub(crate) fn resolve_method_for_call(
     let mut found_name = String::new();
     for &child_id in &ns.items {
         let child_kind = tc.arena[child_id].kind.clone();
-        if let ItemKind::Function(ref f) = child_kind {
-            if f.name == method_name {
-                if let Some(sig) = tc.types.def_to_fn_sig.get(&f.name_span) {
-                    found_sig = Some(sig.clone());
-                    found_name = f.name.clone();
-                    break;
-                }
-            }
+        if let ItemKind::Function(ref f) = child_kind
+            && f.name == method_name
+            && let Some(sig) = tc.types.def_to_fn_sig.get(&f.name_span)
+        {
+            found_sig = Some(sig.clone());
+            found_name = f.name.clone();
+            break;
         }
     }
 

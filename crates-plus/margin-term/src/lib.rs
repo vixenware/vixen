@@ -608,7 +608,7 @@ fn annotations_for_line<'a>(
                 })
         })
         .collect::<Vec<_>>();
-    renderable.sort_by(|left, right| right.priority.cmp(&left.priority));
+    renderable.sort_by_key(|item| std::cmp::Reverse(item.priority));
     renderable
 }
 

@@ -1,4 +1,4 @@
-use std::sync::Arc;
+use std::rc::Rc;
 
 use cranelift_jit::JITModule;
 use vx_jit_types::{StrictFunction, StrictType, StringOwnership};
@@ -30,19 +30,14 @@ pub struct CompiledFragment {
     pub(crate) param_types: Vec<StrictType>,
     pub(crate) _literal_storage: Vec<Box<[u8]>>,
     // Keeps the JIT module (and therefore the generated code) alive.
-    _module: Arc<JITModule>,
+    _module: Rc<JITModule>,
 }
-
-// SAFETY: The JIT module's code is in executable memory that doesn't move.
-// The func_ptr is valid for the lifetime of the Arc<JITModule>.
-unsafe impl Send for CompiledFragment {}
-unsafe impl Sync for CompiledFragment {}
 
 impl CompiledFragment {
     pub(crate) fn new(
         func_ptr: *const u8,
         func: &StrictFunction,
-        module: Arc<JITModule>,
+        module: Rc<JITModule>,
         literal_storage: Vec<Box<[u8]>>,
     ) -> Self {
         Self {

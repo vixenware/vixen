@@ -246,13 +246,13 @@ fn main() -> U64 ( make_pair().0 )
     let result = eval_interpreter(source, "main", &[]);
     // May succeed (if interpreter handles it) or fail — either is fine here.
     // The key invariant is: if interpreter succeeds, Cranelift result == interpreter result.
-    if let Ok(Some(interp_val)) = &result {
-        if let Ok(Some(clift_val)) = eval_cranelift(source, "main", &[]) {
-            assert_eq!(
-                clift_val, *interp_val,
-                "PARITY FAILURE: non_strict_product_interpreter_only"
-            );
-        }
+    if let Ok(Some(interp_val)) = &result
+        && let Ok(Some(clift_val)) = eval_cranelift(source, "main", &[])
+    {
+        assert_eq!(
+            clift_val, *interp_val,
+            "PARITY FAILURE: non_strict_product_interpreter_only"
+        );
     }
 }
 

@@ -81,30 +81,27 @@ pub(crate) fn infer_struct_literal(tc: &mut TypeChecker, sl: &StructLiteralExpr)
     }
 
     // Use the resolved struct item to find the TypeId.
-    if let Some(item_id) = sl.resolved {
-        if let crate::item::ItemKind::Struct(ref s) = tc.arena[item_id].kind {
-            if let Some(&type_id) = tc.types.def_to_type.get(&s.name_span) {
-                if matches!(tc.types.env[type_id], vx_types::TypeDef::Struct(ref sdef) if sdef.parent_enum.is_none())
-                {
-                    return Ty::Struct(vx_types::StructTy {
-                        id: type_id,
-                        type_args: vec![],
-                    });
-                }
-            }
-        }
+    if let Some(item_id) = sl.resolved
+        && let crate::item::ItemKind::Struct(ref s) = tc.arena[item_id].kind
+        && let Some(&type_id) = tc.types.def_to_type.get(&s.name_span)
+        && matches!(tc.types.env[type_id], vx_types::TypeDef::Struct(ref sdef) if sdef.parent_enum.is_none())
+    {
+        return Ty::Struct(vx_types::StructTy {
+            id: type_id,
+            type_args: vec![],
+        });
     }
 
     // Fallback: look up by name.
     let type_ids = tc.types.env.lookup(&sl.name);
     for &id in type_ids {
-        if let vx_types::TypeDef::Struct(ref sdef) = tc.types.env[id] {
-            if sdef.parent_enum.is_none() {
-                return Ty::Struct(vx_types::StructTy {
-                    id,
-                    type_args: vec![],
-                });
-            }
+        if let vx_types::TypeDef::Struct(ref sdef) = tc.types.env[id]
+            && sdef.parent_enum.is_none()
+        {
+            return Ty::Struct(vx_types::StructTy {
+                id,
+                type_args: vec![],
+            });
         }
     }
     Ty::Poison

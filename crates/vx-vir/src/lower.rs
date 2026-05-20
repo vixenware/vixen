@@ -1610,10 +1610,10 @@ impl<'a, 'ctx> VirBodyLowering<'a, 'ctx> {
             }
             // NameRef → Binding → follow init_expr.
             ExprKind::NameRef(nr) => {
-                if let Some(DefTarget::Binding(bid)) = nr.resolved {
-                    if let Some(init) = self.arena()[bid].init_expr {
-                        return self.resolve_to_product_field(init, field, visited);
-                    }
+                if let Some(DefTarget::Binding(bid)) = nr.resolved
+                    && let Some(init) = self.arena()[bid].init_expr
+                {
+                    return self.resolve_to_product_field(init, field, visited);
                 }
                 None
             }
@@ -1852,8 +1852,8 @@ impl<'a, 'ctx> VirBodyLowering<'a, 'ctx> {
         // Remap generated (non-param) slots.
         for s in (capture_count as u32)..child_next_slot {
             let old = SlotId(s);
-            if !slot_remap.contains_key(&old) {
-                slot_remap.insert(old, SlotId(new_slot));
+            if let std::collections::hash_map::Entry::Vacant(e) = slot_remap.entry(old) {
+                e.insert(SlotId(new_slot));
                 new_slot += 1;
             }
         }

@@ -393,18 +393,17 @@ fn collect_call_edges(
         ExprKind::NameRef(ref nr) => {
             // Function-as-value: if a NameRef resolves to a function item,
             // that function's body is reachable (it may be called indirectly).
-            if let Some(DefTarget::Item(item_id)) = nr.resolved {
-                if let ItemKind::Function(ref f) = arena[item_id].kind
-                    && !matches!(
-                        arena[arena[f.body].root_expr].kind,
-                        crate::expr::ExprKind::Error
-                    )
-                {
-                    edges.push(VirCallEdge {
-                        call_expr: expr_id,
-                        callee: VirCallTarget::Body(f.body),
-                    });
-                }
+            if let Some(DefTarget::Item(item_id)) = nr.resolved
+                && let ItemKind::Function(ref f) = arena[item_id].kind
+                && !matches!(
+                    arena[arena[f.body].root_expr].kind,
+                    crate::expr::ExprKind::Error
+                )
+            {
+                edges.push(VirCallEdge {
+                    call_expr: expr_id,
+                    callee: VirCallTarget::Body(f.body),
+                });
             }
         }
         ExprKind::Literal(_) | ExprKind::PathLiteral(_) | ExprKind::Import(_) | ExprKind::Error => {
@@ -487,10 +486,10 @@ fn resolve_callee(arena: &crate::VirArena, callee_expr: ExprId) -> VirCallTarget
                 _ => VirCallTarget::Unknown,
             },
             Some(DefTarget::Binding(bid)) => {
-                if let Some(init_id) = arena[bid].init_expr {
-                    if let ExprKind::Closure(c) = &arena[init_id].kind {
-                        return VirCallTarget::Closure(c.body);
-                    }
+                if let Some(init_id) = arena[bid].init_expr
+                    && let ExprKind::Closure(c) = &arena[init_id].kind
+                {
+                    return VirCallTarget::Closure(c.body);
                 }
                 VirCallTarget::Unknown
             }
@@ -524,14 +523,14 @@ fn select_entry_points(program: &VirProgram, bodies: &[VirAnalyzedBody]) -> Vec<
         if body.parent.is_some() {
             continue; // Not top-level.
         }
-        if let BodyOwner::Function { item } = body.owner {
-            if let ItemKind::Function(f) = &arena[item].kind {
-                top_level_fns.push(TopLevelFn {
-                    body_id,
-                    item_id: item,
-                    name: f.name.clone(),
-                });
-            }
+        if let BodyOwner::Function { item } = body.owner
+            && let ItemKind::Function(f) = &arena[item].kind
+        {
+            top_level_fns.push(TopLevelFn {
+                body_id,
+                item_id: item,
+                name: f.name.clone(),
+            });
         }
     }
 
@@ -597,10 +596,10 @@ fn select_entry_points(program: &VirProgram, bodies: &[VirAnalyzedBody]) -> Vec<
     }
 
     // 6. First top-level function body.
-    if entries.is_empty() {
-        if let Some(f) = top_level_fns.first() {
-            entries.push(f.body_id);
-        }
+    if entries.is_empty()
+        && let Some(f) = top_level_fns.first()
+    {
+        entries.push(f.body_id);
     }
 
     entries.sort();
@@ -1019,12 +1018,12 @@ fn collect_param_projs_expr(
     match kind {
         ExprKind::Field(f) => {
             // Check if receiver is a direct NameRef to a parameter.
-            if let ExprKind::NameRef(nr) = &arena[f.receiver].kind {
-                if let Some(DefTarget::Binding(bid)) = nr.resolved {
-                    if arena[bid].kind == BindingKind::Parameter && arena[bid].body == body_id {
-                        result.entry(bid).or_default().insert(f.field.clone());
-                    }
-                }
+            if let ExprKind::NameRef(nr) = &arena[f.receiver].kind
+                && let Some(DefTarget::Binding(bid)) = nr.resolved
+                && arena[bid].kind == BindingKind::Parameter
+                && arena[bid].body == body_id
+            {
+                result.entry(bid).or_default().insert(f.field.clone());
             }
             // Recurse into receiver for nested projections.
             collect_param_projs_expr(arena, body_id, f.receiver, result);
@@ -1180,10 +1179,10 @@ fn resolve_to_product(
         }
         // Binding → follow init_expr.
         ExprKind::NameRef(nr) => {
-            if let Some(DefTarget::Binding(bid)) = nr.resolved {
-                if let Some(init) = arena[bid].init_expr {
-                    return resolve_to_product(arena, init, visited);
-                }
+            if let Some(DefTarget::Binding(bid)) = nr.resolved
+                && let Some(init) = arena[bid].init_expr
+            {
+                return resolve_to_product(arena, init, visited);
             }
             None
         }
