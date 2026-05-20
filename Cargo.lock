@@ -148,6 +148,15 @@ dependencies = [
 ]
 
 [[package]]
+name = "arc-swap"
+version = "1.9.1"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "6a3a1fd6f75306b68087b831f025c712524bcb19aad54e557b1129cfa0a2b207"
+dependencies = [
+ "rustversion",
+]
+
+[[package]]
 name = "ariadne"
 version = "0.6.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -1011,7 +1020,7 @@ dependencies = [
 
 [[package]]
 name = "facet-cbor"
-version = "0.3.3"
+version = "0.3.4"
 dependencies = [
  "facet",
  "facet-core",
@@ -1390,6 +1399,7 @@ checksum = "8b147ee9d1f6d097cef9ce628cd2ee62288d963e16fb287bd9286455b241382d"
 dependencies = [
  "futures-channel",
  "futures-core",
+ "futures-executor",
  "futures-io",
  "futures-sink",
  "futures-task",
@@ -1411,6 +1421,17 @@ name = "futures-core"
 version = "0.3.32"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "7e3450815272ef58cec6d564423f6e755e25379b217b0bc688e295ba24df6b1d"
+
+[[package]]
+name = "futures-executor"
+version = "0.3.32"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "baf29c38818342a3b26b5b923639e7b1f4a61fc5e76102d4b1981c6dc7a7579d"
+dependencies = [
+ "futures-core",
+ "futures-task",
+ "futures-util",
+]
 
 [[package]]
 name = "futures-io"
@@ -2248,6 +2269,12 @@ dependencies = [
 ]
 
 [[package]]
+name = "museair"
+version = "0.4.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "bb41311b1064dea78399acd92ca903b13be1120eef0a8555803da792e2c50511"
+
+[[package]]
 name = "mutants"
 version = "0.0.3"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -2392,6 +2419,15 @@ dependencies = [
 ]
 
 [[package]]
+name = "passfd"
+version = "0.1.6"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "b332c50e4d07c0011fff51ea305374408319908908bc1dbed7a0ffaaf63a8151"
+dependencies = [
+ "libc",
+]
+
+[[package]]
 name = "percent-encoding"
 version = "2.3.2"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -2422,6 +2458,12 @@ name = "pin-project-lite"
 version = "0.2.17"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "a89322df9ebe1c1578d689c92318e070967d1042b512afbe49518723f4e6d5cd"
+
+[[package]]
+name = "pin-utils"
+version = "0.1.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "8b870d8c151b6f2fb93e84a13146138f05d02ed11c7e7c54f8826aaaf7c9f184"
 
 [[package]]
 name = "pkg-config"
@@ -3505,7 +3547,7 @@ checksum = "8d5208a9710a6ca1c2da0d64289a5dcca13deb05afdedf651f4e11bcd9fc53eb"
 
 [[package]]
 name = "vox"
-version = "0.4.0"
+version = "0.6.0"
 dependencies = [
  "facet",
  "facet-pretty",
@@ -3523,13 +3565,14 @@ dependencies = [
 
 [[package]]
 name = "vox-core"
-version = "0.4.0"
+version = "0.6.0"
 dependencies = [
  "facet",
  "facet-cbor",
  "facet-core",
  "facet-error",
  "facet-reflect",
+ "futures-util",
  "getrandom 0.4.2",
  "moire",
  "smallvec 1.15.1",
@@ -3543,9 +3586,20 @@ dependencies = [
 ]
 
 [[package]]
-name = "vox-jit"
-version = "0.4.0"
+name = "vox-fdpass"
+version = "0.6.0"
 dependencies = [
+ "libc",
+ "passfd",
+ "tokio",
+ "windows-sys 0.61.2",
+]
+
+[[package]]
+name = "vox-jit"
+version = "0.6.0"
+dependencies = [
+ "arc-swap",
  "cranelift-codegen",
  "cranelift-frontend",
  "cranelift-jit",
@@ -3553,24 +3607,27 @@ dependencies = [
  "cranelift-native",
  "facet",
  "facet-core",
+ "libc",
+ "museair",
  "vox-jit-abi",
  "vox-jit-cal",
  "vox-postcard",
  "vox-schema",
- "vox-types",
 ]
 
 [[package]]
 name = "vox-jit-abi"
-version = "0.4.0"
+version = "0.6.0"
 dependencies = [
+ "arc-swap",
  "facet-core",
+ "museair",
  "vox-jit-cal",
 ]
 
 [[package]]
 name = "vox-jit-cal"
-version = "0.4.0"
+version = "0.6.0"
 dependencies = [
  "facet",
  "facet-core",
@@ -3578,7 +3635,7 @@ dependencies = [
 
 [[package]]
 name = "vox-macros-core"
-version = "0.4.0"
+version = "0.6.0"
 dependencies = [
  "facet-cargo-toml",
  "heck 0.5.0",
@@ -3589,7 +3646,7 @@ dependencies = [
 
 [[package]]
 name = "vox-macros-parse"
-version = "0.4.0"
+version = "0.6.0"
 dependencies = [
  "proc-macro2",
  "unsynn",
@@ -3597,18 +3654,19 @@ dependencies = [
 
 [[package]]
 name = "vox-postcard"
-version = "0.4.0"
+version = "0.6.0"
 dependencies = [
  "facet",
  "facet-core",
  "facet-reflect",
+ "vox-jit-abi",
  "vox-jit-cal",
  "vox-schema",
 ]
 
 [[package]]
 name = "vox-schema"
-version = "0.4.0"
+version = "0.6.0"
 dependencies = [
  "blake3",
  "facet",
@@ -3619,7 +3677,7 @@ dependencies = [
 
 [[package]]
 name = "vox-service-macros"
-version = "0.4.0"
+version = "0.6.0"
 dependencies = [
  "proc-macro2",
  "vox-macros-core",
@@ -3627,21 +3685,23 @@ dependencies = [
 
 [[package]]
 name = "vox-stream"
-version = "0.4.0"
+version = "0.6.0"
 dependencies = [
  "libc",
  "moire",
  "tokio",
  "vox-core",
+ "vox-fdpass",
  "vox-types",
 ]
 
 [[package]]
 name = "vox-types"
-version = "0.4.0"
+version = "0.6.0"
 dependencies = [
  "bitflags 2.11.1",
  "blake3",
+ "bytes",
  "facet",
  "facet-cbor",
  "facet-core",
@@ -3654,8 +3714,10 @@ dependencies = [
  "smallvec 1.15.1",
  "structstruck",
  "tokio",
+ "vox-jit",
  "vox-postcard",
  "vox-schema",
+ "wasmtimer",
 ]
 
 [[package]]
@@ -4131,6 +4193,19 @@ dependencies = [
  "libc",
  "wasmtime-internal-core",
  "windows-sys 0.61.2",
+]
+
+[[package]]
+name = "wasmtimer"
+version = "0.4.3"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "1c598d6b99ea013e35844697fc4670d08339d5cda15588f193c6beedd12f644b"
+dependencies = [
+ "futures",
+ "js-sys",
+ "parking_lot",
+ "pin-utils",
+ "wasm-bindgen",
 ]
 
 [[package]]

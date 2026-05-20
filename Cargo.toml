@@ -79,7 +79,7 @@ datatest-stable = "0.3"
 figue = { version = "2.0.1" }
 
 # vox RPC framework
-vox = { version = "0.4", features = ["transport-tcp", "transport-local"] }
+vox = { version = "0.6", features = ["transport-tcp", "transport-local"] }
 
 # process management
 
@@ -179,9 +179,9 @@ strip = "none"
 # facet-format = { git = "https://github.com/facet-rs/facet", branch = "main" }
 # facet-path = { git = "https://github.com/facet-rs/facet", branch = "main" }
 
-vox = { path = "/Users/amos/bearcove/vox/rust/vox" }
-vox-core = { path = "/Users/amos/bearcove/vox/rust/vox-core" }
-vox-stream = { path = "/Users/amos/bearcove/vox/rust/vox-stream" }
+vox = { path = "/Users/amos/vox/rust/vox" }
+vox-core = { path = "/Users/amos/vox/rust/vox-core" }
+vox-stream = { path = "/Users/amos/vox/rust/vox-stream" }
 
 windows-projfs = { path = "vendor/windows-projfs" }
 
