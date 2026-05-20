@@ -18,18 +18,18 @@ pub(crate) fn infer_call(tc: &mut TypeChecker, expr_id: ExprId, call: &CallExpr)
 
     match callee_kind {
         ExprKind::NameRef(ref nr) => {
-            if let Some(target) = nr.resolved {
-                if let Some(sig) = call_sig_for_target(tc, target) {
-                    // Type the callee itself as a function type.
-                    let callee_ty = tc.function_ty_from_sig(&sig);
-                    tc.arena[call.callee].ty = Some(callee_ty);
+            if let Some(target) = nr.resolved
+                && let Some(sig) = call_sig_for_target(tc, target)
+            {
+                // Type the callee itself as a function type.
+                let callee_ty = tc.function_ty_from_sig(&sig);
+                tc.arena[call.callee].ty = Some(callee_ty);
 
-                    let sig = instantiate_call_sig(tc, call, sig);
-                    populate_callback_param_types(tc, call, &sig);
-                    check_call_args(tc, call, &sig);
-                    infer_extra_call_args(tc, call, sig.positional_params.len());
-                    return sig.ret.clone();
-                }
+                let sig = instantiate_call_sig(tc, call, sig);
+                populate_callback_param_types(tc, call, &sig);
+                check_call_args(tc, call, &sig);
+                infer_extra_call_args(tc, call, sig.positional_params.len());
+                return sig.ret.clone();
             }
             // Fallback: infer the callee normally.
             tc.infer_expr(call.callee);
@@ -256,12 +256,11 @@ fn infer_static_namespace_call_sig(
     };
 
     for &child_id in &ns.items {
-        if let ItemKind::Function(ref f) = tc.arena[child_id].kind {
-            if f.name == *field_name {
-                if let Some(sig) = tc.types.def_to_fn_sig.get(&f.name_span) {
-                    return Some(instantiate_call_sig(tc, call, sig.clone()));
-                }
-            }
+        if let ItemKind::Function(ref f) = tc.arena[child_id].kind
+            && f.name == *field_name
+            && let Some(sig) = tc.types.def_to_fn_sig.get(&f.name_span)
+        {
+            return Some(instantiate_call_sig(tc, call, sig.clone()));
         }
     }
 
@@ -290,12 +289,11 @@ pub(crate) fn infer_invoke(tc: &mut TypeChecker, inv: &InvokeExpr) -> Ty {
                 super::fields::namespace_name_for_receiver_pub(&receiver_ty, &tc.types.env);
             if let Some(ref ns_name) = namespace_name {
                 // Find method and check it's zero-arg.
-                if let Some(sig) = find_namespace_method_sig(tc, ns_name, &method_name) {
-                    if let Some(method_sig) = instantiate_method_sig(tc, &receiver_ty, &sig, &[]) {
-                        if method_sig.params.is_empty() {
-                            return method_sig.ret;
-                        }
-                    }
+                if let Some(sig) = find_namespace_method_sig(tc, ns_name, &method_name)
+                    && let Some(method_sig) = instantiate_method_sig(tc, &receiver_ty, &sig, &[])
+                    && method_sig.params.is_empty()
+                {
+                    return method_sig.ret;
                 }
             }
 
@@ -314,12 +312,11 @@ pub(crate) fn infer_invoke(tc: &mut TypeChecker, inv: &InvokeExpr) -> Ty {
 pub(crate) fn infer_partial_app(tc: &mut TypeChecker, pa: &PartialAppExpr) -> Ty {
     let callee_kind = tc.arena[pa.callee].kind.clone();
 
-    if let ExprKind::NameRef(ref nr) = callee_kind {
-        if let Some(target) = nr.resolved {
-            if let Some(sig) = sig_for_name_ref_target(tc, target) {
-                return tc.function_ty_from_sig(&sig);
-            }
-        }
+    if let ExprKind::NameRef(ref nr) = callee_kind
+        && let Some(target) = nr.resolved
+        && let Some(sig) = sig_for_name_ref_target(tc, target)
+    {
+        return tc.function_ty_from_sig(&sig);
     }
 
     tc.infer_expr(pa.callee)
@@ -327,14 +324,14 @@ pub(crate) fn infer_partial_app(tc: &mut TypeChecker, pa: &PartialAppExpr) -> Ty
 
 fn find_namespace_method_sig(tc: &TypeChecker, ns_name: &str, method_name: &str) -> Option<FnSig> {
     for (i, item) in tc.arena.items.iter().enumerate() {
-        if let ItemKind::Namespace(ref ns) = item.kind {
-            if tc.arena.item_name(crate::ItemId::from_index(i)) == ns_name {
-                for &child_id in &ns.items {
-                    if let ItemKind::Function(ref f) = tc.arena[child_id].kind {
-                        if f.name == method_name {
-                            return tc.types.def_to_fn_sig.get(&f.name_span).cloned();
-                        }
-                    }
+        if let ItemKind::Namespace(ref ns) = item.kind
+            && tc.arena.item_name(crate::ItemId::from_index(i)) == ns_name
+        {
+            for &child_id in &ns.items {
+                if let ItemKind::Function(ref f) = tc.arena[child_id].kind
+                    && f.name == method_name
+                {
+                    return tc.types.def_to_fn_sig.get(&f.name_span).cloned();
                 }
             }
         }

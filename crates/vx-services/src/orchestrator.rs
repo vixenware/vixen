@@ -16,7 +16,7 @@ pub const ORCHESTRATOR_PROTOCOL_VERSION: u32 = 1;
 #[repr(u8)]
 pub enum StrictEvalBackend {
     Interpreter,
-    Kajit,
+    Cranelift,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Facet)]
@@ -38,24 +38,21 @@ pub struct EvalStrictFunctionRequest {
     pub args: Vec<RuntimeValue>,
     pub backend: StrictEvalBackend,
     pub include_strict_fragment_dump: bool,
-    pub include_hir: bool,
-    pub include_ir: bool,
+    pub include_clif_dump: bool,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Facet)]
 pub struct EvalStrictFunctionSuccess {
     pub value: RuntimeValue,
     pub strict_fragment_dump: Option<String>,
-    pub hir: Option<String>,
-    pub ir: Option<String>,
+    pub clif_dump: Option<String>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Facet)]
 pub struct EvalStrictFunctionFailure {
     pub message: String,
     pub strict_fragment_dump: Option<String>,
-    pub hir: Option<String>,
-    pub ir: Option<String>,
+    pub clif_dump: Option<String>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Facet)]

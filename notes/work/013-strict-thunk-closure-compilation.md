@@ -4,7 +4,7 @@ Status: Not started.
 
 ## Goal
 
-Enable “compile some parts through Kajit and evaluate the rest” in the most incremental way: strict-compile the synthesized bodies (thunk bodies and closure bodies) even when the top-level body must remain interpreted due to boundaries or other non-strict ops.
+Enable “compile some parts through vx-jit and evaluate the rest” in the most incremental way: strict-compile the synthesized bodies (thunk bodies and closure bodies) even when the top-level body must remain interpreted due to boundaries or other non-strict ops.
 
 ## Motivation
 
@@ -36,4 +36,4 @@ The extracted thunk bodies are the natural unit of partial compilation because:
 
 ## Notes
 
-This item is not yet “real eval3 lazy core”. It is a practical stepping stone that aligns the implementation with the strict-fragment execution strategy described in `notes/eval/compiler-pipeline.md`.
+This item is not yet “real eval3 lazy core”. It is a practical stepping stone toward the strict-fragment execution strategy.

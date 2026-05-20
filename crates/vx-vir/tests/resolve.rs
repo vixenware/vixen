@@ -32,14 +32,14 @@ fn fn_tail_expr(
     name: &str,
 ) -> vx_vir::ExprId {
     for &item_id in &arena[su_id].items {
-        if let ItemKind::Function(f) = &arena[item_id].kind {
-            if f.name == name {
-                let root = &arena[arena[f.body].root_expr];
-                if let ExprKind::Block(b) = &root.kind {
-                    return b.tail.expect("function should have tail expression");
-                }
-                panic!("function root is not a block");
+        if let ItemKind::Function(f) = &arena[item_id].kind
+            && f.name == name
+        {
+            let root = &arena[arena[f.body].root_expr];
+            if let ExprKind::Block(b) = &root.kind {
+                return b.tail.expect("function should have tail expression");
             }
+            panic!("function root is not a block");
         }
     }
     panic!("function '{}' not found", name);
@@ -86,12 +86,12 @@ fn fn_stmt(
     index: usize,
 ) -> vx_vir::StmtId {
     for &item_id in &arena[su_id].items {
-        if let ItemKind::Function(f) = &arena[item_id].kind {
-            if f.name == name {
-                let root = &arena[arena[f.body].root_expr];
-                if let ExprKind::Block(b) = &root.kind {
-                    return b.stmts[index];
-                }
+        if let ItemKind::Function(f) = &arena[item_id].kind
+            && f.name == name
+        {
+            let root = &arena[arena[f.body].root_expr];
+            if let ExprKind::Block(b) = &root.kind {
+                return b.stmts[index];
             }
         }
     }
@@ -211,18 +211,18 @@ fn block_local_self_recursion() {
 
     // Find f's body, check that f in its tail resolves to Item.
     let main_stmt = fn_stmt(&arena, su_id, "main", 0);
-    if let StmtKind::Item(item_id) = &arena[main_stmt].kind {
-        if let ItemKind::Function(f) = &arena[*item_id].kind {
-            let root = &arena[arena[f.body].root_expr];
-            if let ExprKind::Block(b) = &root.kind {
-                let tail_id = b.tail.expect("f should have tail");
-                if let ExprKind::NameRef(nr) = &arena[tail_id].kind {
-                    assert!(
-                        matches!(nr.resolved, Some(DefTarget::Item(_))),
-                        "f should resolve to Item (self-recursion): {:?}",
-                        nr.resolved
-                    );
-                }
+    if let StmtKind::Item(item_id) = &arena[main_stmt].kind
+        && let ItemKind::Function(f) = &arena[*item_id].kind
+    {
+        let root = &arena[arena[f.body].root_expr];
+        if let ExprKind::Block(b) = &root.kind {
+            let tail_id = b.tail.expect("f should have tail");
+            if let ExprKind::NameRef(nr) = &arena[tail_id].kind {
+                assert!(
+                    matches!(nr.resolved, Some(DefTarget::Item(_))),
+                    "f should resolve to Item (self-recursion): {:?}",
+                    nr.resolved
+                );
             }
         }
     }
@@ -375,16 +375,16 @@ fn variant_pattern_resolves() {
     // Find the match arm pattern and check it resolved.
     // Walk main's root block tail (the match expr).
     for &item_id in &arena[su_id].items {
-        if let ItemKind::Function(f) = &arena[item_id].kind {
-            if f.name == "main" {
-                let root = &arena[arena[f.body].root_expr];
-                if let ExprKind::Block(b) = &root.kind {
-                    let tail = b.tail.expect("should have tail");
-                    if let ExprKind::Match(m) = &arena[tail].kind {
-                        let pat = &arena[m.arms[0].pattern];
-                        if let PatternKind::Variant(vp) = &pat.kind {
-                            assert!(vp.resolved.is_some(), "variant pattern should be resolved");
-                        }
+        if let ItemKind::Function(f) = &arena[item_id].kind
+            && f.name == "main"
+        {
+            let root = &arena[arena[f.body].root_expr];
+            if let ExprKind::Block(b) = &root.kind {
+                let tail = b.tail.expect("should have tail");
+                if let ExprKind::Match(m) = &arena[tail].kind {
+                    let pat = &arena[m.arms[0].pattern];
+                    if let PatternKind::Variant(vp) = &pat.kind {
+                        assert!(vp.resolved.is_some(), "variant pattern should be resolved");
                     }
                 }
             }

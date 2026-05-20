@@ -33,17 +33,17 @@ pub(crate) fn type_pattern(tc: &mut TypeChecker, pat_id: PatternId, ty: &Ty) {
             }
         }
         PatternKind::Struct(sp) => {
-            if let Ty::Struct(struct_ty) = ty {
-                if let vx_types::TypeDef::Struct(ref sdef) = tc.types.env[struct_ty.id] {
-                    for field in &sp.fields {
-                        let field_ty = sdef
-                            .fields
-                            .iter()
-                            .find(|f| f.name == field.name)
-                            .map(|f| f.ty.clone())
-                            .unwrap_or(Ty::Poison);
-                        type_pattern(tc, field.pattern, &field_ty);
-                    }
+            if let Ty::Struct(struct_ty) = ty
+                && let vx_types::TypeDef::Struct(ref sdef) = tc.types.env[struct_ty.id]
+            {
+                for field in &sp.fields {
+                    let field_ty = sdef
+                        .fields
+                        .iter()
+                        .find(|f| f.name == field.name)
+                        .map(|f| f.ty.clone())
+                        .unwrap_or(Ty::Poison);
+                    type_pattern(tc, field.pattern, &field_ty);
                 }
             }
         }
@@ -132,14 +132,14 @@ fn resolve_variant_fields(
     }
 
     // Enum variants.
-    if let Ty::Enum(enum_ty) = scrutinee_ty {
-        if let vx_types::TypeDef::Enum(ref edef) = tc.types.env[enum_ty.id] {
-            for &variant_id in &edef.variants {
-                if let vx_types::TypeDef::Struct(ref sdef) = tc.types.env[variant_id] {
-                    if sdef.name == variant_name {
-                        return Some(sdef.fields.clone());
-                    }
-                }
+    if let Ty::Enum(enum_ty) = scrutinee_ty
+        && let vx_types::TypeDef::Enum(ref edef) = tc.types.env[enum_ty.id]
+    {
+        for &variant_id in &edef.variants {
+            if let vx_types::TypeDef::Struct(ref sdef) = tc.types.env[variant_id]
+                && sdef.name == variant_name
+            {
+                return Some(sdef.fields.clone());
             }
         }
     }
@@ -147,10 +147,10 @@ fn resolve_variant_fields(
     // Fallback: look up by name.
     let type_ids = tc.types.env.lookup(variant_name);
     for &id in type_ids {
-        if let vx_types::TypeDef::Struct(ref sdef) = tc.types.env[id] {
-            if sdef.parent_enum.is_some() {
-                return Some(sdef.fields.clone());
-            }
+        if let vx_types::TypeDef::Struct(ref sdef) = tc.types.env[id]
+            && sdef.parent_enum.is_some()
+        {
+            return Some(sdef.fields.clone());
         }
     }
 

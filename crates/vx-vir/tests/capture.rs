@@ -33,12 +33,11 @@ fn closure_bodies(arena: &VirArena) -> Vec<BodyId> {
 /// Find a function body by name.
 fn fn_body(arena: &VirArena, name: &str) -> Option<BodyId> {
     for (i, body) in arena.bodies.iter().enumerate() {
-        if let BodyOwner::Function { item } = body.owner {
-            if let vx_vir::item::ItemKind::Function(f) = &arena[item].kind {
-                if f.name == name {
-                    return Some(BodyId(i as u32));
-                }
-            }
+        if let BodyOwner::Function { item } = body.owner
+            && let vx_vir::item::ItemKind::Function(f) = &arena[item].kind
+            && f.name == name
+        {
+            return Some(BodyId(i as u32));
         }
     }
     None

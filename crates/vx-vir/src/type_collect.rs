@@ -848,10 +848,10 @@ fn collect_field_attrs_vir(arena: &VirArena, attributes: &[Attribute]) -> DeserF
 fn entry_string_value(arena: &VirArena, entry: &crate::item::AttributeEntry) -> Option<String> {
     let expr_id = entry.value?;
     let expr = &arena[expr_id];
-    if let ExprKind::Literal(lit) = &expr.kind {
-        if let LitKind::String { raw } = &lit.value {
-            return Some(raw.clone());
-        }
+    if let ExprKind::Literal(lit) = &expr.kind
+        && let LitKind::String { raw } = &lit.value
+    {
+        return Some(raw.clone());
     }
     None
 }

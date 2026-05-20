@@ -76,21 +76,17 @@ pub(crate) struct EvalArgs {
     #[facet(args::named)]
     pub(crate) function: String,
 
-    /// Backend to use: interpreter or kajit
-    #[facet(args::named, default = "interpreter")]
+    /// Evaluation backend: `interpreter` or `cranelift`
+    #[facet(args::named, default = "cranelift")]
     pub(crate) backend: String,
 
-    /// Include strict fragment IR dump in the response
+    /// Print the strict fragment IR to stderr and include it in the response
     #[facet(args::named)]
     pub(crate) strict_fragment_dump: bool,
 
-    /// Include Kajit HIR dump in the response
+    /// Print the Cranelift IR to stderr and include it in the response
     #[facet(args::named)]
-    pub(crate) hir: bool,
-
-    /// Include Kajit IR dump in the response
-    #[facet(args::named)]
-    pub(crate) ir: bool,
+    pub(crate) clif_dump: bool,
 
     /// Function arguments in order. Use `u64:42`, `bool:true`, `string:hello`.
     /// Bare values are treated as strings.

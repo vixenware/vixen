@@ -7,24 +7,10 @@ repository.workspace = true
 
 [dependencies]
 vx-jit = { workspace = true }
-vx-jit-types = { workspace = true }
-kajit = { workspace = true }
-kajit-hir = { workspace = true }
-facet = { workspace = true }
-facet-styx = { workspace = true }
-vx-parser = { workspace = true }
-thiserror = { workspace = true }
+vx-rt = { path = "../vx-rt" }
+vx-vir = { workspace = true }
 
 [dev-dependencies]
-datatest-stable = { workspace = true }
-
-[[test]]
-name = "slice0"
-harness = false
-
-[[test]]
-name = "slice1"
-harness = false
 
 [lints]
 workspace = true

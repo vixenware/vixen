@@ -9,7 +9,7 @@ use tokio::sync::mpsc;
 use async_recursion::async_recursion;
 use thiserror::Error;
 use vox::Tx;
-use vx_jit::{StrictFragmentValue, execute_source_text_unified};
+use vx_jit::{FragmentArg, FragmentResult};
 use vx_services::EvalProgressEvent;
 use vx_services::{
     BlobRef, DirectoryEntryKind, NodeHash, RuntimeValue, StoreClient, StrictEvalBackend,
@@ -60,6 +60,27 @@ pub struct RuntimeEvalContext {
 pub enum RuntimeEvalError {
     #[error("compilation failed: {0}")]
     Compile(#[from] CompileError),
+    #[error("function `{function}` is not strict-compatible with the Cranelift backend")]
+    CraneliftNotStrictCompatible { function: String },
+    #[error("Cranelift backend does not support runtime argument kind `{kind}` in `{function}`")]
+    CraneliftUnsupportedArgKind {
+        function: String,
+        kind: &'static str,
+    },
+    #[error("Cranelift compilation failed for `{function}`: {detail}")]
+    CraneliftCompile {
+        function: String,
+        detail: String,
+        strict_fragment_dump: Option<String>,
+        clif_dump: Option<String>,
+    },
+    #[error("Cranelift execution failed for `{function}`: {detail}")]
+    CraneliftExecute {
+        function: String,
+        detail: String,
+        strict_fragment_dump: Option<String>,
+        clif_dump: Option<String>,
+    },
     #[error("arity mismatch in `{function}`: expected {expected} args, got {actual}")]
     ArityMismatch {
         function: String,
@@ -91,59 +112,203 @@ pub enum RuntimeEvalError {
     },
 }
 
-pub async fn evaluate_source_text_function(
-    context: &RuntimeEvalContext,
-    source: &str,
-    function_name: &str,
-    args: &[RuntimeValue],
-    backend: StrictEvalBackend,
-    progress: Option<Tx<EvalProgressEvent>>,
-) -> Result<RuntimeValue, RuntimeEvalError> {
-    if let Some(value) =
-        try_execute_strict_fragment_fast_path(source, function_name, args, backend)?
-    {
-        return Ok(value);
+impl RuntimeEvalError {
+    pub fn strict_fragment_dump(&self) -> Option<&String> {
+        match self {
+            RuntimeEvalError::CraneliftCompile {
+                strict_fragment_dump,
+                ..
+            }
+            | RuntimeEvalError::CraneliftExecute {
+                strict_fragment_dump,
+                ..
+            } => strict_fragment_dump.as_ref(),
+            _ => None,
+        }
     }
 
-    let program = vx_vir::compile::compile_source(source, function_name)?;
+    pub fn clif_dump(&self) -> Option<&String> {
+        match self {
+            RuntimeEvalError::CraneliftCompile { clif_dump, .. }
+            | RuntimeEvalError::CraneliftExecute { clif_dump, .. } => clif_dump.as_ref(),
+            _ => None,
+        }
+    }
+}
+
+/// Output from a successful evaluation, including optional debug dumps.
+pub struct EvalOutput {
+    pub value: RuntimeValue,
+    pub strict_fragment_dump: Option<String>,
+    pub clif_dump: Option<String>,
+}
+
+pub struct EvalRequest<'a> {
+    pub source: &'a str,
+    pub function_name: &'a str,
+    pub args: &'a [RuntimeValue],
+    pub backend: StrictEvalBackend,
+    pub include_strict_fragment_dump: bool,
+    pub include_clif_dump: bool,
+}
+
+pub async fn evaluate_source_text_function(
+    context: &RuntimeEvalContext,
+    request: EvalRequest<'_>,
+    progress: Option<Tx<EvalProgressEvent>>,
+) -> Result<EvalOutput, RuntimeEvalError> {
+    if request.backend == StrictEvalBackend::Cranelift {
+        return evaluate_with_cranelift(&request);
+    }
+
+    let program = vx_vir::compile::compile_source(request.source, request.function_name)?;
     let body_id = program.entry;
 
-    let args = args
+    let eval_args = request
+        .args
         .iter()
         .cloned()
         .map(eval_value_from_runtime)
         .collect::<Vec<_>>();
     let mut evaluator = ProgramEvaluator::new(context, &program, progress);
     let result = async {
-        let value = evaluator.eval_body(function_name, body_id, &args).await?;
-        let value = evaluator.finalize_value(function_name, value).await?;
-        runtime_value_from_eval(function_name, value)
+        let value = evaluator
+            .eval_body(request.function_name, body_id, &eval_args)
+            .await?;
+        let value = evaluator
+            .finalize_value(request.function_name, value)
+            .await?;
+        runtime_value_from_eval(request.function_name, value)
     }
     .await;
     evaluator.cleanup_exec_prefixes().await;
-    result
+    result.map(|value| EvalOutput {
+        value,
+        strict_fragment_dump: None,
+        clif_dump: None,
+    })
 }
 
-fn try_execute_strict_fragment_fast_path(
-    source: &str,
-    function_name: &str,
-    args: &[RuntimeValue],
-    _backend: StrictEvalBackend,
-) -> Result<Option<RuntimeValue>, RuntimeEvalError> {
-    let args = match args
+fn evaluate_with_cranelift(request: &EvalRequest<'_>) -> Result<EvalOutput, RuntimeEvalError> {
+    let frag_args = request
+        .args
         .iter()
         .cloned()
-        .map(strict_fragment_value_from_runtime)
-        .collect::<Result<Vec<_>, _>>()
-    {
-        Ok(args) => args,
-        Err(_) => return Ok(None),
+        .map(|arg| fragment_arg_from_runtime(request.function_name, arg))
+        .collect::<Result<Vec<_>, _>>()?;
+
+    let output = vx_vir::compile::compile_source_with_types(request.source, request.function_name)?;
+
+    let entry = output.program.entry;
+    let body = match output.program.bodies.get(&entry) {
+        Some(b) => b,
+        None => {
+            return Err(RuntimeEvalError::UnsupportedOperation {
+                function: request.function_name.to_owned(),
+                detail: "compiled program is missing its entry body".to_owned(),
+            });
+        }
     };
 
-    match unsafe { execute_source_text_unified(source, function_name, &args) } {
-        Ok(value) => runtime_value_from_strict_fragment(value).map(Some),
-        Err(_) => Ok(None),
-    }
+    let mut func = match vx_jit::lower_to_strict::try_strict_lower(
+        body,
+        &output.slot_types,
+        output.original_body_count,
+    ) {
+        Some(f) => f,
+        None => {
+            return Err(RuntimeEvalError::CraneliftNotStrictCompatible {
+                function: request.function_name.to_owned(),
+            });
+        }
+    };
+    func.name = request.function_name.to_owned();
+
+    let strict_fragment_dump =
+        if request.include_strict_fragment_dump || std::env::var_os("VX_STRICT_DUMP").is_some() {
+            let dump = format!("{:#?}", func);
+            if std::env::var_os("VX_STRICT_DUMP").is_some() {
+                eprintln!(
+                    "[vx-jit] strict fragment for `{}`:\n{dump}",
+                    request.function_name
+                );
+            }
+            Some(dump)
+        } else {
+            None
+        };
+
+    let compiled =
+        vx_jit::compile_with_dump(&func, request.include_clif_dump).map_err(|failure| {
+            RuntimeEvalError::CraneliftCompile {
+                function: request.function_name.to_owned(),
+                detail: failure.error.to_string(),
+                strict_fragment_dump: strict_fragment_dump.clone(),
+                clif_dump: failure.clif_dump,
+            }
+        })?;
+
+    let result =
+        compiled
+            .fragment
+            .call(&frag_args)
+            .map_err(|error| RuntimeEvalError::CraneliftExecute {
+                function: request.function_name.to_owned(),
+                detail: error.to_string(),
+                strict_fragment_dump: strict_fragment_dump.clone(),
+                clif_dump: compiled.clif_dump.clone(),
+            })?;
+
+    runtime_value_from_fragment_result(result).map(|value| EvalOutput {
+        value,
+        strict_fragment_dump,
+        clif_dump: compiled.clif_dump,
+    })
+}
+
+fn fragment_arg_from_runtime(
+    function_name: &str,
+    value: RuntimeValue,
+) -> Result<FragmentArg, RuntimeEvalError> {
+    Ok(match value {
+        RuntimeValue::U64(v) => FragmentArg::U64(v),
+        RuntimeValue::Bool(v) => FragmentArg::Bool(v),
+        RuntimeValue::String(v) => FragmentArg::String(v),
+        RuntimeValue::Path(_) => {
+            return Err(RuntimeEvalError::CraneliftUnsupportedArgKind {
+                function: function_name.to_owned(),
+                kind: "path",
+            });
+        }
+        RuntimeValue::StringArray(_) => {
+            return Err(RuntimeEvalError::CraneliftUnsupportedArgKind {
+                function: function_name.to_owned(),
+                kind: "string_array",
+            });
+        }
+        RuntimeValue::StringMap(_) => {
+            return Err(RuntimeEvalError::CraneliftUnsupportedArgKind {
+                function: function_name.to_owned(),
+                kind: "string_map",
+            });
+        }
+        RuntimeValue::Tree(_) => {
+            return Err(RuntimeEvalError::CraneliftUnsupportedArgKind {
+                function: function_name.to_owned(),
+                kind: "tree",
+            });
+        }
+    })
+}
+
+fn runtime_value_from_fragment_result(
+    result: FragmentResult,
+) -> Result<RuntimeValue, RuntimeEvalError> {
+    Ok(match result {
+        FragmentResult::U64(v) => RuntimeValue::U64(v),
+        FragmentResult::Bool(v) => RuntimeValue::Bool(v),
+        FragmentResult::String(v) => RuntimeValue::String(v),
+    })
 }
 
 fn eval_value_from_runtime(value: RuntimeValue) -> EvalValue {
@@ -186,50 +351,6 @@ fn runtime_value_from_eval(
             kind: other.kind_name(),
         }),
     }
-}
-
-fn strict_fragment_value_from_runtime(
-    value: RuntimeValue,
-) -> Result<StrictFragmentValue, RuntimeEvalError> {
-    Ok(match value {
-        RuntimeValue::U64(value) => StrictFragmentValue::U64(value),
-        RuntimeValue::Bool(value) => StrictFragmentValue::Bool(value),
-        RuntimeValue::String(value) => StrictFragmentValue::String(value),
-        RuntimeValue::Path(_) => {
-            return Err(RuntimeEvalError::UnsupportedResultKind {
-                function: "strict-fragment-arg".to_owned(),
-                kind: "path",
-            });
-        }
-        RuntimeValue::StringArray(_) => {
-            return Err(RuntimeEvalError::UnsupportedResultKind {
-                function: "strict-fragment-arg".to_owned(),
-                kind: "string-array",
-            });
-        }
-        RuntimeValue::StringMap(_) => {
-            return Err(RuntimeEvalError::UnsupportedResultKind {
-                function: "strict-fragment-arg".to_owned(),
-                kind: "string-map",
-            });
-        }
-        RuntimeValue::Tree(_) => {
-            return Err(RuntimeEvalError::UnsupportedResultKind {
-                function: "strict-fragment-arg".to_owned(),
-                kind: "tree",
-            });
-        }
-    })
-}
-
-fn runtime_value_from_strict_fragment(
-    value: StrictFragmentValue,
-) -> Result<RuntimeValue, RuntimeEvalError> {
-    Ok(match value {
-        StrictFragmentValue::U64(value) => RuntimeValue::U64(value),
-        StrictFragmentValue::Bool(value) => RuntimeValue::Bool(value),
-        StrictFragmentValue::String(value) => RuntimeValue::String(value),
-    })
 }
 
 struct ProgramEvaluator<'a> {
@@ -348,9 +469,12 @@ impl<'a> ProgramEvaluator<'a> {
             KernelOp::MakeStruct { .. } => Ok(EvalValue::Pending(
                 "struct (not yet supported in eager evaluator)".to_owned(),
             )),
-            KernelOp::ProjectNamedField { .. } => Ok(EvalValue::Pending(
-                "named field (not yet supported in eager evaluator)".to_owned(),
-            )),
+            KernelOp::ProjectNamedField { value, field, .. } => {
+                let value = self
+                    .resolve_operand(function_name, producers, slots, value)
+                    .await?;
+                self.eval_project_named_field(function_name, value, field)
+            }
             KernelOp::AssignCallableAddConst { addend, .. } => {
                 let addend = self
                     .resolve_operand(function_name, producers, slots, addend)
@@ -631,6 +755,7 @@ impl<'a> ProgramEvaluator<'a> {
                 positional_inputs,
                 mounts,
                 writable_roots,
+                create_dirs,
                 coarse_mounts,
                 ..
             } => {
@@ -640,6 +765,7 @@ impl<'a> ProgramEvaluator<'a> {
                     positional_inputs,
                     mounts,
                     writable_roots,
+                    create_dirs,
                     coarse_mounts,
                     producers,
                     slots,
@@ -831,6 +957,26 @@ impl<'a> ProgramEvaluator<'a> {
         }
     }
 
+    fn eval_project_named_field(
+        &mut self,
+        function_name: &str,
+        value: EvalValue,
+        field: &str,
+    ) -> Result<EvalValue, RuntimeEvalError> {
+        match (value, field) {
+            (EvalValue::Process { exit_code, .. }, "exit_code") => Ok(EvalValue::U64(exit_code)),
+            (EvalValue::Process { stdout, .. }, "stdout") => Ok(EvalValue::ProcessStdout(stdout)),
+            (EvalValue::Process { stderr, .. }, "stderr") => Ok(EvalValue::ProcessStderr(stderr)),
+            (value, field) => Err(RuntimeEvalError::UnsupportedBoundary {
+                function: function_name.to_owned(),
+                detail: format!(
+                    "unsupported named field projection `{field}` on {}",
+                    value.kind_name()
+                ),
+            }),
+        }
+    }
+
     #[allow(clippy::too_many_arguments)]
     async fn eval_runtime_boundary(
         &mut self,
@@ -839,6 +985,7 @@ impl<'a> ProgramEvaluator<'a> {
         positional_inputs: &[RuntimeBoundaryInputSpec],
         mounts: &[(vx_vir::exec_types::TreeFilePath, RuntimeBoundaryInputSpec)],
         writable_roots: &[vx_vir::exec_types::TreeFilePath],
+        create_dirs: &[vx_vir::exec_types::TreeFilePath],
         coarse_mounts: &[RuntimeBoundaryInputSpec],
         producers: &HashMap<SlotId, &KernelOp>,
         slots: &mut BTreeMap<SlotId, EvalValue>,
@@ -865,37 +1012,60 @@ impl<'a> ProgramEvaluator<'a> {
                         detail: "exec boundary is missing argv input".to_owned(),
                     }
                 })?;
-                let argv = if mounts.is_empty() && writable_roots.is_empty() {
-                    self.resolve_exec_argv(function_name, input, producers, slots)
-                        .await?
-                } else {
-                    let (access_path, prefix) = self
-                        .prepare_local_exec_vfs(
+                let argv =
+                    if mounts.is_empty() && writable_roots.is_empty() && create_dirs.is_empty() {
+                        self.resolve_exec_argv(function_name, input, producers, slots)
+                            .await?
+                    } else {
+                        let (access_path, prefix) = self
+                            .prepare_local_exec_vfs(
+                                function_name,
+                                node,
+                                mounts,
+                                writable_roots,
+                                create_dirs,
+                                producers,
+                                slots,
+                            )
+                            .await?;
+                        self.resolve_exec_argv_for_prefix(
                             function_name,
-                            node,
-                            mounts,
-                            writable_roots,
+                            input,
                             producers,
                             slots,
+                            &access_path,
+                            &prefix,
                         )
-                        .await?;
-                    self.resolve_exec_argv_for_prefix(
-                        function_name,
-                        input,
-                        producers,
-                        slots,
-                        &access_path,
-                        &prefix,
-                    )
-                    .await?
-                };
+                        .await?
+                    };
                 if argv.is_empty() {
                     return Err(RuntimeEvalError::UnsupportedBoundary {
                         function: function_name.to_owned(),
                         detail: "exec argv must not be empty".to_owned(),
                     });
                 }
-                self.run_local_exec(function_name, &argv).await
+                let process = self.run_local_exec(function_name, &argv).await?;
+                let observer = positional_inputs.iter().find_map(|input| match input {
+                    RuntimeBoundaryInputSpec::Closure { closure, .. } => Some(closure),
+                    _ => None,
+                });
+                if let Some(observer) = observer {
+                    let vfs_root = self
+                        .runtime_exec_prefixes
+                        .get(&node)
+                        .cloned()
+                        .map(EvalValue::SandboxTreeRoot)
+                        .unwrap_or_else(|| {
+                            EvalValue::Pending(
+                                "exec observer vfs root is unavailable in local runtime eval"
+                                    .to_owned(),
+                            )
+                        });
+                    self.eval_closure(function_name, observer, &[process, vfs_root])
+                        .await
+                } else {
+                    Ok(process)
+                }
             }
             (RuntimeBoundaryKind::Discover, RuntimeBoundaryPayload::Discover(_payload)) => {
                 let closure = positional_inputs
@@ -1059,6 +1229,7 @@ impl<'a> ProgramEvaluator<'a> {
         node: vx_vir::exec_types::RuntimeNodeId,
         mounts: &[(vx_vir::exec_types::TreeFilePath, RuntimeBoundaryInputSpec)],
         writable_roots: &[vx_vir::exec_types::TreeFilePath],
+        create_dirs: &[vx_vir::exec_types::TreeFilePath],
         producers: &HashMap<SlotId, &KernelOp>,
         slots: &mut BTreeMap<SlotId, EvalValue>,
     ) -> Result<(String, String), RuntimeEvalError> {
@@ -1085,6 +1256,17 @@ impl<'a> ProgramEvaluator<'a> {
                         "failed to create writable root `{}`: {error}",
                         writable_root.0
                     ),
+                })?;
+        }
+
+        for dir in create_dirs {
+            self.emit_phase(format!("creating sandbox dir `{}`", dir.0))
+                .await;
+            vfsd.mkdir(format!("/{prefix}/{}", dir.0))
+                .await
+                .map_err(|error| RuntimeEvalError::UnsupportedBoundary {
+                    function: function_name.to_owned(),
+                    detail: format!("failed to create sandbox dir `{}`: {error}", dir.0),
                 })?;
         }
 
@@ -1442,7 +1624,7 @@ fn find_host_tool(name: &str) -> Option<String> {
 mod tests {
     use vx_services::{RuntimeValue, StrictEvalBackend};
 
-    use super::{RuntimeEvalContext, evaluate_source_text_function};
+    use super::{EvalRequest, RuntimeEvalContext, RuntimeEvalError, evaluate_source_text_function};
 
     const SOURCE_NON_STRICT_CALL: &str = r#"
 fn greet(name: String) -> String (
@@ -1451,6 +1633,12 @@ fn greet(name: String) -> String (
 
 fn build(name: String) -> String (
   greet(name)
+)
+"#;
+
+    const SOURCE_STRICT_ADD: &str = r#"
+fn add(a: U64, b: U64) -> U64 (
+  a + b
 )
 "#;
 
@@ -1487,70 +1675,233 @@ fn probe() #discover -> String (
 )
 "#;
 
+    const SOURCE_EXEC_WRITABLE: &str = r#"
+fn probe() #discover -> String (
+  let sh = discover(executor_class("default"), (host) => host.which("sh"));
+  exec [sh, "-c", "printf hello > out/greeting.txt"] where {
+    writable: [@out],
+    create_dirs: [@out],
+    observer: (proc, _vfs) => proc.stdout.collect()
+  }
+)
+"#;
+
+    const SOURCE_CRANELIFT_SYMBOL_COLLISION: &str = r#"
+fn __vx_alloc(name: String) -> String (
+  `{name}!`
+)
+"#;
+
     #[tokio::test]
     async fn evaluates_non_strict_top_level_body_call() {
-        let value = evaluate_source_text_function(
+        let output = evaluate_source_text_function(
             &RuntimeEvalContext::default(),
-            SOURCE_NON_STRICT_CALL,
-            "build",
-            &[RuntimeValue::String("serde".to_owned())],
-            StrictEvalBackend::Interpreter,
+            EvalRequest {
+                source: SOURCE_NON_STRICT_CALL,
+                function_name: "build",
+                args: &[RuntimeValue::String("serde".to_owned())],
+                backend: StrictEvalBackend::Interpreter,
+                include_strict_fragment_dump: false,
+                include_clif_dump: false,
+            },
             None,
         )
         .await
         .expect("build should evaluate");
 
-        assert_eq!(value, RuntimeValue::String("hello serde".to_owned()));
+        assert_eq!(output.value, RuntimeValue::String("hello serde".to_owned()));
+    }
+
+    #[tokio::test]
+    async fn explicit_cranelift_rejects_non_strict_programs() {
+        let error = match evaluate_source_text_function(
+            &RuntimeEvalContext::default(),
+            EvalRequest {
+                source: SOURCE_NON_STRICT_CALL,
+                function_name: "build",
+                args: &[RuntimeValue::String("serde".to_owned())],
+                backend: StrictEvalBackend::Cranelift,
+                include_strict_fragment_dump: false,
+                include_clif_dump: false,
+            },
+            None,
+        )
+        .await
+        {
+            Ok(_) => panic!("non-strict programs should not silently fall back"),
+            Err(error) => error,
+        };
+
+        assert!(matches!(
+            error,
+            RuntimeEvalError::CraneliftNotStrictCompatible { function }
+            if function == "build"
+        ));
     }
 
     #[tokio::test]
     async fn evaluates_non_strict_string_len_via_local_call() {
-        let value = evaluate_source_text_function(
+        let output = evaluate_source_text_function(
             &RuntimeEvalContext::default(),
-            SOURCE_NON_STRICT_STRING_HELPERS,
-            "build_len",
-            &[RuntimeValue::String("serde".to_owned())],
-            StrictEvalBackend::Interpreter,
+            EvalRequest {
+                source: SOURCE_NON_STRICT_STRING_HELPERS,
+                function_name: "build_len",
+                args: &[RuntimeValue::String("serde".to_owned())],
+                backend: StrictEvalBackend::Interpreter,
+                include_strict_fragment_dump: false,
+                include_clif_dump: false,
+            },
             None,
         )
         .await
         .expect("build_len should evaluate");
 
-        assert_eq!(value, RuntimeValue::U64(5));
+        assert_eq!(output.value, RuntimeValue::U64(5));
+    }
+
+    #[tokio::test]
+    async fn explicit_cranelift_surfaces_jit_compile_failures() {
+        let interpreter_output = evaluate_source_text_function(
+            &RuntimeEvalContext::default(),
+            EvalRequest {
+                source: SOURCE_CRANELIFT_SYMBOL_COLLISION,
+                function_name: "__vx_alloc",
+                args: &[RuntimeValue::String("serde".to_owned())],
+                backend: StrictEvalBackend::Interpreter,
+                include_strict_fragment_dump: false,
+                include_clif_dump: false,
+            },
+            None,
+        )
+        .await
+        .expect("interpreter should still evaluate the function");
+
+        assert_eq!(
+            interpreter_output.value,
+            RuntimeValue::String("serde!".to_owned())
+        );
+
+        let error = match evaluate_source_text_function(
+            &RuntimeEvalContext::default(),
+            EvalRequest {
+                source: SOURCE_CRANELIFT_SYMBOL_COLLISION,
+                function_name: "__vx_alloc",
+                args: &[RuntimeValue::String("serde".to_owned())],
+                backend: StrictEvalBackend::Cranelift,
+                include_strict_fragment_dump: false,
+                include_clif_dump: false,
+            },
+            None,
+        )
+        .await
+        {
+            Ok(_) => panic!("Cranelift compile failures should be reported"),
+            Err(error) => error,
+        };
+
+        assert!(matches!(
+            error,
+            RuntimeEvalError::CraneliftCompile { function, .. }
+            if function == "__vx_alloc"
+        ));
+    }
+
+    #[tokio::test]
+    async fn explicit_cranelift_returns_clif_dump_on_success() {
+        let output = evaluate_source_text_function(
+            &RuntimeEvalContext::default(),
+            EvalRequest {
+                source: SOURCE_STRICT_ADD,
+                function_name: "add",
+                args: &[RuntimeValue::U64(20), RuntimeValue::U64(22)],
+                backend: StrictEvalBackend::Cranelift,
+                include_strict_fragment_dump: false,
+                include_clif_dump: true,
+            },
+            None,
+        )
+        .await
+        .expect("Cranelift should produce an IR dump on success");
+
+        assert_eq!(output.value, RuntimeValue::U64(42));
+        let dump = output.clif_dump.expect("missing Cranelift IR dump");
+        assert!(dump.contains("function"), "unexpected dump: {dump}");
+        assert!(dump.contains("add"), "unexpected dump: {dump}");
+    }
+
+    #[tokio::test]
+    async fn explicit_cranelift_returns_clif_dump_on_execute_failure() {
+        let error = match evaluate_source_text_function(
+            &RuntimeEvalContext::default(),
+            EvalRequest {
+                source: SOURCE_STRICT_ADD,
+                function_name: "add",
+                args: &[RuntimeValue::U64(7)],
+                backend: StrictEvalBackend::Cranelift,
+                include_strict_fragment_dump: false,
+                include_clif_dump: true,
+            },
+            None,
+        )
+        .await
+        {
+            Ok(_) => panic!("Cranelift compile failures should be reported"),
+            Err(error) => error,
+        };
+
+        match error {
+            RuntimeEvalError::CraneliftExecute {
+                function,
+                clif_dump: Some(dump),
+                ..
+            } => {
+                assert_eq!(function, "add");
+                assert!(dump.contains("function"), "unexpected dump: {dump}");
+                assert!(dump.contains("add"), "unexpected dump: {dump}");
+            }
+            other => panic!("expected Cranelift execute error with dump, got {other:?}"),
+        }
     }
 
     #[tokio::test]
     #[ignore = "VIR pipeline does not yet support range syntax (0..2) — work item 018"]
     async fn evaluates_non_strict_string_slice_via_local_call() {
-        let value = evaluate_source_text_function(
+        let output = evaluate_source_text_function(
             &RuntimeEvalContext::default(),
-            SOURCE_NON_STRICT_STRING_HELPERS,
-            "build_slice",
-            &[RuntimeValue::String("serde".to_owned())],
-            StrictEvalBackend::Interpreter,
+            EvalRequest {
+                source: SOURCE_NON_STRICT_STRING_HELPERS,
+                function_name: "build_slice",
+                args: &[RuntimeValue::String("serde".to_owned())],
+                backend: StrictEvalBackend::Interpreter,
+                include_strict_fragment_dump: false,
+                include_clif_dump: false,
+            },
             None,
         )
         .await
         .expect("build_slice should evaluate");
 
-        assert_eq!(value, RuntimeValue::String("se".to_owned()));
+        assert_eq!(output.value, RuntimeValue::String("se".to_owned()));
     }
 
     #[tokio::test]
-    #[ignore = "VIR pipeline does not yet resolve runtime boundary builtins (discover/exec) — work items 014, 016"]
     async fn evaluates_local_discover_host_which() {
-        let value = evaluate_source_text_function(
+        let output = evaluate_source_text_function(
             &RuntimeEvalContext::default(),
-            SOURCE_DISCOVER_WHICH,
-            "probe",
-            &[],
-            StrictEvalBackend::Interpreter,
+            EvalRequest {
+                source: SOURCE_DISCOVER_WHICH,
+                function_name: "probe",
+                args: &[],
+                backend: StrictEvalBackend::Interpreter,
+                include_strict_fragment_dump: false,
+                include_clif_dump: false,
+            },
             None,
         )
         .await
         .expect("probe should evaluate");
 
-        match value {
+        match output.value {
             RuntimeValue::String(path) => {
                 assert!(path.starts_with('/'), "expected absolute path, got {path}");
                 assert!(path.ends_with("sh"), "expected shell path, got {path}");
@@ -1560,19 +1911,50 @@ fn probe() #discover -> String (
     }
 
     #[tokio::test]
-    #[ignore = "VIR pipeline does not yet resolve runtime boundary builtins (discover/exec) — work items 014, 016"]
     async fn evaluates_local_exec_stdout_observer() {
-        let value = evaluate_source_text_function(
+        let output = evaluate_source_text_function(
             &RuntimeEvalContext::default(),
-            SOURCE_EXEC_STDOUT,
-            "probe",
-            &[],
-            StrictEvalBackend::Interpreter,
+            EvalRequest {
+                source: SOURCE_EXEC_STDOUT,
+                function_name: "probe",
+                args: &[],
+                backend: StrictEvalBackend::Interpreter,
+                include_strict_fragment_dump: false,
+                include_clif_dump: false,
+            },
             None,
         )
         .await
         .expect("probe should evaluate");
 
-        assert_eq!(value, RuntimeValue::String("hello".to_owned()));
+        assert_eq!(output.value, RuntimeValue::String("hello".to_owned()));
+    }
+
+    #[tokio::test]
+    async fn exec_writable_keywords_need_hosted_vfsd() {
+        let result = evaluate_source_text_function(
+            &RuntimeEvalContext::default(),
+            EvalRequest {
+                source: SOURCE_EXEC_WRITABLE,
+                function_name: "probe",
+                args: &[],
+                backend: StrictEvalBackend::Interpreter,
+                include_strict_fragment_dump: false,
+                include_clif_dump: false,
+            },
+            None,
+        )
+        .await;
+
+        match result {
+            Ok(_) => panic!("writable exec should require a hosted vfsd"),
+            Err(RuntimeEvalError::UnsupportedBoundary { detail, .. }) => {
+                assert!(
+                    detail.contains("hosted vfsd"),
+                    "unexpected error detail: {detail}"
+                );
+            }
+            Err(other) => panic!("expected hosted-vfsd boundary error, got {other:?}"),
+        }
     }
 }

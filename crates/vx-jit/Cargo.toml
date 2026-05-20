@@ -11,14 +11,15 @@ repository.workspace = true
 rustdoc-args = ["--html-in-header", "arborium-header.html"]
 
 [dependencies]
-kajit = { workspace = true }
-kajit-reprs = { path = "../../../kajit/crates-kajit/kajit-reprs" }
-thiserror = { workspace = true }
-vx-parser = { workspace = true }
-vx-resolve = { workspace = true }
 vx-jit-types = { workspace = true }
 vx-types = { workspace = true }
 vx-vir = { workspace = true }
+cranelift-jit = { workspace = true }
+cranelift-module = { workspace = true }
+cranelift-codegen = { workspace = true }
+cranelift-frontend = { workspace = true }
+cranelift-native = { workspace = true }
+thiserror = { workspace = true }
 
 [lints]
 workspace = true

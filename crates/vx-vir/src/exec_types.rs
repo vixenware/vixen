@@ -4,7 +4,6 @@
 //! evaluator (vx-rt) and the JIT compiler (vx-jit).
 
 use std::collections::BTreeMap;
-use vx_jit_types::VixenTypedFunction;
 
 // ---------------------------------------------------------------------------
 // IDs
@@ -71,15 +70,10 @@ pub struct ExecutableProgram {
     pub runtime_nodes: BTreeMap<RuntimeNodeId, ExecutableRuntimeNode>,
 }
 
-/// Whether this kernel was compiled to a strict fragment (ready for Kajit)
-/// or lowered to interpreted KernelOp bytecode.
 #[derive(Debug, Clone, PartialEq, Eq, Default)]
 pub enum KernelKind {
     #[default]
     Interpreted,
-    Strict {
-        vtf: VixenTypedFunction,
-    },
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -147,6 +141,7 @@ pub struct ExecBoundaryPayload {
     pub has_where_clause: bool,
     pub has_mounts: bool,
     pub has_writable: bool,
+    pub has_create_dirs: bool,
     pub has_coarse_mounts: bool,
 }
 
@@ -389,6 +384,7 @@ pub enum KernelOp {
         positional_inputs: Vec<RuntimeBoundaryInputSpec>,
         mounts: Vec<(TreeFilePath, RuntimeBoundaryInputSpec)>,
         writable_roots: Vec<TreeFilePath>,
+        create_dirs: Vec<TreeFilePath>,
         coarse_mounts: Vec<RuntimeBoundaryInputSpec>,
     },
 }

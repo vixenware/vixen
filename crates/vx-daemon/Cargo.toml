@@ -31,10 +31,6 @@ vx-store = { path = "../vx-store" }
 vx-runner = { path = "../vx-runner" }
 vx-vfsd = { path = "../vx-vfsd" }
 
-[features]
-default = []
-diagnostics = ["moire/diagnostics"]
-
 [dev-dependencies]
 ariadne = { version = "0.6", features = ["auto-color"] }
 arborium = { workspace = true }

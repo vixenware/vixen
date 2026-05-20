@@ -15,6 +15,7 @@ use crate::demand::analyze_demand_for_entry;
 use crate::item::ItemKind;
 use crate::lower::{LowerError, LoweringOutput, lower_vir_program};
 use crate::resolve::resolve_names;
+use crate::scope::{ScopeEntry, ScopeEntryTarget};
 use crate::type_check::type_check_vir;
 use crate::type_collect::collect_types_vir;
 
@@ -42,6 +43,32 @@ impl fmt::Display for CompileError {
 }
 
 impl std::error::Error for CompileError {}
+
+fn inject_implicit_stdlib_imports(program: &mut crate::build::VirProgram) {
+    let Some(&primary_su) = program.source_units.first() else {
+        return;
+    };
+
+    let primary_module_scope = program.arena[program.arena[primary_su].top_level_body].scope;
+    let imported_items = program
+        .source_units
+        .iter()
+        .copied()
+        .skip(1)
+        .flat_map(|su_id| program.arena[su_id].items.iter().copied())
+        .collect::<Vec<_>>();
+
+    for item_id in imported_items {
+        program.arena[primary_module_scope]
+            .entries
+            .push(ScopeEntry {
+                target: ScopeEntryTarget::Item(item_id),
+                // Module scopes are order-independent, but lower decl_order keeps
+                // user-defined top-level items winning on ties and later lookups.
+                decl_order: 0,
+            });
+    }
+}
 
 /// Compile Vixen source text to an executable program.
 ///
@@ -76,6 +103,7 @@ pub fn compile_source(
 
     // Build VIR.
     let mut program = VirBuilder::build_program(&sources);
+    inject_implicit_stdlib_imports(&mut program);
 
     // Semantic passes.
     let types = collect_types_vir(&mut program.arena);
@@ -104,10 +132,10 @@ pub fn compile_source(
         .items
         .iter()
         .find_map(|&item_id| {
-            if let ItemKind::Function(ref f) = program.arena[item_id].kind {
-                if f.name == function_name {
-                    return Some(f.body);
-                }
+            if let ItemKind::Function(ref f) = program.arena[item_id].kind
+                && f.name == function_name
+            {
+                return Some(f.body);
             }
             None
         })
@@ -146,6 +174,7 @@ pub fn compile_source_with_types(
 
     // Build VIR.
     let mut program = VirBuilder::build_program(&sources);
+    inject_implicit_stdlib_imports(&mut program);
 
     // Semantic passes.
     let types = collect_types_vir(&mut program.arena);
@@ -174,10 +203,10 @@ pub fn compile_source_with_types(
         .items
         .iter()
         .find_map(|&item_id| {
-            if let ItemKind::Function(ref f) = program.arena[item_id].kind {
-                if f.name == function_name {
-                    return Some(f.body);
-                }
+            if let ItemKind::Function(ref f) = program.arena[item_id].kind
+                && f.name == function_name
+            {
+                return Some(f.body);
             }
             None
         })
@@ -186,4 +215,170 @@ pub fn compile_source_with_types(
     // Demand analysis + lowering.
     let demand = analyze_demand_for_entry(&program, entry_body);
     lower_vir_program(&program, &demand).map_err(CompileError::Lowering)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::inject_implicit_stdlib_imports;
+    use crate::build::VirBuilder;
+    use crate::cap_check::check_capabilities_vir;
+    use crate::exec_types::RuntimeBoundaryKind;
+    use crate::resolve::resolve_names;
+    use crate::type_check::type_check_vir;
+    use crate::type_collect::collect_types_vir;
+    use vx_resolve::{SourceId, stdlib_sources};
+
+    const SOURCE_DISCOVER_WHICH: &str = r#"
+fn probe() #discover -> String (
+  discover(executor_class("default"), (host) => host.which("sh"))
+)
+"#;
+
+    const SOURCE_EXEC_STDOUT: &str = r#"
+fn probe() #discover -> String (
+  let sh = discover(executor_class("default"), (host) => host.which("sh"));
+  exec [sh, "-c", "printf hello"] where {
+    observer: (proc, _vfs) => proc.stdout.collect()
+  }
+)
+"#;
+
+    const SOURCE_EXEC_WRITABLE: &str = r#"
+fn probe() #discover -> String (
+  let sh = discover(executor_class("default"), (host) => host.which("sh"));
+  exec [sh, "-c", "printf hello > out/greeting.txt"] where {
+    writable: [@out],
+    create_dirs: [@out],
+    observer: (proc, _vfs) => proc.stdout.collect()
+  }
+)
+"#;
+
+    fn semantically_analyze(source: &str) -> crate::build::VirProgram {
+        let parsed = vx_parser::parse_source_file(source);
+        assert!(parsed.errors().is_empty(), "source should parse");
+
+        let mut sources = vec![(SourceId(0), parsed.tree())];
+        for (i, stdlib) in stdlib_sources().iter().enumerate() {
+            let stdlib_parsed = vx_parser::parse_source_file(stdlib.text);
+            assert!(stdlib_parsed.errors().is_empty(), "stdlib should parse");
+            sources.push((SourceId(i as u32 + 1), stdlib_parsed.tree()));
+        }
+
+        let mut program = VirBuilder::build_program(&sources);
+        inject_implicit_stdlib_imports(&mut program);
+        program
+    }
+
+    #[test]
+    fn semantic_pipeline_resolves_discover_and_executor_class_from_stdlib() {
+        let mut program = semantically_analyze(SOURCE_DISCOVER_WHICH);
+        let types = collect_types_vir(&mut program.arena);
+        let resolve_errors = resolve_names(&mut program.arena);
+        assert!(
+            resolve_errors.is_empty(),
+            "expected stdlib names to resolve, got {resolve_errors:?}"
+        );
+        let tc_result = type_check_vir(&mut program.arena, &types);
+        assert!(
+            tc_result.errors.is_empty(),
+            "expected discover source to type-check, got {:?}",
+            tc_result.errors
+        );
+        let cap_result = check_capabilities_vir(&program.arena, &types, &tc_result);
+        assert!(
+            cap_result.errors.is_empty(),
+            "expected discover source to pass capability checks, got {:?}",
+            cap_result.errors
+        );
+
+        let lowered = super::compile_source(SOURCE_DISCOVER_WHICH, "probe")
+            .expect("discover source should now compile through lowering");
+        assert!(
+            lowered
+                .runtime_nodes
+                .values()
+                .any(|node| node.kind == RuntimeBoundaryKind::Discover),
+            "expected discover runtime boundary in lowered program"
+        );
+    }
+
+    #[test]
+    fn semantic_pipeline_resolves_exec_and_observer_from_stdlib() {
+        let mut program = semantically_analyze(SOURCE_EXEC_STDOUT);
+        let types = collect_types_vir(&mut program.arena);
+        let resolve_errors = resolve_names(&mut program.arena);
+        assert!(
+            resolve_errors.is_empty(),
+            "expected stdlib names to resolve, got {resolve_errors:?}"
+        );
+        let tc_result = type_check_vir(&mut program.arena, &types);
+        assert!(
+            tc_result.errors.is_empty(),
+            "expected exec source to type-check, got {:?}",
+            tc_result.errors
+        );
+        let cap_result = check_capabilities_vir(&program.arena, &types, &tc_result);
+        assert!(
+            cap_result.errors.is_empty(),
+            "expected exec source to pass capability checks, got {:?}",
+            cap_result.errors
+        );
+
+        let lowered = super::compile_source(SOURCE_EXEC_STDOUT, "probe")
+            .expect("exec source should now compile through lowering");
+        assert!(
+            lowered
+                .runtime_nodes
+                .values()
+                .any(|node| node.kind == RuntimeBoundaryKind::Exec),
+            "expected exec runtime boundary in lowered program"
+        );
+
+        let lowered = super::compile_source_with_types(SOURCE_EXEC_STDOUT, "probe")
+            .expect("typed compile path should also lower exec");
+        assert!(
+            lowered
+                .program
+                .runtime_nodes
+                .values()
+                .any(|node| node.kind == RuntimeBoundaryKind::Exec),
+            "expected exec runtime boundary in typed lowering output"
+        );
+    }
+
+    #[test]
+    fn semantic_pipeline_resolves_exec_writable_keywords_from_stdlib() {
+        let lowered = super::compile_source(SOURCE_EXEC_WRITABLE, "probe")
+            .expect("exec source with writable keywords should compile through lowering");
+        assert!(
+            lowered
+                .runtime_nodes
+                .values()
+                .any(|node| node.kind == RuntimeBoundaryKind::Exec),
+            "expected exec runtime boundary in lowered program"
+        );
+    }
+
+    #[test]
+    fn semantic_pipeline_eventually_lowers_runtime_boundary_kinds_when_supported() {
+        let lowered = super::compile_source(
+            r#"
+fn probe() #discover -> String (
+  discover(executor_class("default"), (host) => host.which("sh"))
+)
+"#,
+            "probe",
+        );
+
+        if let Ok(program) = lowered {
+            assert!(
+                program
+                    .runtime_nodes
+                    .values()
+                    .any(|node| node.kind == RuntimeBoundaryKind::Discover),
+                "expected discover runtime boundary in lowered program"
+            );
+        }
+    }
 }

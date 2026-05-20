@@ -43,9 +43,5 @@ strip-ansi-escapes = "0.2"
 
 [dev-dependencies]
 
-[features]
-default = []
-diagnostics = ["moire/diagnostics"]
-
 [lints]
 workspace = true

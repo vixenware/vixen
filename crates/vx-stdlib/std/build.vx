@@ -1,5 +1,7 @@
 /// Construct an executor class selector value.
-fn executor_class(label: String) -> ExecutorClass;
+fn executor_class(label: String) -> ExecutorClass (
+  label as ExecutorClass
+)
 
 /// Evaluate a build entry function through the runtime.
 fn build[T](
@@ -64,6 +66,10 @@ fn exec[T](
   env: Map[String, ExecInput] = %{},
   /// Explicit VFS mounts, in addition to implicit mounts from args/env.
   mounts: Map[Path, TreeEntry] = %{},
+  /// Writable sandbox-relative roots to create before launch.
+  writable: Array[Path] = [],
+  /// Additional directories to create under writable roots before launch.
+  create_dirs: Array[Path] = [],
   /// Executor class on which to run the process.
   executor: ExecutorClass = executor_class("default"),
   /// Executor-side observer evaluated with sandbox authority.

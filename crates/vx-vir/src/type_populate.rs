@@ -33,11 +33,11 @@ pub fn populate_expr_types(arena: &mut VirArena, type_check: &TypeCheckResult) {
             expr.ty = None;
             continue;
         }
-        if let ExprKind::Block(ref b) = expr.kind {
-            if b.synthetic {
-                expr.ty = None;
-                continue;
-            }
+        if let ExprKind::Block(ref b) = expr.kind
+            && b.synthetic
+        {
+            expr.ty = None;
+            continue;
         }
         expr.ty = type_check.expr_types.get(&expr.span).cloned();
     }
@@ -107,10 +107,10 @@ pub fn populate_binding_types(arena: &mut VirArena, type_check: &TypeCheckResult
 pub fn body_result_ty(arena: &VirArena, body_id: crate::BodyId) -> Option<&Ty> {
     let root_expr = arena[body_id].root_expr;
     // If the root is a block with a tail, the result type is the tail's type.
-    if let ExprKind::Block(ref b) = arena[root_expr].kind {
-        if let Some(tail) = b.tail {
-            return arena[tail].ty.as_ref();
-        }
+    if let ExprKind::Block(ref b) = arena[root_expr].kind
+        && let Some(tail) = b.tail
+    {
+        return arena[tail].ty.as_ref();
     }
     arena[root_expr].ty.as_ref()
 }

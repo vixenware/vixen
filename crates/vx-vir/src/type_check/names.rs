@@ -111,10 +111,10 @@ pub(crate) fn type_of_item(tc: &TypeChecker, item_id: ItemId) -> Ty {
             // If namespace has exactly one constructor function, return its type.
             let mut sigs = Vec::new();
             for &child_id in &ns.items {
-                if let ItemKind::Function(f) = &tc.arena[child_id].kind {
-                    if let Some(sig) = tc.types.def_to_fn_sig.get(&f.name_span) {
-                        sigs.push(sig.clone());
-                    }
+                if let ItemKind::Function(f) = &tc.arena[child_id].kind
+                    && let Some(sig) = tc.types.def_to_fn_sig.get(&f.name_span)
+                {
+                    sigs.push(sig.clone());
                 }
             }
             if sigs.len() == 1 {
@@ -198,10 +198,10 @@ pub(crate) fn sig_for_name_ref_target(tc: &TypeChecker, target: DefTarget) -> Op
                 ItemKind::Namespace(ns) => {
                     let mut sigs = Vec::new();
                     for &child_id in &ns.items {
-                        if let ItemKind::Function(f) = &tc.arena[child_id].kind {
-                            if let Some(sig) = tc.types.def_to_fn_sig.get(&f.name_span) {
-                                sigs.push(sig.clone());
-                            }
+                        if let ItemKind::Function(f) = &tc.arena[child_id].kind
+                            && let Some(sig) = tc.types.def_to_fn_sig.get(&f.name_span)
+                        {
+                            sigs.push(sig.clone());
                         }
                     }
                     (sigs.len() == 1).then(|| sigs.into_iter().next().unwrap())

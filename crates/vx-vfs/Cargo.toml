@@ -37,9 +37,5 @@ async-stream = { workspace = true }
 [package.metadata.cargo-shear]
 ignored = ["facet-error"]
 
-[features]
-default = []
-diagnostics = ["moire/diagnostics"]
-
 [lints]
 workspace = true

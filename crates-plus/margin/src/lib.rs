@@ -2,63 +2,12 @@
 //!
 //! The core crate intentionally owns the reusable model and the explicit layout
 //! artifact, leaving terminal emission to `margin-term`.
-// d[impl package.name]
-// d[impl package.no-vixen-prefix]
-// d[impl package.primary-split]
-// d[impl package.additional-renderers]
-// d[impl api.core-model]
-// d[impl api.layout-render-separation]
-// d[impl api.explicit-layout-artifact]
-// d[impl api.stable-fixtures]
-// d[impl product.compiler-grade]
-// d[impl model.report]
-// d[impl model.source]
-// d[impl model.annotation]
-// d[impl model.window]
-// d[impl model.role-stable]
-// d[impl input.structured]
-// d[impl input.unified-spans]
-// d[impl input.source-identity]
-// d[impl input.span-bounds]
-// d[impl input.multiple-sources]
-// d[impl input.overlay-kinds]
-// d[impl span.authoritative-source]
-// d[impl span.unicode-correct]
-// d[impl span.zero-width]
-// d[impl span.line-breaks]
-// d[impl unicode.display-width]
-// d[impl unicode.grapheme-safety]
-// d[impl unicode.normalization-stability]
-// d[impl unicode.tab-policy]
-// d[impl label.clustered]
-// d[impl label.multispan]
-// d[impl label.priority]
-// d[impl label.priority-lattice]
-// d[impl label.semantic-over-syntax]
-// d[impl label.single-message-bearing]
-// d[impl syntax.non-owning]
-// d[impl syntax.overlay-model]
-// d[impl syntax.overlay-priority]
-// d[impl syntax.window-bounded]
-// d[impl coalesce.deterministic]
-// d[impl coalesce.identical]
-// d[impl coalesce.message-bearing]
-// d[impl coalesce.nearby]
-// d[impl coalesce.report-sections]
-// d[impl layout.cell-grid]
-// d[impl layout.pipeline]
-// d[impl layout.pure-planning]
-// d[impl layout.gutter-geometry]
-// d[impl layout.crowding-policy]
-// d[impl layout.placement-modes]
-// d[impl layout.message-placement]
-// d[impl layout.long-lines]
-// d[impl layout.width-aware]
-// d[impl window.primary-context]
-// d[impl window.cross-file]
-// d[impl window.context-policy]
-// d[impl window.merge-nearby]
-// d[impl window.stable-selection]
+//!
+//! d[impl package.name]
+//! d[impl package.no-vixen-prefix]
+//! d[impl package.primary-split]
+//! d[impl package.additional-renderers]
+//! d[impl product.compiler-grade]
 
 use std::collections::BTreeMap;
 use std::error::Error;
@@ -68,6 +17,7 @@ use std::ops::Range;
 use facet::Facet;
 use unicode_width::{UnicodeWidthChar, UnicodeWidthStr};
 
+/// d[impl api.stable-fixtures]
 #[cfg(test)]
 mod tests;
 
@@ -79,6 +29,8 @@ pub enum Severity {
     Advice,
 }
 
+/// d[impl model.source]
+/// d[impl input.source-identity]
 #[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Hash, Facet)]
 pub struct SourceId(pub String);
 
@@ -88,6 +40,7 @@ impl From<&str> for SourceId {
     }
 }
 
+/// d[impl unicode.normalization-stability]
 #[derive(Debug, Clone, PartialEq, Eq, Facet)]
 pub struct Source {
     pub id: SourceId,
@@ -96,6 +49,7 @@ pub struct Source {
     pub text: String,
 }
 
+/// d[impl input.unified-spans]
 #[derive(Debug, Clone, PartialEq, Eq, Facet)]
 pub struct Span {
     pub source_id: SourceId,
@@ -112,6 +66,8 @@ impl Span {
         }
     }
 
+    /// d[impl input.span-bounds]
+    /// d[impl unicode.grapheme-safety]
     fn validate(&self, source: &Source) -> Result<(), LayoutError> {
         if self.start > self.end {
             return Err(LayoutError::InvalidSpan {
@@ -141,6 +97,8 @@ impl Span {
     }
 }
 
+/// d[impl model.role-stable]
+/// d[impl input.overlay-kinds]
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Facet)]
 #[repr(u8)]
 pub enum AnnotationRole {
@@ -153,6 +111,7 @@ pub enum AnnotationRole {
     Emphasis,
 }
 
+/// d[impl syntax.overlay-model]
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Facet)]
 #[repr(u8)]
 pub enum SyntaxClass {
@@ -185,6 +144,8 @@ pub enum SyntaxClass {
     Error,
 }
 
+/// d[impl model.annotation]
+/// d[impl label.multispan]
 #[derive(Debug, Clone, PartialEq, Eq, Facet)]
 pub struct Annotation {
     pub spans: Vec<Span>,
@@ -213,6 +174,8 @@ pub struct ReportSection {
     pub notes: Vec<Note>,
 }
 
+/// d[impl api.core-model]
+/// d[impl model.report]
 #[derive(Debug, Clone, PartialEq, Eq, Facet)]
 pub struct Report {
     pub severity: Severity,
@@ -222,12 +185,16 @@ pub struct Report {
     pub sections: Vec<ReportSection>,
 }
 
+/// d[impl input.structured]
+/// d[impl input.multiple-sources]
 #[derive(Debug, Clone, Default, PartialEq, Eq, Facet)]
 pub struct Diagnostics {
     pub sources: Vec<Source>,
     pub reports: Vec<Report>,
 }
 
+/// d[impl layout.width-aware]
+/// d[impl unicode.tab-policy]
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Facet)]
 pub struct LayoutOptions {
     pub width: usize,
@@ -260,12 +227,14 @@ impl Default for LayoutOptions {
     }
 }
 
+/// d[impl layout.long-lines]
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Facet)]
 #[repr(u8)]
 pub enum LongLineMode {
     Clip,
 }
 
+/// d[impl api.explicit-layout-artifact]
 #[derive(Debug, Clone, PartialEq, Eq, Facet)]
 pub struct LayoutPlan {
     pub width: usize,
@@ -281,6 +250,7 @@ pub struct PlannedReport {
     pub sections: Vec<ReportSection>,
 }
 
+/// d[impl model.window]
 #[derive(Debug, Clone, PartialEq, Eq, Facet)]
 pub struct SourceWindow {
     pub source_id: SourceId,
@@ -312,6 +282,7 @@ pub struct WindowAnnotation {
     pub segments: Vec<ResolvedSpan>,
 }
 
+/// d[impl layout.placement-modes]
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Facet)]
 #[repr(u8)]
 pub enum PlacementMode {
@@ -320,6 +291,7 @@ pub enum PlacementMode {
     Stacked,
 }
 
+/// d[impl layout.gutter-geometry]
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Facet)]
 pub struct GutterGeometry {
     pub line_number_width: usize,
@@ -368,6 +340,9 @@ impl Display for LayoutError {
 
 impl Error for LayoutError {}
 
+/// d[impl api.layout-render-separation]
+/// d[impl layout.pipeline]
+/// d[impl layout.pure-planning]
 pub fn plan(diagnostics: &Diagnostics, options: &LayoutOptions) -> Result<LayoutPlan, LayoutError> {
     let sources = index_sources(&diagnostics.sources)?;
     let reports = diagnostics
@@ -417,6 +392,7 @@ fn plan_report(
     })
 }
 
+/// d[impl window.cross-file]
 fn group_annotations_by_source<'a>(
     annotations: &'a [Annotation],
     sources: &BTreeMap<&SourceId, &Source>,
@@ -458,6 +434,8 @@ fn group_annotations_by_source<'a>(
     Ok(grouped)
 }
 
+/// d[impl window.primary-context]
+/// d[impl window.context-policy]
 fn annotation_context(role: AnnotationRole, options: &LayoutOptions) -> usize {
     match role {
         AnnotationRole::PrimaryLabel => options.primary_context_lines,
@@ -465,6 +443,8 @@ fn annotation_context(role: AnnotationRole, options: &LayoutOptions) -> usize {
     }
 }
 
+/// d[impl syntax.non-owning]
+/// d[impl syntax.window-bounded]
 fn build_windows(
     source_id: &SourceId,
     annotations: Vec<PendingAnnotation<'_>>,
@@ -535,6 +515,9 @@ fn build_windows(
         .collect()
 }
 
+/// d[impl window.merge-nearby]
+/// d[impl window.stable-selection]
+/// d[impl coalesce.report-sections]
 fn merge_line_ranges(
     mut ranges: Vec<(usize, usize)>,
     merge_distance_lines: usize,
@@ -617,6 +600,10 @@ fn resolved_span_sort_key(left: &ResolvedSpan, right: &ResolvedSpan) -> std::cmp
         .then_with(|| left.end_column.cmp(&right.end_column))
 }
 
+/// d[impl label.clustered]
+/// d[impl label.single-message-bearing]
+/// d[impl coalesce.deterministic]
+/// d[impl coalesce.identical]
 fn coalesce_window_annotations(annotations: Vec<WindowAnnotation>) -> Vec<WindowAnnotation> {
     let mut merged: Vec<WindowAnnotation> = Vec::new();
 
@@ -645,6 +632,8 @@ fn coalesce_window_annotations(annotations: Vec<WindowAnnotation>) -> Vec<Window
     merged
 }
 
+/// d[impl coalesce.nearby]
+/// d[impl coalesce.message-bearing]
 fn can_cluster(left: &WindowAnnotation, right: &WindowAnnotation) -> bool {
     if left.role != right.role
         || left.syntax_class != right.syntax_class
@@ -667,6 +656,10 @@ fn messages_compatible(left: Option<&str>, right: Option<&str>) -> bool {
     left.is_none() || right.is_none() || left == right
 }
 
+/// d[impl label.priority]
+/// d[impl label.priority-lattice]
+/// d[impl label.semantic-over-syntax]
+/// d[impl syntax.overlay-priority]
 fn apply_priority_lattice(annotations: Vec<WindowAnnotation>) -> Vec<WindowAnnotation> {
     let mut accepted = Vec::<WindowAnnotation>::new();
     let mut occupied = Vec::<(ResolvedSpan, u16, u8)>::new();
@@ -714,6 +707,8 @@ fn role_rank(role: AnnotationRole) -> u8 {
     }
 }
 
+/// d[impl layout.message-placement]
+/// d[impl layout.crowding-policy]
 fn choose_placement(
     annotation: &WindowAnnotation,
     crowded_lines: &mut BTreeMap<usize, usize>,
@@ -743,6 +738,7 @@ fn choose_placement(
     }
 }
 
+/// d[impl layout.cell-grid]
 fn compute_geometry(last_line_number: usize, width: usize) -> GutterGeometry {
     let line_number_width = last_line_number.max(1).to_string().len();
     let separator_columns = 1;
@@ -768,6 +764,8 @@ fn is_line_clipped(
     }
 }
 
+/// d[impl span.zero-width]
+/// d[impl span.line-breaks]
 fn resolve_span(
     source: &Source,
     span: Span,
@@ -808,6 +806,7 @@ fn resolve_span(
     Ok(segments)
 }
 
+/// d[impl unicode.display-width]
 pub(crate) fn display_width(text: &str, tab_width: usize) -> usize {
     let mut width = 0;
     for ch in text.chars() {
@@ -841,6 +840,8 @@ struct PendingAnnotation<'a> {
     segments: Vec<ResolvedSpan>,
 }
 
+/// d[impl span.unicode-correct]
+/// d[impl span.authoritative-source]
 #[derive(Debug)]
 struct LineIndex<'a> {
     source: &'a str,

@@ -15,7 +15,6 @@ Use this authority split:
 
 - `docs/content/spec/` = normative/current spec
 - `docs/design/` = working notes and draft design material
-- `notes/archive/` = historical material, not authority
 
 If `docs/content/spec/` and `docs/design/` disagree, `docs/content/spec/` wins.
 
@@ -49,4 +48,4 @@ When touching eval or architecture docs, prefer:
 
 - promoting accepted truth into `docs/content/spec/`
 - keeping `docs/design/` for drafts/open questions
-- moving retired material to `notes/archive/`
+- deleting retired material rather than archiving it

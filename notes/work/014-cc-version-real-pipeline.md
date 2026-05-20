@@ -36,4 +36,4 @@ Once 008 is done, cc-version should be close.
 ## Depends on
 
 010-done (inline product laziness), 013-done (recursive projection base resolution), 014-done (demand roots/propagation cleanup),
-011 (kernel entry exprs/types), and 013 (compile strict fragments for extracted thunk bodies) if we want Kajit to do meaningful work.
+011 (kernel entry exprs/types), and 013 (compile strict fragments for extracted thunk bodies) if we want vx-jit to do meaningful work.

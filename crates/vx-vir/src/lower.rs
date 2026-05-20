@@ -193,12 +193,14 @@ pub fn lower_vir_program(
         .first()
         .ok_or(LowerError::NoEntryPoint)?;
 
-    // Collect user source IDs so we can distinguish stdlib functions.
+    // The primary source unit is the user program. Later source units come from
+    // the injected stdlib and should remain eligible for runtime-boundary
+    // classification.
     let user_sources: HashSet<vx_resolve::SourceId> = program
         .source_units
-        .iter()
-        .map(|su_id| program.arena[*su_id].source)
-        .collect();
+        .first()
+        .map(|su_id| HashSet::from([program.arena[*su_id].source]))
+        .unwrap_or_default();
 
     let original_body_count = program.arena.bodies.len() as u32;
     let mut ctx = LoweringContext::new(&program.arena, demand, user_sources);
@@ -340,6 +342,17 @@ impl<'a, 'ctx> VirBodyLowering<'a, 'ctx> {
         source_expr(self.body_id, expr)
     }
 
+    fn body_debug_label(&self) -> String {
+        match &self.arena()[self.body_id].owner {
+            crate::body::BodyOwner::Function { item } => match &self.arena()[*item].kind {
+                ItemKind::Function(f) => format!("function {}", f.name),
+                _ => format!("function item {:?}", item),
+            },
+            crate::body::BodyOwner::Closure => "closure".to_owned(),
+            crate::body::BodyOwner::TopLevel { source } => format!("top-level source {:?}", source),
+        }
+    }
+
     // -----------------------------------------------------------------------
     // Binding materialization
     // -----------------------------------------------------------------------
@@ -433,9 +446,7 @@ impl<'a, 'ctx> VirBodyLowering<'a, 'ctx> {
             ExprKind::TypeOp(top) => self.lower_type_op(expr_id, &top),
 
             // Unsupported shapes
-            ExprKind::Where(_) => Err(LowerError::UnsupportedShape(
-                "where (not in executable slice)".into(),
-            )),
+            ExprKind::Where(w) => self.lower_where(expr_id, &w),
             ExprKind::PartialApp(_) => Err(LowerError::UnsupportedShape(
                 "partial application (not in executable slice)".into(),
             )),
@@ -455,7 +466,12 @@ impl<'a, 'ctx> VirBodyLowering<'a, 'ctx> {
             ExprKind::Map(_) => Err(LowerError::UnsupportedShape(
                 "map (not in executable slice)".into(),
             )),
-            ExprKind::Error => Err(LowerError::UnsupportedShape("error node".into())),
+            ExprKind::Error => Err(LowerError::UnsupportedShape(format!(
+                "error node in {} ({:?}) expr {:?}",
+                self.body_debug_label(),
+                self.body_id,
+                expr_id
+            ))),
         }
     }
 
@@ -780,6 +796,36 @@ impl<'a, 'ctx> VirBodyLowering<'a, 'ctx> {
     // Invoke
     // -----------------------------------------------------------------------
 
+    fn lower_where(
+        &mut self,
+        expr_id: ExprId,
+        w: &crate::expr::WhereExpr,
+    ) -> Result<Operand, LowerError> {
+        let callee_kind = self.arena()[w.callee].kind.clone();
+        match callee_kind {
+            ExprKind::Call(call) => {
+                let inner_callee_kind = self.arena()[call.callee].kind.clone();
+                if let ExprKind::NameRef(nr) = inner_callee_kind
+                    && let Some(DefTarget::Item(item_id)) = nr.resolved
+                    && let Some(boundary_kind) = self.ctx.classify_runtime_boundary(item_id)
+                {
+                    return self.lower_runtime_boundary_call(
+                        expr_id,
+                        &call,
+                        boundary_kind,
+                        Some(w.keywords),
+                    );
+                }
+                Err(LowerError::UnsupportedShape(
+                    "where is only lowered for runtime boundary calls".into(),
+                ))
+            }
+            _ => Err(LowerError::UnsupportedShape(
+                "where (not in executable slice)".into(),
+            )),
+        }
+    }
+
     fn lower_invoke(
         &mut self,
         expr_id: ExprId,
@@ -810,9 +856,11 @@ impl<'a, 'ctx> VirBodyLowering<'a, 'ctx> {
                 // Passthrough — no runtime effect.
                 self.lower_expr(top.expr)
             }
-            crate::expr::TypeOpKind::As => Err(LowerError::UnsupportedShape(
-                "type cast (as) not in executable slice".into(),
-            )),
+            crate::expr::TypeOpKind::As => {
+                // For representation-preserving conversions such as newtypes,
+                // the current evaluator keeps the same runtime value.
+                self.lower_expr(top.expr)
+            }
             crate::expr::TypeOpKind::Is => Err(LowerError::UnsupportedShape(
                 "type test (is) not in executable slice".into(),
             )),
@@ -894,7 +942,12 @@ impl<'a, 'ctx> VirBodyLowering<'a, 'ctx> {
                 Some(DefTarget::Item(item_id)) => {
                     // Check for runtime boundary (exec/discover/stabilize from stdlib).
                     if let Some(boundary_kind) = self.ctx.classify_runtime_boundary(item_id) {
-                        return self.lower_runtime_boundary_call(expr_id, call, boundary_kind);
+                        return self.lower_runtime_boundary_call(
+                            expr_id,
+                            call,
+                            boundary_kind,
+                            None,
+                        );
                     }
 
                     if let ItemKind::Function(ref func) = self.arena()[item_id].kind {
@@ -960,6 +1013,7 @@ impl<'a, 'ctx> VirBodyLowering<'a, 'ctx> {
         expr_id: ExprId,
         call: &crate::expr::CallExpr,
         kind: RuntimeBoundaryKind,
+        keyword_expr: Option<ExprId>,
     ) -> Result<Operand, LowerError> {
         let node_id = self.ctx.alloc_runtime_node();
 
@@ -969,6 +1023,27 @@ impl<'a, 'ctx> VirBodyLowering<'a, 'ctx> {
             let input = self.lower_boundary_input(arg.expr)?;
             positional_inputs.push(input);
         }
+        let mut mounts = Vec::new();
+        let mut writable_roots = Vec::new();
+        let mut create_dirs = Vec::new();
+        let mut coarse_mounts = Vec::new();
+
+        if let Some(keyword_expr) = keyword_expr {
+            self.lower_runtime_boundary_keywords(
+                kind,
+                keyword_expr,
+                &mut positional_inputs,
+                &mut mounts,
+                &mut writable_roots,
+                &mut create_dirs,
+                &mut coarse_mounts,
+            )?;
+        }
+
+        let has_closure_arg = positional_inputs
+            .iter()
+            .any(|input| matches!(input, RuntimeBoundaryInputSpec::Closure { .. }));
+        let has_where_clause = keyword_expr.is_some();
 
         let dst = self.alloc_typed_temp(expr_id);
         self.ops.push(KernelOp::AwaitRuntime {
@@ -976,25 +1051,27 @@ impl<'a, 'ctx> VirBodyLowering<'a, 'ctx> {
             source: self.source_for(expr_id),
             node: node_id,
             positional_inputs: positional_inputs.clone(),
-            mounts: vec![],
-            writable_roots: vec![],
-            coarse_mounts: vec![],
+            mounts: mounts.clone(),
+            writable_roots: writable_roots.clone(),
+            create_dirs: create_dirs.clone(),
+            coarse_mounts: coarse_mounts.clone(),
         });
 
         let payload = match kind {
             RuntimeBoundaryKind::Exec => {
                 RuntimeBoundaryPayload::Exec(crate::exec_types::ExecBoundaryPayload {
                     positional_arg_count: positional_inputs.len(),
-                    has_where_clause: false,
-                    has_mounts: false,
-                    has_writable: false,
-                    has_coarse_mounts: false,
+                    has_where_clause,
+                    has_mounts: !mounts.is_empty(),
+                    has_writable: !writable_roots.is_empty(),
+                    has_create_dirs: !create_dirs.is_empty(),
+                    has_coarse_mounts: !coarse_mounts.is_empty(),
                 })
             }
             RuntimeBoundaryKind::Discover => {
                 RuntimeBoundaryPayload::Discover(crate::exec_types::DiscoverBoundaryPayload {
                     positional_arg_count: positional_inputs.len(),
-                    has_closure_arg: false,
+                    has_closure_arg,
                 })
             }
             RuntimeBoundaryKind::SharedKeyed => {
@@ -1017,12 +1094,146 @@ impl<'a, 'ctx> VirBodyLowering<'a, 'ctx> {
         Ok(Operand::Slot(dst))
     }
 
+    fn lower_runtime_boundary_keywords(
+        &mut self,
+        kind: RuntimeBoundaryKind,
+        keyword_expr: ExprId,
+        positional_inputs: &mut Vec<RuntimeBoundaryInputSpec>,
+        mounts: &mut Vec<(crate::exec_types::TreeFilePath, RuntimeBoundaryInputSpec)>,
+        writable_roots: &mut Vec<crate::exec_types::TreeFilePath>,
+        create_dirs: &mut Vec<crate::exec_types::TreeFilePath>,
+        coarse_mounts: &mut Vec<RuntimeBoundaryInputSpec>,
+    ) -> Result<(), LowerError> {
+        let ExprKind::Record(record) = self.arena()[keyword_expr].kind.clone() else {
+            return Err(LowerError::UnsupportedShape(
+                "runtime boundary where expects a record".into(),
+            ));
+        };
+
+        for field in record.fields {
+            match kind {
+                RuntimeBoundaryKind::Exec => match field.name.as_str() {
+                    "observer" => positional_inputs.push(self.lower_boundary_input(field.value)?),
+                    "mounts" => mounts.extend(self.lower_boundary_mounts(field.value)?),
+                    "writable" => {
+                        writable_roots.extend(self.lower_boundary_writable_roots(field.value)?)
+                    }
+                    "create_dirs" => {
+                        create_dirs.extend(self.lower_boundary_writable_roots(field.value)?)
+                    }
+                    "coarse_mounts" => {
+                        coarse_mounts.extend(self.lower_boundary_array_items(field.value)?)
+                    }
+                    other => {
+                        return Err(LowerError::UnsupportedShape(format!(
+                            "exec where keyword `{other}` not in executable slice"
+                        )));
+                    }
+                },
+                _ => {
+                    return Err(LowerError::UnsupportedShape(format!(
+                        "runtime boundary {kind:?} does not accept where in executable slice"
+                    )));
+                }
+            }
+        }
+
+        Ok(())
+    }
+
+    fn lower_boundary_mounts(
+        &mut self,
+        expr_id: ExprId,
+    ) -> Result<Vec<(crate::exec_types::TreeFilePath, RuntimeBoundaryInputSpec)>, LowerError> {
+        let ExprKind::Map(map) = self.arena()[expr_id].kind.clone() else {
+            return Err(LowerError::UnsupportedShape(
+                "exec mounts keyword expects a map literal".into(),
+            ));
+        };
+
+        let mut result = Vec::new();
+        for entry in map.entries {
+            let crate::expr::MapElement::Entry(entry) = entry else {
+                return Err(LowerError::UnsupportedShape(
+                    "spread in exec mounts is not supported yet".into(),
+                ));
+            };
+            let path = match entry.key {
+                crate::expr::MapKey::Expr(key_expr) => self.lower_boundary_path(key_expr)?,
+                crate::expr::MapKey::Name { name, .. } => crate::exec_types::TreeFilePath(name),
+            };
+            let value = self.lower_boundary_input(entry.value)?;
+            result.push((path, value));
+        }
+        Ok(result)
+    }
+
+    fn lower_boundary_writable_roots(
+        &mut self,
+        expr_id: ExprId,
+    ) -> Result<Vec<crate::exec_types::TreeFilePath>, LowerError> {
+        let mut result = Vec::new();
+        for item in self.lower_boundary_array_items(expr_id)? {
+            let path = match item {
+                RuntimeBoundaryInputSpec::PathLiteral(path) => path,
+                other => {
+                    return Err(LowerError::UnsupportedShape(format!(
+                        "exec writable entries must be path literals, got {other:?}"
+                    )));
+                }
+            };
+            result.push(path);
+        }
+        Ok(result)
+    }
+
+    fn lower_boundary_array_items(
+        &mut self,
+        expr_id: ExprId,
+    ) -> Result<Vec<RuntimeBoundaryInputSpec>, LowerError> {
+        let ExprKind::Array(array) = self.arena()[expr_id].kind.clone() else {
+            return Err(LowerError::UnsupportedShape(
+                "runtime boundary keyword expects an array literal".into(),
+            ));
+        };
+
+        let mut result = Vec::new();
+        for element in array.elements {
+            match element {
+                crate::expr::ArrayElement::Expr(expr_id) => {
+                    result.push(self.lower_boundary_input(expr_id)?);
+                }
+                crate::expr::ArrayElement::Spread(_) => {
+                    return Err(LowerError::UnsupportedShape(
+                        "spread in runtime boundary array keyword is not supported yet".into(),
+                    ));
+                }
+            }
+        }
+        Ok(result)
+    }
+
+    fn lower_boundary_path(
+        &mut self,
+        expr_id: ExprId,
+    ) -> Result<crate::exec_types::TreeFilePath, LowerError> {
+        match self.arena()[expr_id].kind.clone() {
+            ExprKind::PathLiteral(pl) => Ok(crate::exec_types::TreeFilePath(
+                self.assemble_path_literal(&pl),
+            )),
+            other => Err(LowerError::UnsupportedShape(format!(
+                "runtime boundary path expects a path literal, got {other:?}"
+            ))),
+        }
+    }
+
     fn lower_boundary_input(
         &mut self,
         expr_id: ExprId,
     ) -> Result<RuntimeBoundaryInputSpec, LowerError> {
         let kind = self.arena()[expr_id].kind.clone();
         match kind {
+            ExprKind::Closure(cl) => self.lower_boundary_closure(expr_id, &cl),
             ExprKind::Literal(lit) => match &lit.value {
                 LitKind::Int { raw } => {
                     let value: i64 = raw
@@ -1073,6 +1284,39 @@ impl<'a, 'ctx> VirBodyLowering<'a, 'ctx> {
                 })
             }
         }
+    }
+
+    fn lower_boundary_closure(
+        &mut self,
+        expr_id: ExprId,
+        cl: &crate::expr::ClosureExpr,
+    ) -> Result<RuntimeBoundaryInputSpec, LowerError> {
+        let captures = self.arena()[cl.body].captures.clone();
+        if !captures.is_empty() {
+            return Err(LowerError::UnsupportedShape(
+                "runtime boundary closure captures are not supported yet".into(),
+            ));
+        }
+
+        self.lower_closure_body(cl.body, &captures)?;
+        let exec_body = self
+            .ctx
+            .synth_bodies
+            .remove(&a_body(cl.body))
+            .ok_or_else(|| {
+                LowerError::UnsupportedShape(
+                    "failed to materialize runtime boundary closure body".into(),
+                )
+            })?;
+
+        Ok(RuntimeBoundaryInputSpec::Closure {
+            source: self.source_for(expr_id),
+            closure: crate::exec_types::ExecutableClosure {
+                params: exec_body.params,
+                ops: exec_body.ops,
+                result_source: exec_body.result_source,
+            },
+        })
     }
 
     // -----------------------------------------------------------------------
@@ -1366,10 +1610,10 @@ impl<'a, 'ctx> VirBodyLowering<'a, 'ctx> {
             }
             // NameRef → Binding → follow init_expr.
             ExprKind::NameRef(nr) => {
-                if let Some(DefTarget::Binding(bid)) = nr.resolved {
-                    if let Some(init) = self.arena()[bid].init_expr {
-                        return self.resolve_to_product_field(init, field, visited);
-                    }
+                if let Some(DefTarget::Binding(bid)) = nr.resolved
+                    && let Some(init) = self.arena()[bid].init_expr
+                {
+                    return self.resolve_to_product_field(init, field, visited);
                 }
                 None
             }
@@ -1608,8 +1852,8 @@ impl<'a, 'ctx> VirBodyLowering<'a, 'ctx> {
         // Remap generated (non-param) slots.
         for s in (capture_count as u32)..child_next_slot {
             let old = SlotId(s);
-            if !slot_remap.contains_key(&old) {
-                slot_remap.insert(old, SlotId(new_slot));
+            if let std::collections::hash_map::Entry::Vacant(e) = slot_remap.entry(old) {
+                e.insert(SlotId(new_slot));
                 new_slot += 1;
             }
         }

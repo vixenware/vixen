@@ -511,7 +511,8 @@ model, but they are not part of the core language syntax.
 
 > r[exec.executor-class]
 >
-> `executor_class(label: String) -> ExecutorClass` creates a value
+> `ExecutorClass` is a distinct newtype over `String`.
+> `executor_class(label: String) -> ExecutorClass` wraps a label into a value
 > representing a class of executor environments (e.g.,
 > `executor_class("ubuntu-22.04")`). The class is the unit of cache
 > reuse for `exec` — cached results are keyed by executor class, not

@@ -14,10 +14,3 @@ rustdoc-args = ["--html-in-header", "arborium-header.html"]
 vx-vir = { path = "../vx-vir" }
 thiserror = "2"
 
-[dev-dependencies]
-datatest-stable = { workspace = true }
-vx-eval-tests = { path = "../vx-eval-tests" }
-
-[[test]]
-name = "slice0_pipeline"
-harness = false

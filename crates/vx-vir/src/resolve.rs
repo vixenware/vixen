@@ -66,7 +66,7 @@ pub fn resolve_names(arena: &mut VirArena) -> Vec<ResolveError> {
 
     // Collect source unit IDs first to avoid borrow issues.
     let su_ids: Vec<SourceUnitId> = (0..arena.source_units.len())
-        .map(|i| SourceUnitId::from_index(i))
+        .map(SourceUnitId::from_index)
         .collect();
 
     for su_id in su_ids {
@@ -723,10 +723,10 @@ fn item_decl_order(arena: &VirArena, item_id: ItemId) -> u32 {
     // Search all scopes for an entry pointing to this item.
     for scope in &arena.scopes {
         for entry in &scope.entries {
-            if let ScopeEntryTarget::Item(id) = entry.target {
-                if id == item_id {
-                    return entry.decl_order;
-                }
+            if let ScopeEntryTarget::Item(id) = entry.target
+                && id == item_id
+            {
+                return entry.decl_order;
             }
         }
     }

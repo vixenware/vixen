@@ -7,10 +7,6 @@ edition.workspace = true
 name = "vx_runner"
 path = "src/lib.rs"
 
-[features]
-default = []
-diagnostics = ["moire/diagnostics"]
-
 [package.metadata.cargo-shear]
 ignored = ["moire"]
 

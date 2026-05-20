@@ -5,7 +5,6 @@
 
 use vx_parser::parse_source_file;
 use vx_resolve::SourceId;
-use vx_vir::VirVisitor;
 use vx_vir::build::VirBuilder;
 use vx_vir::expr::{ExprKind, FieldKey, LitKind};
 use vx_vir::item::ItemKind;
@@ -437,10 +436,10 @@ fn fn_body_scope(
     name: &str,
 ) -> vx_vir::ScopeId {
     for &item_id in &arena[su_id].items {
-        if let ItemKind::Function(f) = &arena[item_id].kind {
-            if f.name == name {
-                return arena[f.body].scope;
-            }
+        if let ItemKind::Function(f) = &arena[item_id].kind
+            && f.name == name
+        {
+            return arena[f.body].scope;
         }
     }
     panic!("function '{}' not found in source unit", name);
@@ -453,14 +452,14 @@ fn fn_block_scope(
     name: &str,
 ) -> vx_vir::ScopeId {
     for &item_id in &arena[su_id].items {
-        if let ItemKind::Function(f) = &arena[item_id].kind {
-            if f.name == name {
-                let root = &arena[arena[f.body].root_expr];
-                if let ExprKind::Block(b) = &root.kind {
-                    return b.scope;
-                }
-                panic!("function '{}' root is not a block", name);
+        if let ItemKind::Function(f) = &arena[item_id].kind
+            && f.name == name
+        {
+            let root = &arena[arena[f.body].root_expr];
+            if let ExprKind::Block(b) = &root.kind {
+                return b.scope;
             }
+            panic!("function '{}' root is not a block", name);
         }
     }
     panic!("function '{}' not found", name);

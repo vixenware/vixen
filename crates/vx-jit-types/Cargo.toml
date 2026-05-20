@@ -11,7 +11,6 @@ repository.workspace = true
 rustdoc-args = ["--html-in-header", "arborium-header.html"]
 
 [dependencies]
-kajit-reprs = { path = "../../../kajit/crates-kajit/kajit-reprs" }
 
 [lints]
 workspace = true

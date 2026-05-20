@@ -62,7 +62,10 @@ specs (
         impls (
             {
                 name rust
-                include (crates/**/*.rs)
+                include (
+                    crates/**/*.rs
+                    crates-plus/**/*.rs
+                )
                 exclude (target/**)
             }
         )
