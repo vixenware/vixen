@@ -2098,20 +2098,9 @@ name = "moire"
 version = "1.0.1"
 source = "git+https://github.com/bearcove/moire?rev=cf162e7#cf162e7be775dd6a22317fa4fef1309e6c0a9d69"
 dependencies = [
- "moire-macros",
  "moire-macros-noop",
  "moire-tokio",
  "moire-wasm",
-]
-
-[[package]]
-name = "moire-macros"
-version = "1.0.1"
-source = "git+https://github.com/bearcove/moire?rev=cf162e7#cf162e7be775dd6a22317fa4fef1309e6c0a9d69"
-dependencies = [
- "proc-macro2",
- "quote",
- "unsynn",
 ]
 
 [[package]]
@@ -3531,6 +3520,7 @@ dependencies = [
  "facet-core",
  "libc",
  "museair",
+ "tracing",
  "vox-jit-abi",
  "vox-jit-cal",
  "vox-postcard",
@@ -3581,6 +3571,7 @@ dependencies = [
  "facet",
  "facet-core",
  "facet-reflect",
+ "facet-value",
  "vox-jit-abi",
  "vox-jit-cal",
  "vox-schema",

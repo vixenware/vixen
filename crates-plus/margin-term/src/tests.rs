@@ -52,12 +52,12 @@ fn sample_diagnostics() -> Diagnostics {
     }
 }
 
-// d[verify api.renderer-options]
-// d[verify term.explicit-capabilities]
-// d[verify term.plaintext-mode]
-// d[verify test.fixture-first]
-// d[verify layout.no-terminal-wrap]
-// d[verify layout.notes-wrap]
+/// d[verify api.renderer-options]
+/// d[verify term.explicit-capabilities]
+/// d[verify term.plaintext-mode]
+/// d[verify test.fixture-first]
+/// d[verify layout.no-terminal-wrap]
+/// d[verify layout.notes-wrap]
 #[test]
 fn render_supports_plaintext_ascii_output() {
     let rendered = render(
@@ -83,8 +83,8 @@ fn render_supports_plaintext_ascii_output() {
     assert!(!rendered.contains("\u{1b}["));
 }
 
-// d[verify term.explicit-capabilities]
-// d[verify api.renderer-options]
+/// d[verify term.explicit-capabilities]
+/// d[verify api.renderer-options]
 #[test]
 fn render_can_hyperlink_source_headers() {
     let rendered = render(
@@ -107,7 +107,7 @@ fn render_can_hyperlink_source_headers() {
     assert!(rendered.contains("src/main.vx"), "{rendered}");
 }
 
-// d[verify label.multiline-message-alignment]
+/// d[verify label.multiline-message-alignment]
 #[test]
 fn render_below_span_message_stays_anchored_to_the_span() {
     let rendered = render(
@@ -191,12 +191,12 @@ fn render_multiline_annotations_only_emit_the_message_once() {
     assert_eq!(rendered.matches("spans lines").count(), 2, "{rendered}");
 }
 
-// d[verify test.width-matrix]
-// d[verify test.capability-matrix]
-// d[verify glyph.unicode-ascii]
-// d[verify theme.capability-fallback]
-// d[verify label.multiline-message-alignment]
-// d[verify layout.multiline-labels]
+/// d[verify test.width-matrix]
+/// d[verify test.capability-matrix]
+/// d[verify glyph.unicode-ascii]
+/// d[verify theme.capability-fallback]
+/// d[verify label.multiline-message-alignment]
+/// d[verify layout.multiline-labels]
 #[test]
 fn render_changes_with_width_and_capabilities() {
     let narrow = render(
@@ -233,8 +233,8 @@ fn render_changes_with_width_and_capabilities() {
     assert!(wide.contains("consider defining the binding before using it"));
 }
 
-// d[verify theme.capability-fallback]
-// d[verify test.capability-matrix]
+/// d[verify theme.capability-fallback]
+/// d[verify test.capability-matrix]
 #[test]
 fn render_can_use_rgb24_colors_from_arborium_theme() {
     let plan = super::layout(
@@ -264,7 +264,7 @@ fn render_can_use_rgb24_colors_from_arborium_theme() {
     assert!(rendered.contains("\u{1b}[38;2;"), "{rendered}");
 }
 
-// d[verify layout.ellipsis]
+/// d[verify layout.ellipsis]
 #[test]
 fn render_clips_long_lines_with_explicit_ellipsis() {
     let diagnostics = Diagnostics {
@@ -350,8 +350,8 @@ fn render_wraps_long_path_like_tokens() {
     assert!(rendered.contains("component/file.c"), "{rendered}");
 }
 
-// d[verify term.ansi-discipline]
-// d[verify theme.roles]
+/// d[verify term.ansi-discipline]
+/// d[verify theme.roles]
 #[test]
 fn render_uses_balanced_ansi_sequences_and_role_styles() {
     let plan = super::layout(
@@ -386,11 +386,11 @@ fn render_uses_balanced_ansi_sequences_and_role_styles() {
     );
 }
 
-// d[verify unicode.tab-policy]
-// d[verify unicode.display-width]
-// d[verify unicode.grapheme-safety]
-// d[verify unicode.normalization-stability]
-// d[verify test.unicode]
+/// d[verify unicode.tab-policy]
+/// d[verify unicode.display-width]
+/// d[verify unicode.grapheme-safety]
+/// d[verify unicode.normalization-stability]
+/// d[verify test.unicode]
 #[test]
 fn render_expands_tabs_and_keeps_unicode_text_stable() {
     let diagnostics = Diagnostics {

@@ -25,9 +25,9 @@ VixenFS has three layers:
 │  VixenFS.appex (FSKit extension, Swift)     │
 │  - sandboxed process managed by fskitd      │
 │  - serves /.vixenfs/status.json locally     │
-│  - forwards all other I/O over roam         │
+│  - forwards all other I/O over vox          │
 ├─────────────────────────────────────────────┤
-│  vx-vfsd (Rust backend, roam connection)    │
+│  vx-vfsd (Rust backend, vox connection)     │
 │  - actually resolves file content from CAS  │
 └─────────────────────────────────────────────┘
 ```
@@ -42,7 +42,7 @@ intermediate states, not just "mounted" and "not mounted".
 - The **extension** (VixenFS.appex) is **registered** or not, **enabled** or
   not, and **running** or not. These are independent.
 - The **backend** (vx-vfsd) is **connected** or not (from the extension's
-  perspective, via roam).
+  perspective, via vox).
 
 ## What can go wrong
 

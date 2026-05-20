@@ -4,7 +4,7 @@ Status: Not started.
 
 ## Goal
 
-Stop generating Kajit strict fragments by re-walking the raw parser AST keyed by spans. Instead, generate strict fragments from the already-lowered executable slice (`ExecutableBody.ops`) when those ops are in the strict-compatible subset.
+Stop generating vx-jit strict fragments by re-walking the raw parser AST keyed by spans. Instead, generate strict fragments from the already-lowered executable slice (`ExecutableBody.ops`) when those ops are in the strict-compatible subset.
 
 This makes “strict compilation” a property of the lowering output, not a property of a second independent AST walk.
 
@@ -23,13 +23,13 @@ KernelOps are already a statement-like IR that is closer to the intended lazy-co
 - Define a strict-compatible subset of `KernelOp` that can be compiled:
 - scalar const ops
 - scalar arithmetic and comparisons
-- string ops if Kajit supports them (or exclude initially)
+- string ops if vx-jit supports them (or exclude initially)
 - pure `Select` with strict bool condition
 - Define a new strict lowerer that takes:
 - `params: &[SlotId]`
 - `ops: &[KernelOp]`
 - `result_slot: SlotId`
-- and produces a `kajit_hir::VixenTypedFunction`
+- and produces a vx-jit input IR (`VixenTypedFunction`-shaped)
 - Wire this into `vx-analysis` lowering:
 - After `exec_slice::lower_executable_program(...)`, attempt strict-lowering for each `ExecutableBody`.
 - If strict lowering succeeds, set `kernel_kind = Strict { vtf }`, otherwise keep interpreted.

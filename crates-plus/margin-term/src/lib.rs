@@ -1,22 +1,6 @@
 //! Terminal rendering for `margin` layout plans.
-// d[impl package.primary-split]
-// d[impl api.layout-render-separation]
-// d[impl api.renderer-options]
-// d[impl layout.ellipsis]
-// d[impl label.multiline-message-alignment]
-// d[impl layout.multiline-labels]
-// d[impl layout.no-terminal-wrap]
-// d[impl layout.notes-wrap]
-// d[impl term.ansi-discipline]
-// d[impl term.explicit-capabilities]
-// d[impl term.plaintext-mode]
-// d[impl glyph.unicode-ascii]
-// d[impl theme.capability-fallback]
-// d[impl theme.roles]
-// d[impl test.fixture-first]
-// d[impl test.width-matrix]
-// d[impl test.capability-matrix]
-// d[impl test.unicode]
+//!
+//! d[impl package.primary-split]
 
 use std::fmt::Write;
 
@@ -27,9 +11,14 @@ use margin::{
 };
 use unicode_width::{UnicodeWidthChar, UnicodeWidthStr};
 
+/// d[impl test.fixture-first]
+/// d[impl test.width-matrix]
+/// d[impl test.capability-matrix]
+/// d[impl test.unicode]
 #[cfg(test)]
 mod tests;
 
+/// d[impl glyph.unicode-ascii]
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum GlyphMode {
     Unicode,
@@ -49,6 +38,8 @@ pub enum HyperlinkMode {
     Osc8,
 }
 
+/// d[impl api.renderer-options]
+/// d[impl term.explicit-capabilities]
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct TerminalCapabilities {
     pub width: usize,
@@ -58,6 +49,7 @@ pub struct TerminalCapabilities {
     pub tab_width: usize,
 }
 
+/// d[impl theme.roles]
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct Theme {
     pub severity_error: Style,
@@ -181,6 +173,7 @@ impl Style {
         })
     }
 
+    /// d[impl theme.capability-fallback]
     fn has_effect(self, color_level: ColorLevel) -> bool {
         match color_level {
             ColorLevel::None => false,
@@ -226,6 +219,7 @@ pub fn render(
     Ok(render_plan(&plan, capabilities))
 }
 
+/// d[impl api.layout-render-separation]
 pub fn render_plan(plan: &LayoutPlan, capabilities: TerminalCapabilities) -> String {
     render_plan_with_theme(plan, capabilities, Theme::default())
 }
@@ -281,6 +275,7 @@ pub fn render_plan_with_theme(
     output
 }
 
+/// d[impl layout.ellipsis]
 fn render_window(
     output: &mut String,
     window: &SourceWindow,
@@ -441,6 +436,7 @@ fn hyperlink_text(text: &str, target: Option<&str>, mode: HyperlinkMode) -> Stri
     }
 }
 
+/// d[impl layout.notes-wrap]
 fn render_note(output: &mut String, note: &Note, capabilities: TerminalCapabilities, theme: Theme) {
     let prefix = match note.kind {
         NoteKind::Note => "note",
@@ -466,6 +462,8 @@ fn render_note(output: &mut String, note: &Note, capabilities: TerminalCapabilit
     }
 }
 
+/// d[impl layout.multiline-labels]
+/// d[impl label.multiline-message-alignment]
 fn render_annotation(
     output: &mut String,
     annotation: RenderableAnnotation<'_>,
@@ -697,6 +695,7 @@ fn clip_to_width(text: &str, width: usize) -> String {
     clipped
 }
 
+/// d[impl layout.no-terminal-wrap]
 fn wrap_text(text: &str, width: usize) -> Vec<String> {
     if width == 0 {
         return vec![String::new()];
@@ -804,6 +803,8 @@ fn severity_for_role(role: AnnotationRole) -> Severity {
     }
 }
 
+/// d[impl term.ansi-discipline]
+/// d[impl term.plaintext-mode]
 fn colorize(text: &str, style: Style, color_level: ColorLevel) -> String {
     if color_level == ColorLevel::None {
         return text.to_string();
