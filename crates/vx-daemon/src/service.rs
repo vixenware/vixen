@@ -63,7 +63,11 @@ impl Daemon for DaemonService {
     }
 
     async fn shutdown(&self) {
-        let _ = self.inner.shutdown_tx.send(true);
+        let shutdown_tx = self.inner.shutdown_tx.clone();
+        tokio::spawn(async move {
+            tokio::time::sleep(std::time::Duration::from_millis(25)).await;
+            let _ = shutdown_tx.send(true);
+        });
     }
 }
 

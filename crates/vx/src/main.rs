@@ -309,8 +309,10 @@ async fn eval(args: EvalArgs) -> eyre::Result<()> {
             } else {
                 error.into()
             }
-        })?;
-    progress_task.await?;
+        });
+    progress_task.abort();
+    let _ = progress_task.await;
+    let result = result?;
 
     match result {
         EvalFunctionResult::Ok(success) => {
