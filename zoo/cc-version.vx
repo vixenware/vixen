@@ -24,7 +24,7 @@ fn discover_c_toolchain(class: ExecutorClass) {
 fn build(ws: Path, args: Array[String], env: Map[String, String]) #discover -> Tree (
   let class = executor_class("default");
   let toolchain = discover_c_toolchain(class);
-  exec [toolchain.cc, "--version"] where {
+  let ev_stream = exec [toolchain.cc, "--version"] where {
     coarse_mounts: toolchain.coarse_mounts,
     observer: (proc, _vfs) => (
       if proc.exit_code != 0 (
@@ -35,5 +35,12 @@ fn build(ws: Path, args: Array[String], env: Map[String, String]) #discover -> T
         }
       )
     ),
+    observer: (proc, vfs) => (
+      proc.stdout.lines.filter_map.from_json {
+
+      }
+    )
   }
+
+  // smth with ev_stream
 )
