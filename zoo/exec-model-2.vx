@@ -1,0 +1,37 @@
+
+// design note: It should be able to skip fields in the keyword arguments that we
+// don't actually use, and the CLI should still be able to to evaluate the
+// function just without passing things that are not actually being used.
+fn build() #discover where { ws: Path, args: Array[String], env: Map[String, String] } -> Tree {
+  let src_dir = ws.subtree @src
+  let tree = build_c_program src
+  tree / @main
+}
+
+fn build_c_program(src: Tree) -> Tree {
+  let executor = default_executor();
+
+  struct Toolchain {
+    cc: Path,
+    coarse_mounts: Map[Path, Path],
+  }
+
+  // toolchain is also a Path
+  let cc = discover(executor, (os) => {
+    // cc is a Path
+    let cc = os.which("cc")
+
+    {
+      cc,
+      coarse_mounts: %{
+
+      }
+    }
+  })
+
+  exec [cc, src/@main.c, "-o", @out/main] where {
+    mounts: %{
+      @src => src,
+    }
+  }
+}
