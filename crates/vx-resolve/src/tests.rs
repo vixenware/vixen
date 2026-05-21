@@ -1558,7 +1558,7 @@ fn main() {
 
 #[test]
 fn cc_version_sketch_resolves_and_typechecks() {
-    let path = Path::new(env!("CARGO_MANIFEST_DIR")).join("../../zoo/cc-version.vx");
+    let path = Path::new(env!("CARGO_MANIFEST_DIR")).join("../../old-zoo/cc-version.vx");
     let source = fs::read_to_string(&path)
         .unwrap_or_else(|err| panic!("failed to read {}: {err}", path.display()));
     let file = parse_file_path(&path);
@@ -1583,7 +1583,7 @@ fn cc_version_sketch_resolves_and_typechecks() {
 
 #[test]
 fn lua_sketch_resolves_and_typechecks() {
-    let path = Path::new(env!("CARGO_MANIFEST_DIR")).join("../../zoo/lua.vx");
+    let path = Path::new(env!("CARGO_MANIFEST_DIR")).join("../../old-zoo/lua.vx");
     let source = fs::read_to_string(&path)
         .unwrap_or_else(|err| panic!("failed to read {}: {err}", path.display()));
     let file = parse_file_path(&path);
@@ -1608,7 +1608,7 @@ fn lua_sketch_resolves_and_typechecks() {
 
 #[test]
 fn cargo_resolve_sketch_resolves_and_typechecks() {
-    let path = Path::new(env!("CARGO_MANIFEST_DIR")).join("../../zoo/cargo-resolve.vx");
+    let path = Path::new(env!("CARGO_MANIFEST_DIR")).join("../../old-zoo/cargo-resolve.vx");
     let source = fs::read_to_string(&path)
         .unwrap_or_else(|err| panic!("failed to read {}: {err}", path.display()));
     let file = parse_file_path(&path);
@@ -1633,7 +1633,7 @@ fn cargo_resolve_sketch_resolves_and_typechecks() {
 
 #[test]
 fn libpng_sketch_resolves_and_typechecks() {
-    let path = Path::new(env!("CARGO_MANIFEST_DIR")).join("../../zoo/libpng.vx");
+    let path = Path::new(env!("CARGO_MANIFEST_DIR")).join("../../old-zoo/libpng.vx");
     let source = fs::read_to_string(&path)
         .unwrap_or_else(|err| panic!("failed to read {}: {err}", path.display()));
     let file = parse_file_path(&path);
@@ -1658,7 +1658,7 @@ fn libpng_sketch_resolves_and_typechecks() {
 
 #[test]
 fn remote_libpng_sketch_resolves_and_typechecks() {
-    let path = Path::new(env!("CARGO_MANIFEST_DIR")).join("../../zoo/remote-libpng.vx");
+    let path = Path::new(env!("CARGO_MANIFEST_DIR")).join("../../old-zoo/remote-libpng.vx");
     let source = fs::read_to_string(&path)
         .unwrap_or_else(|err| panic!("failed to read {}: {err}", path.display()));
     let file = parse_file_path(&path);

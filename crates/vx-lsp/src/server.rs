@@ -194,7 +194,15 @@ impl DocumentState {
             return String::new();
         };
         let start = u32::from(def.full_span.start()) as usize;
-        let end = u32::from(def.full_span.end()) as usize;
+        let end = if def.kind == vx_resolve::DefKind::Function {
+            self.declaration_node_for(def)
+                .and_then(FnDecl::cast)
+                .and_then(|decl| decl.body_expr())
+                .map(|body| u32::from(body.syntax().text_range().start()) as usize)
+                .unwrap_or_else(|| u32::from(def.full_span.end()) as usize)
+        } else {
+            u32::from(def.full_span.end()) as usize
+        };
         let slice = &doc.text[start..end];
         slice
             .lines()
