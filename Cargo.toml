@@ -49,7 +49,7 @@ repository = "https://github.com/bearcove/vx"
 
 [workspace.dependencies]
 # instrumentation
-moire = { version = "1.0.0", git = "https://github.com/bearcove/moire", rev = "cf162e7" }
+moire = "1.0.1"
 vx-services = { path = "crates/vx-services" }
 margin = { path = "crates-plus/margin" }
 margin-term = { path = "crates-plus/margin-term" }
@@ -78,7 +78,7 @@ facet-styx = "3.0.0"
 figue = { version = "2.0.1" }
 
 # vox RPC framework
-vox = { version = "0.6", features = ["transport-tcp", "transport-local"] }
+vox = { version = "0.8.1", features = ["transport-tcp", "transport-local"] }
 
 # process management
 
