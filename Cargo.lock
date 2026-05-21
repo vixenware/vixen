@@ -3793,6 +3793,7 @@ dependencies = [
  "vx-runner",
  "vx-services",
  "vx-store",
+ "vx-types",
  "vx-vfsd",
  "vx-vir",
 ]
@@ -3951,6 +3952,7 @@ dependencies = [
  "facet",
  "facet-postcard",
  "fastcdc",
+ "thiserror 2.0.18",
  "tokio",
  "vox",
 ]

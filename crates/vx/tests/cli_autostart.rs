@@ -132,13 +132,12 @@ fn eval_fresh_daemon_replaces_running_daemon_and_runs_rustc_hello() {
 fn vx_alias_runs_vixen_run_build() {
     let temp_dir = TempDir::new().expect("temp dir should exist");
     let config_path = write_daemon_config_without_vfsd(&temp_dir);
-    let build_file = write_simple_build_file(&temp_dir);
+    write_simple_build_file(&temp_dir);
 
     let output = Command::new(vx_bin())
-        .current_dir(workspace_root())
+        .current_dir(temp_dir.path())
         .env("VX_DAEMON_CONFIG", &config_path)
-        .args(["build", "--file"])
-        .arg(&build_file)
+        .arg("build")
         .output()
         .expect("vx build should run");
 
