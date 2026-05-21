@@ -1,7 +1,7 @@
 use facet::Facet;
 use figue as args;
 
-/// vx - Thin CLI for the current daemon shell
+/// vixen - Management CLI for the current daemon shell
 #[derive(Facet, Debug)]
 pub(crate) struct Cli {
     /// Command to run
@@ -16,6 +16,9 @@ pub(crate) struct Cli {
 #[derive(Facet, Debug)]
 #[repr(u8)]
 pub(crate) enum CliCommand {
+    /// Run a package-defined command
+    Run(RunArgs),
+
     /// Quick health check
     Health(HealthArgs),
 
@@ -89,6 +92,41 @@ pub(crate) struct EvalArgs {
     pub(crate) clif_dump: bool,
 
     /// Function arguments in order. Use `u64:42`, `bool:true`, `string:hello`.
+    /// Bare values are treated as strings.
+    #[facet(args::positional)]
+    pub(crate) args: Option<Vec<String>>,
+}
+
+#[derive(Facet, Debug)]
+pub(crate) struct RunArgs {
+    #[facet(flatten)]
+    pub(crate) target: ClientTargetArgs,
+
+    /// Stop and restart the local auto-started daemon before running
+    #[facet(args::named)]
+    pub(crate) fresh_daemon: bool,
+
+    /// Source file containing the requested command
+    #[facet(args::named)]
+    pub(crate) file: Option<camino::Utf8PathBuf>,
+
+    /// Evaluation backend: `interpreter` or `cranelift`
+    #[facet(args::named, default = "interpreter")]
+    pub(crate) backend: String,
+
+    /// Print the strict fragment IR to stderr and include it in the response
+    #[facet(args::named)]
+    pub(crate) strict_fragment_dump: bool,
+
+    /// Print the Cranelift IR to stderr and include it in the response
+    #[facet(args::named)]
+    pub(crate) clif_dump: bool,
+
+    /// Package-defined command to run
+    #[facet(args::positional)]
+    pub(crate) command: String,
+
+    /// Command arguments in order. Use `u64:42`, `bool:true`, `string:hello`.
     /// Bare values are treated as strings.
     #[facet(args::positional)]
     pub(crate) args: Option<Vec<String>>,

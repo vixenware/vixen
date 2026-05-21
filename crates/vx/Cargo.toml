@@ -2,6 +2,15 @@
 name = "vx"
 version.workspace = true
 edition.workspace = true
+autobins = false
+
+[[bin]]
+name = "vixen"
+path = "src/bin/vixen.rs"
+
+[[bin]]
+name = "vx"
+path = "src/main.rs"
 
 [package.metadata]
 
