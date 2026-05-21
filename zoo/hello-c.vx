@@ -13,27 +13,38 @@ fn build(root: Path) #discover -> Tree {
     let { triple, exec } = env;
     let toolchain = c.discover_toolchain() where { executor: exec };
     let tree = exec([toolchain.cc, root / @main.c, "-o", @out/main]);
-    Tree %{ triple => tree }
+    {
+      triple,
+      tree,
+    }
   });
-  trees.collect().merge()
+  trees.collect()
 
   // shape of the output:
   //
-  // x86_64-unknown-linux-gnu/
-  //   main
-  // aarch64-apple-darwin/
-  //   main
-  // aarch64-pc-windows-msvc/
-  //   main.exe
-  // local/
-  //   main
+  // [
+  //   { triple: "x86_64-unknown-linux-gnu", os: "linux", arch: "x86_64", tree: ? },
+  //   { triple: "aarch64-apple-darwin", os: "mac", arch: "aarch64", tree: ? },
+  //   { triple: "aarch64-pc-windows-msvc", os: "windows", arch: "aarch64", tree: ? },
+  //   { triple: "local", os: "?", arch: "?", tree: ? },
+  // ]
   //
-  // invocation of `vx build`
+  // default => local
   //
-  // vx build /x86_64-unknown-linux-gnu ?
+  // invocation of `vx build` (defaults to default?)
+  //
+  // vx build x86_64-unknown-linux-gnu ?
+  // vx build local
   //
   // where does it go?
   // how to do a local build?
   //
   // would `vx build` default to `/local` ? where does it write files?
+  //
+  // what about `vx bench`, `vx test`, `vx run`
+  //
+  // vx bench rpc_encode
+  // vx bench --os windows,linux,mac rpc_encode
+  /
+  // vx bench /x86_64-unknown-linux-gnu /aarch64-apple-darwin /aarch64-pc-windows-msvc -- rpc_encode
 }

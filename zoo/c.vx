@@ -1,0 +1,28 @@
+
+// our C package
+
+struct CToolchain {
+  clang: ExecutorPath,
+  fingerprints: Array[String],
+}
+
+fn discover_toolchain() where { executor: Executor } #discover -> CToolchain {
+  discover(executor, (host) => {
+    match host.os {
+      "darwin" => {
+        let clang = host.which("clang");
+        CToolchain {
+          clang,
+          fingerprints: [
+            host.exec([clang, "--version"]),
+            host.exec(["xcode-select", "--print-path"]),
+            host.exec(["plutil", "-p", "/Applications/Xcode.app/Contents/Info.plist"]),
+          ],
+        }
+      },
+      _ => {
+        fail "only linux supported"
+      }
+    }
+  })
+}
