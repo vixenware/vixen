@@ -3562,7 +3562,7 @@ checksum = "8d5208a9710a6ca1c2da0d64289a5dcca13deb05afdedf651f4e11bcd9fc53eb"
 
 [[package]]
 name = "vox"
-version = "0.8.1"
+version = "0.8.2"
 dependencies = [
  "facet",
  "facet-pretty",
@@ -3580,7 +3580,7 @@ dependencies = [
 
 [[package]]
 name = "vox-core"
-version = "0.8.1"
+version = "0.8.2"
 dependencies = [
  "facet",
  "facet-cbor",
@@ -3602,7 +3602,7 @@ dependencies = [
 
 [[package]]
 name = "vox-fdpass"
-version = "0.8.1"
+version = "0.8.2"
 dependencies = [
  "libc",
  "passfd",
@@ -3612,7 +3612,7 @@ dependencies = [
 
 [[package]]
 name = "vox-jit"
-version = "0.8.1"
+version = "0.8.2"
 dependencies = [
  "arc-swap",
  "cranelift-codegen",
@@ -3633,7 +3633,7 @@ dependencies = [
 
 [[package]]
 name = "vox-jit-abi"
-version = "0.8.1"
+version = "0.8.2"
 dependencies = [
  "arc-swap",
  "facet-core",
@@ -3643,7 +3643,7 @@ dependencies = [
 
 [[package]]
 name = "vox-jit-cal"
-version = "0.8.1"
+version = "0.8.2"
 dependencies = [
  "facet",
  "facet-core",
@@ -3651,7 +3651,7 @@ dependencies = [
 
 [[package]]
 name = "vox-macros-core"
-version = "0.8.1"
+version = "0.8.2"
 dependencies = [
  "facet-cargo-toml",
  "heck 0.5.0",
@@ -3662,7 +3662,7 @@ dependencies = [
 
 [[package]]
 name = "vox-macros-parse"
-version = "0.8.1"
+version = "0.8.2"
 dependencies = [
  "proc-macro2",
  "unsynn",
@@ -3670,7 +3670,7 @@ dependencies = [
 
 [[package]]
 name = "vox-postcard"
-version = "0.8.1"
+version = "0.8.2"
 dependencies = [
  "facet",
  "facet-core",
@@ -3683,7 +3683,7 @@ dependencies = [
 
 [[package]]
 name = "vox-schema"
-version = "0.8.1"
+version = "0.8.2"
 dependencies = [
  "blake3",
  "facet",
@@ -3694,7 +3694,7 @@ dependencies = [
 
 [[package]]
 name = "vox-service-macros"
-version = "0.8.1"
+version = "0.8.2"
 dependencies = [
  "proc-macro2",
  "vox-macros-core",
@@ -3702,7 +3702,7 @@ dependencies = [
 
 [[package]]
 name = "vox-stream"
-version = "0.8.1"
+version = "0.8.2"
 dependencies = [
  "libc",
  "moire 1.0.1 (git+https://github.com/bearcove/moire?rev=cf162e7)",
@@ -3715,7 +3715,7 @@ dependencies = [
 
 [[package]]
 name = "vox-types"
-version = "0.8.1"
+version = "0.8.2"
 dependencies = [
  "bitflags 2.11.1",
  "blake3",
