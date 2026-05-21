@@ -73,6 +73,7 @@ impl OrchestratorService {
                 value: output.value,
                 strict_fragment_dump: output.strict_fragment_dump,
                 clif_dump: output.clif_dump,
+                jit_report: output.jit_report,
             }),
             Err(error) => {
                 let strict_fragment_dump = error.strict_fragment_dump().cloned();
@@ -81,6 +82,7 @@ impl OrchestratorService {
                     message: error.to_string(),
                     strict_fragment_dump,
                     clif_dump,
+                    jit_report: None,
                 })
             }
         }
@@ -127,6 +129,7 @@ impl OrchestratorService {
                 value: output.value,
                 strict_fragment_dump: output.strict_fragment_dump,
                 clif_dump: output.clif_dump,
+                jit_report: output.jit_report,
             }),
             Err(error) => {
                 let strict_fragment_dump = error.strict_fragment_dump().cloned();
@@ -135,6 +138,7 @@ impl OrchestratorService {
                     message: error.to_string(),
                     strict_fragment_dump,
                     clif_dump,
+                    jit_report: None,
                 })
             }
         }

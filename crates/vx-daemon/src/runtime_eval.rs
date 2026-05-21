@@ -10,12 +10,16 @@ use async_recursion::async_recursion;
 use thiserror::Error;
 use vox::Tx;
 use vx_jit::{FragmentArg, FragmentResult};
-use vx_services::EvalProgressEvent;
 use vx_services::{
     BlobRef, DirectoryEntryKind, NodeHash, RuntimeValue, StoreClient, StrictEvalBackend,
     cas_tree::{MerkleTreeFile, build_merkle_tree},
     chunking::{prepare_blob, store_prepared_blob},
 };
+use vx_services::{
+    EvalProgressEvent, JitFailureReason, JitReport, JitReportEntry, JitReportOutcome,
+    JitSkipReason, JitUnsupportedOp, JitUnsupportedParam,
+};
+use vx_types::{Scalar, Ty};
 use vx_vfsd::{VfsdService, protocol::Vfsd};
 use vx_vir::compile::CompileError;
 use vx_vir::exec_types::{
@@ -23,6 +27,7 @@ use vx_vir::exec_types::{
     RuntimeBoundaryInputSpec, RuntimeBoundaryKind, RuntimeBoundaryPayload, RuntimeField,
     RuntimeMemberOp, SlotId,
 };
+use vx_vir::lower::SlotTypeMap;
 
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
 enum EvalValue {
@@ -60,13 +65,6 @@ pub struct RuntimeEvalContext {
 pub enum RuntimeEvalError {
     #[error("compilation failed: {0}")]
     Compile(#[from] CompileError),
-    #[error("function `{function}` is not strict-compatible with the Cranelift backend")]
-    CraneliftNotStrictCompatible { function: String },
-    #[error("Cranelift backend does not support runtime argument kind `{kind}` in `{function}`")]
-    CraneliftUnsupportedArgKind {
-        function: String,
-        kind: &'static str,
-    },
     #[error("Cranelift compilation failed for `{function}`: {detail}")]
     CraneliftCompile {
         function: String,
@@ -141,6 +139,7 @@ pub struct EvalOutput {
     pub value: RuntimeValue,
     pub strict_fragment_dump: Option<String>,
     pub clif_dump: Option<String>,
+    pub jit_report: Option<JitReport>,
 }
 
 pub struct EvalRequest<'a> {
@@ -158,7 +157,42 @@ pub async fn evaluate_source_text_function(
     progress: Option<Tx<EvalProgressEvent>>,
 ) -> Result<EvalOutput, RuntimeEvalError> {
     if request.backend == StrictEvalBackend::Cranelift {
-        return evaluate_with_cranelift(&request);
+        let output =
+            vx_vir::compile::compile_source_with_types(request.source, request.function_name)?;
+        let eval_args = request
+            .args
+            .iter()
+            .cloned()
+            .map(eval_value_from_runtime)
+            .collect::<Vec<_>>();
+        let mut evaluator = ProgramEvaluator::new(
+            context,
+            &output.program,
+            progress,
+            Some(JitMode {
+                slot_types: &output.slot_types,
+                original_body_count: output.original_body_count,
+                include_strict_fragment_dump: request.include_strict_fragment_dump,
+                include_clif_dump: request.include_clif_dump,
+            }),
+        );
+        let result = async {
+            let value = evaluator
+                .eval_body(request.function_name, output.program.entry, &eval_args)
+                .await?;
+            let value = evaluator
+                .finalize_value(request.function_name, value)
+                .await?;
+            runtime_value_from_eval(request.function_name, value)
+        }
+        .await;
+        evaluator.cleanup_exec_prefixes().await;
+        return result.map(|value| EvalOutput {
+            value,
+            strict_fragment_dump: evaluator.strict_fragment_dump,
+            clif_dump: evaluator.clif_dump,
+            jit_report: Some(evaluator.jit_report),
+        });
     }
 
     let program = vx_vir::compile::compile_source(request.source, request.function_name)?;
@@ -170,7 +204,7 @@ pub async fn evaluate_source_text_function(
         .cloned()
         .map(eval_value_from_runtime)
         .collect::<Vec<_>>();
-    let mut evaluator = ProgramEvaluator::new(context, &program, progress);
+    let mut evaluator = ProgramEvaluator::new(context, &program, progress, None);
     let result = async {
         let value = evaluator
             .eval_body(request.function_name, body_id, &eval_args)
@@ -186,129 +220,83 @@ pub async fn evaluate_source_text_function(
         value,
         strict_fragment_dump: None,
         clif_dump: None,
+        jit_report: None,
     })
 }
 
-fn evaluate_with_cranelift(request: &EvalRequest<'_>) -> Result<EvalOutput, RuntimeEvalError> {
-    let frag_args = request
-        .args
+fn fragment_arg_from_eval(value: &EvalValue) -> Option<FragmentArg> {
+    Some(match value {
+        EvalValue::U64(v) => FragmentArg::U64(*v),
+        EvalValue::Bool(v) => FragmentArg::Bool(*v),
+        EvalValue::String(v) => FragmentArg::String(v.clone()),
+        _ => return None,
+    })
+}
+
+fn eval_value_from_fragment_result(result: FragmentResult) -> EvalValue {
+    match result {
+        FragmentResult::U64(v) => EvalValue::U64(v),
+        FragmentResult::Bool(v) => EvalValue::Bool(v),
+        FragmentResult::String(v) => EvalValue::String(v),
+    }
+}
+
+fn jit_skip_reason(body: &vx_vir::exec_types::ExecutableBody, jit: JitMode<'_>) -> JitSkipReason {
+    if body.id.0 >= jit.original_body_count {
+        return JitSkipReason::SynthesizedBody;
+    }
+
+    let unsupported_params = body
+        .params
         .iter()
-        .cloned()
-        .map(|arg| fragment_arg_from_runtime(request.function_name, arg))
-        .collect::<Result<Vec<_>, _>>()?;
-
-    let output = vx_vir::compile::compile_source_with_types(request.source, request.function_name)?;
-
-    let entry = output.program.entry;
-    let body = match output.program.bodies.get(&entry) {
-        Some(b) => b,
-        None => {
-            return Err(RuntimeEvalError::UnsupportedOperation {
-                function: request.function_name.to_owned(),
-                detail: "compiled program is missing its entry body".to_owned(),
-            });
-        }
-    };
-
-    let mut func = match vx_jit::lower_to_strict::try_strict_lower(
-        body,
-        &output.slot_types,
-        output.original_body_count,
-    ) {
-        Some(f) => f,
-        None => {
-            return Err(RuntimeEvalError::CraneliftNotStrictCompatible {
-                function: request.function_name.to_owned(),
-            });
-        }
-    };
-    func.name = request.function_name.to_owned();
-
-    let strict_fragment_dump =
-        if request.include_strict_fragment_dump || std::env::var_os("VX_STRICT_DUMP").is_some() {
-            let dump = format!("{:#?}", func);
-            if std::env::var_os("VX_STRICT_DUMP").is_some() {
-                eprintln!(
-                    "[vx-jit] strict fragment for `{}`:\n{dump}",
-                    request.function_name
-                );
-            }
-            Some(dump)
-        } else {
-            None
+        .filter_map(|slot| {
+            let ty = jit.slot_types.get(&(body.id, *slot))?;
+            (!fragment_type_supported(ty)).then(|| JitUnsupportedParam {
+                slot: slot.0,
+                ty: format!("{ty:?}"),
+            })
+        })
+        .collect::<Vec<_>>();
+    if !unsupported_params.is_empty() {
+        return JitSkipReason::NonStrictParameterTypes {
+            params: unsupported_params,
         };
+    }
 
-    let compiled =
-        vx_jit::compile_with_dump(&func, request.include_clif_dump).map_err(|failure| {
-            RuntimeEvalError::CraneliftCompile {
-                function: request.function_name.to_owned(),
-                detail: failure.error.to_string(),
-                strict_fragment_dump: strict_fragment_dump.clone(),
-                clif_dump: failure.clif_dump,
-            }
-        })?;
+    for op in &body.ops {
+        if let Some(reason) = unsupported_jit_op_reason(op) {
+            return JitSkipReason::UnsupportedOp { op: reason };
+        }
+    }
 
-    let result =
-        compiled
-            .fragment
-            .call(&frag_args)
-            .map_err(|error| RuntimeEvalError::CraneliftExecute {
-                function: request.function_name.to_owned(),
-                detail: error.to_string(),
-                strict_fragment_dump: strict_fragment_dump.clone(),
-                clif_dump: compiled.clif_dump.clone(),
-            })?;
-
-    runtime_value_from_fragment_result(result).map(|value| EvalOutput {
-        value,
-        strict_fragment_dump,
-        clif_dump: compiled.clif_dump,
-    })
+    JitSkipReason::NotStrictLowerable
 }
 
-fn fragment_arg_from_runtime(
-    function_name: &str,
-    value: RuntimeValue,
-) -> Result<FragmentArg, RuntimeEvalError> {
-    Ok(match value {
-        RuntimeValue::U64(v) => FragmentArg::U64(v),
-        RuntimeValue::Bool(v) => FragmentArg::Bool(v),
-        RuntimeValue::String(v) => FragmentArg::String(v),
-        RuntimeValue::Path(_) => {
-            return Err(RuntimeEvalError::CraneliftUnsupportedArgKind {
-                function: function_name.to_owned(),
-                kind: "path",
-            });
-        }
-        RuntimeValue::StringArray(_) => {
-            return Err(RuntimeEvalError::CraneliftUnsupportedArgKind {
-                function: function_name.to_owned(),
-                kind: "string_array",
-            });
-        }
-        RuntimeValue::StringMap(_) => {
-            return Err(RuntimeEvalError::CraneliftUnsupportedArgKind {
-                function: function_name.to_owned(),
-                kind: "string_map",
-            });
-        }
-        RuntimeValue::Tree(_) => {
-            return Err(RuntimeEvalError::CraneliftUnsupportedArgKind {
-                function: function_name.to_owned(),
-                kind: "tree",
-            });
-        }
-    })
+fn fragment_type_supported(ty: &Ty) -> bool {
+    matches!(
+        ty,
+        Ty::Scalar(Scalar::U64) | Ty::Scalar(Scalar::Bool) | Ty::Scalar(Scalar::String)
+    )
 }
 
-fn runtime_value_from_fragment_result(
-    result: FragmentResult,
-) -> Result<RuntimeValue, RuntimeEvalError> {
-    Ok(match result {
-        FragmentResult::U64(v) => RuntimeValue::U64(v),
-        FragmentResult::Bool(v) => RuntimeValue::Bool(v),
-        FragmentResult::String(v) => RuntimeValue::String(v),
-    })
+fn unsupported_jit_op_reason(op: &KernelOp) -> Option<JitUnsupportedOp> {
+    match op {
+        KernelOp::AwaitRuntime { .. } => Some(JitUnsupportedOp::RuntimeBoundary),
+        KernelOp::BuildTree { .. } => Some(JitUnsupportedOp::BuildTree),
+        KernelOp::MakeArray { .. } => Some(JitUnsupportedOp::MakeArray),
+        KernelOp::MakeBlob { .. } => Some(JitUnsupportedOp::MakeBlob),
+        KernelOp::AllocThunk { .. } => Some(JitUnsupportedOp::AllocThunk),
+        KernelOp::AllocClosure { .. } => Some(JitUnsupportedOp::AllocClosure),
+        KernelOp::ApplyClosure { .. } => Some(JitUnsupportedOp::ApplyClosure),
+        KernelOp::MakeStruct { .. } => Some(JitUnsupportedOp::MakeStruct),
+        KernelOp::ProjectNamedField { .. } => Some(JitUnsupportedOp::ProjectNamedField),
+        KernelOp::AssignFailure { .. } => Some(JitUnsupportedOp::AssignFailure),
+        KernelOp::CallBody { .. } => Some(JitUnsupportedOp::CallBody),
+        KernelOp::CallMember { .. } => Some(JitUnsupportedOp::CallMember),
+        KernelOp::ProjectField { .. } => Some(JitUnsupportedOp::ProjectField),
+        KernelOp::AssignSandboxTreeRoot { .. } => Some(JitUnsupportedOp::AssignSandboxTreeRoot),
+        _ => None,
+    }
 }
 
 fn eval_value_from_runtime(value: RuntimeValue) -> EvalValue {
@@ -357,9 +345,21 @@ struct ProgramEvaluator<'a> {
     context: &'a RuntimeEvalContext,
     program: &'a ExecutableProgram,
     progress: Option<Tx<EvalProgressEvent>>,
+    jit: Option<JitMode<'a>>,
+    strict_fragment_dump: Option<String>,
+    clif_dump: Option<String>,
+    jit_report: JitReport,
     memo: HashMap<(BodyId, Vec<EvalValue>), EvalValue>,
     runtime_exec_prefixes: HashMap<vx_vir::exec_types::RuntimeNodeId, String>,
     next_exec_prefix: u64,
+}
+
+#[derive(Clone, Copy)]
+struct JitMode<'a> {
+    slot_types: &'a SlotTypeMap,
+    original_body_count: u32,
+    include_strict_fragment_dump: bool,
+    include_clif_dump: bool,
 }
 
 static NEXT_EXEC_PREFIX_ID: AtomicU64 = AtomicU64::new(0);
@@ -369,11 +369,18 @@ impl<'a> ProgramEvaluator<'a> {
         context: &'a RuntimeEvalContext,
         program: &'a ExecutableProgram,
         progress: Option<Tx<EvalProgressEvent>>,
+        jit: Option<JitMode<'a>>,
     ) -> Self {
         Self {
             context,
             program,
             progress,
+            jit,
+            strict_fragment_dump: None,
+            clif_dump: None,
+            jit_report: JitReport {
+                entries: Vec::new(),
+            },
             memo: HashMap::new(),
             runtime_exec_prefixes: HashMap::new(),
             next_exec_prefix: NEXT_EXEC_PREFIX_ID.fetch_add(1, Ordering::Relaxed),
@@ -414,6 +421,10 @@ impl<'a> ProgramEvaluator<'a> {
                 actual: args.len(),
             });
         }
+        if let Some(value) = self.try_eval_body_with_cranelift(function_name, body, args)? {
+            self.memo.insert(cache_key, value.clone());
+            return Ok(value);
+        }
         let mut slots = BTreeMap::new();
         for (slot, value) in body.params.iter().copied().zip(args.iter().cloned()) {
             slots.insert(slot, value);
@@ -434,6 +445,105 @@ impl<'a> ProgramEvaluator<'a> {
             .await?;
         self.memo.insert(cache_key, value.clone());
         Ok(value)
+    }
+
+    fn try_eval_body_with_cranelift(
+        &mut self,
+        function_name: &str,
+        body: &vx_vir::exec_types::ExecutableBody,
+        args: &[EvalValue],
+    ) -> Result<Option<EvalValue>, RuntimeEvalError> {
+        let Some(jit) = self.jit else {
+            return Ok(None);
+        };
+        let Some(mut func) = vx_jit::lower_to_strict::try_strict_lower(
+            body,
+            jit.slot_types,
+            jit.original_body_count,
+        ) else {
+            self.jit_report.entries.push(JitReportEntry {
+                body_id: body.id.0,
+                outcome: JitReportOutcome::Skipped {
+                    reason: jit_skip_reason(body, jit),
+                },
+            });
+            return Ok(None);
+        };
+        let Some(frag_args) = args
+            .iter()
+            .map(fragment_arg_from_eval)
+            .collect::<Option<Vec<_>>>()
+        else {
+            self.jit_report.entries.push(JitReportEntry {
+                body_id: body.id.0,
+                outcome: JitReportOutcome::Skipped {
+                    reason: JitSkipReason::RuntimeArgumentsNotRepresentable,
+                },
+            });
+            return Ok(None);
+        };
+
+        func.name = if body.id == self.program.entry {
+            function_name.to_owned()
+        } else {
+            format!("{function_name}__body_{}", body.id.0)
+        };
+        let strict_fragment_dump =
+            if jit.include_strict_fragment_dump || std::env::var_os("VX_STRICT_DUMP").is_some() {
+                let dump = format!("{func:#?}");
+                if std::env::var_os("VX_STRICT_DUMP").is_some() {
+                    eprintln!("[vx-jit] strict fragment for `{}`:\n{dump}", func.name);
+                }
+                Some(dump)
+            } else {
+                None
+            };
+
+        let compiled =
+            vx_jit::compile_with_dump(&func, jit.include_clif_dump).map_err(|failure| {
+                self.jit_report.entries.push(JitReportEntry {
+                    body_id: body.id.0,
+                    outcome: JitReportOutcome::Failed {
+                        reason: JitFailureReason::Compile {
+                            detail: failure.error.to_string(),
+                        },
+                    },
+                });
+                RuntimeEvalError::CraneliftCompile {
+                    function: function_name.to_owned(),
+                    detail: failure.error.to_string(),
+                    strict_fragment_dump: strict_fragment_dump.clone(),
+                    clif_dump: failure.clif_dump,
+                }
+            })?;
+        let result = compiled.fragment.call(&frag_args).map_err(|error| {
+            self.jit_report.entries.push(JitReportEntry {
+                body_id: body.id.0,
+                outcome: JitReportOutcome::Failed {
+                    reason: JitFailureReason::Execute {
+                        detail: error.to_string(),
+                    },
+                },
+            });
+            RuntimeEvalError::CraneliftExecute {
+                function: function_name.to_owned(),
+                detail: error.to_string(),
+                strict_fragment_dump: strict_fragment_dump.clone(),
+                clif_dump: compiled.clif_dump.clone(),
+            }
+        })?;
+
+        if self.strict_fragment_dump.is_none() {
+            self.strict_fragment_dump = strict_fragment_dump;
+        }
+        if self.clif_dump.is_none() {
+            self.clif_dump = compiled.clif_dump;
+        }
+        self.jit_report.entries.push(JitReportEntry {
+            body_id: body.id.0,
+            outcome: JitReportOutcome::Compiled { name: func.name },
+        });
+        Ok(Some(eval_value_from_fragment_result(result)))
     }
 
     #[async_recursion]
@@ -1622,7 +1732,9 @@ fn find_host_tool(name: &str) -> Option<String> {
 
 #[cfg(test)]
 mod tests {
-    use vx_services::{RuntimeValue, StrictEvalBackend};
+    use vx_services::{
+        JitReportOutcome, JitSkipReason, JitUnsupportedOp, RuntimeValue, StrictEvalBackend,
+    };
 
     use super::{EvalRequest, RuntimeEvalContext, RuntimeEvalError, evaluate_source_text_function};
 
@@ -1713,8 +1825,8 @@ fn __vx_alloc(name: String) -> String (
     }
 
     #[tokio::test]
-    async fn explicit_cranelift_rejects_non_strict_programs() {
-        let error = match evaluate_source_text_function(
+    async fn cranelift_backend_falls_back_and_reports_non_strict_bodies() {
+        let output = evaluate_source_text_function(
             &RuntimeEvalContext::default(),
             EvalRequest {
                 source: SOURCE_NON_STRICT_CALL,
@@ -1727,16 +1839,18 @@ fn __vx_alloc(name: String) -> String (
             None,
         )
         .await
-        {
-            Ok(_) => panic!("non-strict programs should not silently fall back"),
-            Err(error) => error,
-        };
+        .expect("hybrid Cranelift evaluation should fall back");
 
-        assert!(matches!(
-            error,
-            RuntimeEvalError::CraneliftNotStrictCompatible { function }
-            if function == "build"
-        ));
+        assert_eq!(output.value, RuntimeValue::String("hello serde".to_owned()));
+        let report = output.jit_report.expect("JIT report should be present");
+        assert!(report.entries.iter().any(|entry| matches!(
+            &entry.outcome,
+            JitReportOutcome::Skipped {
+                reason: JitSkipReason::UnsupportedOp {
+                    op: JitUnsupportedOp::CallBody
+                }
+            }
+        )));
     }
 
     #[tokio::test]
@@ -1830,7 +1944,7 @@ fn __vx_alloc(name: String) -> String (
     }
 
     #[tokio::test]
-    async fn explicit_cranelift_returns_clif_dump_on_execute_failure() {
+    async fn cranelift_backend_checks_arity_before_jit_execution() {
         let error = match evaluate_source_text_function(
             &RuntimeEvalContext::default(),
             EvalRequest {
@@ -1845,22 +1959,18 @@ fn __vx_alloc(name: String) -> String (
         )
         .await
         {
-            Ok(_) => panic!("Cranelift compile failures should be reported"),
+            Ok(_) => panic!("arity mismatch should be reported"),
             Err(error) => error,
         };
 
-        match error {
-            RuntimeEvalError::CraneliftExecute {
+        assert!(matches!(
+            error,
+            RuntimeEvalError::ArityMismatch {
                 function,
-                clif_dump: Some(dump),
-                ..
-            } => {
-                assert_eq!(function, "add");
-                assert!(dump.contains("function"), "unexpected dump: {dump}");
-                assert!(dump.contains("add"), "unexpected dump: {dump}");
-            }
-            other => panic!("expected Cranelift execute error with dump, got {other:?}"),
-        }
+                expected: 2,
+                actual: 1
+            } if function == "add"
+        ));
     }
 
     #[tokio::test]

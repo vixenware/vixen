@@ -14,7 +14,8 @@ use std::time::Duration;
 use figue as args;
 use vx_services::{
     Blake3Hash, DAEMON_SOCK, DaemonClient, EvalFunctionRequest, EvalFunctionResult,
-    EvalProgressEvent, OrchestratorClient, RuntimeValue, StrictEvalBackend,
+    EvalProgressEvent, JitReport, JitReportOutcome, OrchestratorClient, RuntimeValue,
+    StrictEvalBackend,
 };
 use vx_vfsd::protocol::VfsdClient;
 
@@ -44,11 +45,15 @@ pub fn run(binary: Binary) {
 }
 
 async fn async_main(binary: Binary) -> eyre::Result<()> {
+    if binary == Binary::Vx {
+        return run_package_command(parse_vx_args(std::env::args().skip(1).collect())?).await;
+    }
+
     let program_name = match binary {
         Binary::Vixen => "vixen",
         Binary::Vx => "vx",
     };
-    let raw_args = cli_args(binary);
+    let raw_args: Vec<String> = std::env::args().skip(1).collect();
     let cli: Cli = args::Driver::new(
         args::builder::<Cli>()
             .expect("failed to build CLI")
@@ -85,13 +90,29 @@ async fn async_main(binary: Binary) -> eyre::Result<()> {
     }
 }
 
-fn cli_args(binary: Binary) -> Vec<String> {
-    match binary {
-        Binary::Vixen => std::env::args().skip(1).collect(),
-        Binary::Vx => std::iter::once("run".to_owned())
-            .chain(std::env::args().skip(1))
-            .collect(),
-    }
+fn parse_vx_args(args: Vec<String>) -> eyre::Result<RunArgs> {
+    let Some((command, command_args)) = args.split_first() else {
+        eyre::bail!("missing package command");
+    };
+
+    Ok(RunArgs {
+        target: ClientTargetArgs {
+            daemon: None,
+            config: None,
+        },
+        fresh_daemon: false,
+        file: None,
+        backend: "cranelift".to_owned(),
+        strict_fragment_dump: false,
+        clif_dump: false,
+        jit_report: false,
+        command: command.clone(),
+        args: if command_args.is_empty() {
+            None
+        } else {
+            Some(command_args.to_vec())
+        },
+    })
 }
 
 async fn health(target: ClientTargetArgs) -> eyre::Result<()> {
@@ -313,6 +334,7 @@ async fn run_package_command(args: RunArgs) -> eyre::Result<()> {
         backend: args.backend,
         strict_fragment_dump: args.strict_fragment_dump,
         clif_dump: args.clif_dump,
+        jit_report: args.jit_report,
         values,
     })
     .await
@@ -356,6 +378,7 @@ async fn eval(args: EvalArgs) -> eyre::Result<()> {
         backend: args.backend,
         strict_fragment_dump: args.strict_fragment_dump,
         clif_dump: args.clif_dump,
+        jit_report: args.jit_report,
         values,
     })
     .await
@@ -369,6 +392,7 @@ struct EvalInvocation {
     backend: String,
     strict_fragment_dump: bool,
     clif_dump: bool,
+    jit_report: bool,
     values: Vec<RuntimeValue>,
 }
 
@@ -417,6 +441,11 @@ async fn eval_invocation(args: EvalInvocation) -> eyre::Result<()> {
             if let Some(dump) = &success.clif_dump {
                 eprintln!("[clif-dump]\n{dump}");
             }
+            if args.jit_report
+                && let Some(report) = &success.jit_report
+            {
+                emit_jit_report(report);
+            }
             println!("{}", format_value(&success.value));
             Ok(())
         }
@@ -427,8 +456,30 @@ async fn eval_invocation(args: EvalInvocation) -> eyre::Result<()> {
             if let Some(dump) = &failure.clif_dump {
                 eprintln!("[clif-dump]\n{dump}");
             }
+            if args.jit_report
+                && let Some(report) = &failure.jit_report
+            {
+                emit_jit_report(report);
+            }
             eprintln!("error: {}", failure.message);
             std::process::exit(1);
+        }
+    }
+}
+
+fn emit_jit_report(report: &JitReport) {
+    eprintln!("[jit-report]");
+    for entry in &report.entries {
+        match &entry.outcome {
+            JitReportOutcome::Compiled { name } => {
+                eprintln!("body {}: compiled: {name}", entry.body_id);
+            }
+            JitReportOutcome::Skipped { reason } => {
+                eprintln!("body {}: skipped: {reason}", entry.body_id);
+            }
+            JitReportOutcome::Failed { reason } => {
+                eprintln!("body {}: failed: {reason}", entry.body_id);
+            }
         }
     }
 }
@@ -811,8 +862,9 @@ mod tests {
     use crate::{
         config_home_from_env, daemon_binary_warning, daemon_client_executable_blake3,
         daemon_config_override_from_env, daemon_config_path_in, default_build_args,
-        default_eval_args, format_daemon_status, parse_tree_hash, resolve_daemon_target,
-        resolve_store_root, state_home_from_env, store_root_in, validate_mount_name,
+        default_eval_args, format_daemon_status, parse_tree_hash, parse_vx_args,
+        resolve_daemon_target, resolve_store_root, state_home_from_env, store_root_in,
+        validate_mount_name,
     };
 
     #[test]
@@ -1057,6 +1109,30 @@ daemon {
     }
 
     #[test]
+    fn vx_alias_keeps_package_flags_as_command_args() {
+        let args = parse_vx_args(vec!["build".to_owned(), "--release".to_owned()])
+            .expect("vx args should parse");
+        assert_eq!(args.command, "build");
+        assert_eq!(args.args, Some(vec!["--release".to_owned()]));
+    }
+
+    #[test]
+    fn vx_alias_treats_management_looking_flags_as_package_args() {
+        let args = parse_vx_args(vec![
+            "build".to_owned(),
+            "--file".to_owned(),
+            "custom.vx".to_owned(),
+        ])
+        .expect("vx args should parse");
+        assert_eq!(args.command, "build");
+        assert_eq!(args.file, None);
+        assert_eq!(
+            args.args,
+            Some(vec!["--file".to_owned(), "custom.vx".to_owned()])
+        );
+    }
+
+    #[test]
     fn non_build_defaults_do_not_inject_arguments() {
         let args = default_eval_args("greet", Vec::new()).expect("defaults should resolve");
         assert!(args.is_empty());
@@ -1075,6 +1151,7 @@ daemon {
             backend: "cranelift".to_owned(),
             strict_fragment_dump: false,
             clif_dump: false,
+            jit_report: false,
             args: None,
         };
 

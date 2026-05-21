@@ -91,6 +91,10 @@ pub(crate) struct EvalArgs {
     #[facet(args::named)]
     pub(crate) clif_dump: bool,
 
+    /// Print the JIT coverage report to stderr
+    #[facet(args::named)]
+    pub(crate) jit_report: bool,
+
     /// Function arguments in order. Use `u64:42`, `bool:true`, `string:hello`.
     /// Bare values are treated as strings.
     #[facet(args::positional)]
@@ -111,7 +115,7 @@ pub(crate) struct RunArgs {
     pub(crate) file: Option<camino::Utf8PathBuf>,
 
     /// Evaluation backend: `interpreter` or `cranelift`
-    #[facet(args::named, default = "interpreter")]
+    #[facet(args::named, default = "cranelift")]
     pub(crate) backend: String,
 
     /// Print the strict fragment IR to stderr and include it in the response
@@ -121,6 +125,10 @@ pub(crate) struct RunArgs {
     /// Print the Cranelift IR to stderr and include it in the response
     #[facet(args::named)]
     pub(crate) clif_dump: bool,
+
+    /// Print the JIT coverage report to stderr
+    #[facet(args::named)]
+    pub(crate) jit_report: bool,
 
     /// Package-defined command to run
     #[facet(args::positional)]

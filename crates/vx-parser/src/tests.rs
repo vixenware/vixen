@@ -235,19 +235,19 @@ fn stdlib_build_header_parses() {
 
 #[test]
 fn libpng_sketch_parses() {
-    let path = Path::new(env!("CARGO_MANIFEST_DIR")).join("../../zoo/libpng.vx");
+    let path = Path::new(env!("CARGO_MANIFEST_DIR")).join("../../old-zoo/libpng.vx");
     assert_file_parses(&path);
 }
 
 #[test]
 fn cargo_resolve_sketch_parses() {
-    let path = Path::new(env!("CARGO_MANIFEST_DIR")).join("../../zoo/cargo-resolve.vx");
+    let path = Path::new(env!("CARGO_MANIFEST_DIR")).join("../../old-zoo/cargo-resolve.vx");
     assert_file_parses(&path);
 }
 
 #[test]
 fn lua_sketch_parses() {
-    let path = Path::new(env!("CARGO_MANIFEST_DIR")).join("../../zoo/lua.vx");
+    let path = Path::new(env!("CARGO_MANIFEST_DIR")).join("../../old-zoo/lua.vx");
     assert_file_parses(&path);
 }
 
