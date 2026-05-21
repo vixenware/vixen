@@ -1,0 +1,39 @@
+let config = import("vixen:config")
+let c = import("c")
+
+fn build(root: Path) #discover -> Tree {
+  let executors = [
+    { triple: "x86_64-unknown-linux-gnu", exec: config.linux_executor },
+    { triple: "aarch64-apple-darwin", exec: config.mac_executor },
+    { triple: "aarch64-pc-windows-msvc", exec: config.win_executor },
+    { triple: "local", exec: executor_class("default") }
+  ];
+
+  let trees = executors.map((env) => {
+    let { triple, exec } = env;
+    let toolchain = c.discover_toolchain() where { executor: exec };
+    let tree = exec([toolchain.cc, root / @main.c, "-o", @out/main]);
+    Tree %{ triple => tree }
+  });
+  trees.collect().merge()
+
+  // shape of the output:
+  //
+  // x86_64-unknown-linux-gnu/
+  //   main
+  // aarch64-apple-darwin/
+  //   main
+  // aarch64-pc-windows-msvc/
+  //   main.exe
+  // local/
+  //   main
+  //
+  // invocation of `vx build`
+  //
+  // vx build /x86_64-unknown-linux-gnu ?
+  //
+  // where does it go?
+  // how to do a local build?
+  //
+  // would `vx build` default to `/local` ? where does it write files?
+}
