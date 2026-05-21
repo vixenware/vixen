@@ -1,0 +1,38 @@
+
+// design note: It should be able to skip fields in the keyword arguments that we
+// don't actually use, and the CLI should still be able to to evaluate the
+// function just without passing things that are not actually being used.
+fn build() #discover where { ws: Path, args: Array[String], env: Map[String, String] } -> Tree {
+  let src_dir = ws.subtree @src
+  let tree = build_c_program src
+  tree / @main
+}
+
+fn build_c_program(src: Tree) -> Tree {
+  let url = ""
+  let hash = "sha256:asdfoijsodfij"
+  let toolchain = acquire(url, hash);
+
+  exec [toolchain/@cc, src/@main.c, "-o", @out/main]
+}
+
+fn build_c_program_no_defaults(src: Tree) -> Tree {
+  let url = ""
+  let hash = "sha256:asdfoijsodfij"
+  let toolchain = acquire(url, hash);
+
+  exec [toolchain/@cc, src/@main.c, "-o", @out/main] where {
+    mounts: %{
+      @toolchain => toolchain,
+      @src => src,
+    },
+    executor: default_executor(),
+    observer: () where { proc: Process, vfs: Vfs } => {
+      if proc.exit_code != 0 (
+        fail `process failed`
+      ) else (
+        vfs.subtree @out
+      )
+    }
+  }
+}
