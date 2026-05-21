@@ -361,9 +361,7 @@ impl LanguageServer for VxLanguageServer {
                 code_action_provider: Some(CodeActionProviderCapability::Simple(true)),
                 call_hierarchy_provider: Some(CallHierarchyServerCapability::Simple(true)),
                 workspace_symbol_provider: Some(OneOf::Left(true)),
-                linked_editing_range_provider: Some(LinkedEditingRangeServerCapabilities::Simple(
-                    true,
-                )),
+                linked_editing_range_provider: None,
                 ..Default::default()
             },
             ..Default::default()
@@ -1402,34 +1400,9 @@ impl LanguageServer for VxLanguageServer {
 
     async fn linked_editing_range(
         &self,
-        params: LinkedEditingRangeParams,
+        _params: LinkedEditingRangeParams,
     ) -> Result<Option<LinkedEditingRanges>> {
-        let uri = &params.text_document_position_params.text_document.uri;
-        let pos = params.text_document_position_params.position;
-
-        let result = self.with_document(uri, |state| {
-            let offset = state.line_index.offset(vx::Position {
-                line: pos.line,
-                col: pos.character,
-            })?;
-
-            let def = state.definition_at(offset)?;
-            if def.source() != state.current_source {
-                return None;
-            }
-
-            let mut ranges = vec![state.to_lsp_range_span(def.name_span)];
-            for ref_span in state.references_to(def) {
-                ranges.push(state.to_lsp_range_span(ref_span));
-            }
-
-            Some(LinkedEditingRanges {
-                ranges,
-                word_pattern: None,
-            })
-        });
-
-        Ok(result.flatten())
+        Ok(None)
     }
 }
 
