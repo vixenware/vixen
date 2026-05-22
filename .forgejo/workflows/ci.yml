@@ -13,100 +13,69 @@ concurrency:
 
 jobs:
   check:
-    runs-on: linux-x86_64-trusted
+    runs-on: mac
     env:
       VX_REPO_URL: https://code.vixen.rs/vixen/vixen.git
       VX_SHA: ${{ forgejo.sha }}
     steps:
-      - name: Prepare job container
-        run: |
-          apt-get update
-          apt-get install -y --no-install-recommends ca-certificates curl git build-essential pkg-config libssl-dev fuse3 libfuse3-dev
-          if ! command -v cargo >/dev/null 2>&1; then
-            curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh -s -- -y --profile minimal
-          fi
-
       - name: Checkout repository
         run: |
-          . "$HOME/.cargo/env"
-          git init "$GITHUB_WORKSPACE"
+          mkdir -p "$GITHUB_WORKSPACE"
           cd "$GITHUB_WORKSPACE"
+          git init
+          git remote remove origin 2>/dev/null || true
           git remote add origin "$VX_REPO_URL"
           git -c http.extraHeader="Authorization: token ${FORGEJO_TOKEN}" fetch --depth 1 origin "$VX_SHA"
           git checkout --detach FETCH_HEAD
 
       - name: Show Rust toolchain
         run: |
-          . "$HOME/.cargo/env"
           rustc --version
           cargo --version
 
-      - run: |
-          . "$HOME/.cargo/env"
-          cargo check --workspace --all-targets
+      - run: cargo check --workspace --all-targets
 
   clippy:
-    runs-on: linux-x86_64-trusted
+    runs-on: mac
     env:
       VX_REPO_URL: https://code.vixen.rs/vixen/vixen.git
       VX_SHA: ${{ forgejo.sha }}
     steps:
-      - name: Prepare job container
-        run: |
-          apt-get update
-          apt-get install -y --no-install-recommends ca-certificates curl git build-essential pkg-config libssl-dev fuse3 libfuse3-dev
-          if ! command -v cargo >/dev/null 2>&1; then
-            curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh -s -- -y --profile minimal
-          fi
-
       - name: Checkout repository
         run: |
-          . "$HOME/.cargo/env"
-          git init "$GITHUB_WORKSPACE"
+          mkdir -p "$GITHUB_WORKSPACE"
           cd "$GITHUB_WORKSPACE"
+          git init
+          git remote remove origin 2>/dev/null || true
           git remote add origin "$VX_REPO_URL"
           git -c http.extraHeader="Authorization: token ${FORGEJO_TOKEN}" fetch --depth 1 origin "$VX_SHA"
           git checkout --detach FETCH_HEAD
 
       - name: Prepare clippy
-        run: |
-          . "$HOME/.cargo/env"
-          rustup component add clippy
+        run: rustup component add clippy
 
-      - run: |
-          . "$HOME/.cargo/env"
-          cargo clippy --workspace --all-targets
+      - run: cargo clippy --workspace --all-targets
 
   tests:
-    runs-on: linux-x86_64-trusted
+    runs-on: mac
     env:
       VX_REPO_URL: https://code.vixen.rs/vixen/vixen.git
       VX_SHA: ${{ forgejo.sha }}
     steps:
-      - name: Prepare job container
-        run: |
-          apt-get update
-          apt-get install -y --no-install-recommends ca-certificates curl git build-essential pkg-config libssl-dev fuse3 libfuse3-dev
-          if ! command -v cargo >/dev/null 2>&1; then
-            curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh -s -- -y --profile minimal
-          fi
-
       - name: Checkout repository
         run: |
-          . "$HOME/.cargo/env"
-          git init "$GITHUB_WORKSPACE"
+          mkdir -p "$GITHUB_WORKSPACE"
           cd "$GITHUB_WORKSPACE"
+          git init
+          git remote remove origin 2>/dev/null || true
           git remote add origin "$VX_REPO_URL"
           git -c http.extraHeader="Authorization: token ${FORGEJO_TOKEN}" fetch --depth 1 origin "$VX_SHA"
           git checkout --detach FETCH_HEAD
 
       - name: Install cargo-nextest if needed
         run: |
-          . "$HOME/.cargo/env"
           if ! cargo nextest --version >/dev/null 2>&1; then
             cargo install cargo-nextest --locked
           fi
 
-      - run: |
-          . "$HOME/.cargo/env"
-          cargo nextest run --workspace --no-fail-fast --status-level fail --final-status-level fail
+      - run: cargo nextest run --workspace --no-fail-fast --status-level fail --final-status-level fail

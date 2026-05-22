@@ -16,20 +16,17 @@ concurrency:
 
 jobs:
   build:
-    runs-on: linux-x86_64-trusted
+    runs-on: mac
     env:
       VX_REPO_URL: https://code.vixen.rs/vixen/vixen.git
       VX_SHA: ${{ forgejo.sha }}
     steps:
-      - name: Prepare job container
-        run: |
-          apt-get update
-          apt-get install -y --no-install-recommends ca-certificates curl git
-
       - name: Checkout repository
         run: |
-          git init "$GITHUB_WORKSPACE"
+          mkdir -p "$GITHUB_WORKSPACE"
           cd "$GITHUB_WORKSPACE"
+          git init
+          git remote remove origin 2>/dev/null || true
           git remote add origin "$VX_REPO_URL"
           git -c http.extraHeader="Authorization: token ${FORGEJO_TOKEN}" fetch --depth 1 origin "$VX_SHA"
           git checkout --detach FETCH_HEAD
