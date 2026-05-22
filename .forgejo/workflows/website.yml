@@ -37,7 +37,7 @@ jobs:
 
       - name: Build website
         run: |
-          ~/.cargo/bin/ddc build . --no-tui
+          ~/.cargo/bin/ddc build .
 
       - name: Copy CNAME to output
         run: cp CNAME docs/public/
