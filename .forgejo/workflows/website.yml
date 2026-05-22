@@ -33,17 +33,11 @@ jobs:
 
       - name: Install dodeca
         run: |
-          if ! command -v ddc >/dev/null 2>&1; then
-            curl --proto '=https' --tlsv1.2 -LsSf https://github.com/bearcove/dodeca/releases/latest/download/dodeca-installer.sh | sh
-          fi
+          curl --proto '=https' --tlsv1.2 -LsSf https://github.com/bearcove/dodeca/releases/latest/download/dodeca-installer.sh | sh
 
       - name: Build website
         run: |
-          if command -v ddc >/dev/null 2>&1; then
-            ddc build --content docs/content --output docs/public --no-tui
-          else
-            ~/.cargo/bin/ddc build --content docs/content --output docs/public --no-tui
-          fi
+          ~/.cargo/bin/ddc build . --no-tui
 
       - name: Copy CNAME to output
         run: cp CNAME docs/public/
