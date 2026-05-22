@@ -17,8 +17,22 @@ concurrency:
 jobs:
   build:
     runs-on: linux-x86_64-trusted
+    env:
+      VX_REPO_URL: https://code.vixen.rs/vixen/vixen.git
+      VX_SHA: ${{ forgejo.sha }}
     steps:
-      - uses: https://data.forgejo.org/actions/checkout@v4
+      - name: Prepare job container
+        run: |
+          apt-get update
+          apt-get install -y --no-install-recommends ca-certificates curl git
+
+      - name: Checkout repository
+        run: |
+          git init "$GITHUB_WORKSPACE"
+          cd "$GITHUB_WORKSPACE"
+          git remote add origin "$VX_REPO_URL"
+          git -c http.extraHeader="Authorization: token ${FORGEJO_TOKEN}" fetch --depth 1 origin "$VX_SHA"
+          git checkout --detach FETCH_HEAD
 
       - name: Install dodeca
         run: |
@@ -36,9 +50,3 @@ jobs:
 
       - name: Copy CNAME to output
         run: cp CNAME docs/public/
-
-      - name: Upload website artifact
-        uses: https://data.forgejo.org/forgejo/upload-artifact@v4
-        with:
-          name: website
-          path: docs/public
