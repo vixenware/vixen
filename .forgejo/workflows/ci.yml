@@ -13,7 +13,10 @@ concurrency:
 
 jobs:
   check:
-    runs-on: mac
+    strategy:
+      matrix:
+        runner: [mac, linux-x86_64-trusted]
+    runs-on: ${{ matrix.runner }}
     env:
       CARGO_INCREMENTAL: "1"
       VX_REPO_URL: https://code.vixen.rs/vixen/vixen.git
@@ -37,7 +40,10 @@ jobs:
       - run: CARGO_TARGET_DIR="$HOME/.cache/vixen/forgejo-target" cargo check --workspace --all-targets
 
   clippy:
-    runs-on: mac
+    strategy:
+      matrix:
+        runner: [mac, linux-x86_64-trusted]
+    runs-on: ${{ matrix.runner }}
     env:
       CARGO_INCREMENTAL: "1"
       VX_REPO_URL: https://code.vixen.rs/vixen/vixen.git
@@ -59,7 +65,10 @@ jobs:
       - run: CARGO_TARGET_DIR="$HOME/.cache/vixen/forgejo-target" cargo clippy --workspace --all-targets
 
   tests:
-    runs-on: mac
+    strategy:
+      matrix:
+        runner: [mac, linux-x86_64-trusted]
+    runs-on: ${{ matrix.runner }}
     env:
       CARGO_INCREMENTAL: "1"
       VX_REPO_URL: https://code.vixen.rs/vixen/vixen.git
