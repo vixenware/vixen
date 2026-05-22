@@ -1,0 +1,44 @@
+name: Website
+
+on:
+  push:
+    branches: [main]
+    paths:
+      - 'docs/**'
+      - '.config/dodeca.styx'
+      - '.forgejo/workflows/website.yml'
+      - 'CNAME'
+  workflow_dispatch:
+
+concurrency:
+  group: website-${{ forgejo.ref }}
+  cancel-in-progress: true
+
+jobs:
+  build:
+    runs-on: linux-x86_64-trusted
+    steps:
+      - uses: https://data.forgejo.org/actions/checkout@v4
+
+      - name: Install dodeca
+        run: |
+          if ! command -v ddc >/dev/null 2>&1; then
+            curl --proto '=https' --tlsv1.2 -LsSf https://github.com/bearcove/dodeca/releases/latest/download/dodeca-installer.sh | sh
+          fi
+
+      - name: Build website
+        run: |
+          if command -v ddc >/dev/null 2>&1; then
+            ddc build
+          else
+            ~/.cargo/bin/ddc build
+          fi
+
+      - name: Copy CNAME to output
+        run: cp CNAME docs/public/
+
+      - name: Upload website artifact
+        uses: https://data.forgejo.org/forgejo/upload-artifact@v4
+        with:
+          name: website
+          path: docs/public

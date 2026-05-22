@@ -1,0 +1,48 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+    branches: [main]
+  workflow_dispatch:
+
+concurrency:
+  group: ci-${{ forgejo.ref }}
+  cancel-in-progress: true
+
+jobs:
+  check:
+    runs-on: linux-x86_64-trusted
+    steps:
+      - uses: https://data.forgejo.org/actions/checkout@v4
+
+      - name: Show Rust toolchain
+        run: |
+          rustc --version
+          cargo --version
+
+      - run: cargo check --workspace --all-targets
+
+  clippy:
+    runs-on: linux-x86_64-trusted
+    steps:
+      - uses: https://data.forgejo.org/actions/checkout@v4
+
+      - name: Prepare clippy
+        run: rustup component add clippy
+
+      - run: cargo clippy --workspace --all-targets
+
+  tests:
+    runs-on: linux-x86_64-trusted
+    steps:
+      - uses: https://data.forgejo.org/actions/checkout@v4
+
+      - name: Install cargo-nextest if needed
+        run: |
+          if ! cargo nextest --version >/dev/null 2>&1; then
+            cargo install cargo-nextest --locked
+          fi
+
+      - run: cargo nextest run --workspace --no-fail-fast --status-level fail --final-status-level fail
