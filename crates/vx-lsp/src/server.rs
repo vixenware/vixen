@@ -2546,7 +2546,7 @@ fn demo() {
         assert_eq!(def.kind, vx_resolve::DefKind::Function);
         assert_eq!(
             state.declaration_snippet(def),
-            "fn executor_class(label: String) -> ExecutorClass ("
+            "fn executor_class(label: String) -> ExecutorClass"
         );
         assert_eq!(
             state.doc_comment_for(def).as_deref(),
