@@ -11,16 +11,15 @@ concurrency:
   group: ci-${{ forgejo.ref }}
   cancel-in-progress: true
 
+env:
+  CARGO_INCREMENTAL: "1"
+  VX_REPO_URL: https://code.vixen.rs/vixen/vixen.git
+  VX_SHA: ${{ forgejo.sha }}
+
 jobs:
-  check:
-    strategy:
-      matrix:
-        runner: [mac, linux-x86_64-trusted]
-    runs-on: ${{ matrix.runner }}
-    env:
-      CARGO_INCREMENTAL: "1"
-      VX_REPO_URL: https://code.vixen.rs/vixen/vixen.git
-      VX_SHA: ${{ forgejo.sha }}
+  check-mac:
+    name: check (mac)
+    runs-on: mac
     steps:
       - name: Checkout repository
         run: |
@@ -48,15 +47,32 @@ jobs:
           . "$HOME/.cargo/env" 2>/dev/null || true
           CARGO_TARGET_DIR="$HOME/.cache/vixen/forgejo-target" cargo check --workspace --all-targets
 
-  clippy:
-    strategy:
-      matrix:
-        runner: [mac, linux-x86_64-trusted]
-    runs-on: ${{ matrix.runner }}
-    env:
-      CARGO_INCREMENTAL: "1"
-      VX_REPO_URL: https://code.vixen.rs/vixen/vixen.git
-      VX_SHA: ${{ forgejo.sha }}
+  check-linux:
+    name: check (linux-x86_64-trusted)
+    runs-on: linux-x86_64-trusted
+    container: code.vixen.rs/vixen/vixen-ci:latest
+    steps:
+      - name: Checkout repository
+        run: |
+          mkdir -p "$GITHUB_WORKSPACE"
+          cd "$GITHUB_WORKSPACE"
+          git init
+          git remote remove origin 2>/dev/null || true
+          git remote add origin "$VX_REPO_URL"
+          git -c http.extraHeader="Authorization: token ${FORGEJO_TOKEN}" fetch --depth 1 origin "$VX_SHA"
+          git checkout --detach FETCH_HEAD
+
+      - name: Show toolchain
+        run: |
+          rustc --version
+          cargo --version
+
+      - run: |
+          CARGO_TARGET_DIR="$HOME/.cache/vixen/forgejo-target" cargo check --workspace --all-targets
+
+  clippy-mac:
+    name: clippy (mac)
+    runs-on: mac
     steps:
       - name: Checkout repository
         run: |
@@ -89,15 +105,33 @@ jobs:
           . "$HOME/.cargo/env" 2>/dev/null || true
           CARGO_TARGET_DIR="$HOME/.cache/vixen/forgejo-target" cargo clippy --workspace --all-targets
 
-  tests:
-    strategy:
-      matrix:
-        runner: [mac, linux-x86_64-trusted]
-    runs-on: ${{ matrix.runner }}
-    env:
-      CARGO_INCREMENTAL: "1"
-      VX_REPO_URL: https://code.vixen.rs/vixen/vixen.git
-      VX_SHA: ${{ forgejo.sha }}
+  clippy-linux:
+    name: clippy (linux-x86_64-trusted)
+    runs-on: linux-x86_64-trusted
+    container: code.vixen.rs/vixen/vixen-ci:latest
+    steps:
+      - name: Checkout repository
+        run: |
+          mkdir -p "$GITHUB_WORKSPACE"
+          cd "$GITHUB_WORKSPACE"
+          git init
+          git remote remove origin 2>/dev/null || true
+          git remote add origin "$VX_REPO_URL"
+          git -c http.extraHeader="Authorization: token ${FORGEJO_TOKEN}" fetch --depth 1 origin "$VX_SHA"
+          git checkout --detach FETCH_HEAD
+
+      - name: Show toolchain
+        run: |
+          rustc --version
+          cargo --version
+          cargo clippy --version
+
+      - run: |
+          CARGO_TARGET_DIR="$HOME/.cache/vixen/forgejo-target" cargo clippy --workspace --all-targets
+
+  tests-mac:
+    name: tests (mac)
+    runs-on: mac
     steps:
       - name: Checkout repository
         run: |
@@ -130,4 +164,28 @@ jobs:
 
       - run: |
           . "$HOME/.cargo/env" 2>/dev/null || true
+          CARGO_TARGET_DIR="$HOME/.cache/vixen/forgejo-target" cargo nextest run --workspace --no-fail-fast --status-level fail --final-status-level fail
+
+  tests-linux:
+    name: tests (linux-x86_64-trusted)
+    runs-on: linux-x86_64-trusted
+    container: code.vixen.rs/vixen/vixen-ci:latest
+    steps:
+      - name: Checkout repository
+        run: |
+          mkdir -p "$GITHUB_WORKSPACE"
+          cd "$GITHUB_WORKSPACE"
+          git init
+          git remote remove origin 2>/dev/null || true
+          git remote add origin "$VX_REPO_URL"
+          git -c http.extraHeader="Authorization: token ${FORGEJO_TOKEN}" fetch --depth 1 origin "$VX_SHA"
+          git checkout --detach FETCH_HEAD
+
+      - name: Show toolchain
+        run: |
+          rustc --version
+          cargo --version
+          cargo nextest --version
+
+      - run: |
           CARGO_TARGET_DIR="$HOME/.cache/vixen/forgejo-target" cargo nextest run --workspace --no-fail-fast --status-level fail --final-status-level fail
