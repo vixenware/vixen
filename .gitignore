@@ -35,3 +35,4 @@ zoo/libpng-src/
 
 # local manager/executor work files
 /work
+/.envrc
