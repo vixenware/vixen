@@ -1,4 +1,5 @@
 use camino::Utf8PathBuf;
+use eyre::eyre;
 
 use crate::Result;
 
@@ -41,7 +42,7 @@ pub async fn cleanup_stuck_mount(mount_path: &Utf8PathBuf) -> Result<()> {
         .arg("-u")
         .arg(mount_path.as_str())
         .status()
-        .map_err(|e| format!("failed to run fusermount3: {}", e))?;
+        .map_err(|e| eyre!("failed to run fusermount3: {e}"))?;
 
     if status.success() {
         tracing::info!("successfully unmounted stuck FUSE mount");
@@ -54,7 +55,7 @@ pub async fn cleanup_stuck_mount(mount_path: &Utf8PathBuf) -> Result<()> {
         .arg("-uz")
         .arg(mount_path.as_str())
         .status()
-        .map_err(|e| format!("failed to run fusermount3: {}", e))?;
+        .map_err(|e| eyre!("failed to run fusermount3: {e}"))?;
 
     if status.success() {
         tracing::info!("successfully unmounted with lazy unmount");
@@ -79,17 +80,16 @@ pub async fn cleanup_stuck_mount(mount_path: &Utf8PathBuf) -> Result<()> {
         .arg("-uz")
         .arg(mount_path.as_str())
         .status()
-        .map_err(|e| format!("failed to run fusermount3: {}", e))?;
+        .map_err(|e| eyre!("failed to run fusermount3: {e}"))?;
 
     if status.success() {
         tracing::warn!("nuclear cleanup succeeded");
         Ok(())
     } else {
-        Err(format!(
+        Err(eyre!(
             "failed to clean up stuck FUSE mount at {} after all attempts",
             mount_path
-        )
-        .into())
+        ))
     }
 }
 
