@@ -32,12 +32,21 @@ jobs:
           git -c http.extraHeader="Authorization: token ${FORGEJO_TOKEN}" fetch --depth 1 origin "$VX_SHA"
           git checkout --detach FETCH_HEAD
 
-      - name: Show Rust toolchain
+      - name: Prepare Rust toolchain
         run: |
+          if ! command -v cargo >/dev/null 2>&1; then
+            curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh -s -- -y --profile minimal
+          fi
+          if [ -n "${GITHUB_PATH:-}" ]; then
+            echo "$HOME/.cargo/bin" >> "$GITHUB_PATH"
+          fi
+          . "$HOME/.cargo/env" 2>/dev/null || true
           rustc --version
           cargo --version
 
-      - run: CARGO_TARGET_DIR="$HOME/.cache/vixen/forgejo-target" cargo check --workspace --all-targets
+      - run: |
+          . "$HOME/.cargo/env" 2>/dev/null || true
+          CARGO_TARGET_DIR="$HOME/.cache/vixen/forgejo-target" cargo check --workspace --all-targets
 
   clippy:
     strategy:
@@ -59,10 +68,26 @@ jobs:
           git -c http.extraHeader="Authorization: token ${FORGEJO_TOKEN}" fetch --depth 1 origin "$VX_SHA"
           git checkout --detach FETCH_HEAD
 
-      - name: Prepare clippy
-        run: rustup component add clippy
+      - name: Prepare Rust toolchain
+        run: |
+          if ! command -v cargo >/dev/null 2>&1; then
+            curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh -s -- -y --profile minimal
+          fi
+          if [ -n "${GITHUB_PATH:-}" ]; then
+            echo "$HOME/.cargo/bin" >> "$GITHUB_PATH"
+          fi
+          . "$HOME/.cargo/env" 2>/dev/null || true
+          rustc --version
+          cargo --version
 
-      - run: CARGO_TARGET_DIR="$HOME/.cache/vixen/forgejo-target" cargo clippy --workspace --all-targets
+      - name: Prepare clippy
+        run: |
+          . "$HOME/.cargo/env" 2>/dev/null || true
+          rustup component add clippy
+
+      - run: |
+          . "$HOME/.cargo/env" 2>/dev/null || true
+          CARGO_TARGET_DIR="$HOME/.cache/vixen/forgejo-target" cargo clippy --workspace --all-targets
 
   tests:
     strategy:
@@ -84,10 +109,25 @@ jobs:
           git -c http.extraHeader="Authorization: token ${FORGEJO_TOKEN}" fetch --depth 1 origin "$VX_SHA"
           git checkout --detach FETCH_HEAD
 
+      - name: Prepare Rust toolchain
+        run: |
+          if ! command -v cargo >/dev/null 2>&1; then
+            curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh -s -- -y --profile minimal
+          fi
+          if [ -n "${GITHUB_PATH:-}" ]; then
+            echo "$HOME/.cargo/bin" >> "$GITHUB_PATH"
+          fi
+          . "$HOME/.cargo/env" 2>/dev/null || true
+          rustc --version
+          cargo --version
+
       - name: Install cargo-nextest if needed
         run: |
+          . "$HOME/.cargo/env" 2>/dev/null || true
           if ! cargo nextest --version >/dev/null 2>&1; then
             cargo install cargo-nextest --locked
           fi
 
-      - run: CARGO_TARGET_DIR="$HOME/.cache/vixen/forgejo-target" cargo nextest run --workspace --no-fail-fast --status-level fail --final-status-level fail
+      - run: |
+          . "$HOME/.cargo/env" 2>/dev/null || true
+          CARGO_TARGET_DIR="$HOME/.cache/vixen/forgejo-target" cargo nextest run --workspace --no-fail-fast --status-level fail --final-status-level fail
