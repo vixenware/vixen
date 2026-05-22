@@ -16,7 +16,6 @@ jobs:
     runs-on: mac
     env:
       CARGO_INCREMENTAL: "1"
-      CARGO_TARGET_DIR: /Users/amos/.cache/vixen/forgejo-target
       VX_REPO_URL: https://code.vixen.rs/vixen/vixen.git
       VX_SHA: ${{ forgejo.sha }}
     steps:
@@ -35,13 +34,12 @@ jobs:
           rustc --version
           cargo --version
 
-      - run: cargo check --workspace --all-targets
+      - run: CARGO_TARGET_DIR="$HOME/.cache/vixen/forgejo-target" cargo check --workspace --all-targets
 
   clippy:
     runs-on: mac
     env:
       CARGO_INCREMENTAL: "1"
-      CARGO_TARGET_DIR: /Users/amos/.cache/vixen/forgejo-target
       VX_REPO_URL: https://code.vixen.rs/vixen/vixen.git
       VX_SHA: ${{ forgejo.sha }}
     steps:
@@ -58,13 +56,12 @@ jobs:
       - name: Prepare clippy
         run: rustup component add clippy
 
-      - run: cargo clippy --workspace --all-targets
+      - run: CARGO_TARGET_DIR="$HOME/.cache/vixen/forgejo-target" cargo clippy --workspace --all-targets
 
   tests:
     runs-on: mac
     env:
       CARGO_INCREMENTAL: "1"
-      CARGO_TARGET_DIR: /Users/amos/.cache/vixen/forgejo-target
       VX_REPO_URL: https://code.vixen.rs/vixen/vixen.git
       VX_SHA: ${{ forgejo.sha }}
     steps:
@@ -84,4 +81,4 @@ jobs:
             cargo install cargo-nextest --locked
           fi
 
-      - run: cargo nextest run --workspace --no-fail-fast --status-level fail --final-status-level fail
+      - run: CARGO_TARGET_DIR="$HOME/.cache/vixen/forgejo-target" cargo nextest run --workspace --no-fail-fast --status-level fail --final-status-level fail
