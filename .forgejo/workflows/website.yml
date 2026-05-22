@@ -40,9 +40,9 @@ jobs:
       - name: Build website
         run: |
           if command -v ddc >/dev/null 2>&1; then
-            ddc build
+            ddc build --content docs/content --output docs/public
           else
-            ~/.cargo/bin/ddc build
+            ~/.cargo/bin/ddc build --content docs/content --output docs/public
           fi
 
       - name: Copy CNAME to output
