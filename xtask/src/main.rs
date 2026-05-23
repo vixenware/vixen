@@ -34,7 +34,7 @@ fn main() {
 }
 
 fn install(mode: InstallMode) {
-    let binaries = vec!["vx"];
+    let binaries = vec!["vx", "vixen"];
 
     // Find workspace root
     let workspace_root = find_workspace_root().expect("Could not find workspace root");
@@ -105,7 +105,7 @@ fn install(mode: InstallMode) {
             }
         }
 
-        if binary_name == "vx" {
+        if binary_name == "vixen" {
             let output = Command::new(&dst)
                 .arg("--version")
                 .output()
