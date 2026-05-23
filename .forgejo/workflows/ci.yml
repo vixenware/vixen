@@ -53,10 +53,10 @@ jobs:
     container:
       image: code.vixen.rs/vixen/vixen-ci:latest
       volumes:
-        - /var/persistent-build-storage:/persistent-build-storage
+        - /srv/ci/cache/vixen:/ci-cache
     env:
-      CARGO_HOME: /persistent-build-storage/vixen/cargo
-      CARGO_TARGET_DIR: /persistent-build-storage/vixen/target/check-linux
+      CARGO_HOME: /ci-cache/cargo
+      CARGO_TARGET_DIR: /ci-cache/target/check-linux
     steps:
       - name: Checkout repository
         run: |
@@ -117,10 +117,10 @@ jobs:
     container:
       image: code.vixen.rs/vixen/vixen-ci:latest
       volumes:
-        - /var/persistent-build-storage:/persistent-build-storage
+        - /srv/ci/cache/vixen:/ci-cache
     env:
-      CARGO_HOME: /persistent-build-storage/vixen/cargo
-      CARGO_TARGET_DIR: /persistent-build-storage/vixen/target/clippy-linux
+      CARGO_HOME: /ci-cache/cargo
+      CARGO_TARGET_DIR: /ci-cache/target/clippy-linux
     steps:
       - name: Checkout repository
         run: |
@@ -184,10 +184,10 @@ jobs:
     container:
       image: code.vixen.rs/vixen/vixen-ci:latest
       volumes:
-        - /var/persistent-build-storage:/persistent-build-storage
+        - /srv/ci/cache/vixen:/ci-cache
     env:
-      CARGO_HOME: /persistent-build-storage/vixen/cargo
-      CARGO_TARGET_DIR: /persistent-build-storage/vixen/target/tests-linux
+      CARGO_HOME: /ci-cache/cargo
+      CARGO_TARGET_DIR: /ci-cache/target/tests-linux
     steps:
       - name: Checkout repository
         run: |
