@@ -50,7 +50,13 @@ jobs:
   check-linux:
     name: check (linux-x86_64-trusted)
     runs-on: linux-x86_64-trusted
-    container: code.vixen.rs/vixen/vixen-ci:latest
+    container:
+      image: code.vixen.rs/vixen/vixen-ci:latest
+      volumes:
+        - vixen-cargo-cache:/cargo-cache
+    env:
+      CARGO_HOME: /cargo-cache/cargo
+      CARGO_TARGET_DIR: /cargo-cache/target
     steps:
       - name: Checkout repository
         run: |
@@ -64,11 +70,11 @@ jobs:
 
       - name: Show toolchain
         run: |
+          mkdir -p "$CARGO_HOME" "$CARGO_TARGET_DIR"
           rustc --version
           cargo --version
 
-      - run: |
-          CARGO_TARGET_DIR="$HOME/.cache/vixen/forgejo-target" cargo check --workspace --all-targets
+      - run: cargo check --workspace --all-targets
 
   clippy-mac:
     name: clippy (mac)
@@ -108,7 +114,13 @@ jobs:
   clippy-linux:
     name: clippy (linux-x86_64-trusted)
     runs-on: linux-x86_64-trusted
-    container: code.vixen.rs/vixen/vixen-ci:latest
+    container:
+      image: code.vixen.rs/vixen/vixen-ci:latest
+      volumes:
+        - vixen-cargo-cache:/cargo-cache
+    env:
+      CARGO_HOME: /cargo-cache/cargo
+      CARGO_TARGET_DIR: /cargo-cache/target
     steps:
       - name: Checkout repository
         run: |
@@ -122,12 +134,12 @@ jobs:
 
       - name: Show toolchain
         run: |
+          mkdir -p "$CARGO_HOME" "$CARGO_TARGET_DIR"
           rustc --version
           cargo --version
           cargo clippy --version
 
-      - run: |
-          CARGO_TARGET_DIR="$HOME/.cache/vixen/forgejo-target" cargo clippy --workspace --all-targets
+      - run: cargo clippy --workspace --all-targets
 
   tests-mac:
     name: tests (mac)
@@ -169,7 +181,13 @@ jobs:
   tests-linux:
     name: tests (linux-x86_64-trusted)
     runs-on: linux-x86_64-trusted
-    container: code.vixen.rs/vixen/vixen-ci:latest
+    container:
+      image: code.vixen.rs/vixen/vixen-ci:latest
+      volumes:
+        - vixen-cargo-cache:/cargo-cache
+    env:
+      CARGO_HOME: /cargo-cache/cargo
+      CARGO_TARGET_DIR: /cargo-cache/target
     steps:
       - name: Checkout repository
         run: |
@@ -183,9 +201,9 @@ jobs:
 
       - name: Show toolchain
         run: |
+          mkdir -p "$CARGO_HOME" "$CARGO_TARGET_DIR"
           rustc --version
           cargo --version
           cargo nextest --version
 
-      - run: |
-          CARGO_TARGET_DIR="$HOME/.cache/vixen/forgejo-target" cargo nextest run --workspace --no-fail-fast --status-level fail --final-status-level fail
+      - run: cargo nextest run --workspace --no-fail-fast --status-level fail --final-status-level fail
