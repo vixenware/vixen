@@ -55,13 +55,11 @@ vx-jit-types = { path = "crates/vx-jit-types" }
 vx-vir = { path = "crates/vx-vir" }
 vxd = { path = "crates/vx-daemon", package = "vx-daemon" }
 
-# moved to vixen-lang
+# moved to vixen-lang (vx-diagnostics / margin / margin-term also live there
+# but no monorepo workspace member uses them anymore)
 vx-parser = { git = "ssh://code.vixen.rs/vixen/vixen-lang" }
 vx-resolve = { git = "ssh://code.vixen.rs/vixen/vixen-lang" }
 vx-types = { git = "ssh://code.vixen.rs/vixen/vixen-lang" }
-vx-diagnostics = { git = "ssh://code.vixen.rs/vixen/vixen-lang" }
-margin = { git = "ssh://code.vixen.rs/vixen/vixen-lang" }
-margin-term = { git = "ssh://code.vixen.rs/vixen/vixen-lang" }
 
 # vx-lsp lives in vixen-lsp and is installed as a standalone binary
 # (no longer linked into vx; editors point at `vx-lsp` directly)
@@ -124,7 +122,6 @@ windows-projfs = { version = "0.1", features = ["dynamic-import"] }
 
 # terminal
 owo-colors = { version = "4", features = ["supports-color"] }
-unicode-width = "0.2"
 arborium = { version = "2.16.0", default-features = false }
 arborium-highlight = "2.16.0"
 arborium-theme = "2.16.0"
