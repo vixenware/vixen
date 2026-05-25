@@ -44,7 +44,7 @@ impl fmt::Display for CompileError {
 
 impl std::error::Error for CompileError {}
 
-fn inject_implicit_stdlib_imports(program: &mut crate::build::VirProgram) {
+pub fn inject_implicit_stdlib_imports(program: &mut crate::build::VirProgram) {
     let Some(&primary_su) = program.source_units.first() else {
         return;
     };

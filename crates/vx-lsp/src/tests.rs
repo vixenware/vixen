@@ -29,10 +29,8 @@ fn text_range(text: &str, needle: &str, len: usize) -> Range {
 
 fn definition_named<'a>(state: &'a DocumentState, name: &str) -> &'a vx_resolve::Definition {
     state
-        .resolution()
-        .scopes
-        .all_definitions_in(*state.current_source())
-        .into_iter()
+        .all_definitions()
+        .iter()
         .find(|def| def.name == name)
         .unwrap_or_else(|| panic!("missing definition `{name}`"))
 }
@@ -242,11 +240,11 @@ fn demo() {
     assert_ne!(def.source(), *state.current_source());
     assert_eq!(def.kind, vx_resolve::DefKind::Function);
     assert_eq!(
-        state.declaration_snippet(def),
+        state.declaration_snippet(&def),
         "fn executor_class(label: String) -> ExecutorClass"
     );
     assert_eq!(
-        state.doc_comment_for(def).as_deref(),
+        state.doc_comment_for(&def).as_deref(),
         Some("Construct an executor class selector value.")
     );
 
@@ -277,7 +275,7 @@ fn demo(blob: Blob) {
     assert_eq!(def.name, "Toml");
     assert_eq!(def.kind, vx_resolve::DefKind::Namespace);
     assert_ne!(def.source(), *state.current_source());
-    assert_eq!(state.declaration_snippet(def), "namespace Toml {");
+    assert_eq!(state.declaration_snippet(&def), "namespace Toml {");
 
     let uri = state.uri_for_source(def.source()).unwrap();
     let disk_path = uri
@@ -305,11 +303,11 @@ fn demo(host: Host) {
     assert_eq!(def.kind, vx_resolve::DefKind::Function);
     assert_ne!(def.source(), *state.current_source());
     assert_eq!(
-        state.declaration_snippet(def),
+        state.declaration_snippet(&def),
         "fn which(self, name: String) -> String"
     );
     assert_eq!(
-        state.doc_comment_for(def).as_deref(),
+        state.doc_comment_for(&def).as_deref(),
         Some("Resolve a tool or executable name on the executor host.")
     );
 }

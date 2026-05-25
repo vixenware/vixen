@@ -5,11 +5,17 @@ use rowan::TextRange;
 use tower_lsp::jsonrpc::Result;
 use tower_lsp::lsp_types::*;
 use tower_lsp::{Client, LanguageServer};
+use vx_ir::arena::VirArena;
+use vx_ir::expr::ExprKind;
+use vx_ir::item::ItemKind;
+use vx_ir::scope::{DefTarget, ScopeEntryTarget, ScopeOwner};
+use vx_ir::span_index::SpanIndex;
+use vx_ir::type_check::TypeCheckVirResult;
+use vx_ir::type_collect::TypeCollection;
+use vx_ir::{BindingId, ItemId, ScopeId};
 use vx_parser::{self as vx, AstNode, FnDecl, Parsed, SourceFile, SyntaxKind, trimmed_range};
 
-#[cfg(test)]
-use vx_resolve::TypeCollection;
-use vx_resolve::{ImportGraph, NameResolution, SourceFileRef, SourceId, SourceSpan};
+use vx_resolve::{CapCheckResult, DefId, DefKind, Definition, SourceId, SourceSpan};
 pub struct VxLanguageServer {
     client: Client,
     documents: Mutex<HashMap<Url, DocumentState>>,
@@ -21,10 +27,15 @@ pub(crate) struct DocumentState {
     parsed: Parsed<SourceFile>,
     line_index: vx::LineIndex,
     source_docs: HashMap<SourceId, SourceDoc>,
-    resolution: NameResolution,
-    types: vx_resolve::TypeCollection,
-    cap_check: vx_resolve::CapCheckResult,
-    type_check: vx_resolve::TypeCheckResult,
+    arena: VirArena,
+    span_index: SpanIndex,
+    types: TypeCollection,
+    type_check: TypeCheckVirResult,
+    cap_check: CapCheckResult,
+    resolve_errors: Vec<vx_ir::resolve::ResolveError>,
+    /// Cached materialized Definitions for `all_definitions_in` queries.
+    /// Keyed by source so workspace_symbol can scan all loaded docs.
+    all_defs: Vec<Definition>,
 }
 
 struct SourceDoc {
@@ -32,29 +43,6 @@ struct SourceDoc {
     text: String,
     parsed: Parsed<SourceFile>,
     line_index: vx::LineIndex,
-}
-
-#[derive(Default)]
-struct SourceCatalog {
-    next_id: u32,
-    docs: HashMap<SourceId, SourceDoc>,
-}
-
-impl SourceCatalog {
-    fn insert(&mut self, uri: Option<Url>, text: String) -> SourceId {
-        let id = SourceId(self.next_id);
-        self.next_id += 1;
-        self.docs.insert(
-            id,
-            SourceDoc {
-                uri,
-                line_index: vx::LineIndex::new(&text),
-                parsed: vx::parse_source_file(&text),
-                text,
-            },
-        );
-        id
-    }
 }
 
 impl DocumentState {
@@ -68,56 +56,148 @@ impl DocumentState {
         &self.current_source
     }
 
+    /// Test-only: enumerate all materialized definitions in the current source.
     #[cfg(test)]
-    pub(crate) fn resolution(&self) -> &NameResolution {
-        &self.resolution
+    pub(crate) fn all_definitions(&self) -> &[Definition] {
+        &self.all_defs
     }
 
     pub(crate) fn new_with_uri(text: String, current_uri: Option<Url>) -> Self {
         let parsed = vx::parse_source_file(&text);
         let line_index = vx::LineIndex::new(&text);
-        let mut catalog = SourceCatalog::default();
-        let current_source = catalog.insert(current_uri.clone(), text.clone());
-        let mut imports = ImportGraph::new();
 
-        for source in vx_resolve::stdlib_sources() {
-            let uri = Url::from_file_path(vx_resolve::source_disk_path(source.logical_path)).ok();
-            let stdlib_source = catalog.insert(uri, source.text.to_string());
-            imports.add_import(current_source, stdlib_source);
+        // ------------------------------------------------------------------
+        // Build source catalog: user source first (SourceId(0)), then stdlib.
+        // Mirrors vx_ir::compile::compile_source.
+        // ------------------------------------------------------------------
+        let current_source = SourceId(0);
+        let mut source_docs: HashMap<SourceId, SourceDoc> = HashMap::new();
+        source_docs.insert(
+            current_source,
+            SourceDoc {
+                uri: current_uri.clone(),
+                text: text.clone(),
+                parsed: parsed.clone(),
+                line_index: vx::LineIndex::new(&text),
+            },
+        );
+
+        let mut sources: Vec<(SourceId, vx::SourceFile)> = vec![(current_source, parsed.tree())];
+        for (i, stdlib) in vx_resolve::stdlib_sources().iter().enumerate() {
+            let stdlib_id = SourceId(i as u32 + 1);
+            let stdlib_parsed = vx::parse_source_file(stdlib.text);
+            let stdlib_line_index = vx::LineIndex::new(stdlib.text);
+            let uri = Url::from_file_path(vx_resolve::source_disk_path(stdlib.logical_path)).ok();
+            source_docs.insert(
+                stdlib_id,
+                SourceDoc {
+                    uri,
+                    text: stdlib.text.to_string(),
+                    parsed: stdlib_parsed.clone(),
+                    line_index: stdlib_line_index,
+                },
+            );
+            sources.push((stdlib_id, stdlib_parsed.tree()));
         }
 
-        let source_docs = catalog.docs;
-        let sources: Vec<_> = source_docs
-            .iter()
-            .map(|(&id, doc)| SourceFileRef {
-                id,
-                file: doc.parsed.tree(),
-            })
-            .collect();
+        // ------------------------------------------------------------------
+        // VIR build + semantic passes.
+        // ------------------------------------------------------------------
+        let mut program = vx_ir::build::VirBuilder::build_program(&sources);
+        vx_ir::compile::inject_implicit_stdlib_imports(&mut program);
 
-        let resolution = vx_resolve::resolve_in_program(
-            SourceFileRef {
-                id: current_source,
-                file: parsed.tree(),
-            },
-            &sources,
-            imports,
-        );
-        let types = vx_resolve::collect_types_for_sources(&sources);
-        let type_check = vx_resolve::type_check(&parsed.tree(), &resolution, &types);
+        let types = vx_ir::type_collect::collect_types_vir(&mut program.arena);
+        let resolve_errors = vx_ir::resolve::resolve_names(&mut program.arena);
+        let type_check = vx_ir::type_check::type_check_vir(&mut program.arena, &types);
         let cap_check =
-            vx_resolve::check_capabilities(&parsed.tree(), &resolution, &types, &type_check);
+            vx_ir::cap_check::check_capabilities_vir(&program.arena, &types, &type_check);
+
+        let span_index = SpanIndex::build(&program.arena);
+        let arena = program.arena;
+        let all_defs = materialize_all_definitions(&arena, current_source);
+
         Self {
             current_source,
             text,
             parsed,
             line_index,
             source_docs,
-            resolution,
+            arena,
+            span_index,
             types,
-            cap_check,
             type_check,
+            cap_check,
+            resolve_errors,
+            all_defs,
         }
+    }
+
+    // ------------------------------------------------------------------
+    // Span-index-backed queries.
+    // ------------------------------------------------------------------
+
+    /// Materialize a `Definition` for whatever the SpanIndex finds at this name span.
+    fn definition_at_name_span(&self, span: SourceSpan) -> Option<Definition> {
+        if let Some(item_id) = self.span_index.item_at_name_span(span) {
+            return definition_from_item(&self.arena, item_id);
+        }
+        if let Some(binding_id) = self.span_index.binding_at_name_span(span) {
+            return Some(definition_from_binding(&self.arena, binding_id));
+        }
+        None
+    }
+
+    /// Materialize a Definition from a resolved DefTarget.
+    fn definition_from_target(&self, target: DefTarget) -> Option<Definition> {
+        match target {
+            DefTarget::Item(item_id) => definition_from_item(&self.arena, item_id),
+            DefTarget::Binding(binding_id) => {
+                Some(definition_from_binding(&self.arena, binding_id))
+            }
+            DefTarget::Variant {
+                enum_item,
+                variant_index,
+            } => definition_from_variant(&self.arena, enum_item, variant_index),
+        }
+    }
+
+    /// Lookup the expression at exactly this span (unwrapping parens via CST).
+    fn expr_ty_at(&self, span: SourceSpan) -> Option<vx_types::Ty> {
+        let expr_id = self.span_index.expr_at(span)?;
+        self.arena[expr_id].ty.clone()
+    }
+
+    /// Walk the CST to unwrap paren expressions, return the inner span.
+    fn span_unwrapping_parens(&self, expr: &vx::Expr) -> SourceSpan {
+        let mut cur = expr.clone();
+        while let vx::Expr::Paren(p) = &cur {
+            match p.expr() {
+                Some(inner) => cur = inner,
+                None => break,
+            }
+        }
+        self.current_span(cur.syntax().text_range())
+    }
+
+    /// Resolve a name-ref-like token to a definition by walking up the CST
+    /// to find the enclosing NAME_REF_EXPR node and looking up its span in
+    /// the SpanIndex. IR spans use the full text_range (with leading trivia)
+    /// while token text_ranges are trimmed.
+    fn resolved_target_for_token(&self, token: &vx::SyntaxToken) -> Option<DefTarget> {
+        let mut node = token.parent();
+        while let Some(n) = node {
+            let span = self.current_span(n.text_range());
+            if let Some(expr_id) = self.span_index.name_ref_at(span, &self.arena)
+                && let ExprKind::NameRef(nr) = &self.arena[expr_id].kind
+            {
+                return nr.resolved;
+            }
+            if matches!(n.kind(), SyntaxKind::NAME_REF_EXPR) {
+                break;
+            }
+            node = n.parent();
+        }
+        None
     }
 
     /// Find the definition under the cursor and the range that should be
@@ -125,70 +205,114 @@ impl DocumentState {
     pub(crate) fn definition_with_origin_at(
         &self,
         offset: rowan::TextSize,
-    ) -> Option<(&vx_resolve::Definition, SourceSpan)> {
-        // Check if cursor is on a reference
-        if let Some(resolved) = self
-            .resolution
-            .refs
-            .iter()
-            .find(|r| r.span.contains_inclusive(offset))
-        {
-            return Some((resolved.target.as_ref().ok()?, resolved.span));
+    ) -> Option<(Definition, SourceSpan)> {
+        // 1. Try both right-biased and left-biased tokens at the offset.
+        // The offset may sit at a token boundary; we need to consider both
+        // sides so cursor placement just before an identifier still resolves.
+        let token_at = self.parsed.tree().syntax().token_at_offset(offset);
+        let candidates: Vec<vx::SyntaxToken> = match token_at {
+            rowan::TokenAtOffset::None => return None,
+            rowan::TokenAtOffset::Single(t) => vec![t],
+            rowan::TokenAtOffset::Between(left, right) => vec![right, left],
+        };
+
+        for token in candidates {
+            // The IR stores spans that may include leading trivia (e.g. the
+            // NAME_REF_EXPR CST node's full text_range). The token's range is
+            // trimmed. Look up via both: first the token (matches name_span on
+            // bindings/items), then the enclosing CST node (matches IR exprs).
+            let token_span = self.current_span(token.text_range());
+
+            // Cursor on a definition site (bindings/items use token spans).
+            if let Some(def) = self.definition_at_name_span(token_span) {
+                let span = def.name_span;
+                return Some((def, span));
+            }
+
+            // Member-defs side table is keyed by the token (CST node) span
+            // for field/method references — check both.
+            if let Some(def) = self.type_check.member_defs.get(&token_span) {
+                return Some((def.clone(), token_span));
+            }
+
+            // Walk up the syntax tree to find an enclosing NAME_REF_EXPR.
+            let mut node = token.parent();
+            while let Some(n) = node {
+                let n_span = self.current_span(n.text_range());
+
+                // Cursor on a name reference via the CST node's full span.
+                if let Some(expr_id) = self.span_index.name_ref_at(n_span, &self.arena)
+                    && let ExprKind::NameRef(nr) = &self.arena[expr_id].kind
+                    && let Some(target) = nr.resolved
+                    && let Some(def) = self.definition_from_target(target)
+                {
+                    return Some((def, self.current_span(trimmed_range(&n))));
+                }
+
+                // Member-defs may be keyed by the enclosing node span too.
+                if let Some(def) = self.type_check.member_defs.get(&n_span) {
+                    return Some((def.clone(), self.current_span(trimmed_range(&n))));
+                }
+
+                // Stop once we exit identifier-like syntax.
+                if matches!(n.kind(), SyntaxKind::NAME_REF_EXPR | SyntaxKind::FIELD_EXPR) {
+                    break;
+                }
+                node = n.parent();
+            }
         }
 
-        if let Some((span, def)) = self
-            .type_check
-            .member_defs
-            .iter()
-            .find(|(span, _)| span.contains_inclusive(offset))
-        {
-            return Some((def, *span));
-        }
-
-        // Check if cursor is on a definition site
-        let def = self
-            .resolution
-            .scopes
-            .all_definitions_in(self.current_source)
-            .into_iter()
-            .find(|d| d.name_span.contains_inclusive(offset))?;
-        Some((def, def.name_span))
+        None
     }
 
     /// Find the definition under the cursor. Works whether the cursor is on
     /// a definition site or on a reference that resolves to one.
-    pub(crate) fn definition_at(&self, offset: rowan::TextSize) -> Option<&vx_resolve::Definition> {
+    pub(crate) fn definition_at(&self, offset: rowan::TextSize) -> Option<Definition> {
         Some(self.definition_with_origin_at(offset)?.0)
     }
 
     /// Find all reference ranges that point to a given definition.
-    fn references_to(&self, def: &vx_resolve::Definition) -> Vec<SourceSpan> {
-        let mut refs: Vec<_> = self
-            .resolution
-            .refs
-            .iter()
-            .filter_map(|r| {
-                let target = r.target.as_ref().ok()?;
-                if target.id == def.id {
-                    Some(r.span)
-                } else {
-                    None
-                }
-            })
-            .collect();
-        refs.extend(
-            self.type_check
-                .member_defs
-                .iter()
-                .filter_map(|(span, target)| {
-                    if target.id == def.id {
-                        Some(*span)
-                    } else {
-                        None
-                    }
-                }),
-        );
+    /// Returns trimmed spans (the identifier token range, excluding any
+    /// leading trivia carried by the IR span).
+    fn references_to(&self, def: &Definition) -> Vec<SourceSpan> {
+        let mut refs = Vec::new();
+        for expr in &self.arena.exprs {
+            if let ExprKind::NameRef(nr) = &expr.kind
+                && let Some(target) = nr.resolved
+                && let Some(target_def) = self.definition_from_target(target)
+                && target_def.id == def.id
+            {
+                refs.push(self.trim_span(expr.span));
+            }
+            if let ExprKind::StructLiteral(sl) = &expr.kind
+                && let Some(item_id) = sl.resolved
+                && let Some(target_def) = definition_from_item(&self.arena, item_id)
+                && target_def.id == def.id
+            {
+                refs.push(sl.name_span);
+            }
+        }
+        for (span, target) in &self.type_check.member_defs {
+            if target.id == def.id {
+                refs.push(*span);
+            }
+        }
         refs
+    }
+
+    /// Trim a span to exclude leading/trailing trivia by finding the
+    /// enclosing CST node and using its trimmed range. Falls back to the
+    /// original span if no node matches.
+    fn trim_span(&self, span: SourceSpan) -> SourceSpan {
+        let Some(doc) = self.source_doc(span.source) else {
+            return span;
+        };
+        let root = doc.parsed.tree().syntax().clone();
+        if let Some(node) = root.descendants().find(|n| n.text_range() == span.range) {
+            SourceSpan::new(span.source, trimmed_range(&node))
+        } else {
+            span
+        }
     }
 
     fn source_doc(&self, source: SourceId) -> Option<&SourceDoc> {
@@ -201,12 +325,12 @@ impl DocumentState {
 
     /// Extract a declaration snippet for hover display.
     /// Takes the first line of the full declaration range.
-    pub(crate) fn declaration_snippet(&self, def: &vx_resolve::Definition) -> String {
+    pub(crate) fn declaration_snippet(&self, def: &Definition) -> String {
         let Some(doc) = self.source_doc(def.source()) else {
             return String::new();
         };
         let start = u32::from(def.full_span.start()) as usize;
-        let end = if def.kind == vx_resolve::DefKind::Function {
+        let end = if def.kind == DefKind::Function {
             self.declaration_node_for(def)
                 .and_then(FnDecl::cast)
                 .and_then(|decl| decl.body_expr())
@@ -225,32 +349,30 @@ impl DocumentState {
     }
 
     /// Extract the doc comment attached to a definition's syntax node.
-    pub(crate) fn doc_comment_for(&self, def: &vx_resolve::Definition) -> Option<String> {
+    pub(crate) fn doc_comment_for(&self, def: &Definition) -> Option<String> {
         let node = self.declaration_node_for(def)?;
         vx::doc_comment(&node)
     }
 
-    pub(crate) fn documentation_for(&self, def: &vx_resolve::Definition) -> Option<String> {
+    pub(crate) fn documentation_for(&self, def: &Definition) -> Option<String> {
         self.doc_comment_for(def).or_else(|| {
-            self.type_check
-                .closure_param_docs
-                .get(&def.name_span)
-                .cloned()
+            // closure_param_docs is keyed by BindingId in vx-ir.
+            let binding_id = self.span_index.binding_at_name_span(def.name_span)?;
+            self.type_check.closure_param_docs.get(&binding_id).cloned()
         })
     }
 
-    fn declaration_node_for(&self, def: &vx_resolve::Definition) -> Option<vx::SyntaxNode> {
+    fn declaration_node_for(&self, def: &Definition) -> Option<vx::SyntaxNode> {
         let expected_kind = match def.kind {
-            vx_resolve::DefKind::Function => SyntaxKind::FN_DECL,
-            vx_resolve::DefKind::Namespace => SyntaxKind::NAMESPACE_DECL,
-            vx_resolve::DefKind::Struct => SyntaxKind::STRUCT_DECL,
-            vx_resolve::DefKind::Enum => SyntaxKind::ENUM_DECL,
-            vx_resolve::DefKind::Newtype => SyntaxKind::NEWTYPE_DECL,
-            vx_resolve::DefKind::TypeAlias => SyntaxKind::TYPE_ALIAS_DECL,
-            vx_resolve::DefKind::Binding
-            | vx_resolve::DefKind::Parameter
-            | vx_resolve::DefKind::Variant
-            | vx_resolve::DefKind::Field => return None,
+            DefKind::Function => SyntaxKind::FN_DECL,
+            DefKind::Namespace => SyntaxKind::NAMESPACE_DECL,
+            DefKind::Struct => SyntaxKind::STRUCT_DECL,
+            DefKind::Enum => SyntaxKind::ENUM_DECL,
+            DefKind::Newtype => SyntaxKind::NEWTYPE_DECL,
+            DefKind::TypeAlias => SyntaxKind::TYPE_ALIAS_DECL,
+            DefKind::Binding | DefKind::Parameter | DefKind::Variant | DefKind::Field => {
+                return None;
+            }
         };
 
         self.source_doc(def.source())?
@@ -261,32 +383,41 @@ impl DocumentState {
             .find(|node| node.kind() == expected_kind && node.text_range() == def.full_span.range)
     }
 
-    fn fn_decl_for(&self, def: &vx_resolve::Definition) -> Option<FnDecl> {
-        if def.kind != vx_resolve::DefKind::Function {
+    fn fn_decl_for(&self, def: &Definition) -> Option<FnDecl> {
+        if def.kind != DefKind::Function {
             return None;
         }
         FnDecl::cast(self.declaration_node_for(def)?)
     }
 
-    pub(crate) fn inferred_def_type(&self, def: &vx_resolve::Definition) -> Option<vx_types::Ty> {
-        if let Some(ty) = self.type_check.binding_types.get(&def.name_span) {
-            return Some(ty.clone());
+    pub(crate) fn inferred_def_type(&self, def: &Definition) -> Option<vx_types::Ty> {
+        // For local bindings & parameters: type is on Binding.ty.
+        if let Some(binding_id) = self.span_index.binding_at_name_span(def.name_span)
+            && let Some(ty) = self.arena[binding_id].ty.clone()
+        {
+            return Some(ty);
         }
 
-        if let Some(ty) = self.type_check.closure_param_types.get(&def.name_span) {
-            return Some(ty.clone());
-        }
-
-        for resolved_ref in &self.resolution.refs {
-            if let Ok(ref target) = resolved_ref.target
-                && target.id == def.id
-                && let Some(ty) = self.type_check.expr_types.get(&resolved_ref.span)
+        // Fall back to walking references — first reference site with a type wins.
+        for expr in &self.arena.exprs {
+            let ExprKind::NameRef(nr) = &expr.kind else {
+                continue;
+            };
+            let Some(target) = nr.resolved else {
+                continue;
+            };
+            let Some(target_def) = self.definition_from_target(target) else {
+                continue;
+            };
+            if target_def.id == def.id
+                && let Some(ty) = expr.ty.clone()
             {
-                return Some(ty.clone());
+                return Some(ty);
             }
         }
 
-        self.type_check.expr_types.get(&def.name_span).cloned()
+        // Last fallback: the definition's own span as an expression.
+        self.expr_ty_at(def.name_span)
     }
 
     pub(crate) fn to_lsp_range(&self, range: TextRange) -> Range {
@@ -308,6 +439,23 @@ impl DocumentState {
 
     fn current_span(&self, range: TextRange) -> SourceSpan {
         SourceSpan::new(self.current_source, range)
+    }
+
+    /// Enumerate all materialized definitions in the current source.
+    fn all_definitions_in_current(&self) -> &[Definition] {
+        &self.all_defs
+    }
+
+    /// Enumerate definitions visible at a particular offset in the current source.
+    /// Uses vx-ir's scope lookup machinery to walk the scope chain.
+    fn visible_at(&self, offset: rowan::TextSize) -> Vec<Definition> {
+        let from_scope = self.scope_at_offset(offset);
+        visible_definitions_at(&self.arena, from_scope, offset)
+    }
+
+    /// Find the innermost scope owning `offset` in the current source.
+    fn scope_at_offset(&self, offset: rowan::TextSize) -> ScopeId {
+        innermost_scope_at(&self.arena, self.current_source, offset)
     }
 }
 
@@ -462,23 +610,29 @@ impl LanguageServer for VxLanguageServer {
     ) -> Result<Option<SemanticTokensResult>> {
         let data = self.with_document(&params.text_document.uri, |state| {
             let tokens = vx::semantic_tokens(state.parsed.tree().syntax());
-            // Collect ranges of builtin references for modifier tagging
-            let builtin_ranges: std::collections::HashSet<rowan::TextRange> = state
-                .resolution
-                .refs
-                .iter()
-                .filter_map(|r| r.target.as_ref().ok().map(|def| (r.span.range, def)))
-                .filter(|(_, def)| def.source() != state.current_source)
-                .map(|(range, _)| range)
-                .chain(
-                    state
-                        .type_check
-                        .member_defs
-                        .iter()
-                        .filter(|(_, def)| def.source() != state.current_source)
-                        .map(|(span, _)| span.range),
-                )
-                .collect();
+            // Collect ranges of builtin references for modifier tagging.
+            let mut builtin_ranges: std::collections::HashSet<rowan::TextRange> =
+                std::collections::HashSet::new();
+            for expr in &state.arena.exprs {
+                let ExprKind::NameRef(nr) = &expr.kind else {
+                    continue;
+                };
+                let Some(target) = nr.resolved else {
+                    continue;
+                };
+                let Some(def) = state.definition_from_target(target) else {
+                    continue;
+                };
+                if def.source() != state.current_source && expr.span.source == state.current_source
+                {
+                    builtin_ranges.insert(expr.span.range);
+                }
+            }
+            for (span, def) in &state.type_check.member_defs {
+                if def.source() != state.current_source && span.source == state.current_source {
+                    builtin_ranges.insert(span.range);
+                }
+            }
             encode_semantic_tokens(&tokens, &state.line_index, &builtin_ranges)
         });
         Ok(data.map(|data| {
@@ -521,10 +675,8 @@ impl LanguageServer for VxLanguageServer {
             {
                 let field_name = field_name_tok.text();
                 if let Some(receiver_expr) = field_node.receiver() {
-                    let receiver_ty = state
-                        .type_check
-                        .expr_types
-                        .get(&state.current_span(receiver_expr.syntax().text_range()));
+                    let receiver_ty =
+                        state.expr_ty_at(state.span_unwrapping_parens(&receiver_expr));
                     if let Some(vx_types::Ty::Struct(struct_ty)) = receiver_ty
                         && let vx_types::TypeDef::Struct(sdef) = &state.types.env[struct_ty.id]
                         && let Some(fdef) = sdef.fields.iter().find(|f| f.name == field_name)
@@ -556,7 +708,7 @@ impl LanguageServer for VxLanguageServer {
 
             let def = state.definition_at(offset)?;
             let mut locations: Vec<Location> = state
-                .references_to(def)
+                .references_to(&def)
                 .into_iter()
                 .map(|span| Location {
                     uri: uri.clone(),
@@ -623,7 +775,7 @@ impl LanguageServer for VxLanguageServer {
 
             // Collect all edits: the definition site + all references
             let mut edits: Vec<TextEdit> = state
-                .references_to(def)
+                .references_to(&def)
                 .into_iter()
                 .map(|span| TextEdit {
                     range: state.to_lsp_range_span(span),
@@ -662,13 +814,13 @@ impl LanguageServer for VxLanguageServer {
             // First, try definition-based hover (existing behavior)
             if let Some((def, hover_range)) = state.definition_with_origin_at(offset) {
                 let kind_label = def_kind_label(def.kind);
-                let snippet = state.declaration_snippet(def);
-                let doc = state.documentation_for(def);
+                let snippet = state.declaration_snippet(&def);
+                let doc = state.documentation_for(&def);
 
                 let mut markdown = format!("```vx\n{snippet}\n```\n---\n*{kind_label}*");
 
                 // Show type signature for functions
-                if let Some(sig) = state.types.fn_sig_for_def(def) {
+                if let Some(sig) = state.types.fn_sig_for_def(&def) {
                     markdown.push_str(&format!(
                         "\n\nReturns `{}`",
                         sig.ret.display_with_env(&state.types.env)
@@ -676,17 +828,15 @@ impl LanguageServer for VxLanguageServer {
                 }
 
                 // Show inferred type for parameters and bindings from the type checker
-                if matches!(
-                    def.kind,
-                    vx_resolve::DefKind::Parameter | vx_resolve::DefKind::Binding
-                ) && let Some(ty) = state.inferred_def_type(def)
+                if matches!(def.kind, DefKind::Parameter | DefKind::Binding)
+                    && let Some(ty) = state.inferred_def_type(&def)
                 {
                     let display = ty.display_with_env(&state.types.env);
                     markdown.push_str(&format!("\n\nType: `{display}`"));
                 }
 
                 // Show fields for structs
-                if let Some(type_id) = state.types.type_id_for_def(def) {
+                if let Some(type_id) = state.types.type_id_for_def(&def) {
                     match &state.types.env[type_id] {
                         vx_types::TypeDef::Struct(s) if !s.fields.is_empty() => {
                             markdown.push_str("\n\n**Fields:**\n");
@@ -729,10 +879,7 @@ impl LanguageServer for VxLanguageServer {
             let mut node = token.parent();
             while let Some(n) = node {
                 if let Some(expr) = vx::Expr::cast(n.clone())
-                    && let Some(ty) = state
-                        .type_check
-                        .expr_types
-                        .get(&state.current_span(expr.syntax().text_range()))
+                    && let Some(ty) = state.expr_ty_at(state.span_unwrapping_parens(&expr))
                 {
                     let display = ty.display_with_env(&state.types.env);
                     let markdown = format!("```vx\n{display}\n```");
@@ -776,12 +923,10 @@ impl LanguageServer for VxLanguageServer {
             }
 
             let mut items: Vec<CompletionItem> = state
-                .resolution
-                .scopes
-                .visible_at(state.current_source, offset)
+                .visible_at(offset)
                 .into_iter()
                 .map(|def| {
-                    let documentation = state.documentation_for(def).map(|doc| {
+                    let documentation = state.documentation_for(&def).map(|doc| {
                         Documentation::MarkupContent(MarkupContent {
                             kind: MarkupKind::Markdown,
                             value: doc,
@@ -790,7 +935,7 @@ impl LanguageServer for VxLanguageServer {
                     CompletionItem {
                         label: def.name.clone(),
                         kind: Some(def_kind_to_completion(def.kind)),
-                        detail: Some(state.declaration_snippet(def)),
+                        detail: Some(state.declaration_snippet(&def)),
                         documentation,
                         ..Default::default()
                     }
@@ -940,25 +1085,19 @@ impl LanguageServer for VxLanguageServer {
                     vx::Expr::NameRef(ref nr) => nr.token()?,
                     _ if !label_parts.is_empty() => {
                         // Already handled above (method call)
-                        // Fall through to build the result
-                        // This branch shouldn't actually be reached since params would be populated
                         return None;
                     }
                     _ => return None,
                 };
 
-                let callee_range = callee_token.text_range();
-                let resolved = state
-                    .resolution
-                    .refs
-                    .iter()
-                    .find(|r| r.span == state.current_span(callee_range));
-                let def = resolved.and_then(|r| r.target.as_ref().ok());
+                let def = state
+                    .resolved_target_for_token(&callee_token)
+                    .and_then(|target| state.definition_from_target(target));
 
                 if let Some(def) = def
-                    && def.kind == vx_resolve::DefKind::Function
+                    && def.kind == DefKind::Function
                 {
-                    if let Some(fn_node) = state.fn_decl_for(def) {
+                    if let Some(fn_node) = state.fn_decl_for(&def) {
                         let fn_name = fn_node
                             .name()
                             .map(|t| t.text().to_string())
@@ -1020,7 +1159,7 @@ impl LanguageServer for VxLanguageServer {
                             label_parts.push(format!(" {ret_text}"));
                         }
 
-                        doc = state.documentation_for(def);
+                        doc = state.documentation_for(&def);
                     } else {
                         return None;
                     }
@@ -1100,10 +1239,7 @@ impl LanguageServer for VxLanguageServer {
                         col: diag.range.start.character,
                     });
                     if let Some(offset) = offset {
-                        let visible = state
-                            .resolution
-                            .scopes
-                            .visible_at(state.current_source, offset);
+                        let visible = state.visible_at(offset);
                         if let Some(suggestion) = closest_name(name, &visible) {
                             let edit = TextEdit {
                                 range: diag.range,
@@ -1159,7 +1295,7 @@ impl LanguageServer for VxLanguageServer {
                 });
             }
 
-            for ref_span in state.references_to(def) {
+            for ref_span in state.references_to(&def) {
                 highlights.push(DocumentHighlight {
                     range: state.to_lsp_range_span(ref_span),
                     kind: Some(DocumentHighlightKind::READ),
@@ -1209,11 +1345,11 @@ impl LanguageServer for VxLanguageServer {
             })?;
 
             let def = state.definition_at(offset)?;
-            if def.kind != vx_resolve::DefKind::Function {
+            if def.kind != DefKind::Function {
                 return None;
             }
 
-            Some(vec![make_call_hierarchy_item(uri, def, state)])
+            Some(vec![make_call_hierarchy_item(uri, &def, state)])
         });
 
         Ok(result.flatten())
@@ -1235,49 +1371,48 @@ impl LanguageServer for VxLanguageServer {
             })?;
             let target_def = state.definition_at(item_start)?;
 
-            // Find all call sites that reference this function
-            let call_refs: Vec<_> = state
-                .resolution
-                .refs
-                .iter()
-                .filter(|r| {
-                    r.target
-                        .as_ref()
-                        .ok()
-                        .is_some_and(|d| d.id == target_def.id)
-                })
-                .filter(|r| {
-                    // Only include refs that are the root callee of an application chain.
-                    let token = root.token_at_offset(r.span.start()).right_biased();
-                    token.is_some_and(|t| is_root_callee_ref(&t))
-                })
-                .collect();
+            // Find all call sites that reference this function. Walk arena.exprs
+            // for NameRef expressions that resolve to target_def and whose token
+            // is the root callee of an application chain.
+            let mut call_spans: Vec<SourceSpan> = Vec::new();
+            for expr in &state.arena.exprs {
+                let ExprKind::NameRef(nr) = &expr.kind else {
+                    continue;
+                };
+                let Some(target) = nr.resolved else {
+                    continue;
+                };
+                let Some(def) = state.definition_from_target(target) else {
+                    continue;
+                };
+                if def.id != target_def.id || expr.span.source != state.current_source {
+                    continue;
+                }
+                let token = root.token_at_offset(expr.span.range.start()).right_biased();
+                if !token.as_ref().is_some_and(is_root_callee_ref) {
+                    continue;
+                }
+                call_spans.push(expr.span);
+            }
 
             // Group by enclosing function
-            let mut by_caller: HashMap<
-                vx_resolve::DefId,
-                (vx_resolve::Definition, Vec<TextRange>),
-            > = HashMap::new();
-            for r in &call_refs {
-                let token = root.token_at_offset(r.span.start()).right_biased()?;
+            let mut by_caller: HashMap<DefId, (Definition, Vec<TextRange>)> = HashMap::new();
+            for span in &call_spans {
+                let token = root.token_at_offset(span.range.start()).right_biased()?;
                 // Walk up to find the enclosing FN_DECL
                 let fn_node = token.parent_ancestors().find_map(FnDecl::cast)?;
                 let caller_name_token = fn_node.name()?;
                 let caller_name_range = caller_name_token.text_range();
+                let caller_name_span = state.current_span(caller_name_range);
 
-                // Find the definition for this enclosing function
-                let caller_def = state
-                    .resolution
-                    .scopes
-                    .all_definitions_in(state.current_source)
-                    .into_iter()
-                    .find(|d| d.name_span.range == caller_name_range)?;
+                // Find the definition for this enclosing function.
+                let caller_def = state.definition_at_name_span(caller_name_span)?;
 
                 by_caller
                     .entry(caller_def.id)
                     .or_insert_with(|| (caller_def.clone(), Vec::new()))
                     .1
-                    .push(r.span.range);
+                    .push(span.range);
             }
 
             let calls: Vec<_> = by_caller
@@ -1313,10 +1448,8 @@ impl LanguageServer for VxLanguageServer {
             let fn_range = fn_node.syntax().text_range();
 
             // Find all CALL_EXPR nodes inside this function
-            let mut by_target: HashMap<
-                vx_resolve::DefSite,
-                (vx_resolve::Definition, Vec<TextRange>),
-            > = HashMap::new();
+            let mut by_target: HashMap<vx_resolve::DefSite, (Definition, Vec<TextRange>)> =
+                HashMap::new();
 
             for node in fn_node.syntax().descendants() {
                 if node.kind() != SyntaxKind::CALL_EXPR {
@@ -1342,14 +1475,14 @@ impl LanguageServer for VxLanguageServer {
                     continue;
                 }
 
-                // Resolve the callee
-                let resolved = state
-                    .resolution
-                    .refs
-                    .iter()
-                    .find(|r| r.span == state.current_span(callee_range))?;
-                let def = resolved.target.as_ref().ok()?;
-                if def.kind != vx_resolve::DefKind::Function {
+                // Resolve the callee via the parent NAME_REF_EXPR span.
+                let Some(target) = state.resolved_target_for_token(&callee_token) else {
+                    continue;
+                };
+                let Some(def) = state.definition_from_target(target) else {
+                    continue;
+                };
+                if def.kind != DefKind::Function {
                     continue;
                 }
 
@@ -1383,16 +1516,9 @@ impl LanguageServer for VxLanguageServer {
 
         let mut results = Vec::new();
         for (uri, state) in docs.iter() {
-            for def in state
-                .resolution
-                .scopes
-                .all_definitions_in(state.current_source)
-            {
+            for def in state.all_definitions_in_current() {
                 // Skip local bindings/parameters — only top-level-ish symbols
-                if matches!(
-                    def.kind,
-                    vx_resolve::DefKind::Binding | vx_resolve::DefKind::Parameter
-                ) {
+                if matches!(def.kind, DefKind::Binding | DefKind::Parameter) {
                     continue;
                 }
 
@@ -1441,19 +1567,27 @@ impl VxLanguageServer {
             })
             .collect();
 
-        // Unresolved name diagnostics from resolution
-        for err in &state.resolution.errors {
-            match err {
-                vx_resolve::ResolveError::Unresolved { name, span } => {
-                    diagnostics.push(Diagnostic {
-                        range: state.to_lsp_range_span(*span),
-                        severity: Some(DiagnosticSeverity::ERROR),
-                        source: Some("vx-resolve".to_string()),
-                        message: format!("unresolved name `{name}`"),
-                        ..Default::default()
-                    });
-                }
+        // Unresolved/invalid name diagnostics from VIR resolve.
+        for err in &state.resolve_errors {
+            // Only surface errors that originate in the user's source file.
+            if err.span.source != state.current_source {
+                continue;
             }
+            let message = match &err.kind {
+                vx_ir::resolve::ResolveErrorKind::Unresolved => {
+                    format!("unresolved name `{}`", err.name)
+                }
+                vx_ir::resolve::ResolveErrorKind::InvalidTarget { .. } => {
+                    format!("name `{}` resolves to an unexpected kind", err.name)
+                }
+            };
+            diagnostics.push(Diagnostic {
+                range: state.to_lsp_range_span(err.span),
+                severity: Some(DiagnosticSeverity::ERROR),
+                source: Some("vx-resolve".to_string()),
+                message,
+                ..Default::default()
+            });
         }
 
         // Capability checking diagnostics
@@ -1487,23 +1621,27 @@ impl VxLanguageServer {
         {
             use std::collections::HashSet;
             // Collect all definition sites that have at least one reference.
-            let referenced: HashSet<_> = state
-                .resolution
-                .refs
-                .iter()
-                .filter_map(|r| r.target.as_ref().ok())
-                .map(vx_resolve::Definition::site)
-                .collect();
-
-            for def in state
-                .resolution
-                .scopes
-                .all_definitions_in(state.current_source)
+            let mut referenced: HashSet<vx_resolve::DefSite> = HashSet::new();
+            for expr in &state.arena.exprs {
+                if let ExprKind::NameRef(nr) = &expr.kind
+                    && let Some(target) = nr.resolved
+                    && let Some(def) = state.definition_from_target(target)
+                {
+                    referenced.insert(def.site());
+                }
+            }
+            for def in &state
+                .type_check
+                .member_defs
+                .values()
+                .cloned()
+                .collect::<Vec<_>>()
             {
-                if !matches!(
-                    def.kind,
-                    vx_resolve::DefKind::Binding | vx_resolve::DefKind::Parameter
-                ) {
+                referenced.insert(def.site());
+            }
+
+            for def in state.all_definitions_in_current() {
+                if !matches!(def.kind, DefKind::Binding | DefKind::Parameter) {
                     continue;
                 }
                 // Skip names starting with _ (conventional unused marker)
@@ -1517,7 +1655,7 @@ impl VxLanguageServer {
                         source: Some("vx-lint".to_string()),
                         message: format!(
                             "unused {}: `{}`",
-                            if def.kind == vx_resolve::DefKind::Binding {
+                            if def.kind == DefKind::Binding {
                                 "binding"
                             } else {
                                 "parameter"
@@ -1533,8 +1671,12 @@ impl VxLanguageServer {
 
         // Type checking diagnostics
         for err in &state.type_check.errors {
+            // Only surface errors that originate in the user's source file.
+            if err.span.source != state.current_source {
+                continue;
+            }
             let message = match &err.kind {
-                vx_resolve::TypeErrorKind::ArgTypeMismatch {
+                vx_ir::type_check::TypeErrorKind::ArgTypeMismatch {
                     param_name,
                     expected,
                     found,
@@ -1543,21 +1685,21 @@ impl VxLanguageServer {
                         "type mismatch for `{param_name}`: expected `{expected}`, found `{found}`"
                     )
                 }
-                vx_resolve::TypeErrorKind::BinaryOpMismatch { op, left, right } => {
+                vx_ir::type_check::TypeErrorKind::BinaryOpMismatch { op, left, right } => {
                     format!("cannot apply `{op}` to `{left}` and `{right}`")
                 }
-                vx_resolve::TypeErrorKind::NoSuchMethod {
+                vx_ir::type_check::TypeErrorKind::NoSuchMethod {
                     receiver_ty,
                     method_name,
                 } => {
                     format!("no method `{method_name}` on type `{receiver_ty}`")
                 }
-                vx_resolve::TypeErrorKind::UnusedExprStatement => {
+                vx_ir::type_check::TypeErrorKind::UnusedExprStatement => {
                     "unused expression statement".to_string()
                 }
             };
             diagnostics.push(Diagnostic {
-                range: state.to_lsp_range(err.range),
+                range: state.to_lsp_range_span(err.span),
                 severity: Some(DiagnosticSeverity::ERROR),
                 source: Some("vx-type".to_string()),
                 message,
@@ -1600,33 +1742,33 @@ fn convert_symbol_kind(kind: vx::SymbolKind) -> SymbolKind {
     }
 }
 
-fn def_kind_label(kind: vx_resolve::DefKind) -> &'static str {
+fn def_kind_label(kind: DefKind) -> &'static str {
     match kind {
-        vx_resolve::DefKind::Function => "function",
-        vx_resolve::DefKind::Namespace => "namespace",
-        vx_resolve::DefKind::Struct => "struct",
-        vx_resolve::DefKind::Enum => "enum",
-        vx_resolve::DefKind::Newtype => "newtype",
-        vx_resolve::DefKind::TypeAlias => "type alias",
-        vx_resolve::DefKind::Binding => "binding",
-        vx_resolve::DefKind::Parameter => "parameter",
-        vx_resolve::DefKind::Variant => "variant",
-        vx_resolve::DefKind::Field => "field",
+        DefKind::Function => "function",
+        DefKind::Namespace => "namespace",
+        DefKind::Struct => "struct",
+        DefKind::Enum => "enum",
+        DefKind::Newtype => "newtype",
+        DefKind::TypeAlias => "type alias",
+        DefKind::Binding => "binding",
+        DefKind::Parameter => "parameter",
+        DefKind::Variant => "variant",
+        DefKind::Field => "field",
     }
 }
 
-fn def_kind_to_completion(kind: vx_resolve::DefKind) -> CompletionItemKind {
+fn def_kind_to_completion(kind: DefKind) -> CompletionItemKind {
     match kind {
-        vx_resolve::DefKind::Function => CompletionItemKind::FUNCTION,
-        vx_resolve::DefKind::Namespace => CompletionItemKind::MODULE,
-        vx_resolve::DefKind::Struct => CompletionItemKind::STRUCT,
-        vx_resolve::DefKind::Enum => CompletionItemKind::ENUM,
-        vx_resolve::DefKind::Newtype => CompletionItemKind::CLASS,
-        vx_resolve::DefKind::TypeAlias => CompletionItemKind::TYPE_PARAMETER,
-        vx_resolve::DefKind::Binding => CompletionItemKind::VARIABLE,
-        vx_resolve::DefKind::Parameter => CompletionItemKind::VARIABLE,
-        vx_resolve::DefKind::Variant => CompletionItemKind::ENUM_MEMBER,
-        vx_resolve::DefKind::Field => CompletionItemKind::FIELD,
+        DefKind::Function => CompletionItemKind::FUNCTION,
+        DefKind::Namespace => CompletionItemKind::MODULE,
+        DefKind::Struct => CompletionItemKind::STRUCT,
+        DefKind::Enum => CompletionItemKind::ENUM,
+        DefKind::Newtype => CompletionItemKind::CLASS,
+        DefKind::TypeAlias => CompletionItemKind::TYPE_PARAMETER,
+        DefKind::Binding => CompletionItemKind::VARIABLE,
+        DefKind::Parameter => CompletionItemKind::VARIABLE,
+        DefKind::Variant => CompletionItemKind::ENUM_MEMBER,
+        DefKind::Field => CompletionItemKind::FIELD,
     }
 }
 
@@ -1721,7 +1863,7 @@ fn encode_semantic_tokens(
 
 fn make_call_hierarchy_item(
     uri: &Url,
-    def: &vx_resolve::Definition,
+    def: &Definition,
     state: &DocumentState,
 ) -> CallHierarchyItem {
     CallHierarchyItem {
@@ -1738,18 +1880,18 @@ fn make_call_hierarchy_item(
     }
 }
 
-fn def_kind_to_symbol(kind: vx_resolve::DefKind) -> SymbolKind {
+fn def_kind_to_symbol(kind: DefKind) -> SymbolKind {
     match kind {
-        vx_resolve::DefKind::Function => SymbolKind::FUNCTION,
-        vx_resolve::DefKind::Namespace => SymbolKind::NAMESPACE,
-        vx_resolve::DefKind::Struct => SymbolKind::STRUCT,
-        vx_resolve::DefKind::Enum => SymbolKind::ENUM,
-        vx_resolve::DefKind::Newtype => SymbolKind::CLASS,
-        vx_resolve::DefKind::TypeAlias => SymbolKind::TYPE_PARAMETER,
-        vx_resolve::DefKind::Binding => SymbolKind::VARIABLE,
-        vx_resolve::DefKind::Parameter => SymbolKind::VARIABLE,
-        vx_resolve::DefKind::Variant => SymbolKind::ENUM_MEMBER,
-        vx_resolve::DefKind::Field => SymbolKind::FIELD,
+        DefKind::Function => SymbolKind::FUNCTION,
+        DefKind::Namespace => SymbolKind::NAMESPACE,
+        DefKind::Struct => SymbolKind::STRUCT,
+        DefKind::Enum => SymbolKind::ENUM,
+        DefKind::Newtype => SymbolKind::CLASS,
+        DefKind::TypeAlias => SymbolKind::TYPE_PARAMETER,
+        DefKind::Binding => SymbolKind::VARIABLE,
+        DefKind::Parameter => SymbolKind::VARIABLE,
+        DefKind::Variant => SymbolKind::ENUM_MEMBER,
+        DefKind::Field => SymbolKind::FIELD,
     }
 }
 
@@ -1841,17 +1983,14 @@ fn dot_completions(
             let name_token = nr.token()?;
             let name_range = name_token.text_range();
 
-            // Try to resolve this name
-            let resolved = state
-                .resolution
-                .refs
-                .iter()
-                .find(|r| r.span == state.current_span(name_range))?;
-            let def = resolved.target.as_ref().ok()?;
+            // Try to resolve this name via the parent NAME_REF_EXPR span.
+            let _ = name_range;
+            let target = state.resolved_target_for_token(&name_token)?;
+            let def = state.definition_from_target(target)?;
 
             // If it's an enum, offer variants
-            if def.kind == vx_resolve::DefKind::Enum {
-                let type_id = state.types.type_id_for_def(def)?;
+            if def.kind == DefKind::Enum {
+                let type_id = state.types.type_id_for_def(&def)?;
                 if let vx_types::TypeDef::Enum(e) = &state.types.env[type_id] {
                     let items: Vec<CompletionItem> = e
                         .variants
@@ -1871,24 +2010,21 @@ fn dot_completions(
             }
 
             // If it's a binding or parameter, offer completions based on inferred type
-            if matches!(
-                def.kind,
-                vx_resolve::DefKind::Binding | vx_resolve::DefKind::Parameter
-            ) {
-                if let Some(ty) = state.inferred_def_type(def)
+            if matches!(def.kind, DefKind::Binding | DefKind::Parameter) {
+                if let Some(ty) = state.inferred_def_type(&def)
                     && let Some(items) = completions_for_type(&ty, state, offset)
                 {
                     return Some(items);
                 }
                 // Fall back to function signature matching
-                if let Some(fields) = resolve_binding_fields(def, state) {
+                if let Some(fields) = resolve_binding_fields(&def, state) {
                     return Some(fields);
                 }
             }
 
             // If it's a function, offer completions on the return type
-            if def.kind == vx_resolve::DefKind::Function
-                && let Some(sig) = state.types.fn_sig_for_def(def)
+            if def.kind == DefKind::Function
+                && let Some(sig) = state.types.fn_sig_for_def(&def)
                 && let Some(items) = completions_for_type(&sig.ret, state, offset)
             {
                 return Some(items);
@@ -1898,13 +2034,9 @@ fn dot_completions(
         }
         _ => {
             // For any other expression, try the type checker's expr_types
-            let expr_range = receiver_expr.syntax().text_range();
-            if let Some(ty) = state
-                .type_check
-                .expr_types
-                .get(&state.current_span(expr_range))
-            {
-                return completions_for_type(ty, state, offset);
+            let receiver_span = state.span_unwrapping_parens(&receiver_expr);
+            if let Some(ty) = state.expr_ty_at(receiver_span) {
+                return completions_for_type(&ty, state, offset);
             }
             None
         }
@@ -1912,10 +2044,7 @@ fn dot_completions(
 }
 
 /// Try to determine the type of a binding and return its struct fields as completions.
-fn resolve_binding_fields(
-    def: &vx_resolve::Definition,
-    state: &DocumentState,
-) -> Option<Vec<CompletionItem>> {
+fn resolve_binding_fields(def: &Definition, state: &DocumentState) -> Option<Vec<CompletionItem>> {
     // Check if this binding is a function parameter with a type annotation
     for sig in state.types.fn_sigs() {
         for param in &sig.positional_params {
@@ -1945,28 +2074,22 @@ pub(crate) fn completions_for_type(
         _ => struct_fields_from_ty(ty, state),
     }
     .or_else(|| {
-        let items: Vec<CompletionItem> = vx_resolve::visible_members_for_receiver(
-            &state.resolution.scopes,
-            &state.types.env,
-            state.current_source,
-            offset,
-            ty,
-        )
-        .into_iter()
-        .filter(|def| def.kind == vx_resolve::DefKind::Function)
-        .map(|def| CompletionItem {
-            label: def.name.clone(),
-            kind: Some(CompletionItemKind::METHOD),
-            detail: Some(state.declaration_snippet(&def)),
-            documentation: state.documentation_for(&def).map(|doc| {
-                Documentation::MarkupContent(MarkupContent {
-                    kind: MarkupKind::Markdown,
-                    value: doc,
-                })
-            }),
-            ..Default::default()
-        })
-        .collect();
+        let items: Vec<CompletionItem> = visible_members_for_receiver(state, offset, ty)
+            .into_iter()
+            .filter(|def| def.kind == DefKind::Function)
+            .map(|def| CompletionItem {
+                label: def.name.clone(),
+                kind: Some(CompletionItemKind::METHOD),
+                detail: Some(state.declaration_snippet(&def)),
+                documentation: state.documentation_for(&def).map(|doc| {
+                    Documentation::MarkupContent(MarkupContent {
+                        kind: MarkupKind::Markdown,
+                        value: doc,
+                    })
+                }),
+                ..Default::default()
+            })
+            .collect();
         if items.is_empty() { None } else { Some(items) }
     })
 }
@@ -2040,7 +2163,7 @@ fn keyword_completions() -> Vec<CompletionItem> {
 
 /// Find the closest name to `target` among visible definitions (Levenshtein distance).
 /// Returns None if no name is within distance 2.
-fn closest_name(target: &str, visible: &[&vx_resolve::Definition]) -> Option<String> {
+fn closest_name(target: &str, visible: &[Definition]) -> Option<String> {
     let mut best: Option<(usize, String)> = None;
     for def in visible {
         let dist = levenshtein(target, &def.name);
@@ -2163,19 +2286,15 @@ pub(crate) fn collect_inlay_hints(state: &DocumentState) -> Vec<InlayHint> {
             None => continue,
         };
 
-        // Resolve to the callee declaration.
-        let callee_range = callee_token.text_range();
-        let resolved = state
-            .resolution
-            .refs
-            .iter()
-            .find(|r| r.span == state.current_span(callee_range));
-        let def = resolved.and_then(|r| r.target.as_ref().ok());
+        // Resolve to the callee declaration via the parent NAME_REF_EXPR span.
+        let def = state
+            .resolved_target_for_token(&callee_token)
+            .and_then(|target| state.definition_from_target(target));
 
         // Collect parameter names from the resolved declaration.
         let param_names: Vec<String>;
-        if let Some(d) = def
-            && d.kind == vx_resolve::DefKind::Function
+        if let Some(ref d) = def
+            && d.kind == DefKind::Function
         {
             let fn_node = match state.fn_decl_for(d) {
                 Some(f) => f,
@@ -2239,12 +2358,12 @@ pub(crate) fn collect_inlay_hints(state: &DocumentState) -> Vec<InlayHint> {
             continue;
         };
 
-        // Look up the inferred type for this binding
-        let Some(ty) = state
-            .type_check
-            .binding_types
-            .get(&state.current_span(name_tok.text_range()))
-        else {
+        // Look up the inferred type for this binding via SpanIndex.
+        let name_span = state.current_span(name_tok.text_range());
+        let Some(binding_id) = state.span_index.binding_at_name_span(name_span) else {
+            continue;
+        };
+        let Some(ty) = state.arena[binding_id].ty.clone() else {
             continue;
         };
 
@@ -2308,5 +2427,267 @@ fn unwrap_paren_expr(expr: vx::Expr) -> vx::Expr {
             None => vx::Expr::Paren(paren),
         },
         other => other,
+    }
+}
+
+// ---------------------------------------------------------------------------
+// VIR -> vx-resolve::Definition adapters
+// ---------------------------------------------------------------------------
+
+fn definition_from_item(arena: &VirArena, item_id: ItemId) -> Option<Definition> {
+    let item = &arena[item_id];
+    let (name, name_span, kind) = match &item.kind {
+        ItemKind::Function(f) => (f.name.clone(), f.name_span, DefKind::Function),
+        ItemKind::Struct(s) => (s.name.clone(), s.name_span, DefKind::Struct),
+        ItemKind::Enum(e) => (e.name.clone(), e.name_span, DefKind::Enum),
+        ItemKind::Newtype(n) => (n.name.clone(), n.name_span, DefKind::Newtype),
+        ItemKind::TypeAlias(t) => (t.name.clone(), t.name_span, DefKind::TypeAlias),
+        ItemKind::Namespace(ns) => (ns.name.clone(), ns.name_span, DefKind::Namespace),
+        ItemKind::Error => return None,
+    };
+    Some(Definition {
+        id: item.def_id,
+        name,
+        kind,
+        name_span,
+        full_span: item.span,
+        // ScopeId is vx-resolve's, not vx-ir's. The LSP doesn't introspect
+        // this field, so use ROOT as a sentinel.
+        scope: vx_resolve::ScopeId::ROOT,
+    })
+}
+
+fn definition_from_binding(arena: &VirArena, binding_id: BindingId) -> Definition {
+    let binding = &arena[binding_id];
+    let kind = match binding.kind {
+        vx_ir::binding::BindingKind::Parameter => DefKind::Parameter,
+        _ => DefKind::Binding,
+    };
+    Definition {
+        id: DefId::Source {
+            source: binding.name_span.source,
+            // Use BindingId encoded as `local` for stable identity. Bindings
+            // are arena-local, distinct from item DefIds (which use the
+            // builder's per-source counter). We OR in a high bit to keep
+            // them disjoint from item DefIds in equality tests.
+            local: 0x8000_0000 | (binding_id.index() as u32),
+        },
+        name: binding.name.clone(),
+        kind,
+        name_span: binding.name_span,
+        full_span: binding.name_span,
+        scope: vx_resolve::ScopeId::ROOT,
+    }
+}
+
+fn definition_from_variant(
+    arena: &VirArena,
+    enum_item: ItemId,
+    variant_index: u32,
+) -> Option<Definition> {
+    let ItemKind::Enum(e) = &arena[enum_item].kind else {
+        return None;
+    };
+    let variant = e.variants.get(variant_index as usize)?;
+    let enum_def_id = arena[enum_item].def_id;
+    let local = match enum_def_id {
+        DefId::Source { local, .. } => local,
+    };
+    let source = variant.name_span.source;
+    Some(Definition {
+        // Encode the variant index in the high bits so each (enum, variant) is
+        // distinct from the enum and other variants. The actual identity that
+        // matters for the LSP is name_span equality.
+        id: DefId::Source {
+            source,
+            local: 0xC000_0000 | (local << 8) | (variant_index & 0xFF),
+        },
+        name: variant.name.clone(),
+        kind: DefKind::Variant,
+        name_span: variant.name_span,
+        full_span: variant.name_span,
+        scope: vx_resolve::ScopeId::ROOT,
+    })
+}
+
+/// Walk the arena and produce one Definition per visible declaration in `source`.
+fn materialize_all_definitions(arena: &VirArena, source: SourceId) -> Vec<Definition> {
+    let mut defs = Vec::new();
+
+    // All items declared anywhere in this source.
+    for (i, item) in arena.items.iter().enumerate() {
+        if item.span.source != source {
+            continue;
+        }
+        if let Some(def) = definition_from_item(arena, ItemId::from_index(i)) {
+            defs.push(def);
+        }
+        // Enum variants are also definitions.
+        if let ItemKind::Enum(e) = &item.kind {
+            for (vi, variant) in e.variants.iter().enumerate() {
+                if variant.name_span.source != source {
+                    continue;
+                }
+                if let Some(def) = definition_from_variant(arena, ItemId::from_index(i), vi as u32)
+                {
+                    defs.push(def);
+                }
+            }
+        }
+    }
+
+    // All bindings declared anywhere in this source.
+    for (i, binding) in arena.bindings.iter().enumerate() {
+        if binding.name_span.source != source {
+            continue;
+        }
+        defs.push(definition_from_binding(arena, BindingId::from_index(i)));
+    }
+
+    defs
+}
+
+/// Find the innermost vx-ir scope that owns `offset` in `source`.
+fn innermost_scope_at(arena: &VirArena, source: SourceId, offset: rowan::TextSize) -> ScopeId {
+    let mut best: Option<(ScopeId, rowan::TextRange)> = None;
+    for (i, scope) in arena.scopes.iter().enumerate() {
+        let range = scope_text_range(arena, scope);
+        if range.source != source {
+            continue;
+        }
+        if !range.range.contains_inclusive(offset) {
+            continue;
+        }
+        // Pick the smallest enclosing range.
+        let candidate_len = range.range.len();
+        if let Some((_, best_range)) = best {
+            if candidate_len < best_range.len() {
+                best = Some((ScopeId::from_index(i), range.range));
+            }
+        } else {
+            best = Some((ScopeId::from_index(i), range.range));
+        }
+    }
+    // Fallback to scope 0 (module root of first source unit) if nothing matched.
+    best.map(|(id, _)| id).unwrap_or(ScopeId::from_index(0))
+}
+
+fn scope_text_range(arena: &VirArena, scope: &vx_ir::scope::Scope) -> SourceSpan {
+    match scope.owner {
+        ScopeOwner::Module(su_id) => arena[arena[su_id].top_level_body].span,
+        ScopeOwner::Body(body_id) => arena[body_id].span,
+        ScopeOwner::Block(expr_id) => arena[expr_id].span,
+        ScopeOwner::MatchArm {
+            match_expr,
+            arm_index,
+        } => {
+            if let ExprKind::Match(m) = &arena[match_expr].kind
+                && let Some(arm) = m.arms.get(arm_index as usize)
+            {
+                return arm.span;
+            }
+            arena[match_expr].span
+        }
+        ScopeOwner::Namespace(item_id) => arena[item_id].span,
+    }
+}
+
+/// Enumerate definitions visible at `offset` by walking the scope chain.
+/// Mirrors vx-resolve `ProgramScopes::visible_at`.
+fn visible_definitions_at(
+    arena: &VirArena,
+    from: ScopeId,
+    offset: rowan::TextSize,
+) -> Vec<Definition> {
+    use std::collections::HashSet;
+
+    let mut seen: HashSet<String> = HashSet::new();
+    let mut result: Vec<Definition> = Vec::new();
+    let mut scope_id = Some(from);
+
+    while let Some(id) = scope_id {
+        let scope = &arena[id];
+        // Iterate entries in reverse so later bindings shadow earlier ones.
+        for entry in scope.entries.iter().rev() {
+            // For block scopes, only include declarations before the cursor.
+            let name_span = match entry.target {
+                ScopeEntryTarget::Binding(b) => arena[b].name_span,
+                ScopeEntryTarget::Item(i) => match arena[i].name_span() {
+                    Some(s) => s,
+                    None => continue,
+                },
+            };
+            if matches!(scope.owner, ScopeOwner::Block(_)) && name_span.range.start() >= offset {
+                continue;
+            }
+            let name = entry.name(arena).to_string();
+            if seen.insert(name.clone()) {
+                let def = match entry.target {
+                    ScopeEntryTarget::Binding(b) => Some(definition_from_binding(arena, b)),
+                    ScopeEntryTarget::Item(i) => definition_from_item(arena, i),
+                };
+                if let Some(def) = def {
+                    result.push(def);
+                }
+            }
+        }
+        for pv in &scope.promoted_variants {
+            if seen.insert(pv.name.clone())
+                && let Some(def) = definition_from_variant(arena, pv.enum_item, pv.variant_index)
+            {
+                result.push(def);
+            }
+        }
+        scope_id = scope.parent;
+    }
+    result
+}
+
+/// Compute methods visible on a receiver of type `ty` at a given offset.
+/// Mirrors vx-resolve `visible_members_for_receiver` but uses vx-ir directly.
+fn visible_members_for_receiver(
+    state: &DocumentState,
+    _offset: rowan::TextSize,
+    receiver_ty: &vx_types::Ty,
+) -> Vec<Definition> {
+    let Some(namespace_name) = namespace_name_for_receiver(receiver_ty, &state.types.env) else {
+        return Vec::new();
+    };
+    // Find a namespace item by name across all source units.
+    let mut members = Vec::new();
+    for (i, item) in state.arena.items.iter().enumerate() {
+        let ItemKind::Namespace(ns) = &item.kind else {
+            continue;
+        };
+        if ns.name != namespace_name {
+            continue;
+        }
+        let _ = i;
+        for &child_id in &ns.items {
+            if let Some(def) = definition_from_item(&state.arena, child_id) {
+                members.push(def);
+            }
+        }
+    }
+    members
+}
+
+fn namespace_name_for_receiver(
+    receiver_ty: &vx_types::Ty,
+    env: &vx_types::TypeEnv,
+) -> Option<String> {
+    use vx_types::{Scalar, Ty};
+    match receiver_ty {
+        Ty::Scalar(Scalar::String) => Some("String".to_string()),
+        Ty::Optional(_) => Some("Option".to_string()),
+        Ty::Array(_) => Some("Array".to_string()),
+        Ty::Map(_, _) => Some("Map".to_string()),
+        Ty::Stream(_) => Some("Stream".to_string()),
+        Ty::Struct(struct_ty) => Some(env.get(struct_ty.id).name().to_string()),
+        Ty::Enum(enum_ty) => Some(env.get(enum_ty.id).name().to_string()),
+        Ty::Newtype(newtype_ty) => Some(env.get(newtype_ty.id).name().to_string()),
+        Ty::Alias(alias_ty) => Some(env.get(alias_ty.id).name().to_string()),
+        Ty::Opaque(opaque_ty) => Some(env.get(opaque_ty.id).name().to_string()),
+        _ => None,
     }
 }
