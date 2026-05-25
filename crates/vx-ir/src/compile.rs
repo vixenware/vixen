@@ -59,7 +59,28 @@ pub fn inject_implicit_stdlib_imports(program: &mut crate::build::VirProgram) {
         .flat_map(|su_id| program.arena[su_id].items.iter().copied())
         .collect::<Vec<_>>();
 
+    // Collect namespace names from imports. When stdlib exposes both an opaque
+    // type alias (e.g. `type Toml;`) and a namespace with the same name
+    // (`namespace Toml { ... }`), the namespace should win in the user's scope
+    // so that `Toml.parse(...)` resolves to the namespace.
+    let namespace_names: std::collections::HashSet<String> = imported_items
+        .iter()
+        .filter_map(|&id| {
+            if let ItemKind::Namespace(ns) = &program.arena[id].kind {
+                Some(ns.name.clone())
+            } else {
+                None
+            }
+        })
+        .collect();
+
     for item_id in imported_items {
+        // Skip stdlib type aliases that are also exposed as a namespace.
+        if let ItemKind::TypeAlias(t) = &program.arena[item_id].kind
+            && namespace_names.contains(&t.name)
+        {
+            continue;
+        }
         program.arena[primary_module_scope]
             .entries
             .push(ScopeEntry {
