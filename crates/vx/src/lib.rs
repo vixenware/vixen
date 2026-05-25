@@ -73,7 +73,6 @@ async fn async_main(binary: Binary) -> eyre::Result<()> {
         CliCommand::Kill(args) => kill(args).await,
         CliCommand::Eval(args) => eval(args).await,
         CliCommand::Mount(args) => mount(args).await,
-        CliCommand::Lsp(_args) => vx_lsp::serve().await,
         CliCommand::Daemon(args) => {
             let config =
                 if let Some(config_path) = discover_daemon_config_path(args.config.as_ref()) {

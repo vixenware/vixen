@@ -63,8 +63,8 @@ vx-diagnostics = { git = "ssh://code.vixen.rs/vixen/vixen-lang" }
 margin = { git = "ssh://code.vixen.rs/vixen/vixen-lang" }
 margin-term = { git = "ssh://code.vixen.rs/vixen/vixen-lang" }
 
-# moved to vixen-lsp
-vx-lsp = { git = "ssh://code.vixen.rs/vixen/vixen-lsp" }
+# vx-lsp lives in vixen-lsp and is installed as a standalone binary
+# (no longer linked into vx; editors point at `vx-lsp` directly)
 
 # facet ecosystem
 facet = { version = "0.46", features = ["jiff02", "camino"] }
