@@ -241,7 +241,7 @@ fn libpng_sketch_parses() {
 
 #[test]
 fn cargo_resolve_sketch_parses() {
-    let path = Path::new(env!("CARGO_MANIFEST_DIR")).join("../../old-zoo/cargo-resolve.vx");
+    let path = Path::new(env!("CARGO_MANIFEST_DIR")).join("../fixtures/cargo-resolve.vx");
     assert_file_parses(&path);
 }
 
