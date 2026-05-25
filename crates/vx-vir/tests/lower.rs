@@ -19,8 +19,8 @@ fn eval_vir(source: &str, args: &[RtValue]) -> Result<RtValue, String> {
     let _errors = resolve_names(&mut program.arena);
     analyze_captures(&mut program.arena);
     let demand = analyze_demand(&program);
-    let output = lower_vir_program(&program, &demand).map_err(|e| format!("lower: {e:?}"))?;
-    eval_program(&output.program, args).map_err(|e| format!("eval: {e:?}"))
+    let program = lower_vir_program(&program, &demand).map_err(|e| format!("lower: {e:?}"))?;
+    eval_program(&program, args).map_err(|e| format!("eval: {e:?}"))
 }
 
 fn expect_u64(source: &str, args: &[RtValue], expected: u64) {

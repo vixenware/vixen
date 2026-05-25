@@ -3730,11 +3730,9 @@ dependencies = [
  "tracing",
  "tree-sitter-vixen 0.1.0 (git+https://github.com/bearcove/tree-sitter-vixen?rev=9fe14bea91399543282035090086fec8a868fb6c)",
  "vox",
- "vx-jit",
  "vx-runner",
  "vx-services",
  "vx-store",
- "vx-types",
  "vx-vfsd",
  "vx-vir",
 ]
@@ -3806,25 +3804,6 @@ dependencies = [
  "tempfile",
  "tokio",
 ]
-
-[[package]]
-name = "vx-jit"
-version = "0.1.0"
-dependencies = [
- "cranelift-codegen",
- "cranelift-frontend",
- "cranelift-jit",
- "cranelift-module",
- "cranelift-native",
- "thiserror 2.0.18",
- "vx-jit-types",
- "vx-types",
- "vx-vir",
-]
-
-[[package]]
-name = "vx-jit-types"
-version = "0.1.0"
 
 [[package]]
 name = "vx-lsp"

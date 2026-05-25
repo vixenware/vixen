@@ -55,9 +55,6 @@ impl OrchestratorService {
             source: &request.source_text,
             function_name: &request.function_name,
             args: &request.args,
-            backend: request.backend,
-            include_strict_fragment_dump: request.include_strict_fragment_dump,
-            include_clif_dump: request.include_clif_dump,
         };
         match evaluate_source_text_function(
             &RuntimeEvalContext {
@@ -71,20 +68,10 @@ impl OrchestratorService {
         {
             Ok(output) => EvalStrictFunctionResult::Ok(EvalStrictFunctionSuccess {
                 value: output.value,
-                strict_fragment_dump: output.strict_fragment_dump,
-                clif_dump: output.clif_dump,
-                jit_report: output.jit_report,
             }),
-            Err(error) => {
-                let strict_fragment_dump = error.strict_fragment_dump().cloned();
-                let clif_dump = error.clif_dump().cloned();
-                EvalStrictFunctionResult::Err(EvalStrictFunctionFailure {
-                    message: error.to_string(),
-                    strict_fragment_dump,
-                    clif_dump,
-                    jit_report: None,
-                })
-            }
+            Err(error) => EvalStrictFunctionResult::Err(EvalStrictFunctionFailure {
+                message: error.to_string(),
+            }),
         }
     }
 
@@ -111,9 +98,6 @@ impl OrchestratorService {
             source: &request.source_text,
             function_name: &request.function_name,
             args: &request.args,
-            backend: request.backend,
-            include_strict_fragment_dump: request.include_strict_fragment_dump,
-            include_clif_dump: request.include_clif_dump,
         };
         match evaluate_source_text_function(
             &RuntimeEvalContext {
@@ -127,20 +111,10 @@ impl OrchestratorService {
         {
             Ok(output) => EvalFunctionResult::Ok(EvalStrictFunctionSuccess {
                 value: output.value,
-                strict_fragment_dump: output.strict_fragment_dump,
-                clif_dump: output.clif_dump,
-                jit_report: output.jit_report,
             }),
-            Err(error) => {
-                let strict_fragment_dump = error.strict_fragment_dump().cloned();
-                let clif_dump = error.clif_dump().cloned();
-                EvalFunctionResult::Err(EvalStrictFunctionFailure {
-                    message: error.to_string(),
-                    strict_fragment_dump,
-                    clif_dump,
-                    jit_report: None,
-                })
-            }
+            Err(error) => EvalFunctionResult::Err(EvalStrictFunctionFailure {
+                message: error.to_string(),
+            }),
         }
     }
 }

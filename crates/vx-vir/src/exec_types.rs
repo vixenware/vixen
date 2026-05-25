@@ -1,7 +1,7 @@
 //! Executable program types — the output of VIR lowering.
 //!
 //! These types represent the bytecode-level program consumed by the runtime
-//! evaluator (vx-rt) and the JIT compiler (vx-jit).
+//! evaluator (vx-rt).
 
 use std::collections::BTreeMap;
 

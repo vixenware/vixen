@@ -14,8 +14,7 @@ use std::time::Duration;
 use figue as args;
 use vx_services::{
     Blake3Hash, DAEMON_SOCK, DaemonClient, EvalFunctionRequest, EvalFunctionResult,
-    EvalProgressEvent, JitReport, JitReportOutcome, OrchestratorClient, RuntimeValue,
-    StrictEvalBackend,
+    EvalProgressEvent, OrchestratorClient, RuntimeValue,
 };
 use vx_vfsd::protocol::VfsdClient;
 
@@ -101,10 +100,6 @@ fn parse_vx_args(args: Vec<String>) -> eyre::Result<RunArgs> {
         },
         fresh_daemon: false,
         file: None,
-        backend: "cranelift".to_owned(),
-        strict_fragment_dump: false,
-        clif_dump: false,
-        jit_report: false,
         command: command.clone(),
         args: if command_args.is_empty() {
             None
@@ -307,16 +302,6 @@ fn emit_eval_daemon_note(address: &str, status: &vx_services::DaemonStatus) -> e
     Ok(())
 }
 
-fn parse_backend(s: &str) -> eyre::Result<StrictEvalBackend> {
-    match s {
-        "interpreter" => Ok(StrictEvalBackend::Interpreter),
-        "cranelift" => Ok(StrictEvalBackend::Cranelift),
-        other => eyre::bail!(
-            "unknown backend `{other}`; valid options are `interpreter` and `cranelift`"
-        ),
-    }
-}
-
 async fn run_package_command(args: RunArgs) -> eyre::Result<()> {
     let raw_args = args.args.unwrap_or_default();
     let values = if args.command == "build" {
@@ -330,10 +315,6 @@ async fn run_package_command(args: RunArgs) -> eyre::Result<()> {
         fresh_daemon: args.fresh_daemon,
         file: resolve_run_file(args.file.as_ref())?,
         function: args.command,
-        backend: args.backend,
-        strict_fragment_dump: args.strict_fragment_dump,
-        clif_dump: args.clif_dump,
-        jit_report: args.jit_report,
         values,
     })
     .await
@@ -374,10 +355,6 @@ async fn eval(args: EvalArgs) -> eyre::Result<()> {
         fresh_daemon: args.fresh_daemon,
         file: args.file,
         function: args.function,
-        backend: args.backend,
-        strict_fragment_dump: args.strict_fragment_dump,
-        clif_dump: args.clif_dump,
-        jit_report: args.jit_report,
         values,
     })
     .await
@@ -388,16 +365,11 @@ struct EvalInvocation {
     fresh_daemon: bool,
     file: camino::Utf8PathBuf,
     function: String,
-    backend: String,
-    strict_fragment_dump: bool,
-    clif_dump: bool,
-    jit_report: bool,
     values: Vec<RuntimeValue>,
 }
 
 async fn eval_invocation(args: EvalInvocation) -> eyre::Result<()> {
     let source_text = std::fs::read_to_string(args.file.as_std_path())?;
-    let backend = parse_backend(&args.backend)?;
 
     let daemon = ensure_daemon_available(&args.target, args.fresh_daemon).await?;
     emit_eval_daemon_note(&daemon.address, &daemon.status)?;
@@ -410,14 +382,14 @@ async fn eval_invocation(args: EvalInvocation) -> eyre::Result<()> {
         }
     });
     let result = client
-        .eval_function_with_progress(EvalFunctionRequest {
-            source_text,
-            function_name: args.function,
-            args: args.values,
-            backend,
-            include_strict_fragment_dump: args.strict_fragment_dump,
-            include_clif_dump: args.clif_dump,
-        }, progress_tx)
+        .eval_function_with_progress(
+            EvalFunctionRequest {
+                source_text,
+                function_name: args.function,
+                args: args.values,
+            },
+            progress_tx,
+        )
         .await
         .map_err(|error| {
             if matches!(error, vox::VoxError::UnknownMethod) {
@@ -434,51 +406,12 @@ async fn eval_invocation(args: EvalInvocation) -> eyre::Result<()> {
 
     match result {
         EvalFunctionResult::Ok(success) => {
-            if let Some(dump) = &success.strict_fragment_dump {
-                eprintln!("[strict-fragment-dump]\n{dump}");
-            }
-            if let Some(dump) = &success.clif_dump {
-                eprintln!("[clif-dump]\n{dump}");
-            }
-            if args.jit_report
-                && let Some(report) = &success.jit_report
-            {
-                emit_jit_report(report);
-            }
             println!("{}", format_value(&success.value));
             Ok(())
         }
         EvalFunctionResult::Err(failure) => {
-            if let Some(dump) = &failure.strict_fragment_dump {
-                eprintln!("[strict-fragment-dump]\n{dump}");
-            }
-            if let Some(dump) = &failure.clif_dump {
-                eprintln!("[clif-dump]\n{dump}");
-            }
-            if args.jit_report
-                && let Some(report) = &failure.jit_report
-            {
-                emit_jit_report(report);
-            }
             eprintln!("error: {}", failure.message);
             std::process::exit(1);
-        }
-    }
-}
-
-fn emit_jit_report(report: &JitReport) {
-    eprintln!("[jit-report]");
-    for entry in &report.entries {
-        match &entry.outcome {
-            JitReportOutcome::Compiled { name } => {
-                eprintln!("body {}: compiled: {name}", entry.body_id);
-            }
-            JitReportOutcome::Skipped { reason } => {
-                eprintln!("body {}: skipped: {reason}", entry.body_id);
-            }
-            JitReportOutcome::Failed { reason } => {
-                eprintln!("body {}: failed: {reason}", entry.body_id);
-            }
         }
     }
 }
@@ -1147,10 +1080,6 @@ daemon {
             fresh_daemon: true,
             file: camino::Utf8PathBuf::from("zoo/rustc-hello.vx"),
             function: "build".to_owned(),
-            backend: "cranelift".to_owned(),
-            strict_fragment_dump: false,
-            clif_dump: false,
-            jit_report: false,
             args: None,
         };
 

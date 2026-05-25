@@ -8,27 +8,12 @@
 
 use std::collections::{BTreeMap, BTreeSet, HashMap, HashSet};
 
-use vx_types::Ty;
-
 use crate::exec_types::{
     BodyId as ABodyId, BridgeLocalBindingId, ExecSliceError, ExecutableBody, ExecutableProgram,
     ExecutableRuntimeNode, FieldKey, KernelKind, KernelOp, Operand, ResultSource,
     RuntimeBoundaryInputSpec, RuntimeBoundaryKind, RuntimeBoundaryPayload, RuntimeNodeId, SlotId,
     SourceExpr,
 };
-
-/// Slot type map keyed in executable ID space.
-pub type SlotTypeMap = HashMap<(ABodyId, SlotId), Ty>;
-
-/// Output of [`lower_vir_program`].
-pub struct LoweringOutput {
-    pub program: ExecutableProgram,
-    /// Types for each (body, slot) pair, populated during lowering from VIR arena types.
-    pub slot_types: SlotTypeMap,
-    /// Number of original VIR bodies. Bodies with `id.0 >= original_body_count` are
-    /// synthesized (thunks, closure wrappers) and should not be strict-lowered.
-    pub original_body_count: u32,
-}
 
 use crate::binding::BindingKind;
 use crate::build::VirProgram;
@@ -107,8 +92,6 @@ struct LoweringContext<'a> {
     /// Runtime node allocator.
     next_runtime_node_id: u32,
     runtime_nodes: BTreeMap<RuntimeNodeId, ExecutableRuntimeNode>,
-    /// Slot type map, populated as slots are created.
-    slot_types: SlotTypeMap,
 }
 
 impl<'a> LoweringContext<'a> {
@@ -131,7 +114,6 @@ impl<'a> LoweringContext<'a> {
             synth_bodies: BTreeMap::new(),
             next_runtime_node_id: 0,
             runtime_nodes: BTreeMap::new(),
-            slot_types: SlotTypeMap::new(),
         }
     }
 
@@ -187,7 +169,7 @@ fn to_analysis_field_key(fk: &crate::expr::FieldKey) -> FieldKey {
 pub fn lower_vir_program(
     program: &VirProgram,
     demand: &VirDemandResult,
-) -> Result<LoweringOutput, LowerError> {
+) -> Result<ExecutableProgram, LowerError> {
     let entry = *demand
         .entry_points
         .first()
@@ -202,7 +184,6 @@ pub fn lower_vir_program(
         .map(|su_id| HashSet::from([program.arena[*su_id].source]))
         .unwrap_or_default();
 
-    let original_body_count = program.arena.bodies.len() as u32;
     let mut ctx = LoweringContext::new(&program.arena, demand, user_sources);
     let mut bodies: BTreeMap<ABodyId, ExecutableBody> = BTreeMap::new();
 
@@ -215,14 +196,10 @@ pub fn lower_vir_program(
     // Add synthesized thunk/closure bodies.
     bodies.extend(ctx.synth_bodies);
 
-    Ok(LoweringOutput {
-        program: ExecutableProgram {
-            entry: a_body(entry),
-            bodies,
-            runtime_nodes: ctx.runtime_nodes,
-        },
-        slot_types: ctx.slot_types,
-        original_body_count,
+    Ok(ExecutableProgram {
+        entry: a_body(entry),
+        bodies,
+        runtime_nodes: ctx.runtime_nodes,
     })
 }
 
@@ -252,17 +229,13 @@ impl<'a, 'ctx> VirBodyLowering<'a, 'ctx> {
         let mut slot_by_binding = HashMap::new();
         let mut params = Vec::new();
 
-        // Pre-allocate param slots and record their types.
-        let a_body_id = a_body(body_id);
+        // Pre-allocate param slots.
         for param in &body.params {
             if let crate::pattern::PatternKind::Binding(ref b) = ctx.arena[param.pattern].kind {
                 let slot = SlotId(next_slot);
                 next_slot += 1;
                 slot_by_binding.insert(b.binding, slot);
                 params.push(slot);
-                if let Some(ty) = ctx.arena[b.binding].ty.clone() {
-                    ctx.slot_types.insert((a_body_id, slot), ty);
-                }
             }
         }
 
@@ -305,13 +278,11 @@ impl<'a, 'ctx> VirBodyLowering<'a, 'ctx> {
         s
     }
 
-    /// Allocate a temp slot and record its type from the given expression.
-    fn alloc_typed_temp(&mut self, expr_id: ExprId) -> SlotId {
-        let s = self.alloc_temp();
-        if let Some(ty) = self.arena()[expr_id].ty.clone() {
-            self.ctx.slot_types.insert((a_body(self.body_id), s), ty);
-        }
-        s
+    /// Allocate a temp slot. The `expr_id` parameter is retained for call-site
+    /// readability but is no longer used (the previous strict-lowering JIT
+    /// consumer is gone).
+    fn alloc_typed_temp(&mut self, _expr_id: ExprId) -> SlotId {
+        self.alloc_temp()
     }
 
     fn ensure_slot(&mut self, operand: Operand, body: BodyId, expr: ExprId) -> SlotId {
@@ -364,11 +335,6 @@ impl<'a, 'ctx> VirBodyLowering<'a, 'ctx> {
         let s = SlotId(self.next_slot);
         self.next_slot += 1;
         self.slot_by_binding.insert(bid, s);
-        // Record binding type in SlotTypeMap if available.
-        if let Some(ty) = self.arena()[bid].ty.clone() {
-            let exec_body_id = a_body(self.body_id);
-            self.ctx.slot_types.insert((exec_body_id, s), ty);
-        }
         s
     }
 

@@ -13,8 +13,6 @@ members = [
   "crates/vx-lsp",
 
   ## eval crates
-  "crates/vx-jit",
-  "crates/vx-jit-types",
   "crates/vx-rt",
 
   ## runtime support
@@ -56,8 +54,6 @@ vx-io = { path = "crates/vx-io" }
 vx-vfs = { path = "crates/vx-vfs" }
 vx-vfsd = { path = "crates/vx-vfsd" }
 vx-vfs-types = { path = "crates/vx-vfs-types" }
-vx-jit = { path = "crates/vx-jit" }
-vx-jit-types = { path = "crates/vx-jit-types" }
 vx-parser = { path = "crates/vx-parser" }
 vx-resolve = { path = "crates/vx-resolve" }
 vx-vir = { path = "crates/vx-vir" }
@@ -86,13 +82,6 @@ blake3 = "1"
 
 # content-defined chunking (pin version for CDC boundary stability)
 fastcdc = "3"
-
-# Cranelift JIT
-cranelift-jit = "0.131.0"
-cranelift-module = "0.131.0"
-cranelift-codegen = "0.131.0"
-cranelift-frontend = "0.131.0"
-cranelift-native = "0.131.0"
 
 # error handling
 eyre = "0.6"

@@ -9,17 +9,11 @@ use tokio::sync::mpsc;
 use async_recursion::async_recursion;
 use thiserror::Error;
 use vox::Tx;
-use vx_jit::{FragmentArg, FragmentResult};
 use vx_services::{
-    BlobRef, DirectoryEntryKind, NodeHash, RuntimeValue, StoreClient, StrictEvalBackend,
+    BlobRef, DirectoryEntryKind, EvalProgressEvent, NodeHash, RuntimeValue, StoreClient,
     cas_tree::{MerkleTreeFile, build_merkle_tree},
     chunking::{prepare_blob, store_prepared_blob},
 };
-use vx_services::{
-    EvalProgressEvent, JitFailureReason, JitReport, JitReportEntry, JitReportOutcome,
-    JitSkipReason, JitUnsupportedOp, JitUnsupportedParam,
-};
-use vx_types::{Scalar, Ty};
 use vx_vfsd::{VfsdService, protocol::Vfsd};
 use vx_vir::compile::CompileError;
 use vx_vir::exec_types::{
@@ -27,7 +21,6 @@ use vx_vir::exec_types::{
     RuntimeBoundaryInputSpec, RuntimeBoundaryKind, RuntimeBoundaryPayload, RuntimeField,
     RuntimeMemberOp, SlotId,
 };
-use vx_vir::lower::SlotTypeMap;
 
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
 enum EvalValue {
@@ -65,20 +58,6 @@ pub struct RuntimeEvalContext {
 pub enum RuntimeEvalError {
     #[error("compilation failed: {0}")]
     Compile(#[from] CompileError),
-    #[error("Cranelift compilation failed for `{function}`: {detail}")]
-    CraneliftCompile {
-        function: String,
-        detail: String,
-        strict_fragment_dump: Option<String>,
-        clif_dump: Option<String>,
-    },
-    #[error("Cranelift execution failed for `{function}`: {detail}")]
-    CraneliftExecute {
-        function: String,
-        detail: String,
-        strict_fragment_dump: Option<String>,
-        clif_dump: Option<String>,
-    },
     #[error("arity mismatch in `{function}`: expected {expected} args, got {actual}")]
     ArityMismatch {
         function: String,
@@ -110,45 +89,15 @@ pub enum RuntimeEvalError {
     },
 }
 
-impl RuntimeEvalError {
-    pub fn strict_fragment_dump(&self) -> Option<&String> {
-        match self {
-            RuntimeEvalError::CraneliftCompile {
-                strict_fragment_dump,
-                ..
-            }
-            | RuntimeEvalError::CraneliftExecute {
-                strict_fragment_dump,
-                ..
-            } => strict_fragment_dump.as_ref(),
-            _ => None,
-        }
-    }
-
-    pub fn clif_dump(&self) -> Option<&String> {
-        match self {
-            RuntimeEvalError::CraneliftCompile { clif_dump, .. }
-            | RuntimeEvalError::CraneliftExecute { clif_dump, .. } => clif_dump.as_ref(),
-            _ => None,
-        }
-    }
-}
-
-/// Output from a successful evaluation, including optional debug dumps.
+/// Output from a successful evaluation.
 pub struct EvalOutput {
     pub value: RuntimeValue,
-    pub strict_fragment_dump: Option<String>,
-    pub clif_dump: Option<String>,
-    pub jit_report: Option<JitReport>,
 }
 
 pub struct EvalRequest<'a> {
     pub source: &'a str,
     pub function_name: &'a str,
     pub args: &'a [RuntimeValue],
-    pub backend: StrictEvalBackend,
-    pub include_strict_fragment_dump: bool,
-    pub include_clif_dump: bool,
 }
 
 pub async fn evaluate_source_text_function(
@@ -156,45 +105,6 @@ pub async fn evaluate_source_text_function(
     request: EvalRequest<'_>,
     progress: Option<Tx<EvalProgressEvent>>,
 ) -> Result<EvalOutput, RuntimeEvalError> {
-    if request.backend == StrictEvalBackend::Cranelift {
-        let output =
-            vx_vir::compile::compile_source_with_types(request.source, request.function_name)?;
-        let eval_args = request
-            .args
-            .iter()
-            .cloned()
-            .map(eval_value_from_runtime)
-            .collect::<Vec<_>>();
-        let mut evaluator = ProgramEvaluator::new(
-            context,
-            &output.program,
-            progress,
-            Some(JitMode {
-                slot_types: &output.slot_types,
-                original_body_count: output.original_body_count,
-                include_strict_fragment_dump: request.include_strict_fragment_dump,
-                include_clif_dump: request.include_clif_dump,
-            }),
-        );
-        let result = async {
-            let value = evaluator
-                .eval_body(request.function_name, output.program.entry, &eval_args)
-                .await?;
-            let value = evaluator
-                .finalize_value(request.function_name, value)
-                .await?;
-            runtime_value_from_eval(request.function_name, value)
-        }
-        .await;
-        evaluator.cleanup_exec_prefixes().await;
-        return result.map(|value| EvalOutput {
-            value,
-            strict_fragment_dump: evaluator.strict_fragment_dump,
-            clif_dump: evaluator.clif_dump,
-            jit_report: Some(evaluator.jit_report),
-        });
-    }
-
     let program = vx_vir::compile::compile_source(request.source, request.function_name)?;
     let body_id = program.entry;
 
@@ -204,7 +114,7 @@ pub async fn evaluate_source_text_function(
         .cloned()
         .map(eval_value_from_runtime)
         .collect::<Vec<_>>();
-    let mut evaluator = ProgramEvaluator::new(context, &program, progress, None);
+    let mut evaluator = ProgramEvaluator::new(context, &program, progress);
     let result = async {
         let value = evaluator
             .eval_body(request.function_name, body_id, &eval_args)
@@ -216,87 +126,7 @@ pub async fn evaluate_source_text_function(
     }
     .await;
     evaluator.cleanup_exec_prefixes().await;
-    result.map(|value| EvalOutput {
-        value,
-        strict_fragment_dump: None,
-        clif_dump: None,
-        jit_report: None,
-    })
-}
-
-fn fragment_arg_from_eval(value: &EvalValue) -> Option<FragmentArg> {
-    Some(match value {
-        EvalValue::U64(v) => FragmentArg::U64(*v),
-        EvalValue::Bool(v) => FragmentArg::Bool(*v),
-        EvalValue::String(v) => FragmentArg::String(v.clone()),
-        _ => return None,
-    })
-}
-
-fn eval_value_from_fragment_result(result: FragmentResult) -> EvalValue {
-    match result {
-        FragmentResult::U64(v) => EvalValue::U64(v),
-        FragmentResult::Bool(v) => EvalValue::Bool(v),
-        FragmentResult::String(v) => EvalValue::String(v),
-    }
-}
-
-fn jit_skip_reason(body: &vx_vir::exec_types::ExecutableBody, jit: JitMode<'_>) -> JitSkipReason {
-    if body.id.0 >= jit.original_body_count {
-        return JitSkipReason::SynthesizedBody;
-    }
-
-    let unsupported_params = body
-        .params
-        .iter()
-        .filter_map(|slot| {
-            let ty = jit.slot_types.get(&(body.id, *slot))?;
-            (!fragment_type_supported(ty)).then(|| JitUnsupportedParam {
-                slot: slot.0,
-                ty: format!("{ty:?}"),
-            })
-        })
-        .collect::<Vec<_>>();
-    if !unsupported_params.is_empty() {
-        return JitSkipReason::NonStrictParameterTypes {
-            params: unsupported_params,
-        };
-    }
-
-    for op in &body.ops {
-        if let Some(reason) = unsupported_jit_op_reason(op) {
-            return JitSkipReason::UnsupportedOp { op: reason };
-        }
-    }
-
-    JitSkipReason::NotStrictLowerable
-}
-
-fn fragment_type_supported(ty: &Ty) -> bool {
-    matches!(
-        ty,
-        Ty::Scalar(Scalar::U64) | Ty::Scalar(Scalar::Bool) | Ty::Scalar(Scalar::String)
-    )
-}
-
-fn unsupported_jit_op_reason(op: &KernelOp) -> Option<JitUnsupportedOp> {
-    match op {
-        KernelOp::AwaitRuntime { .. } => Some(JitUnsupportedOp::RuntimeBoundary),
-        KernelOp::BuildTree { .. } => Some(JitUnsupportedOp::BuildTree),
-        KernelOp::MakeArray { .. } => Some(JitUnsupportedOp::MakeArray),
-        KernelOp::MakeBlob { .. } => Some(JitUnsupportedOp::MakeBlob),
-        KernelOp::AllocThunk { .. } => Some(JitUnsupportedOp::AllocThunk),
-        KernelOp::AllocClosure { .. } => Some(JitUnsupportedOp::AllocClosure),
-        KernelOp::ApplyClosure { .. } => Some(JitUnsupportedOp::ApplyClosure),
-        KernelOp::MakeStruct { .. } => Some(JitUnsupportedOp::MakeStruct),
-        KernelOp::ProjectNamedField { .. } => Some(JitUnsupportedOp::ProjectNamedField),
-        KernelOp::AssignFailure { .. } => Some(JitUnsupportedOp::AssignFailure),
-        KernelOp::CallBody { .. } => Some(JitUnsupportedOp::CallBody),
-        KernelOp::CallMember { .. } => Some(JitUnsupportedOp::CallMember),
-        KernelOp::ProjectField { .. } => Some(JitUnsupportedOp::ProjectField),
-        KernelOp::AssignSandboxTreeRoot { .. } => Some(JitUnsupportedOp::AssignSandboxTreeRoot),
-        _ => None,
-    }
+    result.map(|value| EvalOutput { value })
 }
 
 fn eval_value_from_runtime(value: RuntimeValue) -> EvalValue {
@@ -345,21 +175,9 @@ struct ProgramEvaluator<'a> {
     context: &'a RuntimeEvalContext,
     program: &'a ExecutableProgram,
     progress: Option<Tx<EvalProgressEvent>>,
-    jit: Option<JitMode<'a>>,
-    strict_fragment_dump: Option<String>,
-    clif_dump: Option<String>,
-    jit_report: JitReport,
     memo: HashMap<(BodyId, Vec<EvalValue>), EvalValue>,
     runtime_exec_prefixes: HashMap<vx_vir::exec_types::RuntimeNodeId, String>,
     next_exec_prefix: u64,
-}
-
-#[derive(Clone, Copy)]
-struct JitMode<'a> {
-    slot_types: &'a SlotTypeMap,
-    original_body_count: u32,
-    include_strict_fragment_dump: bool,
-    include_clif_dump: bool,
 }
 
 static NEXT_EXEC_PREFIX_ID: AtomicU64 = AtomicU64::new(0);
@@ -369,18 +187,11 @@ impl<'a> ProgramEvaluator<'a> {
         context: &'a RuntimeEvalContext,
         program: &'a ExecutableProgram,
         progress: Option<Tx<EvalProgressEvent>>,
-        jit: Option<JitMode<'a>>,
     ) -> Self {
         Self {
             context,
             program,
             progress,
-            jit,
-            strict_fragment_dump: None,
-            clif_dump: None,
-            jit_report: JitReport {
-                entries: Vec::new(),
-            },
             memo: HashMap::new(),
             runtime_exec_prefixes: HashMap::new(),
             next_exec_prefix: NEXT_EXEC_PREFIX_ID.fetch_add(1, Ordering::Relaxed),
@@ -421,10 +232,6 @@ impl<'a> ProgramEvaluator<'a> {
                 actual: args.len(),
             });
         }
-        if let Some(value) = self.try_eval_body_with_cranelift(function_name, body, args)? {
-            self.memo.insert(cache_key, value.clone());
-            return Ok(value);
-        }
         let mut slots = BTreeMap::new();
         for (slot, value) in body.params.iter().copied().zip(args.iter().cloned()) {
             slots.insert(slot, value);
@@ -445,105 +252,6 @@ impl<'a> ProgramEvaluator<'a> {
             .await?;
         self.memo.insert(cache_key, value.clone());
         Ok(value)
-    }
-
-    fn try_eval_body_with_cranelift(
-        &mut self,
-        function_name: &str,
-        body: &vx_vir::exec_types::ExecutableBody,
-        args: &[EvalValue],
-    ) -> Result<Option<EvalValue>, RuntimeEvalError> {
-        let Some(jit) = self.jit else {
-            return Ok(None);
-        };
-        let Some(mut func) = vx_jit::lower_to_strict::try_strict_lower(
-            body,
-            jit.slot_types,
-            jit.original_body_count,
-        ) else {
-            self.jit_report.entries.push(JitReportEntry {
-                body_id: body.id.0,
-                outcome: JitReportOutcome::Skipped {
-                    reason: jit_skip_reason(body, jit),
-                },
-            });
-            return Ok(None);
-        };
-        let Some(frag_args) = args
-            .iter()
-            .map(fragment_arg_from_eval)
-            .collect::<Option<Vec<_>>>()
-        else {
-            self.jit_report.entries.push(JitReportEntry {
-                body_id: body.id.0,
-                outcome: JitReportOutcome::Skipped {
-                    reason: JitSkipReason::RuntimeArgumentsNotRepresentable,
-                },
-            });
-            return Ok(None);
-        };
-
-        func.name = if body.id == self.program.entry {
-            function_name.to_owned()
-        } else {
-            format!("{function_name}__body_{}", body.id.0)
-        };
-        let strict_fragment_dump =
-            if jit.include_strict_fragment_dump || std::env::var_os("VX_STRICT_DUMP").is_some() {
-                let dump = format!("{func:#?}");
-                if std::env::var_os("VX_STRICT_DUMP").is_some() {
-                    eprintln!("[vx-jit] strict fragment for `{}`:\n{dump}", func.name);
-                }
-                Some(dump)
-            } else {
-                None
-            };
-
-        let compiled =
-            vx_jit::compile_with_dump(&func, jit.include_clif_dump).map_err(|failure| {
-                self.jit_report.entries.push(JitReportEntry {
-                    body_id: body.id.0,
-                    outcome: JitReportOutcome::Failed {
-                        reason: JitFailureReason::Compile {
-                            detail: failure.error.to_string(),
-                        },
-                    },
-                });
-                RuntimeEvalError::CraneliftCompile {
-                    function: function_name.to_owned(),
-                    detail: failure.error.to_string(),
-                    strict_fragment_dump: strict_fragment_dump.clone(),
-                    clif_dump: failure.clif_dump,
-                }
-            })?;
-        let result = compiled.fragment.call(&frag_args).map_err(|error| {
-            self.jit_report.entries.push(JitReportEntry {
-                body_id: body.id.0,
-                outcome: JitReportOutcome::Failed {
-                    reason: JitFailureReason::Execute {
-                        detail: error.to_string(),
-                    },
-                },
-            });
-            RuntimeEvalError::CraneliftExecute {
-                function: function_name.to_owned(),
-                detail: error.to_string(),
-                strict_fragment_dump: strict_fragment_dump.clone(),
-                clif_dump: compiled.clif_dump.clone(),
-            }
-        })?;
-
-        if self.strict_fragment_dump.is_none() {
-            self.strict_fragment_dump = strict_fragment_dump;
-        }
-        if self.clif_dump.is_none() {
-            self.clif_dump = compiled.clif_dump;
-        }
-        self.jit_report.entries.push(JitReportEntry {
-            body_id: body.id.0,
-            outcome: JitReportOutcome::Compiled { name: func.name },
-        });
-        Ok(Some(eval_value_from_fragment_result(result)))
     }
 
     #[async_recursion]
@@ -1732,9 +1440,7 @@ fn find_host_tool(name: &str) -> Option<String> {
 
 #[cfg(test)]
 mod tests {
-    use vx_services::{
-        JitReportOutcome, JitSkipReason, JitUnsupportedOp, RuntimeValue, StrictEvalBackend,
-    };
+    use vx_services::RuntimeValue;
 
     use super::{EvalRequest, RuntimeEvalContext, RuntimeEvalError, evaluate_source_text_function};
 
@@ -1745,12 +1451,6 @@ fn greet(name: String) -> String (
 
 fn build(name: String) -> String (
   greet(name)
-)
-"#;
-
-    const SOURCE_STRICT_ADD: &str = r#"
-fn add(a: U64, b: U64) -> U64 (
-  a + b
 )
 "#;
 
@@ -1798,12 +1498,6 @@ fn probe() #discover -> String (
 )
 "#;
 
-    const SOURCE_CRANELIFT_SYMBOL_COLLISION: &str = r#"
-fn __vx_alloc(name: String) -> String (
-  `{name}!`
-)
-"#;
-
     #[tokio::test]
     async fn evaluates_non_strict_top_level_body_call() {
         let output = evaluate_source_text_function(
@@ -1812,9 +1506,6 @@ fn __vx_alloc(name: String) -> String (
                 source: SOURCE_NON_STRICT_CALL,
                 function_name: "build",
                 args: &[RuntimeValue::String("serde".to_owned())],
-                backend: StrictEvalBackend::Interpreter,
-                include_strict_fragment_dump: false,
-                include_clif_dump: false,
             },
             None,
         )
@@ -1825,35 +1516,6 @@ fn __vx_alloc(name: String) -> String (
     }
 
     #[tokio::test]
-    async fn cranelift_backend_falls_back_and_reports_non_strict_bodies() {
-        let output = evaluate_source_text_function(
-            &RuntimeEvalContext::default(),
-            EvalRequest {
-                source: SOURCE_NON_STRICT_CALL,
-                function_name: "build",
-                args: &[RuntimeValue::String("serde".to_owned())],
-                backend: StrictEvalBackend::Cranelift,
-                include_strict_fragment_dump: false,
-                include_clif_dump: false,
-            },
-            None,
-        )
-        .await
-        .expect("hybrid Cranelift evaluation should fall back");
-
-        assert_eq!(output.value, RuntimeValue::String("hello serde".to_owned()));
-        let report = output.jit_report.expect("JIT report should be present");
-        assert!(report.entries.iter().any(|entry| matches!(
-            &entry.outcome,
-            JitReportOutcome::Skipped {
-                reason: JitSkipReason::UnsupportedOp {
-                    op: JitUnsupportedOp::CallBody
-                }
-            }
-        )));
-    }
-
-    #[tokio::test]
     async fn evaluates_non_strict_string_len_via_local_call() {
         let output = evaluate_source_text_function(
             &RuntimeEvalContext::default(),
@@ -1861,9 +1523,6 @@ fn __vx_alloc(name: String) -> String (
                 source: SOURCE_NON_STRICT_STRING_HELPERS,
                 function_name: "build_len",
                 args: &[RuntimeValue::String("serde".to_owned())],
-                backend: StrictEvalBackend::Interpreter,
-                include_strict_fragment_dump: false,
-                include_clif_dump: false,
             },
             None,
         )
@@ -1871,106 +1530,6 @@ fn __vx_alloc(name: String) -> String (
         .expect("build_len should evaluate");
 
         assert_eq!(output.value, RuntimeValue::U64(5));
-    }
-
-    #[tokio::test]
-    async fn explicit_cranelift_surfaces_jit_compile_failures() {
-        let interpreter_output = evaluate_source_text_function(
-            &RuntimeEvalContext::default(),
-            EvalRequest {
-                source: SOURCE_CRANELIFT_SYMBOL_COLLISION,
-                function_name: "__vx_alloc",
-                args: &[RuntimeValue::String("serde".to_owned())],
-                backend: StrictEvalBackend::Interpreter,
-                include_strict_fragment_dump: false,
-                include_clif_dump: false,
-            },
-            None,
-        )
-        .await
-        .expect("interpreter should still evaluate the function");
-
-        assert_eq!(
-            interpreter_output.value,
-            RuntimeValue::String("serde!".to_owned())
-        );
-
-        let error = match evaluate_source_text_function(
-            &RuntimeEvalContext::default(),
-            EvalRequest {
-                source: SOURCE_CRANELIFT_SYMBOL_COLLISION,
-                function_name: "__vx_alloc",
-                args: &[RuntimeValue::String("serde".to_owned())],
-                backend: StrictEvalBackend::Cranelift,
-                include_strict_fragment_dump: false,
-                include_clif_dump: false,
-            },
-            None,
-        )
-        .await
-        {
-            Ok(_) => panic!("Cranelift compile failures should be reported"),
-            Err(error) => error,
-        };
-
-        assert!(matches!(
-            error,
-            RuntimeEvalError::CraneliftCompile { function, .. }
-            if function == "__vx_alloc"
-        ));
-    }
-
-    #[tokio::test]
-    async fn explicit_cranelift_returns_clif_dump_on_success() {
-        let output = evaluate_source_text_function(
-            &RuntimeEvalContext::default(),
-            EvalRequest {
-                source: SOURCE_STRICT_ADD,
-                function_name: "add",
-                args: &[RuntimeValue::U64(20), RuntimeValue::U64(22)],
-                backend: StrictEvalBackend::Cranelift,
-                include_strict_fragment_dump: false,
-                include_clif_dump: true,
-            },
-            None,
-        )
-        .await
-        .expect("Cranelift should produce an IR dump on success");
-
-        assert_eq!(output.value, RuntimeValue::U64(42));
-        let dump = output.clif_dump.expect("missing Cranelift IR dump");
-        assert!(dump.contains("function"), "unexpected dump: {dump}");
-        assert!(dump.contains("add"), "unexpected dump: {dump}");
-    }
-
-    #[tokio::test]
-    async fn cranelift_backend_checks_arity_before_jit_execution() {
-        let error = match evaluate_source_text_function(
-            &RuntimeEvalContext::default(),
-            EvalRequest {
-                source: SOURCE_STRICT_ADD,
-                function_name: "add",
-                args: &[RuntimeValue::U64(7)],
-                backend: StrictEvalBackend::Cranelift,
-                include_strict_fragment_dump: false,
-                include_clif_dump: true,
-            },
-            None,
-        )
-        .await
-        {
-            Ok(_) => panic!("arity mismatch should be reported"),
-            Err(error) => error,
-        };
-
-        assert!(matches!(
-            error,
-            RuntimeEvalError::ArityMismatch {
-                function,
-                expected: 2,
-                actual: 1
-            } if function == "add"
-        ));
     }
 
     #[tokio::test]
@@ -1982,9 +1541,6 @@ fn __vx_alloc(name: String) -> String (
                 source: SOURCE_NON_STRICT_STRING_HELPERS,
                 function_name: "build_slice",
                 args: &[RuntimeValue::String("serde".to_owned())],
-                backend: StrictEvalBackend::Interpreter,
-                include_strict_fragment_dump: false,
-                include_clif_dump: false,
             },
             None,
         )
@@ -2002,9 +1558,6 @@ fn __vx_alloc(name: String) -> String (
                 source: SOURCE_DISCOVER_WHICH,
                 function_name: "probe",
                 args: &[],
-                backend: StrictEvalBackend::Interpreter,
-                include_strict_fragment_dump: false,
-                include_clif_dump: false,
             },
             None,
         )
@@ -2028,9 +1581,6 @@ fn __vx_alloc(name: String) -> String (
                 source: SOURCE_EXEC_STDOUT,
                 function_name: "probe",
                 args: &[],
-                backend: StrictEvalBackend::Interpreter,
-                include_strict_fragment_dump: false,
-                include_clif_dump: false,
             },
             None,
         )
@@ -2048,9 +1598,6 @@ fn __vx_alloc(name: String) -> String (
                 source: SOURCE_EXEC_WRITABLE,
                 function_name: "probe",
                 args: &[],
-                backend: StrictEvalBackend::Interpreter,
-                include_strict_fragment_dump: false,
-                include_clif_dump: false,
             },
             None,
         )
