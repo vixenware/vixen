@@ -16,7 +16,6 @@ members = [
   "crates/vx-jit",
   "crates/vx-jit-types",
   "crates/vx-rt",
-  "crates/vx-eval-tests",
 
   ## runtime support
   "crates/vx-http",

@@ -3754,15 +3754,6 @@ dependencies = [
 ]
 
 [[package]]
-name = "vx-eval-tests"
-version = "0.1.0"
-dependencies = [
- "vx-jit",
- "vx-rt",
- "vx-vir",
-]
-
-[[package]]
 name = "vx-fskit"
 version = "0.1.0"
 dependencies = [
