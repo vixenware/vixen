@@ -1,7 +1,5 @@
 //! Tests for the VIR name resolution pass.
 
-use vx_parser::parse_source_file;
-use vx_resolve::SourceId;
 use vx_ir::build::VirBuilder;
 use vx_ir::expr::ExprKind;
 use vx_ir::item::ItemKind;
@@ -9,6 +7,7 @@ use vx_ir::pattern::PatternKind;
 use vx_ir::resolve::{ResolveErrorKind, resolve_names};
 use vx_ir::scope::DefTarget;
 use vx_ir::stmt::StmtKind;
+use vx_parser::{SourceId, parse_source_file};
 
 fn build_and_resolve(
     source: &str,

@@ -5,7 +5,7 @@
 
 use crate::expr::UpdateField;
 use crate::{BindingId, BodyId, ExprId, ItemId, PatternId, ScopeId, TypeRefId};
-use vx_resolve::SourceSpan;
+use vx_parser::SourceSpan;
 
 /// A statement node in the VIR.
 #[derive(Debug, Clone)]

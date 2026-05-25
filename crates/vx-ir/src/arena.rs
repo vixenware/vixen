@@ -18,7 +18,7 @@ use crate::type_ref::TypeRef;
 use crate::{
     BindingId, BodyId, ExprId, ItemId, PatternId, ScopeId, SourceUnitId, StmtId, TypeRefId,
 };
-use vx_resolve::SourceId;
+use vx_parser::SourceId;
 
 /// The central VIR arena. Holds all nodes for all source files in a program.
 ///

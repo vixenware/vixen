@@ -36,6 +36,9 @@ pub use parser::{Parse, SyntaxError, parse};
 mod parsed;
 pub use parsed::{Parsed, parse_source_file};
 
+pub mod source;
+pub use source::{ImportGraph, SourceFileRef, SourceId, SourceSpan};
+
 mod syntax_kind;
 pub use rowan::{TextRange, TextSize};
 pub use syntax_kind::{SyntaxKind, SyntaxToken, VxLanguage};

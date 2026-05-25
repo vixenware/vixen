@@ -32,9 +32,11 @@ pub mod arena;
 pub mod binding;
 pub mod body;
 pub mod build;
+pub mod cap;
 pub mod cap_check;
 pub mod capture;
 pub mod compile;
+pub mod def;
 pub mod demand;
 pub mod exec_types;
 pub mod expr;
@@ -48,7 +50,7 @@ pub mod span_index;
 pub mod stmt;
 pub mod type_check;
 pub mod type_collect;
-pub mod type_populate;
+pub mod type_collection;
 pub mod type_ref;
 pub mod visitor;
 
@@ -58,3 +60,9 @@ pub use ids::*;
 // Re-export the arena and visitor trait.
 pub use arena::VirArena;
 pub use visitor::VirVisitor;
+
+// Re-export moved semantic types so external users can write `vx_ir::Definition`
+// etc. instead of `vx_ir::def::Definition`.
+pub use cap::{CapCheckResult, CapError, CapErrorKind, CapSet};
+pub use def::{DefId, DefKind, DefSite, Definition};
+pub use type_collection::{TypeCollection, TypeKind};

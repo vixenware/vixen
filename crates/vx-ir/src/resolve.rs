@@ -20,7 +20,7 @@ use crate::pattern::PatternKind;
 use crate::scope::{self, DefTarget, ScopeEntryTarget};
 use crate::stmt::StmtKind;
 use crate::{BodyId, ExprId, ItemId, PatternId, ScopeId, SourceUnitId, StmtId};
-use vx_resolve::SourceSpan;
+use vx_parser::SourceSpan;
 
 // ---------------------------------------------------------------------------
 // Error types

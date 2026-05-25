@@ -6,11 +6,11 @@
 //! and array rest names.
 //!
 //! Name references resolve to a `BindingId` (for locals) or a
-//! [`DefId`](vx_resolve::DefId) (for top-level definitions). There is exactly
+//! [`DefId`](crate::def::DefId) (for top-level definitions). There is exactly
 //! one canonical `Binding` per introduced name — no second lookup mechanism.
 
 use crate::{BodyId, ExprId, ScopeId};
-use vx_resolve::SourceSpan;
+use vx_parser::SourceSpan;
 use vx_types::Ty;
 
 /// A binding is a named slot that holds a value at runtime.

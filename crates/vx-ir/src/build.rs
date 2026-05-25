@@ -57,8 +57,9 @@ use crate::type_ref::{
     FunctionTypeRef, OptionalTypeRef, PathTypeRef, SumTypeRef, TupleTypeRef, TypeRef, TypeRefKind,
 };
 use crate::{BodyId, ExprId, ItemId, ScopeId, SourceUnitId, TypeRefId};
-use vx_parser::{self, AstNode, SyntaxKind};
-use vx_resolve::{DefId, SourceId, SourceSpan};
+use vx_parser::{self, AstNode, SourceId, SourceSpan, SyntaxKind};
+
+use crate::def::DefId;
 
 /// The result of building VIR from one or more source files.
 #[derive(Debug)]
@@ -161,7 +162,7 @@ impl VirBuilder {
     /// Generate a DefId for a new item declaration.
     ///
     /// TRANSITIONAL: The builder assigns DefId::Source values during construction
-    /// so that items have identity from the start. When vx-resolve is integrated
+    /// so that items have identity from the start. When the resolver is integrated
     /// (work item 002), the resolver becomes the canonical authority for DefIds
     /// and these builder-assigned IDs may be replaced or reconciled.
     fn next_def_id(&mut self) -> DefId {

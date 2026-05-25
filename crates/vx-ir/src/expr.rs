@@ -6,7 +6,7 @@
 //! during the CST-to-VIR walk — the inner expression is used directly.
 
 use crate::{BodyId, ExprId, ItemId, PatternId, ScopeId, StmtId, TypeRefId};
-use vx_resolve::SourceSpan;
+use vx_parser::SourceSpan;
 use vx_types::Ty;
 
 /// An expression node in the VIR.
@@ -599,7 +599,7 @@ pub struct ImportExpr {
     pub path: String,
     /// The resolved source ID of the imported file.
     /// Populated during: name resolution pass. `None` before that.
-    pub resolved_source: Option<vx_resolve::SourceId>,
+    pub resolved_source: Option<vx_parser::SourceId>,
 }
 
 /// A fail expression: `fail "message"` or `fail expr`.

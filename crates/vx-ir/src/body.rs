@@ -5,7 +5,7 @@
 //! body's parent is the body it's lexically nested within.
 
 use crate::{BindingId, BodyId, ExprId, ItemId, PatternId, ScopeId, TypeRefId};
-use vx_resolve::{SourceId, SourceSpan};
+use vx_parser::{SourceId, SourceSpan};
 
 /// A body is a scope-owning unit: a function, closure, or top-level thunk.
 #[derive(Debug, Clone)]

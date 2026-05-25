@@ -82,7 +82,7 @@ struct LoweringContext<'a> {
     arena: &'a crate::VirArena,
     /// Source IDs of user sources (non-stdlib). Functions from other sources
     /// with known names (exec, discover, stabilize) are runtime boundaries.
-    user_sources: HashSet<vx_resolve::SourceId>,
+    user_sources: HashSet<vx_parser::SourceId>,
     /// Lazy fields from demand analysis, indexed for fast lookup.
     lazy_fields: HashSet<(BodyId, ExprId, FieldKey)>,
     /// Next body ID for synthesized thunk/closure bodies.
@@ -98,7 +98,7 @@ impl<'a> LoweringContext<'a> {
     fn new(
         arena: &'a crate::VirArena,
         demand: &VirDemandResult,
-        user_sources: HashSet<vx_resolve::SourceId>,
+        user_sources: HashSet<vx_parser::SourceId>,
     ) -> Self {
         let mut lazy_fields = HashSet::new();
         for lf in &demand.lazy_fields {
@@ -178,7 +178,7 @@ pub fn lower_vir_program(
     // The primary source unit is the user program. Later source units come from
     // the injected stdlib and should remain eligible for runtime-boundary
     // classification.
-    let user_sources: HashSet<vx_resolve::SourceId> = program
+    let user_sources: HashSet<vx_parser::SourceId> = program
         .source_units
         .first()
         .map(|su_id| HashSet::from([program.arena[*su_id].source]))

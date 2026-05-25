@@ -27,7 +27,7 @@ fn text_range(text: &str, needle: &str, len: usize) -> Range {
     }
 }
 
-fn definition_named<'a>(state: &'a DocumentState, name: &str) -> &'a vx_resolve::Definition {
+fn definition_named<'a>(state: &'a DocumentState, name: &str) -> &'a vx_ir::Definition {
     state
         .all_definitions()
         .iter()
@@ -238,7 +238,7 @@ fn demo() {
 
     assert_eq!(def.name, "executor_class");
     assert_ne!(def.source(), *state.current_source());
-    assert_eq!(def.kind, vx_resolve::DefKind::Function);
+    assert_eq!(def.kind, vx_ir::DefKind::Function);
     assert_eq!(
         state.declaration_snippet(&def),
         "fn executor_class(label: String) -> ExecutorClass"
@@ -253,7 +253,7 @@ fn demo() {
         .to_file_path()
         .unwrap_or_else(|_| panic!("expected file uri, got {uri}"));
     assert!(
-        disk_path == vx_resolve::source_disk_path("crates/vx-stdlib/std/build.vx"),
+        disk_path == vx_stdlib::source_disk_path("crates/vx-stdlib/std/build.vx"),
         "expected stdlib build.vx uri to point at real file, got {uri}"
     );
 }
@@ -273,7 +273,7 @@ fn demo(blob: Blob) {
     let def = state.definition_at(offset).unwrap();
 
     assert_eq!(def.name, "Toml");
-    assert_eq!(def.kind, vx_resolve::DefKind::Namespace);
+    assert_eq!(def.kind, vx_ir::DefKind::Namespace);
     assert_ne!(def.source(), *state.current_source());
     assert_eq!(state.declaration_snippet(&def), "namespace Toml {");
 
@@ -283,7 +283,7 @@ fn demo(blob: Blob) {
         .unwrap_or_else(|_| panic!("expected file uri, got {uri}"));
     assert_eq!(
         disk_path,
-        vx_resolve::source_disk_path("crates/vx-stdlib/std/core.vx")
+        vx_stdlib::source_disk_path("crates/vx-stdlib/std/core.vx")
     );
 }
 
@@ -300,7 +300,7 @@ fn demo(host: Host) {
     let def = state.definition_at(offset).unwrap();
 
     assert_eq!(def.name, "which");
-    assert_eq!(def.kind, vx_resolve::DefKind::Function);
+    assert_eq!(def.kind, vx_ir::DefKind::Function);
     assert_ne!(def.source(), *state.current_source());
     assert_eq!(
         state.declaration_snippet(&def),

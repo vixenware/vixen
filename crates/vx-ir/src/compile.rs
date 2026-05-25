@@ -6,9 +6,10 @@
 use std::fmt;
 
 use crate::exec_types::ExecutableProgram;
-use vx_resolve::SourceId;
+use vx_parser::SourceId;
 
 use crate::build::VirBuilder;
+use crate::cap::CapError;
 use crate::cap_check::check_capabilities_vir;
 use crate::capture::analyze_captures;
 use crate::demand::analyze_demand_for_entry;
@@ -24,7 +25,7 @@ pub enum CompileError {
     Parse(Vec<vx_parser::SyntaxError>),
     Resolve(Vec<crate::resolve::ResolveError>),
     Type(Vec<crate::type_check::TypeError>),
-    Capability(Vec<vx_resolve::CapError>),
+    Capability(Vec<CapError>),
     MissingEntry(String),
     Lowering(LowerError),
 }
@@ -90,7 +91,7 @@ pub fn compile_source(
 
     // Parse stdlib sources (trusted — panic on errors).
     let mut sources: Vec<(SourceId, vx_parser::SourceFile)> = vec![(SourceId(0), parsed.tree())];
-    for (i, stdlib) in vx_resolve::stdlib_sources().iter().enumerate() {
+    for (i, stdlib) in vx_stdlib::stdlib_sources().iter().enumerate() {
         let stdlib_parsed = vx_parser::parse_source_file(stdlib.text);
         assert!(
             stdlib_parsed.errors().is_empty(),
@@ -156,7 +157,8 @@ mod tests {
     use crate::resolve::resolve_names;
     use crate::type_check::type_check_vir;
     use crate::type_collect::collect_types_vir;
-    use vx_resolve::{SourceId, stdlib_sources};
+    use vx_parser::SourceId;
+    use vx_stdlib::stdlib_sources;
 
     const SOURCE_DISCOVER_WHICH: &str = r#"
 fn probe() #discover -> String (

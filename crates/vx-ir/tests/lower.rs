@@ -2,14 +2,13 @@
 //!
 //! Each test: source → VIR → demand analysis → lower → vx-rt eval.
 
-use vx_parser::parse_source_file;
-use vx_resolve::SourceId;
-use vx_rt::{RtValue, eval_program};
 use vx_ir::build::VirBuilder;
 use vx_ir::capture::analyze_captures;
 use vx_ir::demand::analyze_demand;
 use vx_ir::lower::lower_vir_program;
 use vx_ir::resolve::resolve_names;
+use vx_parser::{SourceId, parse_source_file};
+use vx_rt::{RtValue, eval_program};
 
 /// Build VIR, resolve, analyze demand, lower, eval.
 fn eval_vir(source: &str, args: &[RtValue]) -> Result<RtValue, String> {

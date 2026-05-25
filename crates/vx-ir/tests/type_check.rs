@@ -3,14 +3,13 @@
 //! Unit tests verify individual expression types.
 //! Equivalence tests compare VIR checker output against the old AST-based checker.
 
-use vx_parser::parse_source_file;
-use vx_resolve::SourceId;
-use vx_types::{Scalar, Ty};
 use vx_ir::build::VirBuilder;
 use vx_ir::resolve::resolve_names;
 use vx_ir::type_check::{TypeCheckVirResult, type_check_vir};
 use vx_ir::type_collect::collect_types_vir;
 use vx_ir::{ExprId, VirArena};
+use vx_parser::{SourceId, parse_source_file};
+use vx_types::{Scalar, Ty};
 
 /// Helper: build VIR, resolve names, collect types, run type checker.
 fn check_source(source: &str) -> (VirArena, TypeCheckVirResult) {

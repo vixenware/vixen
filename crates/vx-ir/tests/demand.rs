@@ -1,12 +1,11 @@
 //! Tests for VIR demand analysis.
 
-use vx_parser::parse_source_file;
-use vx_resolve::SourceId;
 use vx_ir::BodyId;
 use vx_ir::build::{VirBuilder, VirProgram};
 use vx_ir::demand::{Observation, VirCallTarget, VirDemandResult, analyze_demand};
 use vx_ir::expr::FieldKey;
 use vx_ir::resolve::resolve_names;
+use vx_parser::{SourceId, parse_source_file};
 
 /// Helper: build VIR program, resolve names, run demand analysis.
 fn analyze_source(source: &str) -> (VirProgram, VirDemandResult) {

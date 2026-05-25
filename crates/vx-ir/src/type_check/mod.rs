@@ -2,7 +2,7 @@
 //!
 //! Walks the VIR arena and populates `Expr.ty`, `Binding.ty`, and `Pattern.ty`
 //! directly on nodes. This replaces the old span-keyed HashMap approach in
-//! `vx-resolve/src/type_check.rs`.
+//! the legacy span-keyed type check.
 //!
 //! ## Semantics
 //!
@@ -24,17 +24,16 @@ pub mod subst;
 
 use std::collections::HashMap;
 
-use vx_resolve::SourceSpan;
+use vx_parser::SourceSpan;
 use vx_types::{Capability, FnSig, ParamDef, Ty};
 
 use crate::arena::VirArena;
+use crate::def::Definition;
 use crate::expr::ExprKind;
 use crate::item::ItemKind;
 use crate::type_collect::resolve_type_ref;
+use crate::type_collection::TypeCollection;
 use crate::{BindingId, BodyId, ExprId, ItemId, SourceUnitId, TypeRefId};
-
-use vx_resolve::Definition;
-use vx_resolve::type_collect::TypeCollection;
 
 /// A type error found during expression typing.
 #[derive(Debug, Clone, PartialEq, Eq)]

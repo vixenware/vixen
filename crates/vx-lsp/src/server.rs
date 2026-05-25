@@ -11,11 +11,11 @@ use vx_ir::item::ItemKind;
 use vx_ir::scope::{DefTarget, ScopeEntryTarget, ScopeOwner};
 use vx_ir::span_index::SpanIndex;
 use vx_ir::type_check::TypeCheckVirResult;
-use vx_ir::type_collect::TypeCollection;
-use vx_ir::{BindingId, ItemId, ScopeId};
+use vx_ir::{BindingId, ItemId, ScopeId, TypeCollection};
 use vx_parser::{self as vx, AstNode, FnDecl, Parsed, SourceFile, SyntaxKind, trimmed_range};
 
-use vx_resolve::{CapCheckResult, DefId, DefKind, Definition, SourceId, SourceSpan};
+use vx_ir::{CapCheckResult, DefId, DefKind, Definition};
+use vx_parser::{SourceId, SourceSpan};
 pub struct VxLanguageServer {
     client: Client,
     documents: Mutex<HashMap<Url, DocumentState>>,
@@ -83,11 +83,11 @@ impl DocumentState {
         );
 
         let mut sources: Vec<(SourceId, vx::SourceFile)> = vec![(current_source, parsed.tree())];
-        for (i, stdlib) in vx_resolve::stdlib_sources().iter().enumerate() {
+        for (i, stdlib) in vx_stdlib::stdlib_sources().iter().enumerate() {
             let stdlib_id = SourceId(i as u32 + 1);
             let stdlib_parsed = vx::parse_source_file(stdlib.text);
             let stdlib_line_index = vx::LineIndex::new(stdlib.text);
-            let uri = Url::from_file_path(vx_resolve::source_disk_path(stdlib.logical_path)).ok();
+            let uri = Url::from_file_path(vx_stdlib::source_disk_path(stdlib.logical_path)).ok();
             source_docs.insert(
                 stdlib_id,
                 SourceDoc {
@@ -1230,7 +1230,7 @@ impl LanguageServer for VxLanguageServer {
                 }
 
                 // "did you mean?" quickfix for unresolved names
-                if diag.source.as_deref() == Some("vx-resolve")
+                if diag.source.as_deref() == Some("vx-ir")
                     && diag.message.starts_with("unresolved name")
                     && let Some(name) = diag.message.split('`').nth(1)
                 {
@@ -1448,7 +1448,7 @@ impl LanguageServer for VxLanguageServer {
             let fn_range = fn_node.syntax().text_range();
 
             // Find all CALL_EXPR nodes inside this function
-            let mut by_target: HashMap<vx_resolve::DefSite, (Definition, Vec<TextRange>)> =
+            let mut by_target: HashMap<vx_ir::DefSite, (Definition, Vec<TextRange>)> =
                 HashMap::new();
 
             for node in fn_node.syntax().descendants() {
@@ -1584,7 +1584,7 @@ impl VxLanguageServer {
             diagnostics.push(Diagnostic {
                 range: state.to_lsp_range_span(err.span),
                 severity: Some(DiagnosticSeverity::ERROR),
-                source: Some("vx-resolve".to_string()),
+                source: Some("vx-ir".to_string()),
                 message,
                 ..Default::default()
             });
@@ -1593,7 +1593,7 @@ impl VxLanguageServer {
         // Capability checking diagnostics
         for err in &state.cap_check.errors {
             let message = match &err.kind {
-                vx_resolve::CapErrorKind::CapabilityViolation {
+                vx_ir::CapErrorKind::CapabilityViolation {
                     slot_name,
                     allowed,
                     excess,
@@ -1604,7 +1604,7 @@ impl VxLanguageServer {
                          but slot only allows {allowed}"
                     )
                 }
-                vx_resolve::CapErrorKind::UnknownCapability { name } => {
+                vx_ir::CapErrorKind::UnknownCapability { name } => {
                     format!("unknown capability `#{name}`")
                 }
             };
@@ -1621,7 +1621,7 @@ impl VxLanguageServer {
         {
             use std::collections::HashSet;
             // Collect all definition sites that have at least one reference.
-            let mut referenced: HashSet<vx_resolve::DefSite> = HashSet::new();
+            let mut referenced: HashSet<vx_ir::DefSite> = HashSet::new();
             for expr in &state.arena.exprs {
                 if let ExprKind::NameRef(nr) = &expr.kind
                     && let Some(target) = nr.resolved
@@ -2431,7 +2431,7 @@ fn unwrap_paren_expr(expr: vx::Expr) -> vx::Expr {
 }
 
 // ---------------------------------------------------------------------------
-// VIR -> vx-resolve::Definition adapters
+// VIR -> Definition adapters
 // ---------------------------------------------------------------------------
 
 fn definition_from_item(arena: &VirArena, item_id: ItemId) -> Option<Definition> {
@@ -2451,9 +2451,6 @@ fn definition_from_item(arena: &VirArena, item_id: ItemId) -> Option<Definition>
         kind,
         name_span,
         full_span: item.span,
-        // ScopeId is vx-resolve's, not vx-ir's. The LSP doesn't introspect
-        // this field, so use ROOT as a sentinel.
-        scope: vx_resolve::ScopeId::ROOT,
     })
 }
 
@@ -2476,7 +2473,6 @@ fn definition_from_binding(arena: &VirArena, binding_id: BindingId) -> Definitio
         kind,
         name_span: binding.name_span,
         full_span: binding.name_span,
-        scope: vx_resolve::ScopeId::ROOT,
     }
 }
 
@@ -2506,7 +2502,6 @@ fn definition_from_variant(
         kind: DefKind::Variant,
         name_span: variant.name_span,
         full_span: variant.name_span,
-        scope: vx_resolve::ScopeId::ROOT,
     })
 }
 
@@ -2593,7 +2588,7 @@ fn scope_text_range(arena: &VirArena, scope: &vx_ir::scope::Scope) -> SourceSpan
 }
 
 /// Enumerate definitions visible at `offset` by walking the scope chain.
-/// Mirrors vx-resolve `ProgramScopes::visible_at`.
+/// Mirrors the legacy `ProgramScopes::visible_at` against vx-ir scopes.
 fn visible_definitions_at(
     arena: &VirArena,
     from: ScopeId,
@@ -2644,7 +2639,7 @@ fn visible_definitions_at(
 }
 
 /// Compute methods visible on a receiver of type `ty` at a given offset.
-/// Mirrors vx-resolve `visible_members_for_receiver` but uses vx-ir directly.
+/// Mirrors the legacy `visible_members_for_receiver` but uses vx-ir directly.
 fn visible_members_for_receiver(
     state: &DocumentState,
     _offset: rowan::TextSize,

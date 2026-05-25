@@ -9,7 +9,7 @@
 //! TypeRefs are arena-allocated with [`TypeRefId`](crate::TypeRefId).
 
 use crate::TypeRefId;
-use vx_resolve::SourceSpan;
+use vx_parser::SourceSpan;
 
 /// A source-level type annotation.
 ///

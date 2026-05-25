@@ -4,7 +4,9 @@
 //! They also appear as statement-level declarations inside blocks.
 
 use crate::{BodyId, ExprId, ItemId, ScopeId, TypeRefId};
-use vx_resolve::{DefId, SourceSpan};
+use vx_parser::SourceSpan;
+
+use crate::def::DefId;
 use vx_types::TypeId;
 
 /// A top-level declaration item.

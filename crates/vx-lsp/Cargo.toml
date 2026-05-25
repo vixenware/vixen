@@ -19,8 +19,8 @@ path = "src/main.rs"
 
 [dependencies]
 vx-parser = { workspace = true }
-vx-resolve = { workspace = true }
 vx-ir = { workspace = true }
+vx-stdlib = { workspace = true }
 vx-types = { workspace = true }
 eyre = { workspace = true }
 rowan = "0.16"

@@ -1,12 +1,11 @@
 //! Tests for the VIR capture analysis pass.
 
-use vx_parser::parse_source_file;
-use vx_resolve::SourceId;
 use vx_ir::body::BodyOwner;
 use vx_ir::build::VirBuilder;
 use vx_ir::capture::analyze_captures;
 use vx_ir::resolve::resolve_names;
 use vx_ir::{BodyId, VirArena};
+use vx_parser::{SourceId, parse_source_file};
 
 /// Helper: build VIR, resolve names, run capture analysis.
 fn analyze_source(source: &str) -> VirArena {

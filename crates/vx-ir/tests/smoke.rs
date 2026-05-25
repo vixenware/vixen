@@ -1,6 +1,6 @@
 //! Smoke tests for the VIR arena and visitor.
 
-use vx_resolve::{DefId, SourceId, SourceSpan};
+use vx_ir::DefId;
 use vx_ir::binding::{Binding, BindingKind};
 use vx_ir::body::{Body, BodyOwner, Param};
 use vx_ir::expr::{BinOp, BinaryExpr, Expr, ExprKind, LitKind, LiteralExpr, NameRefExpr};
@@ -10,6 +10,7 @@ use vx_ir::scope::{Scope, ScopeEntry, ScopeEntryTarget, ScopeOwner};
 use vx_ir::source_unit::SourceUnit;
 use vx_ir::visitor;
 use vx_ir::{BodyId, ExprId, VirArena, VirVisitor};
+use vx_parser::{SourceId, SourceSpan};
 
 fn dummy_span() -> SourceSpan {
     SourceSpan::new(SourceId(0), rowan::TextRange::default())

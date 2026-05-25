@@ -3811,8 +3811,8 @@ version = "0.1.0"
 dependencies = [
  "rowan",
  "vx-parser",
- "vx-resolve",
  "vx-rt",
+ "vx-stdlib",
  "vx-types",
 ]
 
@@ -3827,7 +3827,7 @@ dependencies = [
  "tracing",
  "vx-ir",
  "vx-parser",
- "vx-resolve",
+ "vx-stdlib",
  "vx-types",
 ]
 
@@ -3836,17 +3836,6 @@ name = "vx-parser"
 version = "0.1.0"
 dependencies = [
  "rowan",
-]
-
-[[package]]
-name = "vx-resolve"
-version = "0.1.0"
-dependencies = [
- "margin",
- "rowan",
- "vx-diagnostics",
- "vx-parser",
- "vx-types",
 ]
 
 [[package]]

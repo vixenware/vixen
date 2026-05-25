@@ -5,7 +5,7 @@
 //! is a direct lookup, not a scan-and-filter-by-span operation.
 
 use crate::{BodyId, ItemId};
-use vx_resolve::SourceId;
+use vx_parser::SourceId;
 
 /// A source file's VIR root.
 ///

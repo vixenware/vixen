@@ -6,7 +6,7 @@
 
 use crate::expr::LitKind;
 use crate::{BindingId, BodyId, ItemId, PatternId, ScopeId};
-use vx_resolve::SourceSpan;
+use vx_parser::SourceSpan;
 use vx_types::Ty;
 
 /// A pattern node in the VIR.

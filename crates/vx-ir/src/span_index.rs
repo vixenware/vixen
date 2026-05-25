@@ -10,7 +10,7 @@
 
 use std::collections::HashMap;
 
-use vx_resolve::SourceSpan;
+use vx_parser::SourceSpan;
 
 use crate::arena::VirArena;
 use crate::expr::ExprKind;

@@ -1,6 +1,6 @@
 //! Capability checking for VIR.
 //!
-//! Ports `vx-resolve/src/cap_check.rs` to walk VIR directly.
+//! Walks VIR directly (no Rowan dependency).
 //!
 //! Three passes:
 //! 1. Collect declared function capabilities → `HashMap<ItemId, CapSet>`.
@@ -16,11 +16,12 @@
 
 use std::collections::HashMap;
 
-use vx_resolve::Definition;
-use vx_resolve::SourceSpan;
-use vx_resolve::type_collect::TypeCollection;
-use vx_resolve::{CapCheckResult, CapError, CapErrorKind, CapSet};
+use vx_parser::SourceSpan;
 use vx_types::{Capability, FnSig, Ty};
+
+use crate::cap::{CapCheckResult, CapError, CapErrorKind, CapSet};
+use crate::def::Definition;
+use crate::type_collection::TypeCollection;
 
 use crate::arena::VirArena;
 use crate::expr::{ExprKind, UpdateField};

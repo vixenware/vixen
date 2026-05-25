@@ -3,13 +3,12 @@
 //! Each test parses a Vixen source snippet, builds VIR, and asserts structural
 //! properties of the resulting arena.
 
-use vx_parser::parse_source_file;
-use vx_resolve::SourceId;
 use vx_ir::build::VirBuilder;
 use vx_ir::expr::{ExprKind, FieldKey, LitKind};
 use vx_ir::item::ItemKind;
 use vx_ir::pattern::PatternKind;
 use vx_ir::stmt::StmtKind;
+use vx_parser::{SourceId, parse_source_file};
 
 fn build_single(source: &str) -> (vx_ir::arena::VirArena, vx_ir::SourceUnitId) {
     let parsed = parse_source_file(source);
@@ -417,10 +416,7 @@ fn module_scope(arena: &vx_ir::arena::VirArena, su_id: vx_ir::SourceUnitId) -> v
 }
 
 /// Helper: get the thunk block scope (the synthetic top-level block's scope).
-fn thunk_block_scope(
-    arena: &vx_ir::arena::VirArena,
-    su_id: vx_ir::SourceUnitId,
-) -> vx_ir::ScopeId {
+fn thunk_block_scope(arena: &vx_ir::arena::VirArena, su_id: vx_ir::SourceUnitId) -> vx_ir::ScopeId {
     let body = &arena[arena[su_id].top_level_body];
     let root = &arena[body.root_expr];
     match &root.kind {

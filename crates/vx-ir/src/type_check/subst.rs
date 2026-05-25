@@ -1,6 +1,6 @@
 //! Type parameter substitution helpers.
 //!
-//! These are exact ports of the free functions in `vx-resolve/src/type_check.rs`:
+//! These are exact ports of the legacy free functions for type substitution:
 //! `substitute_type_params`, `substitute_bound_type_params`, `bind_type_params`,
 //! and `infer_type_params`.
 

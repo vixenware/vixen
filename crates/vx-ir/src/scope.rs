@@ -10,7 +10,7 @@
 
 use crate::arena::VirArena;
 use crate::{BindingId, BodyId, ExprId, ItemId, ScopeId, SourceUnitId};
-use vx_resolve::SourceSpan;
+use vx_parser::SourceSpan;
 
 // ---------------------------------------------------------------------------
 // Scope

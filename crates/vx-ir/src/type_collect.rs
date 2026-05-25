@@ -1,15 +1,11 @@
 //! Type collection on VIR: register type declarations and build signatures.
 //!
-//! This is a structural port of `vx-resolve/src/type_collect.rs` that reads from
-//! VIR items instead of the Rowan parser AST. The output (`TypeCollection`) is
-//! identical — same DefSite keys, same TypeDef contents, same FnSig fields.
-//!
-//! Resolution behavior intentionally mirrors the old collector exactly, including
-//! limitations like ignoring multi-segment paths. Semantic improvements come later.
+//! Reads from VIR items and produces a [`TypeCollection`] with TypeEnv,
+//! def-to-type / def-to-fn-sig maps, and sum-alias alternatives.
 
 use std::collections::HashMap;
 
-use vx_resolve::{DefSite, SourceId};
+use vx_parser::SourceId;
 use vx_types::{
     AliasDef, DeserContainerAttrs, DeserFieldAttrs, DeserRenameRule, EnumDef, FieldDef,
     FieldDefaultValue, FnSig, KeywordParamDef, NewtypeDef, OpaqueDef, ParamDef, Scalar, StructDef,
@@ -18,22 +14,18 @@ use vx_types::{
 
 use crate::arena::VirArena;
 use crate::body::Param;
+use crate::def::DefSite;
 use crate::expr::{ExprKind, LitKind};
 use crate::item::{
     Attribute, EnumItem, FieldDecl, FunctionItem, ItemKind, NamespaceItem, NewtypeItem, StructItem,
     TypeAliasItem, VariantDecl,
 };
 use crate::pattern::PatternKind;
+use crate::type_collection::{TypeCollection, TypeKind};
 use crate::type_ref::TypeRefKind;
 use crate::{ItemId, SourceUnitId, TypeRefId};
 
-// Re-use TypeCollection and TypeKind from vx-resolve.
-pub use vx_resolve::type_collect::{TypeCollection, TypeKind};
-
 /// Collect all type declarations from VIR into a [`TypeCollection`].
-///
-/// This is the VIR equivalent of `vx_resolve::collect_types_for_sources`.
-/// Both collectors coexist; equivalence tests verify identical output.
 pub fn collect_types_vir(arena: &mut VirArena) -> TypeCollection {
     let mut env = TypeEnv::new();
     let mut def_to_type = HashMap::new();

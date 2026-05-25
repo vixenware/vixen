@@ -5,7 +5,6 @@ members = [
 
   ## lang crates
   "crates/vx-parser",
-  "crates/vx-resolve",
   "crates/vx-types",
   "crates/vx-diagnostics",
   "crates/vx-ir",
@@ -55,10 +54,9 @@ vx-vfs = { path = "crates/vx-vfs" }
 vx-vfsd = { path = "crates/vx-vfsd" }
 vx-vfs-types = { path = "crates/vx-vfs-types" }
 vx-parser = { path = "crates/vx-parser" }
-vx-resolve = { path = "crates/vx-resolve" }
 vx-ir = { path = "crates/vx-ir" }
+vx-stdlib = { path = "crates/vx-stdlib" }
 vx-types = { path = "crates/vx-types" }
-vx-diagnostics = { path = "crates/vx-diagnostics" }
 vxd = { path = "crates/vx-daemon", package = "vx-daemon" }
 
 # facet ecosystem
