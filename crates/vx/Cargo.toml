@@ -32,7 +32,7 @@ vox = { workspace = true }
 blake3 = { workspace = true }
 vx-services.workspace = true
 vxd.workspace = true
-vx-lsp = { path = "../vx-lsp" }
+vx-lsp = { workspace = true }
 vx-vfs = { workspace = true }
 vx-vfsd = { workspace = true }
 

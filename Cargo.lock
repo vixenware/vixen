@@ -2034,23 +2034,6 @@ dependencies = [
 ]
 
 [[package]]
-name = "margin"
-version = "0.1.0"
-dependencies = [
- "facet",
- "unicode-width",
-]
-
-[[package]]
-name = "margin-term"
-version = "0.1.0"
-dependencies = [
- "arborium-theme",
- "margin",
- "unicode-width",
-]
-
-[[package]]
 name = "matchers"
 version = "0.2.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -3726,23 +3709,9 @@ dependencies = [
  "vx-runner",
  "vx-services",
  "vx-store",
- "vx-types",
+ "vx-types 0.0.0",
  "vx-vfsd",
  "vx-vir",
-]
-
-[[package]]
-name = "vx-diagnostics"
-version = "0.1.0"
-dependencies = [
- "arborium",
- "arborium-highlight",
- "arborium-theme",
- "eyre",
- "libc",
- "margin",
- "margin-term",
- "tree-sitter-vixen",
 ]
 
 [[package]]
@@ -3819,7 +3788,7 @@ dependencies = [
  "cranelift-native",
  "thiserror 2.0.18",
  "vx-jit-types",
- "vx-types",
+ "vx-types 0.0.0",
  "vx-vir",
 ]
 
@@ -3830,33 +3799,51 @@ version = "0.1.0"
 [[package]]
 name = "vx-lsp"
 version = "0.1.0"
+source = "git+ssh://code.vixen.rs/vixen/vixen-lsp#47920cc2cecfbeac8a361fe0a0dbffd96fbcc3dc"
 dependencies = [
- "eyre",
  "rowan",
  "tokio",
  "tower-lsp",
  "tracing",
- "vx-parser",
- "vx-resolve",
- "vx-types",
+ "vx-parser 0.1.0",
+ "vx-resolve 0.1.0",
+ "vx-types 0.1.0",
+]
+
+[[package]]
+name = "vx-parser"
+version = "0.0.0"
+source = "git+ssh://code.vixen.rs/vixen/vixen-lang#a6f2460169020b25ff3f2d9c80d3b9202cc1c834"
+dependencies = [
+ "rowan",
 ]
 
 [[package]]
 name = "vx-parser"
 version = "0.1.0"
+source = "git+ssh://code.vixen.rs/vixen/vixen#ef57aa208e7ebfc9b9310550a6803fcd02e022a9"
 dependencies = [
  "rowan",
 ]
 
 [[package]]
 name = "vx-resolve"
-version = "0.1.0"
+version = "0.0.0"
+source = "git+ssh://code.vixen.rs/vixen/vixen-lang#a6f2460169020b25ff3f2d9c80d3b9202cc1c834"
 dependencies = [
- "margin",
  "rowan",
- "vx-diagnostics",
- "vx-parser",
- "vx-types",
+ "vx-parser 0.0.0",
+ "vx-types 0.0.0",
+]
+
+[[package]]
+name = "vx-resolve"
+version = "0.1.0"
+source = "git+ssh://code.vixen.rs/vixen/vixen#ef57aa208e7ebfc9b9310550a6803fcd02e022a9"
+dependencies = [
+ "rowan",
+ "vx-parser 0.1.0",
+ "vx-types 0.1.0",
 ]
 
 [[package]]
@@ -3922,7 +3909,16 @@ dependencies = [
 
 [[package]]
 name = "vx-types"
+version = "0.0.0"
+source = "git+ssh://code.vixen.rs/vixen/vixen-lang#a6f2460169020b25ff3f2d9c80d3b9202cc1c834"
+dependencies = [
+ "rowan",
+]
+
+[[package]]
+name = "vx-types"
 version = "0.1.0"
+source = "git+ssh://code.vixen.rs/vixen/vixen#ef57aa208e7ebfc9b9310550a6803fcd02e022a9"
 dependencies = [
  "rowan",
 ]
@@ -3984,10 +3980,10 @@ name = "vx-vir"
 version = "0.1.0"
 dependencies = [
  "rowan",
- "vx-parser",
- "vx-resolve",
+ "vx-parser 0.0.0",
+ "vx-resolve 0.0.0",
  "vx-rt",
- "vx-types",
+ "vx-types 0.0.0",
 ]
 
 [[package]]

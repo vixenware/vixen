@@ -1,29 +1,24 @@
 [workspace]
 members = [
   ## crates+
-  "crates-plus/*",
+  "crates-plus/fuse3",
 
-  ## lang crates
-  "crates/vx-parser",
-  "crates/vx-resolve",
+  ## lang crates (vx-parser, vx-resolve, vx-types, vx-diagnostics live in vixen-lang)
   "crates/vx-vir",
   "crates/vx-stdlib",
-  "crates/vx-lsp",
 
   ## eval crates
   "crates/vx-jit",
   "crates/vx-jit-types",
   "crates/vx-rt",
   "crates/vx-eval-tests",
-  "crates/vx-diagnostics",
 
   ## runtime support
   "crates/vx-http",
   "crates/vx-tarball",
   "crates/landlock-exec",
 
-  ## core crates
-  "crates/vx-types",
+  ## core crates (vx-lsp lives in vixen-lsp)
   "crates/vx",
   "crates/vx-daemon",
   "crates/vx-io",
@@ -51,20 +46,25 @@ repository = "https://github.com/bearcove/vx"
 # instrumentation
 moire = "1.0.1"
 vx-services = { path = "crates/vx-services" }
-margin = { path = "crates-plus/margin" }
-margin-term = { path = "crates-plus/margin-term" }
 vx-io = { path = "crates/vx-io" }
 vx-vfs = { path = "crates/vx-vfs" }
 vx-vfsd = { path = "crates/vx-vfsd" }
 vx-vfs-types = { path = "crates/vx-vfs-types" }
 vx-jit = { path = "crates/vx-jit" }
 vx-jit-types = { path = "crates/vx-jit-types" }
-vx-parser = { path = "crates/vx-parser" }
-vx-resolve = { path = "crates/vx-resolve" }
 vx-vir = { path = "crates/vx-vir" }
-vx-types = { path = "crates/vx-types" }
-vx-diagnostics = { path = "crates/vx-diagnostics" }
 vxd = { path = "crates/vx-daemon", package = "vx-daemon" }
+
+# moved to vixen-lang
+vx-parser = { git = "ssh://code.vixen.rs/vixen/vixen-lang" }
+vx-resolve = { git = "ssh://code.vixen.rs/vixen/vixen-lang" }
+vx-types = { git = "ssh://code.vixen.rs/vixen/vixen-lang" }
+vx-diagnostics = { git = "ssh://code.vixen.rs/vixen/vixen-lang" }
+margin = { git = "ssh://code.vixen.rs/vixen/vixen-lang" }
+margin-term = { git = "ssh://code.vixen.rs/vixen/vixen-lang" }
+
+# moved to vixen-lsp
+vx-lsp = { git = "ssh://code.vixen.rs/vixen/vixen-lsp" }
 
 # facet ecosystem
 facet = { version = "0.46", features = ["jiff02", "camino"] }
