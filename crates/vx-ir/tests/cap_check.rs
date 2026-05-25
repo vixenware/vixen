@@ -2,11 +2,11 @@
 
 use vx_parser::parse_source_file;
 use vx_resolve::{CapErrorKind, SourceId};
-use vx_vir::build::VirBuilder;
-use vx_vir::cap_check::check_capabilities_vir;
-use vx_vir::resolve::resolve_names;
-use vx_vir::type_check::type_check_vir;
-use vx_vir::type_collect::collect_types_vir;
+use vx_ir::build::VirBuilder;
+use vx_ir::cap_check::check_capabilities_vir;
+use vx_ir::resolve::resolve_names;
+use vx_ir::type_check::type_check_vir;
+use vx_ir::type_collect::collect_types_vir;
 
 /// Helper: build VIR, resolve names, collect types, type check, cap check.
 fn cap_check_source(source: &str) -> Vec<CapErrorKind> {

@@ -5,11 +5,11 @@
 use vx_parser::parse_source_file;
 use vx_resolve::SourceId;
 use vx_rt::{RtValue, eval_program};
-use vx_vir::build::VirBuilder;
-use vx_vir::capture::analyze_captures;
-use vx_vir::demand::analyze_demand;
-use vx_vir::lower::lower_vir_program;
-use vx_vir::resolve::resolve_names;
+use vx_ir::build::VirBuilder;
+use vx_ir::capture::analyze_captures;
+use vx_ir::demand::analyze_demand;
+use vx_ir::lower::lower_vir_program;
+use vx_ir::resolve::resolve_names;
 
 /// Build VIR, resolve, analyze demand, lower, eval.
 fn eval_vir(source: &str, args: &[RtValue]) -> Result<RtValue, String> {

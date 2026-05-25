@@ -2,11 +2,11 @@
 
 use vx_parser::parse_source_file;
 use vx_resolve::SourceId;
-use vx_vir::BodyId;
-use vx_vir::build::{VirBuilder, VirProgram};
-use vx_vir::demand::{Observation, VirCallTarget, VirDemandResult, analyze_demand};
-use vx_vir::expr::FieldKey;
-use vx_vir::resolve::resolve_names;
+use vx_ir::BodyId;
+use vx_ir::build::{VirBuilder, VirProgram};
+use vx_ir::demand::{Observation, VirCallTarget, VirDemandResult, analyze_demand};
+use vx_ir::expr::FieldKey;
+use vx_ir::resolve::resolve_names;
 
 /// Helper: build VIR program, resolve names, run demand analysis.
 fn analyze_source(source: &str) -> (VirProgram, VirDemandResult) {
@@ -21,8 +21,8 @@ fn analyze_source(source: &str) -> (VirProgram, VirDemandResult) {
 /// Find a function body by name.
 fn fn_body(program: &VirProgram, name: &str) -> Option<BodyId> {
     for (i, body) in program.arena.bodies.iter().enumerate() {
-        if let vx_vir::body::BodyOwner::Function { item } = body.owner
-            && let vx_vir::item::ItemKind::Function(f) = &program.arena[item].kind
+        if let vx_ir::body::BodyOwner::Function { item } = body.owner
+            && let vx_ir::item::ItemKind::Function(f) = &program.arena[item].kind
             && f.name == name
         {
             return Some(BodyId(i as u32));
@@ -100,7 +100,7 @@ fn closure_call() {
         .bodies
         .iter()
         .enumerate()
-        .filter(|(_, b)| matches!(b.owner, vx_vir::body::BodyOwner::Closure))
+        .filter(|(_, b)| matches!(b.owner, vx_ir::body::BodyOwner::Closure))
         .map(|(i, _)| BodyId(i as u32))
         .collect();
     assert_eq!(closure_bodies.len(), 1);
@@ -253,7 +253,7 @@ fn destructuring_closure_not_resolved() {
         .bodies
         .iter()
         .enumerate()
-        .filter(|(_, b)| matches!(b.owner, vx_vir::body::BodyOwner::Closure))
+        .filter(|(_, b)| matches!(b.owner, vx_ir::body::BodyOwner::Closure))
         .map(|(i, _)| BodyId(i as u32))
         .collect();
     assert_eq!(closure_bodies.len(), 1);

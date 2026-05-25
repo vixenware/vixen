@@ -19,7 +19,7 @@ use crate::{BindingId, BodyId, ExprId, ItemId, StmtId};
 
 /// Demand observation for a body's result.
 ///
-/// Mirrors `vx_analysis::Observation` but lives in vx-vir to avoid
+/// Mirrors `vx_analysis::Observation` but lives in vx-ir to avoid
 /// a dependency on the analysis crate.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum Observation {

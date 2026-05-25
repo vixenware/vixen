@@ -1,15 +1,15 @@
 //! Smoke tests for the VIR arena and visitor.
 
 use vx_resolve::{DefId, SourceId, SourceSpan};
-use vx_vir::binding::{Binding, BindingKind};
-use vx_vir::body::{Body, BodyOwner, Param};
-use vx_vir::expr::{BinOp, BinaryExpr, Expr, ExprKind, LitKind, LiteralExpr, NameRefExpr};
-use vx_vir::item::{FunctionItem, Item, ItemKind};
-use vx_vir::pattern::{Pattern, PatternBinding, PatternKind};
-use vx_vir::scope::{Scope, ScopeEntry, ScopeEntryTarget, ScopeOwner};
-use vx_vir::source_unit::SourceUnit;
-use vx_vir::visitor;
-use vx_vir::{BodyId, ExprId, VirArena, VirVisitor};
+use vx_ir::binding::{Binding, BindingKind};
+use vx_ir::body::{Body, BodyOwner, Param};
+use vx_ir::expr::{BinOp, BinaryExpr, Expr, ExprKind, LitKind, LiteralExpr, NameRefExpr};
+use vx_ir::item::{FunctionItem, Item, ItemKind};
+use vx_ir::pattern::{Pattern, PatternBinding, PatternKind};
+use vx_ir::scope::{Scope, ScopeEntry, ScopeEntryTarget, ScopeOwner};
+use vx_ir::source_unit::SourceUnit;
+use vx_ir::visitor;
+use vx_ir::{BodyId, ExprId, VirArena, VirVisitor};
 
 fn dummy_span() -> SourceSpan {
     SourceSpan::new(SourceId(0), rowan::TextRange::default())
@@ -271,14 +271,14 @@ fn visitor_traversal_count() {
             self.exprs += 1;
             visitor::walk_expr(self, arena, id);
         }
-        fn visit_binding(&mut self, _arena: &VirArena, _id: vx_vir::BindingId) {
+        fn visit_binding(&mut self, _arena: &VirArena, _id: vx_ir::BindingId) {
             self.bindings += 1;
         }
-        fn visit_pattern(&mut self, arena: &VirArena, id: vx_vir::PatternId) {
+        fn visit_pattern(&mut self, arena: &VirArena, id: vx_ir::PatternId) {
             self.patterns += 1;
             visitor::walk_pattern(self, arena, id);
         }
-        fn visit_scope(&mut self, arena: &VirArena, id: vx_vir::ScopeId) {
+        fn visit_scope(&mut self, arena: &VirArena, id: vx_ir::ScopeId) {
             self.scopes += 1;
             visitor::walk_scope(self, arena, id);
         }

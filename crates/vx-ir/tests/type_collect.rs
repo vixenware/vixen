@@ -6,11 +6,11 @@
 use vx_parser::parse_source_file;
 use vx_resolve::{SourceId, collect_types};
 use vx_types::{Scalar, Ty, TypeDef};
-use vx_vir::build::VirBuilder;
-use vx_vir::type_collect::collect_types_vir;
+use vx_ir::build::VirBuilder;
+use vx_ir::type_collect::collect_types_vir;
 
 /// Helper: build VIR and run type collection.
-fn collect_from_source(source: &str) -> (vx_vir::arena::VirArena, vx_resolve::TypeCollection) {
+fn collect_from_source(source: &str) -> (vx_ir::arena::VirArena, vx_resolve::TypeCollection) {
     let parsed = parse_source_file(source);
     let file = parsed.tree();
     let mut program = VirBuilder::build_program(&[(SourceId(0), file)]);

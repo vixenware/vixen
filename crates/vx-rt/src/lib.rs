@@ -3,8 +3,8 @@ use std::collections::{BTreeMap, HashMap};
 use std::rc::Rc;
 
 use thiserror::Error;
-use vx_vir::compile::CompileError;
-use vx_vir::exec_types::{BodyId, ExecutableProgram, KernelOp, Operand, ResultSource, SlotId};
+use vx_ir::compile::CompileError;
+use vx_ir::exec_types::{BodyId, ExecutableProgram, KernelOp, Operand, ResultSource, SlotId};
 
 #[derive(Debug, Error)]
 pub enum RtError {
@@ -158,7 +158,7 @@ pub fn eval_source(
     function_name: &str,
     args: &[RtValue],
 ) -> Result<RtValue, RtError> {
-    let program = vx_vir::compile::compile_source(source, function_name)?;
+    let program = vx_ir::compile::compile_source(source, function_name)?;
     eval_program(&program, args)
 }
 
@@ -564,7 +564,7 @@ mod tests {
     use std::collections::BTreeMap;
 
     use super::*;
-    use vx_vir::exec_types::{ExecutableBody, ExprId, KernelId, KernelKind, SourceExpr};
+    use vx_ir::exec_types::{ExecutableBody, ExprId, KernelId, KernelKind, SourceExpr};
 
     fn source_expr(expr: u32) -> SourceExpr {
         SourceExpr {

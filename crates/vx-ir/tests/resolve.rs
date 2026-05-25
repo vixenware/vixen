@@ -2,20 +2,20 @@
 
 use vx_parser::parse_source_file;
 use vx_resolve::SourceId;
-use vx_vir::build::VirBuilder;
-use vx_vir::expr::ExprKind;
-use vx_vir::item::ItemKind;
-use vx_vir::pattern::PatternKind;
-use vx_vir::resolve::{ResolveErrorKind, resolve_names};
-use vx_vir::scope::DefTarget;
-use vx_vir::stmt::StmtKind;
+use vx_ir::build::VirBuilder;
+use vx_ir::expr::ExprKind;
+use vx_ir::item::ItemKind;
+use vx_ir::pattern::PatternKind;
+use vx_ir::resolve::{ResolveErrorKind, resolve_names};
+use vx_ir::scope::DefTarget;
+use vx_ir::stmt::StmtKind;
 
 fn build_and_resolve(
     source: &str,
 ) -> (
-    vx_vir::arena::VirArena,
-    vx_vir::SourceUnitId,
-    Vec<vx_vir::resolve::ResolveError>,
+    vx_ir::arena::VirArena,
+    vx_ir::SourceUnitId,
+    Vec<vx_ir::resolve::ResolveError>,
 ) {
     let parsed = parse_source_file(source);
     let file = parsed.tree();
@@ -27,10 +27,10 @@ fn build_and_resolve(
 
 /// Helper: get the tail expression of a function's root block.
 fn fn_tail_expr(
-    arena: &vx_vir::arena::VirArena,
-    su_id: vx_vir::SourceUnitId,
+    arena: &vx_ir::arena::VirArena,
+    su_id: vx_ir::SourceUnitId,
     name: &str,
-) -> vx_vir::ExprId {
+) -> vx_ir::ExprId {
     for &item_id in &arena[su_id].items {
         if let ItemKind::Function(f) = &arena[item_id].kind
             && f.name == name
@@ -49,10 +49,10 @@ fn fn_tail_expr(
 /// statement (tail is always None). This finds the expression inside the last
 /// ExprStmt, or a specific statement by index.
 fn thunk_stmt_expr(
-    arena: &vx_vir::arena::VirArena,
-    su_id: vx_vir::SourceUnitId,
+    arena: &vx_ir::arena::VirArena,
+    su_id: vx_ir::SourceUnitId,
     stmt_index: usize,
-) -> vx_vir::ExprId {
+) -> vx_ir::ExprId {
     let body = &arena[arena[su_id].top_level_body];
     let root = &arena[body.root_expr];
     if let ExprKind::Block(b) = &root.kind {
@@ -68,7 +68,7 @@ fn thunk_stmt_expr(
 }
 
 /// Helper: count thunk block statements.
-fn thunk_stmt_count(arena: &vx_vir::arena::VirArena, su_id: vx_vir::SourceUnitId) -> usize {
+fn thunk_stmt_count(arena: &vx_ir::arena::VirArena, su_id: vx_ir::SourceUnitId) -> usize {
     let body = &arena[arena[su_id].top_level_body];
     let root = &arena[body.root_expr];
     if let ExprKind::Block(b) = &root.kind {
@@ -80,11 +80,11 @@ fn thunk_stmt_count(arena: &vx_vir::arena::VirArena, su_id: vx_vir::SourceUnitId
 
 /// Helper: get the N-th statement in a function's root block.
 fn fn_stmt(
-    arena: &vx_vir::arena::VirArena,
-    su_id: vx_vir::SourceUnitId,
+    arena: &vx_ir::arena::VirArena,
+    su_id: vx_ir::SourceUnitId,
     name: &str,
     index: usize,
-) -> vx_vir::StmtId {
+) -> vx_ir::StmtId {
     for &item_id in &arena[su_id].items {
         if let ItemKind::Function(f) = &arena[item_id].kind
             && f.name == name

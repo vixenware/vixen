@@ -2,11 +2,11 @@
 
 use vx_parser::parse_source_file;
 use vx_resolve::SourceId;
-use vx_vir::body::BodyOwner;
-use vx_vir::build::VirBuilder;
-use vx_vir::capture::analyze_captures;
-use vx_vir::resolve::resolve_names;
-use vx_vir::{BodyId, VirArena};
+use vx_ir::body::BodyOwner;
+use vx_ir::build::VirBuilder;
+use vx_ir::capture::analyze_captures;
+use vx_ir::resolve::resolve_names;
+use vx_ir::{BodyId, VirArena};
 
 /// Helper: build VIR, resolve names, run capture analysis.
 fn analyze_source(source: &str) -> VirArena {
@@ -34,7 +34,7 @@ fn closure_bodies(arena: &VirArena) -> Vec<BodyId> {
 fn fn_body(arena: &VirArena, name: &str) -> Option<BodyId> {
     for (i, body) in arena.bodies.iter().enumerate() {
         if let BodyOwner::Function { item } = body.owner
-            && let vx_vir::item::ItemKind::Function(f) = &arena[item].kind
+            && let vx_ir::item::ItemKind::Function(f) = &arena[item].kind
             && f.name == name
         {
             return Some(BodyId(i as u32));

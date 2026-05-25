@@ -5,13 +5,13 @@
 
 use vx_parser::parse_source_file;
 use vx_resolve::SourceId;
-use vx_vir::build::VirBuilder;
-use vx_vir::expr::{ExprKind, FieldKey, LitKind};
-use vx_vir::item::ItemKind;
-use vx_vir::pattern::PatternKind;
-use vx_vir::stmt::StmtKind;
+use vx_ir::build::VirBuilder;
+use vx_ir::expr::{ExprKind, FieldKey, LitKind};
+use vx_ir::item::ItemKind;
+use vx_ir::pattern::PatternKind;
+use vx_ir::stmt::StmtKind;
 
-fn build_single(source: &str) -> (vx_vir::arena::VirArena, vx_vir::SourceUnitId) {
+fn build_single(source: &str) -> (vx_ir::arena::VirArena, vx_ir::SourceUnitId) {
     let parsed = parse_source_file(source);
     let file = parsed.tree();
     let program = VirBuilder::build_program(&[(SourceId(0), file)]);
@@ -407,10 +407,10 @@ fn scope_on_every_node() {
 // Scope building + lookup tests
 // ===========================================================================
 
-use vx_vir::scope::{DefTarget, ScopeEntryTarget, ScopeOwner, lookup_at};
+use vx_ir::scope::{DefTarget, ScopeEntryTarget, ScopeOwner, lookup_at};
 
 /// Helper: get the module scope for a source unit.
-fn module_scope(arena: &vx_vir::arena::VirArena, su_id: vx_vir::SourceUnitId) -> vx_vir::ScopeId {
+fn module_scope(arena: &vx_ir::arena::VirArena, su_id: vx_ir::SourceUnitId) -> vx_ir::ScopeId {
     let body = &arena[arena[su_id].top_level_body];
     // Body.scope is the module scope for top-level bodies.
     body.scope
@@ -418,9 +418,9 @@ fn module_scope(arena: &vx_vir::arena::VirArena, su_id: vx_vir::SourceUnitId) ->
 
 /// Helper: get the thunk block scope (the synthetic top-level block's scope).
 fn thunk_block_scope(
-    arena: &vx_vir::arena::VirArena,
-    su_id: vx_vir::SourceUnitId,
-) -> vx_vir::ScopeId {
+    arena: &vx_ir::arena::VirArena,
+    su_id: vx_ir::SourceUnitId,
+) -> vx_ir::ScopeId {
     let body = &arena[arena[su_id].top_level_body];
     let root = &arena[body.root_expr];
     match &root.kind {
@@ -431,10 +431,10 @@ fn thunk_block_scope(
 
 /// Helper: get the body scope of a named function item.
 fn fn_body_scope(
-    arena: &vx_vir::arena::VirArena,
-    su_id: vx_vir::SourceUnitId,
+    arena: &vx_ir::arena::VirArena,
+    su_id: vx_ir::SourceUnitId,
     name: &str,
-) -> vx_vir::ScopeId {
+) -> vx_ir::ScopeId {
     for &item_id in &arena[su_id].items {
         if let ItemKind::Function(f) = &arena[item_id].kind
             && f.name == name
@@ -447,10 +447,10 @@ fn fn_body_scope(
 
 /// Helper: get the block scope inside a function's root expression.
 fn fn_block_scope(
-    arena: &vx_vir::arena::VirArena,
-    su_id: vx_vir::SourceUnitId,
+    arena: &vx_ir::arena::VirArena,
+    su_id: vx_ir::SourceUnitId,
     name: &str,
-) -> vx_vir::ScopeId {
+) -> vx_ir::ScopeId {
     for &item_id in &arena[su_id].items {
         if let ItemKind::Function(f) = &arena[item_id].kind
             && f.name == name

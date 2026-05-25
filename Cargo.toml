@@ -8,7 +8,7 @@ members = [
   "crates/vx-resolve",
   "crates/vx-types",
   "crates/vx-diagnostics",
-  "crates/vx-vir",
+  "crates/vx-ir",
   "crates/vx-stdlib",
   "crates/vx-lsp",
 
@@ -56,7 +56,7 @@ vx-vfsd = { path = "crates/vx-vfsd" }
 vx-vfs-types = { path = "crates/vx-vfs-types" }
 vx-parser = { path = "crates/vx-parser" }
 vx-resolve = { path = "crates/vx-resolve" }
-vx-vir = { path = "crates/vx-vir" }
+vx-ir = { path = "crates/vx-ir" }
 vx-types = { path = "crates/vx-types" }
 vx-diagnostics = { path = "crates/vx-diagnostics" }
 vxd = { path = "crates/vx-daemon", package = "vx-daemon" }

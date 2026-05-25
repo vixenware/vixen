@@ -3,12 +3,12 @@
 use vx_parser::parse_source_file;
 use vx_resolve::{SourceId, TypeCheckResult, collect_types, resolve, type_check};
 use vx_types::{Scalar, Ty};
-use vx_vir::arena::VirArena;
-use vx_vir::binding::BindingKind;
-use vx_vir::build::VirBuilder;
-use vx_vir::expr::ExprKind;
-use vx_vir::item::ItemKind;
-use vx_vir::type_populate::{body_result_ty, populate_binding_types, populate_expr_types};
+use vx_ir::arena::VirArena;
+use vx_ir::binding::BindingKind;
+use vx_ir::build::VirBuilder;
+use vx_ir::expr::ExprKind;
+use vx_ir::item::ItemKind;
+use vx_ir::type_populate::{body_result_ty, populate_binding_types, populate_expr_types};
 
 /// Build VIR and populate expression + binding types from the existing type checker.
 fn build_and_type(source: &str) -> VirArena {
@@ -24,7 +24,7 @@ fn build_and_type(source: &str) -> VirArena {
 }
 
 /// Helper: get the tail expression of a named function's root block.
-fn fn_tail_expr(arena: &VirArena, su_id: vx_vir::SourceUnitId, name: &str) -> vx_vir::ExprId {
+fn fn_tail_expr(arena: &VirArena, su_id: vx_ir::SourceUnitId, name: &str) -> vx_ir::ExprId {
     for &item_id in &arena[su_id].items {
         if let ItemKind::Function(f) = &arena[item_id].kind
             && f.name == name
@@ -46,7 +46,7 @@ fn fn_tail_expr(arena: &VirArena, su_id: vx_vir::SourceUnitId, name: &str) -> vx
 #[test]
 fn simple_typed_expression() {
     let arena = build_and_type("fn add(x: U64) -> U64 ( x + 1 )");
-    let su_id = vx_vir::SourceUnitId::from_index(0);
+    let su_id = vx_ir::SourceUnitId::from_index(0);
     let tail_id = fn_tail_expr(&arena, su_id, "add");
     let tail = &arena[tail_id];
 
@@ -74,7 +74,7 @@ fn simple_typed_expression() {
 #[test]
 fn paren_elimination_typed() {
     let arena = build_and_type("fn main() -> U64 ( (1 + 2) )");
-    let su_id = vx_vir::SourceUnitId::from_index(0);
+    let su_id = vx_ir::SourceUnitId::from_index(0);
     let tail_id = fn_tail_expr(&arena, su_id, "main");
 
     // VIR eliminates parens — the tail is the inner binary expr directly.
@@ -97,7 +97,7 @@ fn paren_elimination_typed() {
 #[test]
 fn synthetic_block_stays_none() {
     let arena = build_and_type("fn main() -> U64 ( 1 )");
-    let su_id = vx_vir::SourceUnitId::from_index(0);
+    let su_id = vx_ir::SourceUnitId::from_index(0);
 
     // The top-level body's root expr is the synthetic block.
     let body = &arena[arena[su_id].top_level_body];
@@ -353,7 +353,7 @@ fn rerun_clears_stale_binding_types() {
 #[test]
 fn body_result_type_from_root_expr() {
     let arena = build_and_type("fn add(x: U64) -> U64 ( x + 1 )");
-    let su_id = vx_vir::SourceUnitId::from_index(0);
+    let su_id = vx_ir::SourceUnitId::from_index(0);
 
     for &item_id in &arena[su_id].items {
         if let ItemKind::Function(f) = &arena[item_id].kind

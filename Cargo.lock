@@ -3730,11 +3730,11 @@ dependencies = [
  "tracing",
  "tree-sitter-vixen 0.1.0 (git+https://github.com/bearcove/tree-sitter-vixen?rev=9fe14bea91399543282035090086fec8a868fb6c)",
  "vox",
+ "vx-ir",
  "vx-runner",
  "vx-services",
  "vx-store",
  "vx-vfsd",
- "vx-vir",
 ]
 
 [[package]]
@@ -3806,6 +3806,17 @@ dependencies = [
 ]
 
 [[package]]
+name = "vx-ir"
+version = "0.1.0"
+dependencies = [
+ "rowan",
+ "vx-parser",
+ "vx-resolve",
+ "vx-rt",
+ "vx-types",
+]
+
+[[package]]
 name = "vx-lsp"
 version = "0.1.0"
 dependencies = [
@@ -3842,7 +3853,7 @@ name = "vx-rt"
 version = "0.1.0"
 dependencies = [
  "thiserror 2.0.18",
- "vx-vir",
+ "vx-ir",
 ]
 
 [[package]]
@@ -3863,7 +3874,6 @@ dependencies = [
  "facet",
  "facet-postcard",
  "fastcdc",
- "thiserror 2.0.18",
  "tokio",
  "vox",
 ]
@@ -3955,17 +3965,6 @@ dependencies = [
  "vx-io",
  "vx-services",
  "vx-vfs",
-]
-
-[[package]]
-name = "vx-vir"
-version = "0.1.0"
-dependencies = [
- "rowan",
- "vx-parser",
- "vx-resolve",
- "vx-rt",
- "vx-types",
 ]
 
 [[package]]
