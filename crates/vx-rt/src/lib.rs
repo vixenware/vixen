@@ -558,3 +558,52 @@ fn produced_slot(op: &KernelOp) -> SlotId {
         | KernelOp::AwaitRuntime { dst, .. } => *dst,
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use std::collections::BTreeMap;
+
+    use super::*;
+    use vx_vir::exec_types::{ExecutableBody, ExprId, KernelId, KernelKind, SourceExpr};
+
+    fn source_expr(expr: u32) -> SourceExpr {
+        SourceExpr {
+            body: BodyId(0),
+            expr: ExprId(expr),
+        }
+    }
+
+    /// Smoke-test eval_program against a hand-built ExecutableProgram so a
+    /// failure here means the interpreter regressed without blaming compile.
+    #[test]
+    fn evaluates_executable_program() {
+        let body = ExecutableBody {
+            id: BodyId(0),
+            kernel: KernelId(0),
+            kernel_kind: KernelKind::Interpreted,
+            params: vec![SlotId(0), SlotId(1)],
+            ops: vec![KernelOp::Add {
+                dst: SlotId(2),
+                source: source_expr(0),
+                lhs: Operand::Slot(SlotId(0)),
+                rhs: Operand::Slot(SlotId(1)),
+            }],
+            result_source: ResultSource::Slot(SlotId(2)),
+            runtime_boundary_extractions: Vec::new(),
+            local_call_dependencies: Vec::new(),
+        };
+
+        let program = ExecutableProgram {
+            entry: BodyId(0),
+            bodies: BTreeMap::from([(BodyId(0), body)]),
+            runtime_nodes: BTreeMap::new(),
+        };
+
+        let result = eval_program(&program, &[RtValue::U64(40), RtValue::U64(2)]).unwrap();
+
+        match result {
+            RtValue::U64(value) => assert_eq!(value, 42),
+            other => panic!("expected u64, got {}", other.kind_name()),
+        }
+    }
+}
