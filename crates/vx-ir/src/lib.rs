@@ -44,6 +44,7 @@ pub mod pattern;
 pub mod resolve;
 pub mod scope;
 pub mod source_unit;
+pub mod span_index;
 pub mod stmt;
 pub mod type_check;
 pub mod type_collect;

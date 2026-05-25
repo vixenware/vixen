@@ -23,6 +23,22 @@ pub struct Item {
     pub kind: ItemKind,
 }
 
+impl Item {
+    /// The span of this item's declared name, if it has one.
+    /// Returns `None` for `ItemKind::Error`.
+    pub fn name_span(&self) -> Option<SourceSpan> {
+        Some(match &self.kind {
+            ItemKind::Function(f) => f.name_span,
+            ItemKind::Struct(s) => s.name_span,
+            ItemKind::Enum(e) => e.name_span,
+            ItemKind::Newtype(n) => n.name_span,
+            ItemKind::TypeAlias(t) => t.name_span,
+            ItemKind::Namespace(ns) => ns.name_span,
+            ItemKind::Error => return None,
+        })
+    }
+}
+
 /// Discriminant for all declaration item forms.
 #[derive(Debug, Clone)]
 pub enum ItemKind {
