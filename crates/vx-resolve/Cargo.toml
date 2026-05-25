@@ -1,0 +1,20 @@
+[package]
+name = "vx-resolve"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+
+[package.metadata]
+
+[package.metadata."docs.rs"]
+rustdoc-args = ["--html-in-header", "arborium-header.html"]
+
+[dependencies]
+vx-parser = { workspace = true }
+vx-types = { workspace = true }
+rowan = "0.16.1"
+
+[dev-dependencies]
+margin = { path = "../../crates-plus/margin" }
+vx-diagnostics = { path = "../vx-diagnostics" }

@@ -1,9 +1,13 @@
 [workspace]
 members = [
   ## crates+
-  "crates-plus/fuse3",
+  "crates-plus/*",
 
-  ## lang crates (vx-parser, vx-resolve, vx-types, vx-diagnostics live in vixen-lang)
+  ## lang crates
+  "crates/vx-parser",
+  "crates/vx-resolve",
+  "crates/vx-types",
+  "crates/vx-diagnostics",
   "crates/vx-vir",
   "crates/vx-stdlib",
 
@@ -18,7 +22,7 @@ members = [
   "crates/vx-tarball",
   "crates/landlock-exec",
 
-  ## core crates (vx-lsp lives in vixen-lsp)
+  ## core crates
   "crates/vx",
   "crates/vx-daemon",
   "crates/vx-io",
@@ -46,23 +50,20 @@ repository = "https://github.com/bearcove/vx"
 # instrumentation
 moire = "1.0.1"
 vx-services = { path = "crates/vx-services" }
+margin = { path = "crates-plus/margin" }
+margin-term = { path = "crates-plus/margin-term" }
 vx-io = { path = "crates/vx-io" }
 vx-vfs = { path = "crates/vx-vfs" }
 vx-vfsd = { path = "crates/vx-vfsd" }
 vx-vfs-types = { path = "crates/vx-vfs-types" }
 vx-jit = { path = "crates/vx-jit" }
 vx-jit-types = { path = "crates/vx-jit-types" }
+vx-parser = { path = "crates/vx-parser" }
+vx-resolve = { path = "crates/vx-resolve" }
 vx-vir = { path = "crates/vx-vir" }
+vx-types = { path = "crates/vx-types" }
+vx-diagnostics = { path = "crates/vx-diagnostics" }
 vxd = { path = "crates/vx-daemon", package = "vx-daemon" }
-
-# moved to vixen-lang (vx-diagnostics / margin / margin-term also live there
-# but no monorepo workspace member uses them anymore)
-vx-parser = { git = "ssh://code.vixen.rs/vixen/vixen-lang" }
-vx-resolve = { git = "ssh://code.vixen.rs/vixen/vixen-lang" }
-vx-types = { git = "ssh://code.vixen.rs/vixen/vixen-lang" }
-
-# vx-lsp lives in vixen-lsp and is installed as a standalone binary
-# (no longer linked into vx; editors point at `vx-lsp` directly)
 
 # facet ecosystem
 facet = { version = "0.46", features = ["jiff02", "camino"] }
@@ -122,6 +123,7 @@ windows-projfs = { version = "0.1", features = ["dynamic-import"] }
 
 # terminal
 owo-colors = { version = "4", features = ["supports-color"] }
+unicode-width = "0.2"
 arborium = { version = "2.16.0", default-features = false }
 arborium-highlight = "2.16.0"
 arborium-theme = "2.16.0"
