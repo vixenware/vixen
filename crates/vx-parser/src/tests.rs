@@ -205,7 +205,7 @@ namespace Blob {
 }
 
 fn assert_stdlib_header_parses(relative: &str) {
-    let root = Path::new(env!("CARGO_MANIFEST_DIR")).join("../packages/std");
+    let root = Path::new(env!("CARGO_MANIFEST_DIR")).join("../vx-stdlib/std");
     let path = root.join(relative);
     assert_file_parses(&path);
 }

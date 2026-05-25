@@ -66,13 +66,13 @@ pub struct StdlibSource {
 
 const STD_CORE: StdlibSource = StdlibSource {
     // TODO: what is the logical path meant to be exactly?
-    logical_path: "packages/std/core.vx",
-    text: include_str!("../../packages/std/core.vx"),
+    logical_path: "crates/vx-stdlib/std/core.vx",
+    text: include_str!("../../vx-stdlib/std/core.vx"),
 };
 
 const STD_BUILD: StdlibSource = StdlibSource {
-    logical_path: "packages/std/build.vx",
-    text: include_str!("../../packages/std/build.vx"),
+    logical_path: "crates/vx-stdlib/std/build.vx",
+    text: include_str!("../../vx-stdlib/std/build.vx"),
 };
 
 pub fn stdlib_sources() -> &'static [StdlibSource; 2] {
