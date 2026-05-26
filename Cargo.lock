@@ -2034,23 +2034,6 @@ dependencies = [
 ]
 
 [[package]]
-name = "margin"
-version = "0.1.0"
-dependencies = [
- "facet",
- "unicode-width",
-]
-
-[[package]]
-name = "margin-term"
-version = "0.1.0"
-dependencies = [
- "arborium-theme",
- "margin",
- "unicode-width",
-]
-
-[[package]]
 name = "matchers"
 version = "0.2.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -3373,15 +3356,6 @@ checksum = "009994f150cc0cd50ff54917d5bc8bffe8cad10ca10d81c34da2ec421ae61782"
 [[package]]
 name = "tree-sitter-vixen"
 version = "0.1.0"
-source = "git+ssh://git@code.vixen.rs/vixen/tree-sitter-vixen.git?rev=3e2cc63b460685ff595429afe435e8178c4f14a8#3e2cc63b460685ff595429afe435e8178c4f14a8"
-dependencies = [
- "cc",
- "tree-sitter-language",
-]
-
-[[package]]
-name = "tree-sitter-vixen"
-version = "0.1.0"
 source = "git+https://github.com/bearcove/tree-sitter-vixen?rev=9fe14bea91399543282035090086fec8a868fb6c#9fe14bea91399543282035090086fec8a868fb6c"
 dependencies = [
  "cc",
@@ -3728,27 +3702,13 @@ dependencies = [
  "thiserror 2.0.18",
  "tokio",
  "tracing",
- "tree-sitter-vixen 0.1.0 (git+https://github.com/bearcove/tree-sitter-vixen?rev=9fe14bea91399543282035090086fec8a868fb6c)",
+ "tree-sitter-vixen",
  "vox",
  "vx-ir",
  "vx-runner",
  "vx-services",
  "vx-store",
  "vx-vfsd",
-]
-
-[[package]]
-name = "vx-diagnostics"
-version = "0.1.0"
-dependencies = [
- "arborium",
- "arborium-highlight",
- "arborium-theme",
- "eyre",
- "libc",
- "margin",
- "margin-term",
- "tree-sitter-vixen 0.1.0 (git+ssh://git@code.vixen.rs/vixen/tree-sitter-vixen.git?rev=3e2cc63b460685ff595429afe435e8178c4f14a8)",
 ]
 
 [[package]]
