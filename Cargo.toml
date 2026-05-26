@@ -115,6 +115,7 @@ unicode-width = "0.2"
 arborium = { version = "2.16.0", default-features = false }
 arborium-highlight = "2.16.0"
 arborium-theme = "2.16.0"
+terminal-light = "1.8"
 
 # paths
 camino = "1"

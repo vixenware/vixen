@@ -45,6 +45,5 @@ fn build(root: Path) #discover -> Tree {
   //
   // vx bench rpc_encode
   // vx bench --os windows,linux,mac rpc_encode
-  /
   // vx bench /x86_64-unknown-linux-gnu /aarch64-apple-darwin /aarch64-pc-windows-msvc -- rpc_encode
 }

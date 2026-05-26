@@ -24,11 +24,49 @@ pub fn render_diagnostics_with_default_theme(
     capabilities: TerminalCapabilities,
 ) -> Result<String, LayoutError> {
     let plan = margin_term::layout(diagnostics, capabilities)?;
+    let theme = if use_dark_terminal() {
+        arborium_theme::builtin::catppuccin_mocha()
+    } else {
+        arborium_theme::builtin::catppuccin_latte()
+    };
     Ok(margin_term::render_plan_with_theme(
         &plan,
         capabilities,
-        TerminalTheme::from_arborium(&arborium_theme::builtin::catppuccin_mocha()),
+        TerminalTheme::from_arborium(&theme),
     ))
+}
+
+/// Whether the active terminal has a dark background.
+///
+/// Resolution order:
+///
+/// 1. The `VX_THEME` environment variable (`light` or `dark`).
+/// 2. An OSC 11 luma query via `terminal_light::luma()` — works on
+///    iTerm2, kitty, ghostty, alacritty, wezterm, modern xterm, etc.
+/// 3. Falls back to dark (the more common terminal default and the
+///    safer choice if detection times out on the user's TTY).
+///
+/// **Cached process-wide via `OnceLock`.** This is correct for the
+/// current short-lived CLI shape (vx eval, vx run, etc. — process
+/// exits in seconds; the user's terminal theme doesn't change in
+/// that window, and the OSC 11 query is non-trivial blocking I/O
+/// we don't want to pay on every diagnostic render). If a future
+/// long-lived interactive process (TUI, REPL) wants to react to a
+/// mid-session theme switch, replace the OnceLock with an
+/// explicit invalidation API or per-render detection.
+pub fn use_dark_terminal() -> bool {
+    use std::sync::OnceLock;
+    static IS_DARK: OnceLock<bool> = OnceLock::new();
+    *IS_DARK.get_or_init(|| {
+        match std::env::var("VX_THEME").ok().as_deref() {
+            Some(v) if v.eq_ignore_ascii_case("light") => return false,
+            Some(v) if v.eq_ignore_ascii_case("dark") => return true,
+            _ => {}
+        }
+        terminal_light::luma()
+            .map(|luma| luma < 0.5)
+            .unwrap_or(true)
+    })
 }
 
 /// Render diagnostics for the terminal with Vixen syntax highlighting applied
