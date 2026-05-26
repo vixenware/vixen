@@ -46,12 +46,9 @@ const mountOutput = run("mount", { ignoreError: true }) || "";
 let unmounted = 0;
 for (const line of mountOutput.split("\n")) {
   if (line.includes("(vixenfs,")) {
-    const match = line.match(/on\s+(.+?)\s+\(/);
+    const match = line.match(/^.*\son\s+(.+?)\s+\(/);
     if (match) {
-      let mountPath = match[1];
-      if (mountPath.startsWith("/private")) {
-        mountPath = mountPath.replace(/^\/private/, "/tmp");
-      }
+      const mountPath = match[1];
 
       console.log(`${emojis.mount} Unmounting vixenfs at ${colorize("cyan", mountPath)}...`);
       run(`umount "${mountPath}"`, { ignoreError: true, stdio: "pipe" });

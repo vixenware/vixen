@@ -32,11 +32,11 @@ build-rust profile='Debug':
     out_dir="$(pwd)/xcode/build/RustLibs"
     mkdir -p "$out_dir"
     if [[ "{{ profile }}" == "Release" ]]; then
-      cargo build --manifest-path "$repo_root/Cargo.toml" --package vx-fskit --lib --release
+      cargo build --manifest-path "$repo_root/Cargo.toml" --workspace --lib --release
       cp "$repo_root/target/release/libvx_fskit.a" "$out_dir/libvx_fskit.a"
       header_dir="$repo_root/target/release/build"
     else
-      cargo build --manifest-path "$repo_root/Cargo.toml" --package vx-fskit --lib
+      cargo build --manifest-path "$repo_root/Cargo.toml" --workspace --lib
       cp "$repo_root/target/debug/libvx_fskit.a" "$out_dir/libvx_fskit.a"
       header_dir="$repo_root/target/debug/build"
     fi

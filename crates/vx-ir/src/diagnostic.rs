@@ -139,4 +139,75 @@ impl IrDiagnostic {
             IrDiagnostic::UnknownCapability { name } => *name,
         }
     }
+
+    /// Secondary source locations that contextualize the error. The LSP
+    /// surfaces these as `DiagnosticRelatedInformation`; the terminal
+    /// renderer turns them into secondary annotations.
+    pub fn related_spans(&self) -> Vec<RelatedSpan> {
+        match self {
+            IrDiagnostic::Unresolved { .. } => Vec::new(),
+            IrDiagnostic::UnusedExprStatement { .. } => Vec::new(),
+            IrDiagnostic::UnknownCapability { .. } => Vec::new(),
+            IrDiagnostic::InvalidTarget { .. } => Vec::new(),
+            IrDiagnostic::ArgTypeMismatch { param, .. } => vec![RelatedSpan {
+                span: *param,
+                kind: RelatedKind::ParameterDeclaration,
+            }],
+            IrDiagnostic::BinaryOpMismatch { lhs, rhs, .. } => vec![
+                RelatedSpan {
+                    span: *lhs,
+                    kind: RelatedKind::Operand,
+                },
+                RelatedSpan {
+                    span: *rhs,
+                    kind: RelatedKind::Operand,
+                },
+            ],
+            IrDiagnostic::NoSuchMethod {
+                receiver,
+                candidates,
+                ..
+            } => {
+                let mut out = vec![RelatedSpan {
+                    span: *receiver,
+                    kind: RelatedKind::Receiver,
+                }];
+                for c in candidates {
+                    out.push(RelatedSpan {
+                        span: c.name_span,
+                        kind: RelatedKind::Candidate,
+                    });
+                }
+                out
+            }
+            IrDiagnostic::CapabilityViolation { slot, .. } => vec![RelatedSpan {
+                span: *slot,
+                kind: RelatedKind::SlotDeclaration,
+            }],
+        }
+    }
+}
+
+/// A secondary source span attached to a diagnostic, with a kind tag that
+/// callers (LSP, renderer) map to a localized label.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct RelatedSpan {
+    pub span: SourceSpan,
+    pub kind: RelatedKind,
+}
+
+/// What KIND of secondary location this is. The LSP / renderer chooses
+/// the user-visible wording from this tag.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum RelatedKind {
+    /// "parameter declared here"
+    ParameterDeclaration,
+    /// "slot declared here"
+    SlotDeclaration,
+    /// "receiver of the method call"
+    Receiver,
+    /// "operand"
+    Operand,
+    /// "candidate" (member method that might be what the user meant)
+    Candidate,
 }

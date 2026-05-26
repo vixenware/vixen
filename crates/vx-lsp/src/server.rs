@@ -440,6 +440,16 @@ impl DocumentState {
         self.to_lsp_range_span(SourceSpan::new(self.current_source, range))
     }
 
+    /// Convert a vx-ir SourceSpan into a full LSP `Location` (URI + range).
+    /// Returns None if the source has no associated URI (e.g. anonymous
+    /// closure-source).
+    pub(crate) fn location_for_span(&self, span: SourceSpan) -> Option<Location> {
+        Some(Location {
+            uri: self.uri_for_source(span.source)?,
+            range: self.to_lsp_range_span(span),
+        })
+    }
+
     pub(crate) fn to_lsp_range_span(&self, span: SourceSpan) -> Range {
         let line_index = self
             .source_doc(span.source)
@@ -1613,6 +1623,7 @@ impl VxLanguageServer {
                 severity: Some(DiagnosticSeverity::ERROR),
                 source: Some(source_tag.to_string()),
                 message,
+                related_information: related_info_for(state, err),
                 ..Default::default()
             });
         }
@@ -1629,6 +1640,7 @@ impl VxLanguageServer {
                 severity: Some(DiagnosticSeverity::ERROR),
                 source: Some(source_tag.to_string()),
                 message,
+                related_information: related_info_for(state, err),
                 ..Default::default()
             });
         }
@@ -1697,6 +1709,7 @@ impl VxLanguageServer {
                 severity: Some(DiagnosticSeverity::ERROR),
                 source: Some(source_tag.to_string()),
                 message,
+                related_information: related_info_for(state, err),
                 ..Default::default()
             });
         }
@@ -1752,6 +1765,39 @@ fn format_parse_diagnostic(diag: &vx_parser::ParseDiagnostic) -> String {
             }
         },
     }
+}
+
+/// Build LSP `DiagnosticRelatedInformation` entries from an IrDiagnostic's
+/// structural `related_spans()`. Each entry surfaces a secondary location
+/// (param decl site, slot decl site, candidate method, etc.) so editors
+/// can offer "click to jump" affordances.
+fn related_info_for(
+    state: &DocumentState,
+    diag: &vx_ir::IrDiagnostic,
+) -> Option<Vec<DiagnosticRelatedInformation>> {
+    use vx_ir::RelatedKind;
+
+    let entries: Vec<DiagnosticRelatedInformation> = diag
+        .related_spans()
+        .into_iter()
+        .filter_map(|rs| {
+            let location = state.location_for_span(rs.span)?;
+            let message = match rs.kind {
+                RelatedKind::ParameterDeclaration => "parameter declared here".to_string(),
+                RelatedKind::SlotDeclaration => {
+                    "slot declared with these allowed capabilities here".to_string()
+                }
+                RelatedKind::Receiver => "receiver of the method call".to_string(),
+                RelatedKind::Operand => "operand".to_string(),
+                RelatedKind::Candidate => {
+                    format!("candidate: `{}`", state.text_at(rs.span))
+                }
+            };
+            Some(DiagnosticRelatedInformation { location, message })
+        })
+        .collect();
+
+    (!entries.is_empty()).then_some(entries)
 }
 
 /// Render an [`IrDiagnostic`] to an LSP-protocol message string and a
