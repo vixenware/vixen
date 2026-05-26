@@ -6,6 +6,7 @@ members = [
   ## lang crates
   "crates/vx-parser",
   "crates/vx-types",
+  "crates/vx-diagnostics",
   "crates/vx-ir",
   "crates/vx-stdlib",
   "crates/vx-lsp",
@@ -46,6 +47,8 @@ repository = "https://github.com/bearcove/vx"
 # instrumentation
 moire = "1.0.1"
 vx-services = { path = "crates/vx-services" }
+margin = { path = "crates-plus/margin" }
+margin-term = { path = "crates-plus/margin-term" }
 vx-io = { path = "crates/vx-io" }
 vx-vfs = { path = "crates/vx-vfs" }
 vx-vfsd = { path = "crates/vx-vfsd" }
@@ -107,6 +110,7 @@ windows-projfs = { version = "0.1", features = ["dynamic-import"] }
 
 # terminal
 owo-colors = { version = "4", features = ["supports-color"] }
+unicode-width = "0.2"
 arborium = { version = "2.16.0", default-features = false }
 arborium-highlight = "2.16.0"
 arborium-theme = "2.16.0"
