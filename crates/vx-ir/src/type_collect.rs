@@ -476,6 +476,7 @@ fn collect_fn_sig_from_body(
 
     for param in &body.params {
         let pname = param_name(arena, param);
+        let pname_span = param_name_span(arena, param);
         let ty = param
             .ty
             .map(|tr| resolve_type_ref(arena, tr, name_to_id, type_params, self_ty))
@@ -487,6 +488,7 @@ fn collect_fn_sig_from_body(
             let has_default = param_has_default(arena, param);
             keyword_params.push(KeywordParamDef {
                 name: pname,
+                name_span: pname_span,
                 ty,
                 has_default,
                 doc: param.doc.clone(),
@@ -494,6 +496,7 @@ fn collect_fn_sig_from_body(
         } else {
             positional_params.push(ParamDef {
                 name: pname,
+                name_span: pname_span,
                 ty,
                 doc: param.doc.clone(),
             });
@@ -508,11 +511,15 @@ fn collect_fn_sig_from_body(
     let capabilities = body
         .capabilities
         .iter()
-        .map(|name| vx_types::Capability { name: name.clone() })
+        .map(|tag| vx_types::Capability {
+            name: tag.name.clone(),
+            name_span: tag.name_span,
+        })
         .collect();
 
     FnSig {
         name: func.name.clone(),
+        name_span: func.name_span,
         type_params: type_params.to_vec(),
         positional_params,
         keyword_params,
@@ -528,6 +535,15 @@ fn param_name(arena: &VirArena, param: &Param) -> String {
         PatternKind::Binding(b) => arena.bindings[b.binding.0 as usize].name.clone(),
         PatternKind::Wildcard => "_".to_string(),
         _ => String::new(),
+    }
+}
+
+/// Extract the name span from a parameter's pattern.
+fn param_name_span(arena: &VirArena, param: &Param) -> vx_parser::SourceSpan {
+    let pat = &arena.patterns[param.pattern.0 as usize];
+    match &pat.kind {
+        PatternKind::Binding(b) => arena.bindings[b.binding.0 as usize].name_span,
+        _ => pat.span,
     }
 }
 
@@ -605,7 +621,10 @@ pub fn resolve_type_ref(
             let capabilities = func
                 .capabilities
                 .iter()
-                .map(|name| vx_types::Capability { name: name.clone() })
+                .map(|tag| vx_types::Capability {
+                    name: tag.name.clone(),
+                    name_span: tag.name_span,
+                })
                 .collect();
             Ty::Function(vx_types::FunctionTy {
                 params,
@@ -737,7 +756,7 @@ fn collect_field_defs(
                 attrs: collect_field_attrs_vir(arena, &f.attributes),
                 has_default: f.has_default,
                 default_value,
-                name_range: f.name_span.range,
+                name_span: f.name_span,
             }
         })
         .collect()

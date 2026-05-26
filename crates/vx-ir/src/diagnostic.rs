@@ -1,0 +1,145 @@
+//! Structured diagnostics for VIR passes.
+//!
+//! [`IrDiagnostic`] is the unified diagnostic type produced by the resolve,
+//! type-check, and capability-check passes. Each variant carries the
+//! structural data needed to render a user-facing message — all names
+//! carrying a source origin are `SourceSpan`s, all structural references
+//! are IDs, and all operator/capability kinds are enums. No raw strings
+//! live inside diagnostic variants.
+//!
+//! Rendering to a user-facing report happens at the consumer boundary
+//! (e.g. LSP, CLI). A future `to_report(&self, sources, type_env)` impl
+//! will produce a `margin::Report`; for now consumers pattern-match on
+//! the variants directly.
+
+use vx_parser::SourceSpan;
+use vx_types::Ty;
+
+use crate::ItemId;
+use crate::cap::CapSet;
+use crate::expr::BinOp;
+use crate::scope::DefTarget;
+
+/// A diagnostic produced by a VIR semantic pass.
+///
+/// All variants carry only structural data — no preformatted strings.
+/// Spans pinpoint exact source locations; IDs reference other structural
+/// nodes (items, bindings, types); enums classify kinds (binary operators,
+/// capability slots) that previously lived as strings.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum IrDiagnostic {
+    // -----------------------------------------------------------------
+    // Resolve pass
+    // -----------------------------------------------------------------
+    /// A name reference could not be resolved to any definition.
+    Unresolved {
+        /// The name reference span — points at the offending identifier.
+        name: SourceSpan,
+    },
+    /// A name resolved but to a kind that isn't valid here
+    /// (e.g. assigning to a function, struct literal of a non-struct).
+    InvalidTarget {
+        /// The reference span (e.g. LHS of an `=`).
+        name: SourceSpan,
+        /// What we actually found.
+        found: DefTarget,
+    },
+
+    // -----------------------------------------------------------------
+    // Type-check pass
+    // -----------------------------------------------------------------
+    /// An argument's type doesn't match the parameter's declared type.
+    ArgTypeMismatch {
+        /// The argument expression's span.
+        arg: SourceSpan,
+        /// The parameter declaration's name token in the called fn.
+        param: SourceSpan,
+        /// The parameter's declared type. Carries `Ty` rather than `TypeId`
+        /// because structural types (functions, tuples, arrays, …) are not
+        /// interned in [`vx_types::TypeEnv`].
+        expected: Ty,
+        /// The argument's inferred type. See `expected` for the `Ty` vs `TypeId` choice.
+        found: Ty,
+    },
+    /// A binary operator does not apply to the operand types.
+    BinaryOpMismatch {
+        /// Span of the operator token.
+        op: SourceSpan,
+        /// Which binary operator.
+        op_kind: BinOp,
+        /// Span of the LHS expression.
+        lhs: SourceSpan,
+        /// Span of the RHS expression.
+        rhs: SourceSpan,
+        /// Type of the LHS operand. Carries `Ty` rather than `TypeId`
+        /// because structural types are not interned.
+        lhs_ty: Ty,
+        /// Type of the RHS operand.
+        rhs_ty: Ty,
+    },
+    /// Method lookup failed on the given receiver type.
+    NoSuchMethod {
+        /// Span of the `.method_name` token (or the method-call callee).
+        method_call: SourceSpan,
+        /// Span of the receiver expression.
+        receiver: SourceSpan,
+        /// The receiver's inferred type. Carries `Ty` rather than `TypeId`
+        /// because structural types are not interned.
+        receiver_ty: Ty,
+        /// Method candidates discovered while searching (may be empty).
+        candidates: Vec<MethodCandidate>,
+    },
+    /// A bare expression statement that doesn't flow into a value.
+    UnusedExprStatement {
+        /// Span of the offending expression.
+        expr: SourceSpan,
+    },
+
+    // -----------------------------------------------------------------
+    // Cap-check pass
+    // -----------------------------------------------------------------
+    /// A closure's inferred capabilities exceed the mask allowed by the
+    /// callback slot it was passed to.
+    CapabilityViolation {
+        /// The closure expression that exceeds the slot's allowed capabilities.
+        closure: SourceSpan,
+        /// The slot declaration's name token in the called fn's signature.
+        slot: SourceSpan,
+        /// Capabilities the slot allows.
+        allowed: CapSet,
+        /// Capabilities the closure body actually uses.
+        found: CapSet,
+    },
+    /// An unknown capability tag was used.
+    UnknownCapability {
+        /// The capability name token in source.
+        name: SourceSpan,
+    },
+}
+
+/// A method candidate surfaced as part of a [`IrDiagnostic::NoSuchMethod`]
+/// diagnostic.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct MethodCandidate {
+    /// The item ID of the candidate method (its enclosing fn).
+    pub item: ItemId,
+    /// The name token of the method's declaration.
+    pub name_span: SourceSpan,
+}
+
+impl IrDiagnostic {
+    /// The primary source span associated with this diagnostic — the
+    /// location to surface to the user as the "main" cursor for the error.
+    pub fn primary_span(&self) -> SourceSpan {
+        match self {
+            IrDiagnostic::Unresolved { name } => *name,
+            IrDiagnostic::InvalidTarget { name, .. } => *name,
+            IrDiagnostic::ArgTypeMismatch { arg, .. } => *arg,
+            IrDiagnostic::BinaryOpMismatch { op, .. } => *op,
+            IrDiagnostic::NoSuchMethod { method_call, .. } => *method_call,
+            IrDiagnostic::UnusedExprStatement { expr } => *expr,
+            IrDiagnostic::CapabilityViolation { closure, .. } => *closure,
+            IrDiagnostic::UnknownCapability { name } => *name,
+        }
+    }
+}

@@ -29,38 +29,12 @@ use vx_types::{Capability, FnSig, ParamDef, Ty};
 
 use crate::arena::VirArena;
 use crate::def::Definition;
+use crate::diagnostic::IrDiagnostic;
 use crate::expr::ExprKind;
 use crate::item::ItemKind;
 use crate::type_collect::resolve_type_ref;
 use crate::type_collection::TypeCollection;
 use crate::{BindingId, BodyId, ExprId, ItemId, SourceUnitId, TypeRefId};
-
-/// A type error found during expression typing.
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub struct TypeError {
-    pub span: SourceSpan,
-    pub kind: TypeErrorKind,
-}
-
-/// The kind of type error.
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub enum TypeErrorKind {
-    /// Argument type doesn't match parameter type.
-    ArgTypeMismatch {
-        param_name: String,
-        expected: Ty,
-        found: Ty,
-    },
-    /// Binary operator does not apply to the operand types.
-    BinaryOpMismatch { op: String, left: Ty, right: Ty },
-    /// Method not found on type.
-    NoSuchMethod {
-        receiver_ty: Ty,
-        method_name: String,
-    },
-    /// A bare expression appears in statement position without flowing into a value.
-    UnusedExprStatement,
-}
 
 /// Result of the VIR type checking pass.
 ///
@@ -72,8 +46,8 @@ pub struct TypeCheckVirResult {
     pub member_defs: HashMap<SourceSpan, Definition>,
     /// Documentation inherited from callback slots for closure parameters.
     pub closure_param_docs: HashMap<BindingId, String>,
-    /// Type errors found during checking.
-    pub errors: Vec<TypeError>,
+    /// Diagnostics produced during checking.
+    pub errors: Vec<IrDiagnostic>,
 }
 
 /// Run VIR type checking on a fully built and name-resolved arena.
@@ -122,7 +96,7 @@ pub(crate) struct TypeChecker<'a> {
     pub(crate) types: &'a TypeCollection,
     pub(crate) member_defs: HashMap<SourceSpan, Definition>,
     pub(crate) closure_param_docs: HashMap<BindingId, String>,
-    pub(crate) errors: Vec<TypeError>,
+    pub(crate) errors: Vec<IrDiagnostic>,
 }
 
 /// Method signature after binding `self` param and substituting type params.
@@ -134,9 +108,9 @@ pub(crate) struct BoundMethodSig {
 }
 
 impl<'a> TypeChecker<'a> {
-    pub(crate) fn push_error(&mut self, error: TypeError) {
-        if !self.errors.contains(&error) {
-            self.errors.push(error);
+    pub(crate) fn push_diagnostic(&mut self, d: IrDiagnostic) {
+        if !self.errors.contains(&d) {
+            self.errors.push(d);
         }
     }
 

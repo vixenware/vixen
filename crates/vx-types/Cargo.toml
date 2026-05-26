@@ -11,6 +11,6 @@ repository.workspace = true
 rustdoc-args = ["--html-in-header", "arborium-header.html"]
 
 [dependencies]
-rowan = "0.16"
+vx-parser = { workspace = true }
 
 [dev-dependencies]

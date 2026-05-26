@@ -38,6 +38,7 @@ pub mod capture;
 pub mod compile;
 pub mod def;
 pub mod demand;
+pub mod diagnostic;
 pub mod exec_types;
 pub mod expr;
 pub mod item;
@@ -63,6 +64,7 @@ pub use visitor::VirVisitor;
 
 // Re-export moved semantic types so external users can write `vx_ir::Definition`
 // etc. instead of `vx_ir::def::Definition`.
-pub use cap::{CapCheckResult, CapError, CapErrorKind, CapSet};
+pub use cap::{CapCheckResult, CapSet};
 pub use def::{DefId, DefKind, DefSite, Definition};
+pub use diagnostic::{IrDiagnostic, MethodCandidate};
 pub use type_collection::{TypeCollection, TypeKind};

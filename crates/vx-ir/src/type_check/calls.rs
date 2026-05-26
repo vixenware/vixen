@@ -7,11 +7,12 @@ use crate::expr::{CallExpr, ExprKind, InvokeExpr, PartialAppExpr, RecordField, W
 use crate::item::ItemKind;
 use crate::scope::DefTarget;
 
+use super::TypeChecker;
 use super::closures::bind_closure_params;
 use super::fields::{instantiate_method_sig, resolve_method_for_call};
 use super::names::{sig_for_name_ref_target, variant_sig};
 use super::subst::{infer_type_params, substitute_bound_type_params};
-use super::{TypeChecker, TypeError, TypeErrorKind};
+use crate::diagnostic::IrDiagnostic;
 
 pub(crate) fn infer_call(tc: &mut TypeChecker, expr_id: ExprId, call: &CallExpr) -> Ty {
     let callee_kind = tc.arena[call.callee].kind.clone();
@@ -77,14 +78,18 @@ pub(crate) fn infer_call(tc: &mut TypeChecker, expr_id: ExprId, call: &CallExpr)
             tc.arena[call.callee].ty = Some(Ty::Poison);
 
             if receiver_ty != Ty::Poison {
-                tc.push_error(TypeError {
-                    span: tc.arena[call.callee].span,
-                    kind: TypeErrorKind::NoSuchMethod {
-                        receiver_ty: receiver_ty.clone(),
-                        method_name,
-                    },
+                tc.push_diagnostic(IrDiagnostic::NoSuchMethod {
+                    method_call: field.field_span,
+                    receiver: tc.arena[field.receiver].span,
+                    receiver_ty: receiver_ty.clone(),
+                    // Candidate enumeration deferred — the diagnostic still
+                    // carries the structural slot for it.
+                    candidates: Vec::new(),
                 });
             }
+            // method_name kept above for downstream poison propagation reasoning;
+            // unused-by-diagnostic.
+            let _ = method_name;
 
             infer_call_arg_exprs(tc, call);
             Ty::Poison
@@ -189,13 +194,11 @@ fn check_call_args(tc: &mut TypeChecker, call: &CallExpr, sig: &FnSig) {
         let arg_ty = tc.infer_expr(arg.expr);
         if !arg_ty.is_poison() && !param.ty.is_poison() && !tc.types_compatible(&arg_ty, &param.ty)
         {
-            tc.push_error(TypeError {
-                span: tc.arena[arg.expr].span,
-                kind: TypeErrorKind::ArgTypeMismatch {
-                    param_name: param.name.clone(),
-                    expected: param.ty.clone(),
-                    found: arg_ty,
-                },
+            tc.push_diagnostic(IrDiagnostic::ArgTypeMismatch {
+                arg: tc.arena[arg.expr].span,
+                param: param.name_span,
+                expected: param.ty.clone(),
+                found: arg_ty,
             });
         }
     }
@@ -211,13 +214,11 @@ fn check_method_args(
         let arg_ty = tc.infer_expr(arg.expr);
         if !arg_ty.is_poison() && !param.ty.is_poison() && !tc.types_compatible(&arg_ty, &param.ty)
         {
-            tc.push_error(TypeError {
-                span: tc.arena[arg.expr].span,
-                kind: TypeErrorKind::ArgTypeMismatch {
-                    param_name: param.name.clone(),
-                    expected: param.ty.clone(),
-                    found: arg_ty,
-                },
+            tc.push_diagnostic(IrDiagnostic::ArgTypeMismatch {
+                arg: tc.arena[arg.expr].span,
+                param: param.name_span,
+                expected: param.ty.clone(),
+                found: arg_ty,
             });
         }
     }
@@ -383,6 +384,7 @@ pub(crate) fn infer_where(tc: &mut TypeChecker, w: &WhereExpr) -> Ty {
                 .collect();
             let fn_sig = FnSig {
                 name: callee_sig.name,
+                name_span: callee_sig.name_span,
                 type_params: callee_sig.type_params,
                 positional_params: remaining_positional,
                 keyword_params: callee_sig.keyword_params,

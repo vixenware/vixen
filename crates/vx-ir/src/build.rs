@@ -1039,7 +1039,7 @@ impl VirBuilder {
         attrs
     }
 
-    fn build_capabilities_from_fn(&self, f: &vx_parser::FnDecl) -> Vec<String> {
+    fn build_capabilities_from_fn(&self, f: &vx_parser::FnDecl) -> Vec<crate::body::CapabilityTag> {
         // CapabilityList is not exported from vx-parser, so work with raw syntax.
         // Look for CAPABILITY_LIST child containing CAPABILITY_TAG nodes with LOWER_IDENT tokens.
         f.syntax()
@@ -1054,7 +1054,10 @@ impl VirBuilder {
                                 c.into_token()
                                     .filter(|t| t.kind() == SyntaxKind::LOWER_IDENT)
                             })
-                            .map(|t| t.text().to_string())
+                            .map(|t| crate::body::CapabilityTag {
+                                name: t.text().to_string(),
+                                name_span: self.token_span(&t),
+                            })
                     })
                     .collect()
             })
@@ -1586,7 +1589,15 @@ impl VirBuilder {
 
     fn build_name_ref_expr(&mut self, nr: &vx_parser::NameRefExpr) -> ExprId {
         let nr_span = self.span(nr.syntax());
-        let name = nr.token().map(|t| t.text().to_string()).unwrap_or_default();
+        let name_token = nr.token();
+        let name = name_token
+            .as_ref()
+            .map(|t| t.text().to_string())
+            .unwrap_or_default();
+        let name_span = name_token
+            .as_ref()
+            .map(|t| self.token_span(t))
+            .unwrap_or(nr_span);
 
         self.arena.alloc_expr(Expr {
             span: nr_span,
@@ -1594,6 +1605,7 @@ impl VirBuilder {
             scope: self.current_scope(),
             kind: ExprKind::NameRef(VirNameRefExpr {
                 name,
+                name_span,
                 resolved: None,
             }),
             ty: None,
@@ -1909,6 +1921,7 @@ impl VirBuilder {
                                 scope: self.current_scope(),
                                 kind: ExprKind::NameRef(VirNameRefExpr {
                                     name: name.clone(),
+                                    name_span: span,
                                     resolved: None,
                                 }),
                                 ty: None,
@@ -2031,6 +2044,7 @@ impl VirBuilder {
                                 scope: self.current_scope(),
                                 kind: ExprKind::NameRef(VirNameRefExpr {
                                     name: fname.clone(),
+                                    name_span: span,
                                     resolved: None,
                                 }),
                                 ty: None,
@@ -3116,7 +3130,7 @@ impl VirBuilder {
         // Non-Type children that aren't CapabilityList or KeywordParameterList
         // get error type refs.
         let mut type_children: Vec<TypeRefId> = Vec::new();
-        let mut capabilities: Vec<String> = Vec::new();
+        let mut capabilities: Vec<crate::body::CapabilityTag> = Vec::new();
         for child in f.syntax().children() {
             if let Some(t) = vx_parser::Type::cast(child.clone()) {
                 type_children.push(self.build_type_ref(&t));
@@ -3129,7 +3143,10 @@ impl VirBuilder {
                             .filter_map(|c| c.into_token())
                             .find(|t| t.kind() == SyntaxKind::LOWER_IDENT)
                     {
-                        capabilities.push(name_token.text().to_string());
+                        capabilities.push(crate::body::CapabilityTag {
+                            name: name_token.text().to_string(),
+                            name_span: self.token_span(&name_token),
+                        });
                     }
                 }
             } else if child.kind() == SyntaxKind::KEYWORD_PARAMETER_LIST {

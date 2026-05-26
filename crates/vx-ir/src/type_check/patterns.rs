@@ -125,7 +125,7 @@ fn resolve_variant_fields(
                 attrs: f.attrs.clone(),
                 has_default: f.has_default,
                 default_value: f.default_value.clone(),
-                name_range: f.name_range,
+                name_span: f.name_span,
             })
             .collect();
         return Some(fields);

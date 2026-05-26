@@ -9,10 +9,10 @@ use crate::exec_types::ExecutableProgram;
 use vx_parser::SourceId;
 
 use crate::build::VirBuilder;
-use crate::cap::CapError;
 use crate::cap_check::check_capabilities_vir;
 use crate::capture::analyze_captures;
 use crate::demand::analyze_demand_for_entry;
+use crate::diagnostic::IrDiagnostic;
 use crate::item::ItemKind;
 use crate::lower::{LowerError, lower_vir_program};
 use crate::resolve::resolve_names;
@@ -23,9 +23,9 @@ use crate::type_collect::collect_types_vir;
 #[derive(Debug)]
 pub enum CompileError {
     Parse(Vec<vx_parser::SyntaxError>),
-    Resolve(Vec<crate::resolve::ResolveError>),
-    Type(Vec<crate::type_check::TypeError>),
-    Capability(Vec<CapError>),
+    Resolve(Vec<IrDiagnostic>),
+    Type(Vec<IrDiagnostic>),
+    Capability(Vec<IrDiagnostic>),
     MissingEntry(String),
     Lowering(LowerError),
 }

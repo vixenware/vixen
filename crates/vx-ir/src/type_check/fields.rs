@@ -195,6 +195,7 @@ pub(crate) fn instantiate_method_sig(
         .iter()
         .map(|p| ParamDef {
             name: p.name.clone(),
+            name_span: p.name_span,
             ty: substitute_bound_type_params(&p.ty, &substitutions),
             doc: p.doc.clone(),
         })
@@ -206,6 +207,7 @@ pub(crate) fn instantiate_method_sig(
         .iter()
         .map(|p| ParamDef {
             name: p.name.clone(),
+            name_span: p.name_span,
             ty: substitute_bound_type_params(&p.ty, &substitutions),
             doc: p.doc.clone(),
         })

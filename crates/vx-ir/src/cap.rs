@@ -2,11 +2,11 @@
 //!
 //! r[cap.model]
 //!
-//! These types describe the capability fingerprint of closures and the
-//! capability errors that can be reported by capability checking. The actual
-//! capability checking pass lives in [`crate::cap_check`].
+//! These types describe the capability fingerprint of closures.
+//! The actual capability checking pass lives in [`crate::cap_check`];
+//! its diagnostics are emitted as [`crate::IrDiagnostic`] variants.
 
-use rowan::TextRange;
+use crate::diagnostic::IrDiagnostic;
 
 /// A set of capabilities, represented as a bitset.
 #[derive(Clone, Copy, PartialEq, Eq, Default, Debug)]
@@ -77,29 +77,8 @@ impl std::fmt::Display for CapSet {
     }
 }
 
-/// A capability error found during checking.
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub struct CapError {
-    pub range: TextRange,
-    pub kind: CapErrorKind,
-}
-
-/// The kind of capability error.
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub enum CapErrorKind {
-    /// A closure's inferred capabilities exceed the mask of the callback slot.
-    CapabilityViolation {
-        slot_name: String,
-        allowed: CapSet,
-        found: CapSet,
-        excess: CapSet,
-    },
-    /// An unknown capability tag was used.
-    UnknownCapability { name: String },
-}
-
 /// Result of capability checking.
 #[derive(Debug)]
 pub struct CapCheckResult {
-    pub errors: Vec<CapError>,
+    pub errors: Vec<IrDiagnostic>,
 }

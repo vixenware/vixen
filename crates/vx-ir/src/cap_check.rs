@@ -19,8 +19,9 @@ use std::collections::HashMap;
 use vx_parser::SourceSpan;
 use vx_types::{Capability, FnSig, Ty};
 
-use crate::cap::{CapCheckResult, CapError, CapErrorKind, CapSet};
+use crate::cap::{CapCheckResult, CapSet};
 use crate::def::Definition;
+use crate::diagnostic::IrDiagnostic;
 use crate::type_collection::TypeCollection;
 
 use crate::arena::VirArena;
@@ -103,7 +104,7 @@ struct CapChecker<'a> {
     types: &'a TypeCollection,
     member_defs: &'a HashMap<SourceSpan, Definition>,
     fn_caps: HashMap<ItemId, CapSet>,
-    errors: Vec<CapError>,
+    errors: Vec<IrDiagnostic>,
 }
 
 // =========================================================================
@@ -118,7 +119,7 @@ impl CapChecker<'_> {
                 let body = &self.arena[f.body];
                 let mut caps = CapSet::EMPTY;
                 for tag in &body.capabilities {
-                    if let Some(c) = CapSet::from_name(tag) {
+                    if let Some(c) = CapSet::from_name(&tag.name) {
                         caps = caps.union(c);
                     }
                 }
@@ -305,9 +306,6 @@ impl CapChecker<'_> {
         let kind = self.arena[_call_expr_id].kind.clone();
         let ExprKind::Call(call) = kind else { return };
 
-        let Some(callee_name) = self.callee_label(call.callee) else {
-            return;
-        };
         let Some(sig) = self.sig_for_callee(call.callee) else {
             return;
         };
@@ -315,7 +313,7 @@ impl CapChecker<'_> {
         for (arg, param) in args.iter().zip(sig.positional_params.iter()) {
             if let Ty::Function(ref fn_ty) = param.ty {
                 let mask = caps_from_fn_ty_capabilities(&fn_ty.capabilities);
-                self.check_closure_mask(arg.expr, mask, &format!("{} {}", callee_name, param.name));
+                self.check_closure_mask(arg.expr, mask, param.name_span);
             }
         }
     }
@@ -342,9 +340,6 @@ impl CapChecker<'_> {
             }
         };
 
-        let Some(callee_name) = self.callee_label(real_callee_id) else {
-            return;
-        };
         let Some(sig) = self.sig_for_callee(real_callee_id) else {
             return;
         };
@@ -354,11 +349,7 @@ impl CapChecker<'_> {
             for (arg, param) in args.iter().zip(sig.positional_params.iter()) {
                 if let Ty::Function(ref fn_ty) = param.ty {
                     let mask = caps_from_fn_ty_capabilities(&fn_ty.capabilities);
-                    self.check_closure_mask(
-                        arg.expr,
-                        mask,
-                        &format!("{} {}", callee_name, param.name),
-                    );
+                    self.check_closure_mask(arg.expr, mask, param.name_span);
                 }
             }
         }
@@ -374,11 +365,7 @@ impl CapChecker<'_> {
             if let Some(kw_param) = sig.keyword_params.iter().find(|p| p.name == field.name) {
                 if let Ty::Function(ref fn_ty) = kw_param.ty {
                     let mask = caps_from_fn_ty_capabilities(&fn_ty.capabilities);
-                    self.check_closure_mask(
-                        field.value,
-                        mask,
-                        &format!("{} {}", callee_name, kw_param.name),
-                    );
+                    self.check_closure_mask(field.value, mask, kw_param.name_span);
                 }
                 continue;
             }
@@ -387,28 +374,20 @@ impl CapChecker<'_> {
                 && let Ty::Function(ref fn_ty) = pos_param.ty
             {
                 let mask = caps_from_fn_ty_capabilities(&fn_ty.capabilities);
-                self.check_closure_mask(
-                    field.value,
-                    mask,
-                    &format!("{} {}", callee_name, pos_param.name),
-                );
+                self.check_closure_mask(field.value, mask, pos_param.name_span);
             }
         }
     }
 
     /// Check that an expression's inferred caps satisfy a mask.
-    fn check_closure_mask(&mut self, expr_id: ExprId, mask: CapSet, slot_name: &str) {
+    fn check_closure_mask(&mut self, expr_id: ExprId, mask: CapSet, slot: SourceSpan) {
         let inferred = self.infer_expr_caps(expr_id);
-        let excess = inferred.satisfies(mask);
-        if !excess.is_empty() {
-            self.errors.push(CapError {
-                range: self.arena[expr_id].span.range,
-                kind: CapErrorKind::CapabilityViolation {
-                    slot_name: slot_name.to_string(),
-                    allowed: mask,
-                    found: inferred,
-                    excess,
-                },
+        if !inferred.satisfies(mask).is_empty() {
+            self.errors.push(IrDiagnostic::CapabilityViolation {
+                closure: self.arena[expr_id].span,
+                slot,
+                allowed: mask,
+                found: inferred,
             });
         }
     }
@@ -425,10 +404,9 @@ impl CapChecker<'_> {
             ItemKind::Function(f) => {
                 let body = &self.arena[f.body];
                 for tag in &body.capabilities {
-                    if CapSet::from_name(tag).is_none() {
-                        self.errors.push(CapError {
-                            range: body.span.range,
-                            kind: CapErrorKind::UnknownCapability { name: tag.clone() },
+                    if CapSet::from_name(&tag.name).is_none() {
+                        self.errors.push(IrDiagnostic::UnknownCapability {
+                            name: tag.name_span,
                         });
                     }
                 }
@@ -724,21 +702,6 @@ impl CapChecker<'_> {
     fn caps_for_callee(&self, callee_id: ExprId) -> Option<CapSet> {
         let sig = self.sig_for_callee(callee_id)?;
         Some(caps_from_fn_ty_capabilities(&sig.capabilities))
-    }
-
-    fn callee_label(&self, callee_id: ExprId) -> Option<String> {
-        let kind = &self.arena[callee_id].kind;
-        match kind {
-            ExprKind::NameRef(nr) => Some(nr.name.clone()),
-            ExprKind::Field(field) => {
-                let key = &field.field;
-                match key {
-                    crate::expr::FieldKey::Name(name) => Some(name.clone()),
-                    crate::expr::FieldKey::Index(idx) => Some(idx.to_string()),
-                }
-            }
-            _ => None,
-        }
     }
 
     /// Enumerate direct child ExprIds for generic recursion.

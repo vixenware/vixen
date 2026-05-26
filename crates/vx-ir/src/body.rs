@@ -44,7 +44,7 @@ pub struct Body {
     /// Capability tags on this body (e.g. `#fs`, `#discover`).
     /// Only meaningful for function bodies.
     /// Populated during: CST walk.
-    pub capabilities: Vec<String>,
+    pub capabilities: Vec<CapabilityTag>,
 
     /// Bindings from ancestor bodies referenced inside this body.
     /// Populated during: capture analysis pass. Empty for bodies with
@@ -72,6 +72,15 @@ pub enum BodyOwner {
         /// The source file this top-level body belongs to.
         source: SourceId,
     },
+}
+
+/// A capability tag on a body — the name as written and its source span.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct CapabilityTag {
+    /// The capability name (e.g. `"fs"`, `"discover"`).
+    pub name: String,
+    /// Span of the capability name token in source.
+    pub name_span: SourceSpan,
 }
 
 /// A parameter in a function or closure.

@@ -12,6 +12,7 @@
 //! `reference_order` contextually (not stored on nodes).
 
 use crate::arena::VirArena;
+use crate::diagnostic::IrDiagnostic;
 use crate::expr::{
     ArrayElement, ExprKind, MapElement, MapKey, PartialArg, StringPart, UpdateField,
 };
@@ -23,42 +24,15 @@ use crate::{BodyId, ExprId, ItemId, PatternId, ScopeId, SourceUnitId, StmtId};
 use vx_parser::SourceSpan;
 
 // ---------------------------------------------------------------------------
-// Error types
-// ---------------------------------------------------------------------------
-
-/// Why a name couldn't be resolved or resolved to the wrong kind.
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub enum ResolveErrorKind {
-    /// No definition found for this name.
-    Unresolved,
-    /// Name resolved but to the wrong kind (e.g. assigning to a function).
-    InvalidTarget {
-        /// What we found.
-        found: DefTarget,
-    },
-}
-
-/// A name resolution error.
-#[derive(Debug, Clone)]
-pub struct ResolveError {
-    /// The name that failed to resolve (or resolved to the wrong kind).
-    pub name: String,
-    /// Where in source this name appears.
-    pub span: SourceSpan,
-    /// What went wrong.
-    pub kind: ResolveErrorKind,
-}
-
-// ---------------------------------------------------------------------------
 // Public API
 // ---------------------------------------------------------------------------
 
 /// Resolve all name references in a VIR arena.
 ///
 /// Populates `resolved` fields on NameRefExpr, AssignStmt, CompoundUpdateStmt,
-/// FieldAssignStmt, StructLiteralExpr, and VariantPattern. Returns errors for
-/// unresolved names and invalid target kinds.
-pub fn resolve_names(arena: &mut VirArena) -> Vec<ResolveError> {
+/// FieldAssignStmt, StructLiteralExpr, and VariantPattern. Returns diagnostics
+/// for unresolved names and invalid target kinds.
+pub fn resolve_names(arena: &mut VirArena) -> Vec<IrDiagnostic> {
     // Reset all resolved fields to None before walking.
     reset_resolved(arena);
 
@@ -110,13 +84,13 @@ fn reset_resolved(arena: &mut VirArena) {
 /// Entry point: resolve a single source unit by walking its top-level body.
 /// The synthetic block already contains all top-level items as StmtKind::Item,
 /// so there is no separate su.items loop (that would double-resolve).
-fn resolve_source_unit(arena: &mut VirArena, su_id: SourceUnitId, errors: &mut Vec<ResolveError>) {
+fn resolve_source_unit(arena: &mut VirArena, su_id: SourceUnitId, errors: &mut Vec<IrDiagnostic>) {
     let body_id = arena[su_id].top_level_body;
     resolve_body(arena, body_id, errors);
 }
 
 /// Resolve a function/closure/top-level body.
-fn resolve_body(arena: &mut VirArena, body_id: BodyId, errors: &mut Vec<ResolveError>) {
+fn resolve_body(arena: &mut VirArena, body_id: BodyId, errors: &mut Vec<IrDiagnostic>) {
     let root_expr = arena[body_id].root_expr;
     // All params are visible in the body → u32::MAX.
     resolve_expr(arena, root_expr, u32::MAX, errors);
@@ -128,7 +102,7 @@ fn resolve_expr(
     arena: &mut VirArena,
     expr_id: ExprId,
     ref_order: u32,
-    errors: &mut Vec<ResolveError>,
+    errors: &mut Vec<IrDiagnostic>,
 ) {
     // Read the kind by cloning the minimal data needed to avoid holding
     // an immutable borrow on arena while we mutate.
@@ -287,7 +261,7 @@ fn resolve_update_fields(
     arena: &mut VirArena,
     fields: &[UpdateField],
     ref_order: u32,
-    errors: &mut Vec<ResolveError>,
+    errors: &mut Vec<IrDiagnostic>,
 ) {
     for field in fields {
         match field {
@@ -307,7 +281,7 @@ fn resolve_stmt(
     arena: &mut VirArena,
     stmt_id: StmtId,
     stmt_order: u32,
-    errors: &mut Vec<ResolveError>,
+    errors: &mut Vec<IrDiagnostic>,
 ) {
     let kind = arena[stmt_id].kind.clone();
 
@@ -361,7 +335,7 @@ fn resolve_stmt(
 
 /// Resolve an item. Recurses into function bodies, namespace children,
 /// and struct/enum field default-value expressions.
-fn resolve_item(arena: &mut VirArena, item_id: ItemId, errors: &mut Vec<ResolveError>) {
+fn resolve_item(arena: &mut VirArena, item_id: ItemId, errors: &mut Vec<IrDiagnostic>) {
     let kind = arena[item_id].kind.clone();
 
     match kind {
@@ -400,7 +374,7 @@ fn resolve_pattern(
     arena: &mut VirArena,
     pat_id: PatternId,
     ref_order: u32,
-    errors: &mut Vec<ResolveError>,
+    errors: &mut Vec<IrDiagnostic>,
 ) {
     let kind = arena[pat_id].kind.clone();
     let scope = arena[pat_id].scope;
@@ -462,7 +436,7 @@ fn resolve_name_ref(
     name: &str,
     scope: ScopeId,
     ref_order: u32,
-    errors: &mut Vec<ResolveError>,
+    errors: &mut Vec<IrDiagnostic>,
 ) {
     if should_skip(name) {
         return;
@@ -476,12 +450,13 @@ fn resolve_name_ref(
             }
         }
         None => {
-            let span = arena[expr_id].span;
-            errors.push(ResolveError {
-                name: name.to_string(),
-                span,
-                kind: ResolveErrorKind::Unresolved,
-            });
+            // Use the NameRef's name token span (no leading trivia) — the
+            // expression span itself can include preceding whitespace.
+            let span = match &arena[expr_id].kind {
+                ExprKind::NameRef(nr) => nr.name_span,
+                _ => arena[expr_id].span,
+            };
+            errors.push(IrDiagnostic::Unresolved { name: span });
         }
     }
 }
@@ -493,7 +468,7 @@ fn resolve_assign_target(
     name: &str,
     name_span: SourceSpan,
     ref_order: u32,
-    errors: &mut Vec<ResolveError>,
+    errors: &mut Vec<IrDiagnostic>,
 ) {
     if should_skip(name) {
         return;
@@ -509,18 +484,13 @@ fn resolve_assign_target(
             }
         }
         Some(found) => {
-            errors.push(ResolveError {
-                name: name.to_string(),
-                span: name_span,
-                kind: ResolveErrorKind::InvalidTarget { found },
+            errors.push(IrDiagnostic::InvalidTarget {
+                name: name_span,
+                found,
             });
         }
         None => {
-            errors.push(ResolveError {
-                name: name.to_string(),
-                span: name_span,
-                kind: ResolveErrorKind::Unresolved,
-            });
+            errors.push(IrDiagnostic::Unresolved { name: name_span });
         }
     }
 }
@@ -532,7 +502,7 @@ fn resolve_compound_update_target(
     name: &str,
     name_span: SourceSpan,
     ref_order: u32,
-    errors: &mut Vec<ResolveError>,
+    errors: &mut Vec<IrDiagnostic>,
 ) {
     if should_skip(name) {
         return;
@@ -548,18 +518,13 @@ fn resolve_compound_update_target(
             }
         }
         Some(found) => {
-            errors.push(ResolveError {
-                name: name.to_string(),
-                span: name_span,
-                kind: ResolveErrorKind::InvalidTarget { found },
+            errors.push(IrDiagnostic::InvalidTarget {
+                name: name_span,
+                found,
             });
         }
         None => {
-            errors.push(ResolveError {
-                name: name.to_string(),
-                span: name_span,
-                kind: ResolveErrorKind::Unresolved,
-            });
+            errors.push(IrDiagnostic::Unresolved { name: name_span });
         }
     }
 }
@@ -571,7 +536,7 @@ fn resolve_field_assign_target(
     name: &str,
     name_span: SourceSpan,
     ref_order: u32,
-    errors: &mut Vec<ResolveError>,
+    errors: &mut Vec<IrDiagnostic>,
 ) {
     if should_skip(name) {
         return;
@@ -587,18 +552,13 @@ fn resolve_field_assign_target(
             }
         }
         Some(found) => {
-            errors.push(ResolveError {
-                name: name.to_string(),
-                span: name_span,
-                kind: ResolveErrorKind::InvalidTarget { found },
+            errors.push(IrDiagnostic::InvalidTarget {
+                name: name_span,
+                found,
             });
         }
         None => {
-            errors.push(ResolveError {
-                name: name.to_string(),
-                span: name_span,
-                kind: ResolveErrorKind::Unresolved,
-            });
+            errors.push(IrDiagnostic::Unresolved { name: name_span });
         }
     }
 }
@@ -610,14 +570,19 @@ fn resolve_struct_literal(
     name: &str,
     scope: ScopeId,
     ref_order: u32,
-    errors: &mut Vec<ResolveError>,
+    errors: &mut Vec<IrDiagnostic>,
 ) {
     if should_skip(name) {
         return;
     }
 
     let result = scope::lookup_at(arena, name, scope, ref_order);
-    let span = arena[expr_id].span;
+    // Use the struct name token span rather than the full literal span
+    // (which includes the `{ ... }` braces and preceding whitespace).
+    let span = match &arena[expr_id].kind {
+        ExprKind::StructLiteral(sl) => sl.name_span,
+        _ => arena[expr_id].span,
+    };
 
     match result {
         Some(DefTarget::Item(item_id)) => {
@@ -626,28 +591,17 @@ fn resolve_struct_literal(
                     sl.resolved = Some(item_id);
                 }
             } else {
-                errors.push(ResolveError {
-                    name: name.to_string(),
-                    span,
-                    kind: ResolveErrorKind::InvalidTarget {
-                        found: DefTarget::Item(item_id),
-                    },
+                errors.push(IrDiagnostic::InvalidTarget {
+                    name: span,
+                    found: DefTarget::Item(item_id),
                 });
             }
         }
         Some(found) => {
-            errors.push(ResolveError {
-                name: name.to_string(),
-                span,
-                kind: ResolveErrorKind::InvalidTarget { found },
-            });
+            errors.push(IrDiagnostic::InvalidTarget { name: span, found });
         }
         None => {
-            errors.push(ResolveError {
-                name: name.to_string(),
-                span,
-                kind: ResolveErrorKind::Unresolved,
-            });
+            errors.push(IrDiagnostic::Unresolved { name: span });
         }
     }
 }
@@ -663,14 +617,19 @@ fn resolve_variant_pattern(
     name: &str,
     scope: ScopeId,
     ref_order: u32,
-    errors: &mut Vec<ResolveError>,
+    errors: &mut Vec<IrDiagnostic>,
 ) {
     if should_skip(name) {
         return;
     }
 
     let result = scope::lookup_at(arena, name, scope, ref_order);
-    let span = arena[pat_id].span;
+    // Use the variant name token span rather than the full pattern span
+    // (which can include surrounding parens, fields, leading trivia).
+    let span = match &arena[pat_id].kind {
+        PatternKind::Variant(vp) => vp.name_span,
+        _ => arena[pat_id].span,
+    };
 
     match result {
         Some(DefTarget::Variant {
@@ -687,28 +646,17 @@ fn resolve_variant_pattern(
                     vp.resolved = Some(item_id);
                 }
             } else {
-                errors.push(ResolveError {
-                    name: name.to_string(),
-                    span,
-                    kind: ResolveErrorKind::InvalidTarget {
-                        found: DefTarget::Item(item_id),
-                    },
+                errors.push(IrDiagnostic::InvalidTarget {
+                    name: span,
+                    found: DefTarget::Item(item_id),
                 });
             }
         }
         Some(found) => {
-            errors.push(ResolveError {
-                name: name.to_string(),
-                span,
-                kind: ResolveErrorKind::InvalidTarget { found },
-            });
+            errors.push(IrDiagnostic::InvalidTarget { name: span, found });
         }
         None => {
-            errors.push(ResolveError {
-                name: name.to_string(),
-                span,
-                kind: ResolveErrorKind::Unresolved,
-            });
+            errors.push(IrDiagnostic::Unresolved { name: span });
         }
     }
 }

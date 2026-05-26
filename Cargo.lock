@@ -3902,7 +3902,7 @@ dependencies = [
 name = "vx-types"
 version = "0.1.0"
 dependencies = [
- "rowan",
+ "vx-parser",
 ]
 
 [[package]]

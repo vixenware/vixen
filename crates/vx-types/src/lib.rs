@@ -5,6 +5,8 @@
 
 mod display;
 
+use vx_parser::SourceSpan;
+
 /// A unique identifier for a type definition (struct, enum, newtype, type alias).
 ///
 /// These are assigned during type collection — the pass that walks the AST and
@@ -150,6 +152,9 @@ pub struct FunctionTy {
 #[derive(Clone, PartialEq, Eq, Hash, Debug)]
 pub struct Capability {
     pub name: String,
+    /// Span of the capability name token in source. May be a default span
+    /// when constructed synthetically (e.g. from runtime-injected capabilities).
+    pub name_span: SourceSpan,
 }
 
 /// The definition of a named type, stored in the type environment.
@@ -184,8 +189,8 @@ pub struct FieldDef {
     pub attrs: DeserFieldAttrs,
     pub has_default: bool,
     pub default_value: Option<FieldDefaultValue>,
-    /// Text range of the field name token in source (for go-to-definition).
-    pub name_range: rowan::TextRange,
+    /// Span of the field name token in source (for go-to-definition and diagnostics).
+    pub name_span: SourceSpan,
 }
 
 #[derive(Clone, Debug)]
@@ -270,6 +275,8 @@ pub struct SumTy {
 #[derive(Clone, Debug)]
 pub struct FnSig {
     pub name: String,
+    /// Span of the function name token in source.
+    pub name_span: SourceSpan,
     pub type_params: Vec<String>,
     pub positional_params: Vec<ParamDef>,
     pub keyword_params: Vec<KeywordParamDef>,
@@ -281,6 +288,8 @@ pub struct FnSig {
 #[derive(Clone, Debug)]
 pub struct ParamDef {
     pub name: String,
+    /// Span of the parameter name token in source.
+    pub name_span: SourceSpan,
     pub ty: Ty,
     pub doc: Option<String>,
 }
@@ -289,6 +298,8 @@ pub struct ParamDef {
 #[derive(Clone, Debug)]
 pub struct KeywordParamDef {
     pub name: String,
+    /// Span of the keyword parameter name token in source.
+    pub name_span: SourceSpan,
     pub ty: Ty,
     pub has_default: bool,
     pub doc: Option<String>,
@@ -680,6 +691,7 @@ mod tests {
             ret: Box::new(Ty::Scalar(Scalar::String)),
             capabilities: vec![Capability {
                 name: "fs".to_owned(),
+                name_span: Default::default(),
             }],
         });
         assert_eq!(f.to_string(), "Fn(String) #fs -> String");
@@ -788,7 +800,7 @@ mod tests {
                         attrs: DeserFieldAttrs::default(),
                         has_default: false,
                         default_value: None,
-                        name_range: Default::default(),
+                        name_span: Default::default(),
                     },
                     FieldDef {
                         name: "y".to_owned(),
@@ -796,7 +808,7 @@ mod tests {
                         attrs: DeserFieldAttrs::default(),
                         has_default: false,
                         default_value: None,
-                        name_range: Default::default(),
+                        name_span: Default::default(),
                     },
                 ],
             }),
@@ -866,7 +878,7 @@ mod tests {
                     attrs: DeserFieldAttrs::default(),
                     has_default: false,
                     default_value: None,
-                    name_range: Default::default(),
+                    name_span: Default::default(),
                 }],
             }),
         );
@@ -885,7 +897,7 @@ mod tests {
                         attrs: DeserFieldAttrs::default(),
                         has_default: false,
                         default_value: None,
-                        name_range: Default::default(),
+                        name_span: Default::default(),
                     },
                     FieldDef {
                         name: "height".to_owned(),
@@ -893,7 +905,7 @@ mod tests {
                         attrs: DeserFieldAttrs::default(),
                         has_default: false,
                         default_value: None,
-                        name_range: Default::default(),
+                        name_span: Default::default(),
                     },
                 ],
             }),

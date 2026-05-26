@@ -32,7 +32,7 @@ pub(crate) struct DocumentState {
     types: TypeCollection,
     type_check: TypeCheckVirResult,
     cap_check: CapCheckResult,
-    resolve_errors: Vec<vx_ir::resolve::ResolveError>,
+    resolve_errors: Vec<vx_ir::IrDiagnostic>,
     /// Cached materialized Definitions for `all_definitions_in` queries.
     /// Keyed by source so workspace_symbol can scan all loaded docs.
     all_defs: Vec<Definition>,
@@ -321,6 +321,22 @@ impl DocumentState {
 
     pub(crate) fn uri_for_source(&self, source: SourceId) -> Option<Url> {
         self.source_doc(source).and_then(|doc| doc.uri.clone())
+    }
+
+    /// Return the slice of source text at `span`. Falls back to an empty
+    /// string when the source isn't known (e.g. synthetic spans).
+    pub(crate) fn text_at(&self, span: SourceSpan) -> &str {
+        let text: &str = if span.source == self.current_source {
+            &self.text
+        } else {
+            match self.source_doc(span.source) {
+                Some(doc) => &doc.text,
+                None => return "",
+            }
+        };
+        let start = u32::from(span.range.start()) as usize;
+        let end = u32::from(span.range.end()) as usize;
+        text.get(start..end).unwrap_or("")
     }
 
     /// Extract a declaration snippet for hover display.
@@ -683,7 +699,7 @@ impl LanguageServer for VxLanguageServer {
                     {
                         return Some(GotoDefinitionResponse::Scalar(Location {
                             uri: uri.clone(),
-                            range: state.to_lsp_range(fdef.name_range),
+                            range: state.to_lsp_range_span(fdef.name_span),
                         }));
                     }
                 }
@@ -1569,22 +1585,16 @@ impl VxLanguageServer {
 
         // Unresolved/invalid name diagnostics from VIR resolve.
         for err in &state.resolve_errors {
+            let primary = err.primary_span();
             // Only surface errors that originate in the user's source file.
-            if err.span.source != state.current_source {
+            if primary.source != state.current_source {
                 continue;
             }
-            let message = match &err.kind {
-                vx_ir::resolve::ResolveErrorKind::Unresolved => {
-                    format!("unresolved name `{}`", err.name)
-                }
-                vx_ir::resolve::ResolveErrorKind::InvalidTarget { .. } => {
-                    format!("name `{}` resolves to an unexpected kind", err.name)
-                }
-            };
+            let (message, source_tag) = format_ir_diagnostic(state, err);
             diagnostics.push(Diagnostic {
-                range: state.to_lsp_range_span(err.span),
+                range: state.to_lsp_range_span(primary),
                 severity: Some(DiagnosticSeverity::ERROR),
-                source: Some("vx-ir".to_string()),
+                source: Some(source_tag.to_string()),
                 message,
                 ..Default::default()
             });
@@ -1592,26 +1602,15 @@ impl VxLanguageServer {
 
         // Capability checking diagnostics
         for err in &state.cap_check.errors {
-            let message = match &err.kind {
-                vx_ir::CapErrorKind::CapabilityViolation {
-                    slot_name,
-                    allowed,
-                    excess,
-                    ..
-                } => {
-                    format!(
-                        "capability violation in `{slot_name}`: requires {excess} \
-                         but slot only allows {allowed}"
-                    )
-                }
-                vx_ir::CapErrorKind::UnknownCapability { name } => {
-                    format!("unknown capability `#{name}`")
-                }
-            };
+            let primary = err.primary_span();
+            if primary.source != state.current_source {
+                continue;
+            }
+            let (message, source_tag) = format_ir_diagnostic(state, err);
             diagnostics.push(Diagnostic {
-                range: state.to_lsp_range(err.range),
+                range: state.to_lsp_range_span(primary),
                 severity: Some(DiagnosticSeverity::ERROR),
-                source: Some("vx-cap".to_string()),
+                source: Some(source_tag.to_string()),
                 message,
                 ..Default::default()
             });
@@ -1671,37 +1670,15 @@ impl VxLanguageServer {
 
         // Type checking diagnostics
         for err in &state.type_check.errors {
-            // Only surface errors that originate in the user's source file.
-            if err.span.source != state.current_source {
+            let primary = err.primary_span();
+            if primary.source != state.current_source {
                 continue;
             }
-            let message = match &err.kind {
-                vx_ir::type_check::TypeErrorKind::ArgTypeMismatch {
-                    param_name,
-                    expected,
-                    found,
-                } => {
-                    format!(
-                        "type mismatch for `{param_name}`: expected `{expected}`, found `{found}`"
-                    )
-                }
-                vx_ir::type_check::TypeErrorKind::BinaryOpMismatch { op, left, right } => {
-                    format!("cannot apply `{op}` to `{left}` and `{right}`")
-                }
-                vx_ir::type_check::TypeErrorKind::NoSuchMethod {
-                    receiver_ty,
-                    method_name,
-                } => {
-                    format!("no method `{method_name}` on type `{receiver_ty}`")
-                }
-                vx_ir::type_check::TypeErrorKind::UnusedExprStatement => {
-                    "unused expression statement".to_string()
-                }
-            };
+            let (message, source_tag) = format_ir_diagnostic(state, err);
             diagnostics.push(Diagnostic {
-                range: state.to_lsp_range_span(err.span),
+                range: state.to_lsp_range_span(primary),
                 severity: Some(DiagnosticSeverity::ERROR),
-                source: Some("vx-type".to_string()),
+                source: Some(source_tag.to_string()),
                 message,
                 ..Default::default()
             });
@@ -1710,6 +1687,110 @@ impl VxLanguageServer {
         self.client
             .publish_diagnostics(uri.clone(), diagnostics, None)
             .await;
+    }
+}
+
+/// Render an [`IrDiagnostic`] to an LSP-protocol message string and a
+/// `source` tag (the pass that produced it). The message is the
+/// last-mile, human-facing string — the diagnostic itself stays
+/// structural.
+fn format_ir_diagnostic(
+    state: &DocumentState,
+    diag: &vx_ir::IrDiagnostic,
+) -> (String, &'static str) {
+    use vx_ir::IrDiagnostic;
+
+    let env = &state.types.env;
+    match diag {
+        IrDiagnostic::Unresolved { name } => (
+            format!("unresolved name `{}`", state.text_at(*name)),
+            "vx-ir",
+        ),
+        IrDiagnostic::InvalidTarget { name, .. } => (
+            format!(
+                "name `{}` resolves to an unexpected kind",
+                state.text_at(*name)
+            ),
+            "vx-ir",
+        ),
+        IrDiagnostic::ArgTypeMismatch {
+            param,
+            expected,
+            found,
+            ..
+        } => (
+            format!(
+                "type mismatch for `{}`: expected `{}`, found `{}`",
+                state.text_at(*param),
+                expected.display_with_env(env),
+                found.display_with_env(env),
+            ),
+            "vx-type",
+        ),
+        IrDiagnostic::BinaryOpMismatch {
+            op, lhs_ty, rhs_ty, ..
+        } => (
+            format!(
+                "cannot apply `{}` to `{}` and `{}`",
+                state.text_at(*op),
+                lhs_ty.display_with_env(env),
+                rhs_ty.display_with_env(env),
+            ),
+            "vx-type",
+        ),
+        IrDiagnostic::NoSuchMethod {
+            method_call,
+            receiver_ty,
+            candidates,
+            ..
+        } => {
+            let mut msg = format!(
+                "no method `{}` on type `{}`",
+                state.text_at(*method_call),
+                receiver_ty.display_with_env(env),
+            );
+            if !candidates.is_empty() {
+                let suffix: Vec<String> = candidates
+                    .iter()
+                    .map(|c| state.text_at(c.name_span).to_string())
+                    .collect();
+                msg.push_str(" — did you mean ");
+                for (i, name) in suffix.iter().enumerate() {
+                    if i > 0 {
+                        msg.push_str(", ");
+                    }
+                    msg.push('`');
+                    msg.push_str(name);
+                    msg.push('`');
+                }
+                msg.push('?');
+            }
+            (msg, "vx-type")
+        }
+        IrDiagnostic::UnusedExprStatement { .. } => {
+            ("unused expression statement".to_string(), "vx-type")
+        }
+        IrDiagnostic::CapabilityViolation {
+            slot,
+            allowed,
+            found,
+            ..
+        } => {
+            let excess = found.satisfies(*allowed);
+            (
+                format!(
+                    "capability violation in `{}`: requires {} but slot only allows {}",
+                    state.text_at(*slot),
+                    excess,
+                    allowed,
+                ),
+                "vx-cap",
+            )
+        }
+        IrDiagnostic::UnknownCapability { name } => (
+            format!("unknown capability `#{}`", state.text_at(*name)),
+            "vx-cap",
+        ),
     }
 }
 

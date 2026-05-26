@@ -1,6 +1,6 @@
 //! Tests for the VIR capability checking pass.
 
-use vx_ir::CapErrorKind;
+use vx_ir::IrDiagnostic;
 use vx_ir::build::VirBuilder;
 use vx_ir::cap_check::check_capabilities_vir;
 use vx_ir::resolve::resolve_names;
@@ -9,7 +9,10 @@ use vx_ir::type_collect::collect_types_vir;
 use vx_parser::{SourceId, parse_source_file};
 
 /// Helper: build VIR, resolve names, collect types, type check, cap check.
-fn cap_check_source(source: &str) -> Vec<CapErrorKind> {
+/// Returns the resulting diagnostics paired with the source text of the
+/// primary span — tests assert against name shape, not raw strings inside
+/// the diagnostic (which no longer exist).
+fn cap_check_source(source: &str) -> Vec<(IrDiagnostic, String)> {
     let parsed = parse_source_file(source);
     let file = parsed.tree();
     let mut program = VirBuilder::build_program(&[(SourceId(0), file)]);
@@ -17,7 +20,17 @@ fn cap_check_source(source: &str) -> Vec<CapErrorKind> {
     let _resolve_errors = resolve_names(&mut program.arena);
     let tc_result = type_check_vir(&mut program.arena, &tc);
     let cap_result = check_capabilities_vir(&program.arena, &tc, &tc_result);
-    cap_result.errors.into_iter().map(|e| e.kind).collect()
+    cap_result
+        .errors
+        .into_iter()
+        .map(|e| {
+            let span = e.primary_span();
+            let start = u32::from(span.range.start()) as usize;
+            let end = u32::from(span.range.end()) as usize;
+            let text = source.get(start..end).unwrap_or("").to_string();
+            (e, text)
+        })
+        .collect()
 }
 
 // =========================================================================
@@ -29,8 +42,8 @@ fn unknown_cap_tag() {
     let errors = cap_check_source("fn f() #bogus ( 1 )");
     assert_eq!(errors.len(), 1);
     assert!(
-        matches!(&errors[0], CapErrorKind::UnknownCapability { name } if name == "bogus"),
-        "expected UnknownCapability, got {:?}",
+        matches!(&errors[0].0, IrDiagnostic::UnknownCapability { .. }) && errors[0].1 == "bogus",
+        "expected UnknownCapability for `bogus`, got {:?}",
         errors[0]
     );
 }
@@ -65,7 +78,7 @@ fn mixed_known_unknown_tags() {
     assert_eq!(errors.len(), 1);
     assert!(matches!(
         &errors[0],
-        CapErrorKind::UnknownCapability { name } if name == "nope"
+        (IrDiagnostic::UnknownCapability { .. }, text) if text == "nope"
     ));
 }
 
@@ -109,7 +122,7 @@ fn top_level_code_checked() {
     assert_eq!(errors.len(), 1);
     assert!(matches!(
         &errors[0],
-        CapErrorKind::UnknownCapability { name } if name == "invalid"
+        (IrDiagnostic::UnknownCapability { .. }, text) if text == "invalid"
     ));
 }
 
@@ -129,6 +142,6 @@ fn namespace_fn_unknown_cap() {
     assert_eq!(errors.len(), 1);
     assert!(matches!(
         &errors[0],
-        CapErrorKind::UnknownCapability { name } if name == "bogus2"
+        (IrDiagnostic::UnknownCapability { .. }, text) if text == "bogus2"
     ));
 }

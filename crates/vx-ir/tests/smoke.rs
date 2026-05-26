@@ -165,6 +165,7 @@ fn visitor_traversal_count() {
         scope: scope_id,
         kind: ExprKind::NameRef(NameRefExpr {
             name: "x".into(),
+            name_span: dummy_span(),
             resolved: None,
         }),
         ty: None,

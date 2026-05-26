@@ -177,6 +177,10 @@ pub struct NameRefExpr {
     /// The name as written in source.
     pub name: String,
 
+    /// Span of the name token (no leading whitespace/trivia).
+    /// Populated during: CST walk.
+    pub name_span: SourceSpan,
+
     /// What this name resolves to.
     /// Populated during: name resolution pass. `None` means unresolved
     /// (either an error or not yet resolved).

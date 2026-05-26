@@ -2,9 +2,10 @@
 
 use vx_types::{Scalar, Ty};
 
+use crate::diagnostic::IrDiagnostic;
 use crate::expr::{BinOp, BinaryExpr, PrefixExpr, PrefixOp};
 
-use super::{TypeChecker, TypeError, TypeErrorKind};
+use super::TypeChecker;
 
 pub(crate) fn infer_binary(tc: &mut TypeChecker, bin: &BinaryExpr) -> Ty {
     if bin.op == BinOp::Pipe {
@@ -29,24 +30,24 @@ pub(crate) fn infer_binary(tc: &mut TypeChecker, bin: &BinaryExpr) -> Ty {
                 if tc.types_compatible(lhs_inner, rhs_inner) {
                     Ty::Array(lhs_inner.clone())
                 } else {
-                    tc.push_error(TypeError {
-                        span: tc.arena[bin.lhs].span,
-                        kind: TypeErrorKind::BinaryOpMismatch {
-                            op: "++".to_string(),
-                            left: lhs_ty,
-                            right: rhs_ty,
-                        },
+                    tc.push_diagnostic(IrDiagnostic::BinaryOpMismatch {
+                        op: bin.op_span,
+                        op_kind: bin.op,
+                        lhs: tc.arena[bin.lhs].span,
+                        rhs: tc.arena[bin.rhs].span,
+                        lhs_ty,
+                        rhs_ty,
                     });
                     Ty::Poison
                 }
             } else {
-                tc.push_error(TypeError {
-                    span: tc.arena[bin.lhs].span,
-                    kind: TypeErrorKind::BinaryOpMismatch {
-                        op: "++".to_string(),
-                        left: lhs_ty,
-                        right: rhs_ty,
-                    },
+                tc.push_diagnostic(IrDiagnostic::BinaryOpMismatch {
+                    op: bin.op_span,
+                    op_kind: bin.op,
+                    lhs: tc.arena[bin.lhs].span,
+                    rhs: tc.arena[bin.rhs].span,
+                    lhs_ty,
+                    rhs_ty,
                 });
                 Ty::Poison
             }
@@ -78,13 +79,15 @@ fn infer_pipe(tc: &mut TypeChecker, bin: &BinaryExpr) -> Ty {
                 && !first_param.is_poison()
                 && !tc.types_compatible(&lhs_ty, first_param)
             {
-                tc.push_error(TypeError {
-                    span: tc.arena[bin.lhs].span,
-                    kind: TypeErrorKind::ArgTypeMismatch {
-                        param_name: "_".to_string(),
-                        expected: first_param.clone(),
-                        found: lhs_ty,
-                    },
+                // The pipe target's parameter is anonymous in source —
+                // surface the operator token as the secondary "parameter"
+                // span so the diagnostic can point at where the pipe
+                // expects its input.
+                tc.push_diagnostic(IrDiagnostic::ArgTypeMismatch {
+                    arg: tc.arena[bin.lhs].span,
+                    param: bin.op_span,
+                    expected: first_param.clone(),
+                    found: lhs_ty,
                 });
             }
             (*function.ret).clone()

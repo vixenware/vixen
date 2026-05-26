@@ -1,26 +1,46 @@
 //! Tests for the VIR name resolution pass.
 
+use vx_ir::IrDiagnostic;
 use vx_ir::build::VirBuilder;
 use vx_ir::expr::ExprKind;
 use vx_ir::item::ItemKind;
 use vx_ir::pattern::PatternKind;
-use vx_ir::resolve::{ResolveErrorKind, resolve_names};
+use vx_ir::resolve::resolve_names;
 use vx_ir::scope::DefTarget;
 use vx_ir::stmt::StmtKind;
 use vx_parser::{SourceId, parse_source_file};
+
+/// Bundled diagnostic — the structural diagnostic together with the source
+/// text its primary span points at. Most tests assert on the primary name
+/// the diagnostic refers to, so we extract that once here.
+#[derive(Debug)]
+struct ResolveDiag {
+    pub diag: IrDiagnostic,
+    pub name: String,
+}
 
 fn build_and_resolve(
     source: &str,
 ) -> (
     vx_ir::arena::VirArena,
     vx_ir::SourceUnitId,
-    Vec<vx_ir::resolve::ResolveError>,
+    Vec<ResolveDiag>,
 ) {
     let parsed = parse_source_file(source);
     let file = parsed.tree();
     let mut program = VirBuilder::build_program(&[(SourceId(0), file)]);
     let su_id = program.source_units[0];
     let errors = resolve_names(&mut program.arena);
+    let errors = errors
+        .into_iter()
+        .map(|diag| {
+            let span = diag.primary_span();
+            let start = u32::from(span.range.start()) as usize;
+            let end = u32::from(span.range.end()) as usize;
+            let name = source.get(start..end).unwrap_or("").to_string();
+            ResolveDiag { diag, name }
+        })
+        .collect();
     (program.arena, su_id, errors)
 }
 
@@ -151,7 +171,7 @@ fn unresolved_name() {
     let (_, _, errors) = build_and_resolve("fn main() ( x )");
     assert_eq!(errors.len(), 1);
     assert_eq!(errors[0].name, "x");
-    assert!(matches!(errors[0].kind, ResolveErrorKind::Unresolved));
+    assert!(matches!(errors[0].diag, IrDiagnostic::Unresolved { .. }));
 }
 
 // =========================================================================
@@ -194,9 +214,14 @@ fn nested_function_cutoff() {
     let (_, _, errors) = build_and_resolve("fn main() ( let a = 1; fn f() ( a + b ); let b = 2 )");
     // 'b' should be unresolved inside f (cutoff prevents seeing it).
     // 'a' should resolve fine.
-    assert_eq!(errors.len(), 1, "expected 1 error: {:?}", errors);
+    assert_eq!(
+        errors.len(),
+        1,
+        "expected 1 error: {:?}",
+        errors.iter().map(|e| &e.name).collect::<Vec<_>>()
+    );
     assert_eq!(errors[0].name, "b");
-    assert!(matches!(errors[0].kind, ResolveErrorKind::Unresolved));
+    assert!(matches!(errors[0].diag, IrDiagnostic::Unresolved { .. }));
 }
 
 // =========================================================================
@@ -310,12 +335,17 @@ fn valid_assign_resolves() {
 #[test]
 fn invalid_assign_target() {
     let (_, _, errors) = build_and_resolve("fn main() ( fn x() ( 1 ); x = 2 )");
-    assert_eq!(errors.len(), 1, "expected 1 error: {:?}", errors);
+    assert_eq!(
+        errors.len(),
+        1,
+        "expected 1 error: {:?}",
+        errors.iter().map(|e| &e.name).collect::<Vec<_>>()
+    );
     assert_eq!(errors[0].name, "x");
     assert!(
-        matches!(errors[0].kind, ResolveErrorKind::InvalidTarget { .. }),
+        matches!(errors[0].diag, IrDiagnostic::InvalidTarget { .. }),
         "expected InvalidTarget: {:?}",
-        errors[0].kind
+        errors[0].diag
     );
 }
 
@@ -368,7 +398,7 @@ fn variant_pattern_resolves() {
     assert!(
         non_x_errors.is_empty(),
         "expected no errors besides 'x': {:?}",
-        non_x_errors
+        non_x_errors.iter().map(|e| &e.name).collect::<Vec<_>>()
     );
 
     // Find the match arm pattern and check it resolved.
@@ -423,13 +453,13 @@ fn struct_literal_non_struct_invalid() {
     let (_, _, errors) = build_and_resolve("fn main() ( fn Point() ( 1 ); Point { x: 1 } )");
     let invalid: Vec<_> = errors
         .iter()
-        .filter(|e| e.name == "Point" && matches!(e.kind, ResolveErrorKind::InvalidTarget { .. }))
+        .filter(|e| e.name == "Point" && matches!(e.diag, IrDiagnostic::InvalidTarget { .. }))
         .collect();
     assert_eq!(
         invalid.len(),
         1,
         "expected InvalidTarget for Point: {:?}",
-        errors
+        errors.iter().map(|e| &e.name).collect::<Vec<_>>()
     );
 }
 
@@ -446,13 +476,13 @@ fn variant_pattern_non_enum_invalid() {
     // (it resolves to a struct item, not an enum/variant).
     let invalid: Vec<_> = errors
         .iter()
-        .filter(|e| e.name == "Point" && matches!(e.kind, ResolveErrorKind::InvalidTarget { .. }))
+        .filter(|e| e.name == "Point" && matches!(e.diag, IrDiagnostic::InvalidTarget { .. }))
         .collect();
     assert_eq!(
         invalid.len(),
         1,
         "expected InvalidTarget for Point variant pattern: {:?}",
-        errors
+        errors.iter().map(|e| &e.name).collect::<Vec<_>>()
     );
 }
 

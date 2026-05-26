@@ -255,12 +255,14 @@ pub(crate) fn variant_sig(
 
     Some(FnSig {
         name: variant.name.clone(),
+        name_span: variant.name_span,
         type_params: enum_def.type_params.clone(),
         positional_params: variant_struct
             .fields
             .iter()
             .map(|f| ParamDef {
                 name: f.name.clone(),
+                name_span: f.name_span,
                 ty: f.ty.clone(),
                 doc: None,
             })

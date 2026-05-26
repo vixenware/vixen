@@ -6,8 +6,9 @@ use crate::StmtId;
 use crate::expr::{BlockExpr, IfExpr, MatchExpr};
 use crate::stmt::StmtKind;
 
+use super::TypeChecker;
 use super::patterns::type_pattern;
-use super::{TypeChecker, TypeError, TypeErrorKind};
+use crate::diagnostic::IrDiagnostic;
 
 pub(crate) fn infer_block(tc: &mut TypeChecker, block: &BlockExpr) -> Ty {
     let stmts = block.stmts.clone();
@@ -70,10 +71,7 @@ fn check_stmt(tc: &mut TypeChecker, stmt_id: StmtId, is_tail: bool) {
                 // This case is handled by the caller.
             } else {
                 let span = tc.arena[expr_id].span;
-                tc.push_error(TypeError {
-                    span,
-                    kind: TypeErrorKind::UnusedExprStatement,
-                });
+                tc.push_diagnostic(IrDiagnostic::UnusedExprStatement { expr: span });
             }
             let _ = ty;
         }
