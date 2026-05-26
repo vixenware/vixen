@@ -21,7 +21,7 @@ use crate::pattern::PatternKind;
 use crate::scope::{self, DefTarget, ScopeEntryTarget};
 use crate::stmt::StmtKind;
 use crate::{BodyId, ExprId, ItemId, PatternId, ScopeId, SourceUnitId, StmtId};
-use vx_parser::SourceSpan;
+use vx_parser::{SourceId, SourceSpan};
 
 // ---------------------------------------------------------------------------
 // Public API
@@ -47,7 +47,35 @@ pub fn resolve_names(arena: &mut VirArena) -> Vec<IrDiagnostic> {
         resolve_source_unit(arena, su_id, &mut errors);
     }
 
+    dedup_unresolved(arena, &mut errors);
     errors
+}
+
+/// Collapse multiple `Unresolved` diagnostics that refer to the same name in
+/// the same source down to the first occurrence. A typo like `config` used
+/// across four field accesses fires once at the first site, not N times.
+///
+/// Looks up the name string for each unresolved span by indexing the arena's
+/// `NameRefExpr`s; if the span doesn't match a NameRef (rare — e.g. assignment
+/// LHS), the diagnostic is kept as-is.
+fn dedup_unresolved(arena: &VirArena, errors: &mut Vec<IrDiagnostic>) {
+    use std::collections::{HashMap, HashSet};
+    let names_by_span: HashMap<SourceSpan, &str> = arena
+        .exprs
+        .iter()
+        .filter_map(|expr| match &expr.kind {
+            ExprKind::NameRef(nr) => Some((nr.name_span, nr.name.as_str())),
+            _ => None,
+        })
+        .collect();
+    let mut seen: HashSet<(SourceId, &str)> = HashSet::new();
+    errors.retain(|e| match e {
+        IrDiagnostic::Unresolved { name: span } => match names_by_span.get(span) {
+            Some(name) => seen.insert((span.source, *name)),
+            None => true,
+        },
+        _ => true,
+    });
 }
 
 // ---------------------------------------------------------------------------
