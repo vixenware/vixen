@@ -130,6 +130,90 @@ pub(crate) fn namespace_name_for_receiver_pub(receiver_ty: &Ty, env: &TypeEnv) -
     namespace_name_for_receiver(receiver_ty, env)
 }
 
+/// Enumerate sibling method candidates for a failed lookup, ranked by edit
+/// distance against `method_name`. Returns up to 3 candidates with edit
+/// distance <= 3 (a method name that's mistyped by more than 3 chars is
+/// unlikely to have been "meant" by the user).
+///
+/// Used by the NoSuchMethod diagnostic to surface "did you mean..." hints
+/// without copying identifier text into the diagnostic — each candidate
+/// carries the ItemId + the method-declaration's name_span so the renderer
+/// reads the actual identifier from source.
+pub(crate) fn candidates_for_method(
+    tc: &TypeChecker,
+    receiver_ty: TypeId,
+    method_name: &str,
+) -> Vec<crate::diagnostic::MethodCandidate> {
+    let Some(namespace_name) =
+        namespace_name_for_receiver(tc.types.env.get_ty(receiver_ty), &tc.types.env)
+    else {
+        return Vec::new();
+    };
+
+    let Some(ns_item_id) = tc.arena.items.iter().enumerate().find_map(|(i, item)| {
+        if matches!(item.kind, ItemKind::Namespace(_))
+            && tc.arena.item_name(crate::ItemId::from_index(i)) == namespace_name
+        {
+            Some(crate::ItemId::from_index(i))
+        } else {
+            None
+        }
+    }) else {
+        return Vec::new();
+    };
+
+    let ItemKind::Namespace(ref ns) = tc.arena[ns_item_id].kind else {
+        return Vec::new();
+    };
+
+    let mut ranked: Vec<(u32, crate::diagnostic::MethodCandidate)> = ns
+        .items
+        .iter()
+        .filter_map(|&child_id| {
+            if let ItemKind::Function(ref f) = tc.arena[child_id].kind {
+                let d = edit_distance(method_name, &f.name);
+                if d <= 3 {
+                    return Some((
+                        d,
+                        crate::diagnostic::MethodCandidate {
+                            item: child_id,
+                            name_span: f.name_span,
+                        },
+                    ));
+                }
+            }
+            None
+        })
+        .collect();
+    ranked.sort_by_key(|(d, _)| *d);
+    ranked.truncate(3);
+    ranked.into_iter().map(|(_, c)| c).collect()
+}
+
+/// Levenshtein distance between two strings, capped at u32. Iterative
+/// two-row DP — O(n * m) time, O(min(n, m)) space.
+fn edit_distance(a: &str, b: &str) -> u32 {
+    let a: Vec<char> = a.chars().collect();
+    let b: Vec<char> = b.chars().collect();
+    if a.is_empty() {
+        return b.len() as u32;
+    }
+    if b.is_empty() {
+        return a.len() as u32;
+    }
+    let mut prev: Vec<u32> = (0..=b.len() as u32).collect();
+    let mut curr: Vec<u32> = vec![0; b.len() + 1];
+    for (i, ca) in a.iter().enumerate() {
+        curr[0] = (i + 1) as u32;
+        for (j, cb) in b.iter().enumerate() {
+            let cost = u32::from(ca != cb);
+            curr[j + 1] = (curr[j] + 1).min(prev[j + 1] + 1).min(prev[j] + cost);
+        }
+        std::mem::swap(&mut prev, &mut curr);
+    }
+    prev[b.len()]
+}
+
 fn namespace_name_for_receiver(receiver_ty: &Ty, env: &TypeEnv) -> Option<String> {
     match receiver_ty {
         Ty::Scalar(vx_types::Scalar::String) => Some("String".to_string()),

@@ -81,13 +81,13 @@ pub(crate) fn infer_call(tc: &mut TypeChecker, expr_id: ExprId, call: &CallExpr)
 
             if !tc.types.env.get_ty(receiver_ty).is_poison() {
                 let receiver_span = tc.arena[field.receiver].span;
+                let candidates =
+                    super::fields::candidates_for_method(tc, receiver_ty, &method_name);
                 tc.push_diagnostic(IrDiagnostic::NoSuchMethod {
                     method_call: field.field_span,
                     receiver: receiver_span,
                     receiver_ty,
-                    // Candidate enumeration deferred — the diagnostic still
-                    // carries the structural slot for it.
-                    candidates: Vec::new(),
+                    candidates,
                 });
             }
             // method_name kept above for downstream poison propagation reasoning;
