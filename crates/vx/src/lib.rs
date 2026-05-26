@@ -410,8 +410,17 @@ async fn eval_invocation(args: EvalInvocation) -> eyre::Result<()> {
             Ok(())
         }
         EvalFunctionResult::Err(failure) => {
-            for report in &failure.diagnostics.reports {
-                eprintln!("error: {}", report.title);
+            let capabilities = vx_diagnostics::detect_terminal_capabilities();
+            match vx_diagnostics::render_to_terminal(&failure.diagnostics, capabilities) {
+                Ok(rendered) => eprint!("{rendered}"),
+                Err(render_err) => {
+                    // Fallback if rendering itself blows up — surface the
+                    // structural titles so the user still sees something.
+                    eprintln!("(diagnostic rendering failed: {render_err})");
+                    for report in &failure.diagnostics.reports {
+                        eprintln!("error: {}", report.title);
+                    }
+                }
             }
             std::process::exit(1);
         }

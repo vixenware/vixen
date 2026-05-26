@@ -31,6 +31,7 @@ tracing-subscriber = { workspace = true }
 vox = { workspace = true }
 blake3 = { workspace = true }
 vx-services.workspace = true
+vx-diagnostics = { workspace = true }
 vxd.workspace = true
 vx-vfs = { workspace = true }
 vx-vfsd = { workspace = true }

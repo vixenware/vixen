@@ -3704,6 +3704,7 @@ dependencies = [
  "tracing-subscriber",
  "vox",
  "vx-daemon",
+ "vx-diagnostics",
  "vx-services",
  "vx-vfs",
  "vx-vfsd",

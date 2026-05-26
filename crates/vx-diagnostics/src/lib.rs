@@ -31,6 +31,55 @@ pub fn render_diagnostics_with_default_theme(
     ))
 }
 
+/// Render diagnostics for the terminal with Vixen syntax highlighting applied
+/// to every referenced source. The single entry point for CLI/runtime
+/// rendering — equivalent to:
+///
+/// 1. Build a `VixenSyntaxHighlighter`.
+/// 2. For each `Source` in `diagnostics.sources`, generate syntax annotations.
+/// 3. Attach them to each report that already has an annotation in that
+///    source (so the syntax tokens appear in the report's source window).
+/// 4. Lay out + render with `render_diagnostics_with_default_theme`.
+///
+/// Returns a fully-rendered string ready for `eprint!`. The original
+/// `diagnostics` value is not mutated — a clone is augmented internally.
+pub fn render_to_terminal(
+    diagnostics: &Diagnostics,
+    capabilities: TerminalCapabilities,
+) -> Result<String> {
+    let mut diagnostics = diagnostics.clone();
+    let mut highlighter = VixenSyntaxHighlighter::new()?;
+
+    for source in &diagnostics.sources {
+        // Collect the set of report indices that reference this source —
+        // syntax annotations only need to land on reports that actually
+        // display a window into this source.
+        let referencing_reports: Vec<usize> = diagnostics
+            .reports
+            .iter()
+            .enumerate()
+            .filter_map(|(idx, report)| {
+                report
+                    .annotations
+                    .iter()
+                    .any(|ann| ann.spans.iter().any(|s| s.source_id == source.id))
+                    .then_some(idx)
+            })
+            .collect();
+        if referencing_reports.is_empty() {
+            continue;
+        }
+        let annotations = highlighter.syntax_annotations(&source.id.0, &source.text, None)?;
+        for idx in referencing_reports {
+            diagnostics.reports[idx]
+                .annotations
+                .extend(annotations.iter().cloned());
+        }
+    }
+
+    render_diagnostics_with_default_theme(&diagnostics, capabilities).map_err(|e| eyre!("{e:?}"))
+}
+
 pub fn detect_terminal_capabilities() -> TerminalCapabilities {
     let stderr_is_terminal = std::io::stderr().is_terminal();
     TerminalCapabilities {
