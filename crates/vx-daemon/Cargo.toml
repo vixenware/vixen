@@ -26,6 +26,10 @@ blake3 = { workspace = true }
 
 vx-services.workspace = true
 vx-ir.workspace = true
+vx-diagnostics = { workspace = true }
+vx-parser.workspace = true
+vx-types.workspace = true
+margin.workspace = true
 vx-store = { path = "../vx-store" }
 vx-runner = { path = "../vx-runner" }
 vx-vfsd = { path = "../vx-vfsd" }

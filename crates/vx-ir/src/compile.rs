@@ -7,6 +7,7 @@ use std::fmt;
 
 use crate::exec_types::ExecutableProgram;
 use vx_parser::SourceId;
+use vx_types::TypeEnv;
 
 use crate::build::VirBuilder;
 use crate::cap_check::check_capabilities_vir;
@@ -23,9 +24,18 @@ use crate::type_collect::collect_types_vir;
 #[derive(Debug)]
 pub enum CompileError {
     Parse(Vec<vx_parser::ParseDiagnostic>),
-    Resolve(Vec<IrDiagnostic>),
-    Type(Vec<IrDiagnostic>),
-    Capability(Vec<IrDiagnostic>),
+    Resolve {
+        errors: Vec<IrDiagnostic>,
+        env: Box<TypeEnv>,
+    },
+    Type {
+        errors: Vec<IrDiagnostic>,
+        env: Box<TypeEnv>,
+    },
+    Capability {
+        errors: Vec<IrDiagnostic>,
+        env: Box<TypeEnv>,
+    },
     MissingEntry(String),
     Lowering(LowerError),
 }
@@ -34,9 +44,9 @@ impl fmt::Display for CompileError {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
             Self::Parse(e) => write!(f, "parse errors: {e:?}"),
-            Self::Resolve(e) => write!(f, "resolve errors: {e:?}"),
-            Self::Type(e) => write!(f, "type errors: {e:?}"),
-            Self::Capability(e) => write!(f, "capability errors: {e:?}"),
+            Self::Resolve { errors, .. } => write!(f, "resolve errors: {errors:?}"),
+            Self::Type { errors, .. } => write!(f, "type errors: {errors:?}"),
+            Self::Capability { errors, .. } => write!(f, "capability errors: {errors:?}"),
             Self::MissingEntry(name) => write!(f, "entry function `{name}` not found"),
             Self::Lowering(e) => write!(f, "lowering failed: {e:?}"),
         }
@@ -132,15 +142,24 @@ pub fn compile_source(
     let mut types = collect_types_vir(&mut program.arena);
     let resolve_errors = resolve_names(&mut program.arena);
     if !resolve_errors.is_empty() {
-        return Err(CompileError::Resolve(resolve_errors));
+        return Err(CompileError::Resolve {
+            errors: resolve_errors,
+            env: Box::new(types.env),
+        });
     }
     let tc_result = type_check_vir(&mut program.arena, &mut types);
     if !tc_result.errors.is_empty() {
-        return Err(CompileError::Type(tc_result.errors.clone()));
+        return Err(CompileError::Type {
+            errors: tc_result.errors.clone(),
+            env: Box::new(types.env),
+        });
     }
     let cap_result = check_capabilities_vir(&program.arena, &types, &tc_result);
     if !cap_result.errors.is_empty() {
-        return Err(CompileError::Capability(cap_result.errors));
+        return Err(CompileError::Capability {
+            errors: cap_result.errors,
+            env: Box::new(types.env),
+        });
     }
     analyze_captures(&mut program.arena);
 

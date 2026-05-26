@@ -6,7 +6,9 @@ use vx_services::{
 };
 use vx_vfsd::VfsdService;
 
-use crate::runtime_eval::{EvalRequest, RuntimeEvalContext, evaluate_source_text_function};
+use crate::runtime_eval::{
+    EvalRequest, RuntimeEvalContext, evaluate_source_text_function, runtime_error_to_diagnostics,
+};
 
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct OrchestratorWiring {
@@ -70,7 +72,7 @@ impl OrchestratorService {
                 value: output.value,
             }),
             Err(error) => EvalStrictFunctionResult::Err(EvalStrictFunctionFailure {
-                message: error.to_string(),
+                diagnostics: runtime_error_to_diagnostics(&error, &request.source_text, None),
             }),
         }
     }
@@ -113,7 +115,7 @@ impl OrchestratorService {
                 value: output.value,
             }),
             Err(error) => EvalFunctionResult::Err(EvalStrictFunctionFailure {
-                message: error.to_string(),
+                diagnostics: runtime_error_to_diagnostics(&error, &request.source_text, None),
             }),
         }
     }

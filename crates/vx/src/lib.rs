@@ -410,7 +410,9 @@ async fn eval_invocation(args: EvalInvocation) -> eyre::Result<()> {
             Ok(())
         }
         EvalFunctionResult::Err(failure) => {
-            eprintln!("error: {}", failure.message);
+            for report in &failure.diagnostics.reports {
+                eprintln!("error: {}", report.title);
+            }
             std::process::exit(1);
         }
     }

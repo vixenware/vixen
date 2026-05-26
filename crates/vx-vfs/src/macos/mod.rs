@@ -6,7 +6,7 @@
 //! `vx-vfs` mounts the extension, resolves the socket path from status.json,
 //! then connects to that listener and serves `Vfs` on one root connection.
 
-use std::time::Duration;
+use std::{io::ErrorKind, time::Duration};
 
 use camino::Utf8Path;
 use moire::process::Command;
@@ -94,6 +94,8 @@ where
 }
 
 async fn do_mount(mount_path: &Utf8Path) -> Result<(), String> {
+    ensure_mount_directory(mount_path).await?;
+
     let source = "vixen://session";
     let output = Command::new("/sbin/mount")
         .args(["-F", "-t", "vixenfs", source, mount_path.as_str()])
@@ -113,6 +115,27 @@ async fn do_mount(mount_path: &Utf8Path) -> Result<(), String> {
         ));
     }
     Ok(())
+}
+
+async fn ensure_mount_directory(mount_path: &Utf8Path) -> Result<(), String> {
+    if let Some(parent) = mount_path
+        .parent()
+        .filter(|parent| !parent.as_str().is_empty())
+    {
+        moire::fs::create_dir_all(parent.as_std_path())
+            .await
+            .map_err(|e| format!("failed to create mount parent directory {parent}: {e}"))?;
+    }
+
+    // `mkdir` on the final mountpoint is a safe probe for FSKit ghost mounts:
+    // it returns EEXIST/EBUSY without issuing I/O through the mounted filesystem.
+    match std::fs::create_dir(mount_path.as_std_path()) {
+        Ok(()) => Ok(()),
+        Err(error) if error.kind() == ErrorKind::AlreadyExists => Ok(()),
+        Err(error) => Err(format!(
+            "failed to create mount directory {mount_path}: {error}"
+        )),
+    }
 }
 
 async fn read_status(mount_path: &Utf8Path) -> Result<vx_fskit_types::StatusPayload, String> {

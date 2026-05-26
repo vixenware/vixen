@@ -15,6 +15,7 @@ blake3.workspace = true
 facet.workspace = true
 facet-postcard.workspace = true
 fastcdc.workspace = true
+margin.workspace = true
 
 vox.workspace = true
 tokio.workspace = true

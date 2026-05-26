@@ -47,6 +47,7 @@ repository = "https://github.com/bearcove/vx"
 # instrumentation
 moire = "1.0.1"
 vx-services = { path = "crates/vx-services" }
+vx-diagnostics = { path = "crates/vx-diagnostics" }
 margin = { path = "crates-plus/margin" }
 margin-term = { path = "crates-plus/margin-term" }
 vx-io = { path = "crates/vx-io" }

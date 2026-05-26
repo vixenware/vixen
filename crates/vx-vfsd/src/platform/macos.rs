@@ -70,9 +70,9 @@ pub async fn collect_vfs_diagnostics(mount_path: &Utf8PathBuf) -> String {
 }
 
 /// Whether we should create the mount directory.
-/// On macOS, /Volumes is system-managed — don't create it ourselves.
 pub fn should_create_mount_dir(_mount_path: &Utf8PathBuf) -> bool {
-    // vx_fskit::setup() handles mkdir on macOS.
+    // vx-vfs creates the macOS mountpoint with a single final mkdir to avoid
+    // recursively probing an existing FSKit mount.
     false
 }
 

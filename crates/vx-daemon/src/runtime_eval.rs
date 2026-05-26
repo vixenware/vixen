@@ -15,11 +15,13 @@ use vx_ir::exec_types::{
     RuntimeBoundaryInputSpec, RuntimeBoundaryKind, RuntimeBoundaryPayload, RuntimeField,
     RuntimeMemberOp, SlotId,
 };
+use vx_parser::SourceId as ParserSourceId;
 use vx_services::{
     BlobRef, DirectoryEntryKind, EvalProgressEvent, NodeHash, RuntimeValue, StoreClient,
     cas_tree::{MerkleTreeFile, build_merkle_tree},
     chunking::{prepare_blob, store_prepared_blob},
 };
+use vx_types::TypeEnv;
 use vx_vfsd::{VfsdService, protocol::Vfsd};
 
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
@@ -87,6 +89,72 @@ pub enum RuntimeEvalError {
         function: String,
         kind: &'static str,
     },
+}
+
+/// Convert a [`RuntimeEvalError`] into a structured [`margin::Diagnostics`].
+///
+/// For [`RuntimeEvalError::Compile`], delegates to
+/// [`vx_diagnostics::render_compile_error`] using the user's source text.
+/// For runtime variants (which carry no source spans yet), produces a single
+/// no-span report whose title summarizes the variant and whose note carries
+/// the formatted [`Display`] message.
+pub fn runtime_error_to_diagnostics(
+    err: &RuntimeEvalError,
+    user_source_text: &str,
+    user_display_name: Option<&str>,
+) -> margin::Diagnostics {
+    use margin::{Diagnostics, Note, NoteKind, Report, Severity, Source, SourceId};
+
+    match err {
+        RuntimeEvalError::Compile(compile_err) => {
+            // The TypeEnv is carried inside the relevant CompileError variants.
+            // For variants that don't carry it (Parse / MissingEntry /
+            // Lowering), an empty TypeEnv is fine — those code paths don't
+            // format types.
+            let fallback = TypeEnv::default();
+            vx_diagnostics::render_compile_error(
+                compile_err,
+                user_source_text,
+                ParserSourceId(0),
+                user_display_name,
+                &fallback,
+            )
+        }
+        _ => {
+            let title = match err {
+                RuntimeEvalError::ArityMismatch { .. } => "arity mismatch",
+                RuntimeEvalError::UnsupportedBoundary { .. } => "unsupported runtime boundary",
+                RuntimeEvalError::UnsupportedOperation { .. } => "unsupported operation",
+                RuntimeEvalError::MissingSlot { .. } => "missing slot",
+                RuntimeEvalError::TypeMismatch { .. } => "runtime type mismatch",
+                RuntimeEvalError::NegativeIntLiteral { .. } => "negative integer literal",
+                RuntimeEvalError::PendingResult { .. } => "pending result",
+                RuntimeEvalError::FailureResult { .. } => "explicit failure",
+                RuntimeEvalError::UnsupportedResultKind { .. } => "unsupported result kind",
+                RuntimeEvalError::Compile(_) => unreachable!(),
+            };
+            let report = Report {
+                severity: Severity::Error,
+                title: title.to_string(),
+                annotations: Vec::new(),
+                notes: vec![Note {
+                    kind: NoteKind::Note,
+                    text: err.to_string(),
+                }],
+                sections: Vec::new(),
+            };
+            let source = Source {
+                id: SourceId(ParserSourceId(0).0.to_string()),
+                name: user_display_name.unwrap_or("input.vx").to_string(),
+                hyperlink: None,
+                text: user_source_text.to_string(),
+            };
+            Diagnostics {
+                sources: vec![source],
+                reports: vec![report],
+            }
+        }
+    }
 }
 
 /// Output from a successful evaluation.

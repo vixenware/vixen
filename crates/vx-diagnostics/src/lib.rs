@@ -1,5 +1,9 @@
 //! Shared Vixen diagnostics rendering helpers.
 
+mod render;
+
+pub use render::render_compile_error;
+
 use std::collections::BTreeSet;
 use std::io::IsTerminal;
 use std::sync::Arc;

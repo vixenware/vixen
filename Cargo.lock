@@ -3724,16 +3724,20 @@ dependencies = [
  "eyre",
  "facet",
  "facet-styx",
+ "margin",
  "moire",
  "thiserror 2.0.18",
  "tokio",
  "tracing",
  "tree-sitter-vixen 0.1.0 (git+https://github.com/bearcove/tree-sitter-vixen?rev=9fe14bea91399543282035090086fec8a868fb6c)",
  "vox",
+ "vx-diagnostics",
  "vx-ir",
+ "vx-parser",
  "vx-runner",
  "vx-services",
  "vx-store",
+ "vx-types",
  "vx-vfsd",
 ]
 
@@ -3749,6 +3753,10 @@ dependencies = [
  "margin",
  "margin-term",
  "tree-sitter-vixen 0.1.0 (git+ssh://git@code.vixen.rs/vixen/tree-sitter-vixen.git?rev=3e2cc63b460685ff595429afe435e8178c4f14a8)",
+ "vx-ir",
+ "vx-parser",
+ "vx-stdlib",
+ "vx-types",
 ]
 
 [[package]]
@@ -3866,6 +3874,7 @@ dependencies = [
  "facet",
  "facet-postcard",
  "fastcdc",
+ "margin",
  "tokio",
  "vox",
 ]

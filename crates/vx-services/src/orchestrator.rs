@@ -38,7 +38,7 @@ pub struct EvalStrictFunctionSuccess {
 
 #[derive(Debug, Clone, PartialEq, Eq, Facet)]
 pub struct EvalStrictFunctionFailure {
-    pub message: String,
+    pub diagnostics: margin::Diagnostics,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Facet)]
