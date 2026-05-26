@@ -39,6 +39,7 @@ pub mod compile;
 pub mod def;
 pub mod demand;
 pub mod diagnostic;
+pub mod diagnostic_report;
 pub mod exec_types;
 pub mod expr;
 pub mod item;

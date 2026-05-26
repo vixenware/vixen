@@ -3809,6 +3809,7 @@ dependencies = [
 name = "vx-ir"
 version = "0.1.0"
 dependencies = [
+ "margin",
  "rowan",
  "vx-parser",
  "vx-rt",

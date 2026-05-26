@@ -8,9 +8,10 @@
 //! live inside diagnostic variants.
 //!
 //! Rendering to a user-facing report happens at the consumer boundary
-//! (e.g. LSP, CLI). A future `to_report(&self, sources, type_env)` impl
-//! will produce a `margin::Report`; for now consumers pattern-match on
-//! the variants directly.
+//! (e.g. LSP, CLI). [`IrDiagnostic::to_report`] (in
+//! [`crate::diagnostic_report`]) converts a diagnostic into a renderable
+//! [`margin::Report`]; consumers may also pattern-match on the variants
+//! directly for structured handling.
 
 use vx_parser::SourceSpan;
 use vx_types::Ty;

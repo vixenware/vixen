@@ -14,6 +14,7 @@ rustdoc-args = ["--html-in-header", "arborium-header.html"]
 vx-types = { workspace = true }
 vx-parser = { workspace = true }
 vx-stdlib = { workspace = true }
+margin = { workspace = true }
 
 [dev-dependencies]
 rowan = "0.16"
