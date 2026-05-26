@@ -1,0 +1,61 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="utf-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1">
+    <title>{{ page.title }} — vixen.wiki</title>
+    <link rel="preconnect" href="https://fonts.googleapis.com">
+    <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+    <link href="https://fonts.googleapis.com/css2?family=Fraunces:opsz,wght,SOFT,WONK@9..144,300..900,30..100,0..1&amp;family=IBM+Plex+Mono:wght@400;500;600&amp;family=Source+Serif+4:opsz,wght@8..60,400..700&amp;display=swap" rel="stylesheet">
+    <link rel="stylesheet" href="/style.css">
+</head>
+<body>
+    <header class="masthead">
+        <div class="masthead-row">
+            <a href="/" class="brand">
+                <span class="brand-mark">◆</span>
+                <span class="brand-text">vixen.wiki</span>
+            </a>
+            <a href="/" class="masthead-back">← Index</a>
+        </div>
+    </header>
+
+    <main>
+        <article class="page-frame">
+            <div class="page-meta">
+                {% if "type" in page.extra %}
+                <span class="stamp">{{ page.extra.type }}</span>
+                {% endif %}
+                {% if "status" in page.extra %}
+                <span class="status status-{{ page.extra.status }}">{{ page.extra.status }}</span>
+                {% endif %}
+                {% if "date" in page.extra %}
+                <span><span class="meta-sep">/</span> {{ page.extra.date }}</span>
+                {% endif %}
+                {% if "created" in page.extra %}
+                <span><span class="meta-sep">/</span> created {{ page.extra.created }}</span>
+                {% endif %}
+                {% if "updated" in page.extra %}
+                <span><span class="meta-sep">/</span> updated {{ page.extra.updated }}</span>
+                {% endif %}
+                {% if "topic" in page.extra %}
+                <span><span class="meta-sep">/</span> topic / {{ page.extra.topic }}</span>
+                {% endif %}
+                {% if "target" in page.extra %}
+                <span><span class="meta-sep">/</span> target / {{ page.extra.target }}</span>
+                {% endif %}
+            </div>
+
+            <h1 class="display display-2 page-title">{{ page.title }}</h1>
+
+            <div class="page-body">
+                {{ page.content | safe }}
+            </div>
+        </article>
+    </main>
+
+    <footer class="footer">
+        <span class="footer-meta">vixen-wiki@1 · rendered by dodeca</span>
+    </footer>
+</body>
+</html>

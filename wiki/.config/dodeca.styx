@@ -1,0 +1,76 @@
+content content
+output public
+
+page-types {
+    Vision @object{
+        type @string
+        status @enum{living, archived}
+        created @string
+        updated @optional(@string)
+        tags @optional(@seq(@string))
+        supersedes @optional(@link(@Vision))
+        relates_to @optional(@seq(@string))
+    }
+
+    Milestone @object{
+        type @string
+        status @enum{planned, active, done, abandoned}
+        created @string
+        updated @optional(@string)
+        target @optional(@string)
+        tags @optional(@seq(@string))
+        success_criteria @seq(@string)
+        depends_on @optional(@seq(@link(@Milestone)))
+        decisions @optional(@seq(@link(@Decision)))
+        experiments @optional(@seq(@link(@Experiment)))
+    }
+
+    Decision @object{
+        type @string
+        status @enum{proposed, accepted, rejected, superseded}
+        date @string
+        updated @optional(@string)
+        tags @optional(@seq(@string))
+        supersedes @optional(@link(@Decision))
+        resolves @optional(@seq(@link(@Question)))
+        relates_to @optional(@seq(@string))
+    }
+
+    Question @object{
+        type @string
+        status @enum{open, answered, abandoned}
+        created @string
+        updated @optional(@string)
+        tags @optional(@seq(@string))
+        resolved_by @optional(@link(@Decision))
+        relates_to @optional(@seq(@string))
+    }
+
+    Experiment @object{
+        type @string
+        status @enum{planned, running, done, abandoned}
+        created @string
+        updated @optional(@string)
+        tags @optional(@seq(@string))
+        hypothesis @string
+        relates_to @optional(@seq(@string))
+    }
+
+    ArchitectureNote @object{
+        type @string
+        topic @string
+        created @string
+        updated @optional(@string)
+        tags @optional(@seq(@string))
+        relates_to @optional(@seq(@string))
+    }
+
+    Glossary @object{
+        type @string
+        term @string
+        created @string
+        updated @optional(@string)
+        tags @optional(@seq(@string))
+        see_also @optional(@seq(@link(@Glossary)))
+    }
+}
