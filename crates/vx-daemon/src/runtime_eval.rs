@@ -239,6 +239,14 @@ fn runtime_value_from_eval(
     }
 }
 
+/// The mount/writable/create-dirs description of a single exec boundary,
+/// bundled so callers pass one value instead of three slices.
+struct ExecBoundaryLayout<'a> {
+    mounts: &'a [(vx_ir::exec_types::TreeFilePath, RuntimeBoundaryInputSpec)],
+    writable_roots: &'a [vx_ir::exec_types::TreeFilePath],
+    create_dirs: &'a [vx_ir::exec_types::TreeFilePath],
+}
+
 struct ProgramEvaluator<'a> {
     context: &'a RuntimeEvalContext,
     program: &'a ExecutableProgram,
@@ -907,9 +915,11 @@ impl<'a> ProgramEvaluator<'a> {
                             .prepare_local_exec_vfs(
                                 function_name,
                                 node,
-                                mounts,
-                                writable_roots,
-                                create_dirs,
+                                ExecBoundaryLayout {
+                                    mounts,
+                                    writable_roots,
+                                    create_dirs,
+                                },
                                 producers,
                                 slots,
                             )
@@ -1113,12 +1123,15 @@ impl<'a> ProgramEvaluator<'a> {
         &mut self,
         function_name: &str,
         node: vx_ir::exec_types::RuntimeNodeId,
-        mounts: &[(vx_ir::exec_types::TreeFilePath, RuntimeBoundaryInputSpec)],
-        writable_roots: &[vx_ir::exec_types::TreeFilePath],
-        create_dirs: &[vx_ir::exec_types::TreeFilePath],
+        layout: ExecBoundaryLayout<'_>,
         producers: &HashMap<SlotId, &KernelOp>,
         slots: &mut BTreeMap<SlotId, EvalValue>,
     ) -> Result<(String, String), RuntimeEvalError> {
+        let ExecBoundaryLayout {
+            mounts,
+            writable_roots,
+            create_dirs,
+        } = layout;
         let Some(vfsd) = self.context.vfsd.as_ref() else {
             return Err(RuntimeEvalError::UnsupportedBoundary {
                 function: function_name.to_owned(),

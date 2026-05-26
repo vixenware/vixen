@@ -34,13 +34,5 @@ vx-store = { path = "../vx-store" }
 vx-runner = { path = "../vx-runner" }
 vx-vfsd = { path = "../vx-vfsd" }
 
-[dev-dependencies]
-ariadne = { version = "0.6", features = ["auto-color"] }
-arborium = { workspace = true }
-arborium-highlight = { workspace = true }
-arborium-theme = { workspace = true }
-concolor = { version = "0.1", features = ["api"] }
-tree-sitter-vixen = { git = "https://github.com/bearcove/tree-sitter-vixen", rev = "9fe14bea91399543282035090086fec8a868fb6c" }
-
 [lints]
 workspace = true

@@ -75,6 +75,22 @@ impl From<LowerError> for ExecSliceError {
 }
 
 // ---------------------------------------------------------------------------
+// Runtime-boundary accumulator (collects lowering outputs)
+// ---------------------------------------------------------------------------
+
+/// Accumulates the per-boundary outputs as `lower_runtime_boundary_keywords`
+/// walks the where-record. One value flows through instead of five mutable
+/// `&mut Vec` parameters.
+#[derive(Default)]
+struct BoundaryAccumulator {
+    positional_inputs: Vec<RuntimeBoundaryInputSpec>,
+    mounts: Vec<(crate::exec_types::TreeFilePath, RuntimeBoundaryInputSpec)>,
+    writable_roots: Vec<crate::exec_types::TreeFilePath>,
+    create_dirs: Vec<crate::exec_types::TreeFilePath>,
+    coarse_mounts: Vec<RuntimeBoundaryInputSpec>,
+}
+
+// ---------------------------------------------------------------------------
 // Shared lowering context (across all bodies)
 // ---------------------------------------------------------------------------
 
@@ -983,28 +999,22 @@ impl<'a, 'ctx> VirBodyLowering<'a, 'ctx> {
     ) -> Result<Operand, LowerError> {
         let node_id = self.ctx.alloc_runtime_node();
 
-        // Lower positional args to RuntimeBoundaryInputSpec.
-        let mut positional_inputs = Vec::new();
+        // Lower positional args + keyword args into a single accumulator.
+        let mut acc = BoundaryAccumulator::default();
         for arg in &call.args {
             let input = self.lower_boundary_input(arg.expr)?;
-            positional_inputs.push(input);
+            acc.positional_inputs.push(input);
         }
-        let mut mounts = Vec::new();
-        let mut writable_roots = Vec::new();
-        let mut create_dirs = Vec::new();
-        let mut coarse_mounts = Vec::new();
-
         if let Some(keyword_expr) = keyword_expr {
-            self.lower_runtime_boundary_keywords(
-                kind,
-                keyword_expr,
-                &mut positional_inputs,
-                &mut mounts,
-                &mut writable_roots,
-                &mut create_dirs,
-                &mut coarse_mounts,
-            )?;
+            self.lower_runtime_boundary_keywords(kind, keyword_expr, &mut acc)?;
         }
+        let BoundaryAccumulator {
+            positional_inputs,
+            mounts,
+            writable_roots,
+            create_dirs,
+            coarse_mounts,
+        } = acc;
 
         let has_closure_arg = positional_inputs
             .iter()
@@ -1064,12 +1074,15 @@ impl<'a, 'ctx> VirBodyLowering<'a, 'ctx> {
         &mut self,
         kind: RuntimeBoundaryKind,
         keyword_expr: ExprId,
-        positional_inputs: &mut Vec<RuntimeBoundaryInputSpec>,
-        mounts: &mut Vec<(crate::exec_types::TreeFilePath, RuntimeBoundaryInputSpec)>,
-        writable_roots: &mut Vec<crate::exec_types::TreeFilePath>,
-        create_dirs: &mut Vec<crate::exec_types::TreeFilePath>,
-        coarse_mounts: &mut Vec<RuntimeBoundaryInputSpec>,
+        acc: &mut BoundaryAccumulator,
     ) -> Result<(), LowerError> {
+        let BoundaryAccumulator {
+            positional_inputs,
+            mounts,
+            writable_roots,
+            create_dirs,
+            coarse_mounts,
+        } = acc;
         let ExprKind::Record(record) = self.arena()[keyword_expr].kind.clone() else {
             return Err(LowerError::UnsupportedShape(
                 "runtime boundary where expects a record".into(),

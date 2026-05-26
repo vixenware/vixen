@@ -375,23 +375,14 @@ fn demo(values: Map[String, String]) {
 
     let state = DocumentState::new_with_uri(text.to_string(), None);
     let offset = TextSize::new(text.find("values.has").unwrap() as u32);
-    // We need a TypeEnv to intern the Map type, but the test currently passes a Ty value.
-    // Reuse the document's env (it's already populated with stdlib) to intern.
-    let map_ty = {
-        // Use the document's env via DocumentState to intern. Take a snapshot of TypeId.
-        let state_env = state.types();
-        // intern is &mut on TypeEnv; since state.types() returns &TypeCollection, build a
-        // fresh local env by lookup. But the Map(K,V) type needs a TypeEnv for sub-ids.
-        // For this test we only need the *shape* of Ty::Map to drive `completions_for_type`
-        // — the inner key/value ids don't need to resolve from `state`'s env, because the
-        // function only inspects the variant tag (`Ty::Map`) to fetch the namespace name.
-        // Use placeholder TypeId(0) — `completions_for_type` doesn't dereference K or V.
-        let _ = state_env;
-        vx_types::Ty::Map(vx_types::MapTy {
-            key: vx_types::TypeId(0),
-            value: vx_types::TypeId(0),
-        })
-    };
+    // Get the actual `Map[String, String]` Ty out of the document — the binding
+    // for `values` has its type populated by type checking, and that's the
+    // same Ty (interned in the doc's env) we want completions for.
+    let values_binding = definition_named(&state, "values");
+    let map_ty_id = state
+        .inferred_def_type(values_binding)
+        .expect("`values` should have an inferred Map type");
+    let map_ty = state.types().env.get_ty(map_ty_id).clone();
     let items = completions_for_type(&map_ty, &state, offset).expect("member completions");
 
     let has = items
