@@ -3,10 +3,21 @@ use std::{fs, path::Path};
 use rowan::TextSize;
 
 use crate::{
-    AstNode, Breadcrumb, DocumentSymbol, Expr, FoldingRangeKind, Item, LineIndex, MapEntry,
-    PathLiteralExpr, Position, SemanticTokenType, SourceFile, Stmt, SymbolKind, SyntaxKind, Type,
-    document_symbols, enclosing_nodes, folding_ranges, parse, parse_source_file, semantic_tokens,
+    AstNode, Breadcrumb, DocumentSymbol, Expr, FoldingRangeKind, Item, LineIndex, MapEntry, Parse,
+    Parsed, PathLiteralExpr, Position, SemanticTokenType, SourceFile, SourceId, Stmt, SymbolKind,
+    SyntaxKind, Type, document_symbols, enclosing_nodes, folding_ranges, semantic_tokens,
 };
+
+/// Test wrapper that defaults the source id to `SourceId(0)` so the test
+/// bodies stay terse.
+fn parse(source: &str) -> Parse {
+    crate::parse(source, SourceId::default())
+}
+
+/// Test wrapper that defaults the source id to `SourceId(0)`.
+fn parse_source_file(source: &str) -> Parsed<SourceFile> {
+    crate::parse_source_file(source, SourceId::default())
+}
 
 #[test]
 fn parser_does_not_panic_on_if_without_else() {

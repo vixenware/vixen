@@ -1,6 +1,6 @@
 use std::marker::PhantomData;
 
-use crate::{AstNode, Parse, SourceFile, SyntaxError, SyntaxNode, parse};
+use crate::{AstNode, Parse, ParseDiagnostic, SourceFile, SourceId, SyntaxNode, parse};
 
 #[derive(Debug, Clone)]
 pub struct Parsed<T> {
@@ -16,7 +16,7 @@ impl<T> Parsed<T> {
         }
     }
 
-    pub fn errors(&self) -> &[SyntaxError] {
+    pub fn errors(&self) -> &[ParseDiagnostic] {
         self.parse.errors()
     }
 
@@ -35,6 +35,6 @@ impl<T: AstNode> Parsed<T> {
     }
 }
 
-pub fn parse_source_file(source: &str) -> Parsed<SourceFile> {
-    Parsed::new(parse(source))
+pub fn parse_source_file(source: &str, source_id: SourceId) -> Parsed<SourceFile> {
+    Parsed::new(parse(source, source_id))
 }

@@ -22,7 +22,7 @@ use crate::type_collect::collect_types_vir;
 
 #[derive(Debug)]
 pub enum CompileError {
-    Parse(Vec<vx_parser::SyntaxError>),
+    Parse(Vec<vx_parser::ParseDiagnostic>),
     Resolve(Vec<IrDiagnostic>),
     Type(Vec<IrDiagnostic>),
     Capability(Vec<IrDiagnostic>),
@@ -105,7 +105,7 @@ pub fn compile_source(
     function_name: &str,
 ) -> Result<ExecutableProgram, CompileError> {
     // Parse user source — short-circuit on errors.
-    let parsed = vx_parser::parse_source_file(source);
+    let parsed = vx_parser::parse_source_file(source, SourceId(0));
     if !parsed.errors().is_empty() {
         return Err(CompileError::Parse(parsed.errors().to_vec()));
     }
@@ -113,14 +113,15 @@ pub fn compile_source(
     // Parse stdlib sources (trusted — panic on errors).
     let mut sources: Vec<(SourceId, vx_parser::SourceFile)> = vec![(SourceId(0), parsed.tree())];
     for (i, stdlib) in vx_stdlib::stdlib_sources().iter().enumerate() {
-        let stdlib_parsed = vx_parser::parse_source_file(stdlib.text);
+        let stdlib_id = SourceId(i as u32 + 1);
+        let stdlib_parsed = vx_parser::parse_source_file(stdlib.text, stdlib_id);
         assert!(
             stdlib_parsed.errors().is_empty(),
             "stdlib source {} has parse errors: {:?}",
             stdlib.logical_path,
             stdlib_parsed.errors()
         );
-        sources.push((SourceId(i as u32 + 1), stdlib_parsed.tree()));
+        sources.push((stdlib_id, stdlib_parsed.tree()));
     }
 
     // Build VIR.
@@ -208,14 +209,15 @@ fn probe() #discover -> String (
 "#;
 
     fn semantically_analyze(source: &str) -> crate::build::VirProgram {
-        let parsed = vx_parser::parse_source_file(source);
+        let parsed = vx_parser::parse_source_file(source, SourceId(0));
         assert!(parsed.errors().is_empty(), "source should parse");
 
         let mut sources = vec![(SourceId(0), parsed.tree())];
         for (i, stdlib) in stdlib_sources().iter().enumerate() {
-            let stdlib_parsed = vx_parser::parse_source_file(stdlib.text);
+            let stdlib_id = SourceId(i as u32 + 1);
+            let stdlib_parsed = vx_parser::parse_source_file(stdlib.text, stdlib_id);
             assert!(stdlib_parsed.errors().is_empty(), "stdlib should parse");
-            sources.push((SourceId(i as u32 + 1), stdlib_parsed.tree()));
+            sources.push((stdlib_id, stdlib_parsed.tree()));
         }
 
         let mut program = VirBuilder::build_program(&sources);

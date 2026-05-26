@@ -14,7 +14,7 @@ use vx_types::{Scalar, Ty};
 
 /// Helper: build VIR, resolve names, collect types, run type checker.
 fn check_source(source: &str) -> (VirArena, TypeCollection, TypeCheckVirResult) {
-    let parsed = parse_source_file(source);
+    let parsed = parse_source_file(source, SourceId(0));
     let file = parsed.tree();
     let mut program = VirBuilder::build_program(&[(SourceId(0), file)]);
     let mut tc = collect_types_vir(&mut program.arena);

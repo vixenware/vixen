@@ -12,7 +12,7 @@ use vx_rt::{RtValue, eval_program};
 
 /// Build VIR, resolve, analyze demand, lower, eval.
 fn eval_vir(source: &str, args: &[RtValue]) -> Result<RtValue, String> {
-    let parsed = parse_source_file(source);
+    let parsed = parse_source_file(source, SourceId(0));
     let file = parsed.tree();
     let mut program = VirBuilder::build_program(&[(SourceId(0), file)]);
     let _errors = resolve_names(&mut program.arena);

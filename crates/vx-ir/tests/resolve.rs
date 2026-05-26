@@ -26,7 +26,7 @@ fn build_and_resolve(
     vx_ir::SourceUnitId,
     Vec<ResolveDiag>,
 ) {
-    let parsed = parse_source_file(source);
+    let parsed = parse_source_file(source, SourceId(0));
     let file = parsed.tree();
     let mut program = VirBuilder::build_program(&[(SourceId(0), file)]);
     let su_id = program.source_units[0];

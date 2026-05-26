@@ -30,8 +30,13 @@ pub use lsp::{
     semantic_tokens,
 };
 
+mod diagnostic;
+pub use diagnostic::{ExpectedKind, LegacySyntaxKind, ParseDiagnostic};
+
+mod diagnostic_report;
+
 mod parser;
-pub use parser::{Parse, SyntaxError, parse};
+pub use parser::{Parse, parse};
 
 mod parsed;
 pub use parsed::{Parsed, parse_source_file};

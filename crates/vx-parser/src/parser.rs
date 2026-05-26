@@ -2,18 +2,14 @@ use std::mem;
 
 use rowan::{GreenNode, GreenNodeBuilder, Language, TextRange, TextSize};
 
+use crate::diagnostic::{ExpectedKind, LegacySyntaxKind, ParseDiagnostic};
+use crate::source::{SourceId, SourceSpan};
 use crate::{SyntaxKind, SyntaxNode, Token, VxLanguage, lex};
-
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub struct SyntaxError {
-    pub message: String,
-    pub range: TextRange,
-}
 
 #[derive(Debug, Clone)]
 pub struct Parse {
     green: GreenNode,
-    errors: Vec<SyntaxError>,
+    errors: Vec<ParseDiagnostic>,
 }
 
 impl Parse {
@@ -21,19 +17,19 @@ impl Parse {
         SyntaxNode::new_root(self.green.clone())
     }
 
-    pub fn errors(&self) -> &[SyntaxError] {
+    pub fn errors(&self) -> &[ParseDiagnostic] {
         &self.errors
     }
 }
 
-pub fn parse(source: &str) -> Parse {
+pub fn parse(source: &str, source_id: SourceId) -> Parse {
     let tokens = lex(source);
     let significant = tokens
         .iter()
         .enumerate()
         .filter_map(|(idx, token)| (!token.kind.is_trivia()).then_some(idx))
         .collect::<Vec<_>>();
-    let mut parser = Parser::new(source, &tokens, significant);
+    let mut parser = Parser::new(source, source_id, &tokens, significant);
     source_file(&mut parser);
     let events = parser.finish();
     Sink::new(source, &tokens, events).finish()
@@ -49,7 +45,7 @@ enum Event {
     Token {
         token_index: usize,
     },
-    Error(SyntaxError),
+    Error(ParseDiagnostic),
 }
 
 impl Event {
@@ -63,6 +59,7 @@ impl Event {
 
 struct Parser<'a> {
     source: &'a str,
+    source_id: SourceId,
     tokens: &'a [Token],
     significant: Vec<usize>,
     pos: usize,
@@ -71,9 +68,15 @@ struct Parser<'a> {
 }
 
 impl<'a> Parser<'a> {
-    fn new(source: &'a str, tokens: &'a [Token], significant: Vec<usize>) -> Self {
+    fn new(
+        source: &'a str,
+        source_id: SourceId,
+        tokens: &'a [Token],
+        significant: Vec<usize>,
+    ) -> Self {
         Self {
             source,
+            source_id,
             tokens,
             significant,
             pos: 0,
@@ -133,20 +136,41 @@ impl<'a> Parser<'a> {
 
     fn expect(&mut self, kind: SyntaxKind) {
         if !self.eat(kind) {
-            self.error(format!("expected {:?}", kind));
+            self.expect_token(kind);
         }
     }
 
-    fn error(&mut self, message: impl Into<String>) {
-        self.events.push(Event::Error(SyntaxError {
-            message: message.into(),
-            range: self.current_range(),
-        }));
+    /// Diagnose "expected a specific token kind".
+    fn expect_token(&mut self, kind: SyntaxKind) {
+        self.diagnose(ParseDiagnostic::Expected {
+            what: ExpectedKind::Token(kind),
+            at: self.current_span(),
+        });
     }
 
-    fn error_and_bump(&mut self, message: impl Into<String>) -> CompletedMarker {
+    /// Diagnose "expected <construct>" at the current position.
+    fn diagnose_at(&mut self, what: ExpectedKind) {
+        self.diagnose(ParseDiagnostic::Expected {
+            what,
+            at: self.current_span(),
+        });
+    }
+
+    /// Diagnose a legacy-syntax usage at the current position.
+    fn diagnose_legacy(&mut self, kind: LegacySyntaxKind) {
+        self.diagnose(ParseDiagnostic::LegacySyntax {
+            kind,
+            at: self.current_span(),
+        });
+    }
+
+    fn diagnose(&mut self, d: ParseDiagnostic) {
+        self.events.push(Event::Error(d));
+    }
+
+    fn diagnose_and_bump(&mut self, what: ExpectedKind) -> CompletedMarker {
         let marker = self.start();
-        self.error(message);
+        self.diagnose_at(what);
         if self.current() != SyntaxKind::EOF {
             self.bump();
         }
@@ -162,6 +186,10 @@ impl<'a> Parser<'a> {
                     TextSize::from(u32::try_from(self.source.len()).expect("source too large"));
                 TextRange::new(end, end)
             })
+    }
+
+    fn current_span(&self) -> SourceSpan {
+        SourceSpan::new(self.source_id, self.current_range())
     }
 
     fn has_significant_gap_before_current(&self) -> bool {
@@ -229,7 +257,7 @@ struct Sink<'a> {
     tokens: &'a [Token],
     events: Vec<Event>,
     builder: GreenNodeBuilder<'static>,
-    errors: Vec<SyntaxError>,
+    errors: Vec<ParseDiagnostic>,
     token_pos: usize,
 }
 
@@ -343,7 +371,7 @@ fn decl_stmt(p: &mut Parser<'_>) {
             marker.complete(p, SyntaxKind::NAMESPACE_DECL);
         }
         _ => {
-            p.error("expected declaration");
+            p.diagnose_at(ExpectedKind::Declaration);
             p.recover_while(|kind| !is_stmt_start(kind));
             marker.complete(p, SyntaxKind::ERROR);
         }
@@ -366,7 +394,7 @@ fn attributes(p: &mut Parser<'_>) {
                 if p.at(SyntaxKind::LOWER_IDENT) {
                     p.bump();
                 } else {
-                    p.error("expected attribute key");
+                    p.diagnose_at(ExpectedKind::AttributeKey);
                 }
                 if p.eat(SyntaxKind::EQ) {
                     expr(p);
@@ -417,7 +445,7 @@ fn struct_decl_contents(p: &mut Parser<'_>, allow_anonymous: bool) {
     if p.at(SyntaxKind::UPPER_IDENT) {
         p.bump();
     } else if !allow_anonymous {
-        p.error("expected type name");
+        p.diagnose_at(ExpectedKind::TypeName);
     }
     type_param_list(p);
     if p.at(SyntaxKind::L_CURLY) {
@@ -431,7 +459,7 @@ fn enum_decl_contents(p: &mut Parser<'_>, allow_anonymous: bool) {
     if p.at(SyntaxKind::UPPER_IDENT) {
         p.bump();
     } else if !allow_anonymous {
-        p.error("expected type name");
+        p.diagnose_at(ExpectedKind::TypeName);
     }
     type_param_list(p);
     enum_body(p);
@@ -443,7 +471,7 @@ fn newtype_decl_contents(p: &mut Parser<'_>, allow_anonymous: bool) {
     if p.at(SyntaxKind::UPPER_IDENT) {
         p.bump();
     } else if !allow_anonymous {
-        p.error("expected type name");
+        p.diagnose_at(ExpectedKind::TypeName);
     }
     type_param_list(p);
     p.expect(SyntaxKind::OF_KW);
@@ -456,7 +484,7 @@ fn type_alias_decl_contents(p: &mut Parser<'_>, allow_anonymous: bool) {
     if p.at(SyntaxKind::UPPER_IDENT) {
         p.bump();
     } else if !allow_anonymous {
-        p.error("expected type name");
+        p.diagnose_at(ExpectedKind::TypeName);
     }
     type_param_list(p);
     if p.eat(SyntaxKind::EQ) {
@@ -491,7 +519,7 @@ fn inline_type_decl(p: &mut Parser<'_>) {
             marker.complete(p, SyntaxKind::INLINE_TYPE_ALIAS_DECL);
         }
         _ => {
-            p.error("expected inline type declaration");
+            p.diagnose_at(ExpectedKind::InlineTypeDeclaration);
             marker.complete(p, SyntaxKind::ERROR);
         }
     }
@@ -506,7 +534,7 @@ fn struct_body(p: &mut Parser<'_>) {
         if p.at(SyntaxKind::LOWER_IDENT) {
             p.bump();
         } else {
-            p.error("expected field name");
+            p.diagnose_at(ExpectedKind::FieldName);
         }
         p.expect(SyntaxKind::COLON);
         slot_type(p);
@@ -532,7 +560,7 @@ fn enum_body(p: &mut Parser<'_>) {
         if p.at(SyntaxKind::UPPER_IDENT) {
             p.bump();
         } else {
-            p.error("expected variant name");
+            p.diagnose_at(ExpectedKind::VariantName);
         }
         if p.at(SyntaxKind::L_CURLY) {
             struct_body(p);
@@ -554,7 +582,7 @@ fn namespace_body(p: &mut Parser<'_>) {
             decl_stmt(p);
             p.eat(SyntaxKind::SEMICOLON);
         } else {
-            p.error("expected declaration");
+            p.diagnose_at(ExpectedKind::Declaration);
             recover_decl_list(p);
             p.eat(SyntaxKind::SEMICOLON);
         }
@@ -572,7 +600,7 @@ fn keyword_parameter_block(p: &mut Parser<'_>) {
         if p.at(SyntaxKind::LOWER_IDENT) {
             p.bump();
         } else {
-            p.error("expected keyword parameter name");
+            p.diagnose_at(ExpectedKind::KeywordParameterName);
         }
         p.expect(SyntaxKind::COLON);
         slot_type(p);
@@ -599,7 +627,7 @@ fn type_param_list(p: &mut Parser<'_>) {
         if p.at(SyntaxKind::UPPER_IDENT) {
             p.bump();
         } else {
-            p.error("expected type parameter");
+            p.diagnose_at(ExpectedKind::TypeParameter);
             break;
         }
         if !p.eat(SyntaxKind::COMMA) {
@@ -641,7 +669,7 @@ fn parameter_clause(p: &mut Parser<'_>) {
             if p.at(SyntaxKind::LOWER_IDENT) {
                 p.bump();
             } else {
-                p.error("expected keyword parameter name");
+                p.diagnose_at(ExpectedKind::KeywordParameterName);
             }
             p.expect(SyntaxKind::COLON);
             slot_type(p);
@@ -709,7 +737,7 @@ fn type_sum_term(p: &mut Parser<'_>) -> CompletedMarker {
         SyntaxKind::FN_TYPE_KW => function_type(p),
         SyntaxKind::L_PAREN => tuple_or_paren_type(p),
         SyntaxKind::UPPER_IDENT => type_path(p),
-        _ => return p.error_and_bump("expected type"),
+        _ => return p.diagnose_and_bump(ExpectedKind::Type),
     };
 
     if p.at(SyntaxKind::QUESTION) {
@@ -778,7 +806,7 @@ fn type_path(p: &mut Parser<'_>) -> CompletedMarker {
         if p.at(SyntaxKind::UPPER_IDENT) {
             p.bump();
         } else {
-            p.error("expected type member");
+            p.diagnose_at(ExpectedKind::TypeMember);
             break;
         }
     }
@@ -824,7 +852,7 @@ fn wildcard_or_unit_pattern(p: &mut Parser<'_>) -> CompletedMarker {
     } else if p.at(SyntaxKind::ERROR_TOKEN) {
         p.bump();
     } else {
-        p.error("expected binding pattern");
+        p.diagnose_at(ExpectedKind::BindingPattern);
     }
     marker.complete(p, SyntaxKind::WILDCARD_PATTERN)
 }
@@ -864,7 +892,7 @@ fn struct_pattern(p: &mut Parser<'_>) -> CompletedMarker {
         } else if p.at(SyntaxKind::DOT2) {
             p.bump();
         } else {
-            p.error("expected struct pattern field");
+            p.diagnose_at(ExpectedKind::StructPatternField);
             break;
         }
         field.complete(p, SyntaxKind::STRUCT_PATTERN_FIELD);
@@ -923,7 +951,7 @@ fn delimited_block_expr(
             break;
         }
         if stmt_kind == StmtKind::Expr && is_stmt_start(p.current()) {
-            p.error("expected SEMICOLON");
+            p.expect_token(SyntaxKind::SEMICOLON);
             continue;
         }
         if stmt_kind == StmtKind::Decl
@@ -932,9 +960,9 @@ fn delimited_block_expr(
             continue;
         }
         if stmt_kind == StmtKind::Delimited || stmt_kind == StmtKind::Decl {
-            p.error("expected SEMICOLON");
+            p.expect_token(SyntaxKind::SEMICOLON);
         } else {
-            p.error(format!("expected {:?} or SEMICOLON", close));
+            p.diagnose_at(ExpectedKind::TokenOrSemicolon(close));
         }
         recover_block(p);
         p.eat(SyntaxKind::SEMICOLON);
@@ -1199,9 +1227,9 @@ fn path_literal_expr(p: &mut Parser<'_>) -> CompletedMarker {
     } else {
         let saw_bare = path_bare_contents(p);
         if !saw_bare {
-            p.error("expected bare path or @(...) path literal");
+            p.diagnose_at(ExpectedKind::BarePathOrPathLiteral);
         } else if p.at(SyntaxKind::L_PAREN) {
-            p.error("old @attribute syntax is not supported; use #[...]");
+            p.diagnose_legacy(LegacySyntaxKind::AtAttribute);
         }
     }
     marker.complete(p, SyntaxKind::PATH_LITERAL_EXPR)
@@ -1251,7 +1279,7 @@ fn application_expr(p: &mut Parser<'_>) -> CompletedMarker {
             ) {
                 p.bump();
             } else {
-                p.error("expected field name");
+                p.diagnose_at(ExpectedKind::FieldName);
             }
             lhs = marker.complete(p, SyntaxKind::FIELD_EXPR);
             continue;
@@ -1321,7 +1349,7 @@ fn atom_expr(p: &mut Parser<'_>) -> CompletedMarker {
         | SyntaxKind::STRING
         | SyntaxKind::TRUE_KW
         | SyntaxKind::FALSE_KW => literal_expr(p),
-        _ => p.error_and_bump("expected expression"),
+        _ => p.diagnose_and_bump(ExpectedKind::Expression),
     }
 }
 
@@ -1331,7 +1359,7 @@ fn symbol_literal_expr(p: &mut Parser<'_>) -> CompletedMarker {
     if p.at(SyntaxKind::LOWER_IDENT) {
         p.bump();
     } else {
-        p.error("expected symbol name");
+        p.diagnose_at(ExpectedKind::SymbolName);
     }
     marker.complete(p, SyntaxKind::LITERAL_EXPR)
 }
@@ -1341,7 +1369,7 @@ fn name_expr(p: &mut Parser<'_>) -> CompletedMarker {
     let marker = p.start();
     match p.current() {
         SyntaxKind::LOWER_IDENT | SyntaxKind::DOLLAR_IDENT | SyntaxKind::UNDERSCORE => p.bump(),
-        _ => p.error("expected identifier"),
+        _ => p.diagnose_at(ExpectedKind::Identifier),
     }
     marker.complete(p, SyntaxKind::NAME_REF_EXPR)
 }
@@ -1383,7 +1411,7 @@ fn interpolated_string_expr(p: &mut Parser<'_>) -> CompletedMarker {
             p.expect(SyntaxKind::INTERP_END);
             interpolation.complete(p, SyntaxKind::STRING_INTERPOLATION);
         } else {
-            p.error_and_bump("expected interpolated string content");
+            p.diagnose_and_bump(ExpectedKind::InterpolatedStringContent);
         }
     }
     p.expect(SyntaxKind::BACKTICK);
@@ -1470,7 +1498,7 @@ fn brace_literal_expr(p: &mut Parser<'_>) -> CompletedMarker {
             if p.at(SyntaxKind::LOWER_IDENT) {
                 p.bump();
             } else {
-                p.error("expected shorthand field name");
+                p.diagnose_at(ExpectedKind::ShorthandFieldName);
             }
         } else if p.at(SyntaxKind::LOWER_IDENT) {
             p.bump();
@@ -1478,7 +1506,7 @@ fn brace_literal_expr(p: &mut Parser<'_>) -> CompletedMarker {
                 expr(p);
             }
         } else {
-            p.error("expected record field name");
+            p.diagnose_at(ExpectedKind::RecordFieldName);
             p.bump();
         }
         entry.complete(p, SyntaxKind::MAP_ENTRY);
@@ -1531,7 +1559,7 @@ fn struct_literal_body(p: &mut Parser<'_>) {
             if p.at(SyntaxKind::LOWER_IDENT) {
                 p.bump();
             } else {
-                p.error("expected shorthand field name");
+                p.diagnose_at(ExpectedKind::ShorthandFieldName);
             }
         } else if p.at(SyntaxKind::LOWER_IDENT) {
             p.bump();
@@ -1539,7 +1567,7 @@ fn struct_literal_body(p: &mut Parser<'_>) {
                 expr(p);
             }
         } else {
-            p.error("expected struct field name");
+            p.diagnose_at(ExpectedKind::StructFieldName);
             p.bump();
         }
         field.complete(p, SyntaxKind::STRUCT_LITERAL_FIELD);
@@ -1582,14 +1610,14 @@ fn field_path(p: &mut Parser<'_>) -> CompletedMarker {
     if p.at(SyntaxKind::LOWER_IDENT) {
         p.bump();
     } else {
-        p.error("expected field path");
+        p.diagnose_at(ExpectedKind::FieldPath);
     }
     while p.at(SyntaxKind::DOT) {
         p.bump();
         if p.at(SyntaxKind::LOWER_IDENT) {
             p.bump();
         } else {
-            p.error("expected field name");
+            p.diagnose_at(ExpectedKind::FieldName);
             break;
         }
     }
@@ -1654,7 +1682,7 @@ fn match_expr(p: &mut Parser<'_>) -> CompletedMarker {
         if p.at(close) || p.at(SyntaxKind::EOF) {
             break;
         }
-        p.error("expected COMMA");
+        p.expect_token(SyntaxKind::COMMA);
         recover_match(p);
         p.eat(SyntaxKind::COMMA);
     }
@@ -1715,7 +1743,7 @@ fn pattern_atom(p: &mut Parser<'_>) -> CompletedMarker {
         SyntaxKind::L_PAREN => general_tuple_or_paren_pattern(p), // r[pattern.tuple]
         SyntaxKind::L_CURLY => general_struct_pattern(p), // r[pattern.struct]
         SyntaxKind::L_BRACKET => general_array_pattern(p), // r[pattern.array]
-        _ => p.error_and_bump("expected pattern"),
+        _ => p.diagnose_and_bump(ExpectedKind::Pattern),
     }
 }
 
@@ -1770,7 +1798,7 @@ fn general_struct_pattern(p: &mut Parser<'_>) -> CompletedMarker {
         } else if p.at(SyntaxKind::DOT2) {
             p.bump();
         } else {
-            p.error("expected struct pattern field");
+            p.diagnose_at(ExpectedKind::StructPatternField);
             break;
         }
         field.complete(p, SyntaxKind::STRUCT_PATTERN_FIELD);
@@ -1813,7 +1841,7 @@ fn import_expr(p: &mut Parser<'_>) -> CompletedMarker {
     if p.at(SyntaxKind::STRING) {
         p.bump();
     } else {
-        p.error("expected string literal");
+        p.diagnose_at(ExpectedKind::StringLiteral);
     }
     p.expect(SyntaxKind::R_PAREN);
     marker.complete(p, SyntaxKind::IMPORT_EXPR)
@@ -2216,6 +2244,6 @@ fn name(p: &mut Parser<'_>, allow_upper: bool) {
     match p.current() {
         SyntaxKind::LOWER_IDENT => p.bump(),
         SyntaxKind::UPPER_IDENT if allow_upper => p.bump(),
-        _ => p.error("expected identifier"),
+        _ => p.diagnose_at(ExpectedKind::Identifier),
     }
 }

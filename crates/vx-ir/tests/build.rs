@@ -11,7 +11,7 @@ use vx_ir::stmt::StmtKind;
 use vx_parser::{SourceId, parse_source_file};
 
 fn build_single(source: &str) -> (vx_ir::arena::VirArena, vx_ir::SourceUnitId) {
-    let parsed = parse_source_file(source);
+    let parsed = parse_source_file(source, SourceId(0));
     let file = parsed.tree();
     let program = VirBuilder::build_program(&[(SourceId(0), file)]);
     let su_id = program.source_units[0];

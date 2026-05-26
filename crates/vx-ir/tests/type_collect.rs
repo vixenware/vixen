@@ -9,7 +9,7 @@ use vx_types::{Scalar, Ty, TypeDef};
 
 /// Helper: build VIR and run type collection.
 fn collect_from_source(source: &str) -> (vx_ir::arena::VirArena, vx_ir::TypeCollection) {
-    let parsed = parse_source_file(source);
+    let parsed = parse_source_file(source, SourceId(0));
     let file = parsed.tree();
     let mut program = VirBuilder::build_program(&[(SourceId(0), file)]);
     let tc = collect_types_vir(&mut program.arena);

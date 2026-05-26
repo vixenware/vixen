@@ -13,7 +13,7 @@ use vx_parser::{SourceId, parse_source_file};
 /// primary span — tests assert against name shape, not raw strings inside
 /// the diagnostic (which no longer exist).
 fn cap_check_source(source: &str) -> Vec<(IrDiagnostic, String)> {
-    let parsed = parse_source_file(source);
+    let parsed = parse_source_file(source, SourceId(0));
     let file = parsed.tree();
     let mut program = VirBuilder::build_program(&[(SourceId(0), file)]);
     let mut tc = collect_types_vir(&mut program.arena);

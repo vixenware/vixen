@@ -63,14 +63,14 @@ impl DocumentState {
     }
 
     pub(crate) fn new_with_uri(text: String, current_uri: Option<Url>) -> Self {
-        let parsed = vx::parse_source_file(&text);
+        let current_source = SourceId(0);
+        let parsed = vx::parse_source_file(&text, current_source);
         let line_index = vx::LineIndex::new(&text);
 
         // ------------------------------------------------------------------
         // Build source catalog: user source first (SourceId(0)), then stdlib.
         // Mirrors vx_ir::compile::compile_source.
         // ------------------------------------------------------------------
-        let current_source = SourceId(0);
         let mut source_docs: HashMap<SourceId, SourceDoc> = HashMap::new();
         source_docs.insert(
             current_source,
@@ -85,7 +85,7 @@ impl DocumentState {
         let mut sources: Vec<(SourceId, vx::SourceFile)> = vec![(current_source, parsed.tree())];
         for (i, stdlib) in vx_stdlib::stdlib_sources().iter().enumerate() {
             let stdlib_id = SourceId(i as u32 + 1);
-            let stdlib_parsed = vx::parse_source_file(stdlib.text);
+            let stdlib_parsed = vx::parse_source_file(stdlib.text, stdlib_id);
             let stdlib_line_index = vx::LineIndex::new(stdlib.text);
             let uri = Url::from_file_path(vx_stdlib::source_disk_path(stdlib.logical_path)).ok();
             source_docs.insert(
@@ -1592,10 +1592,10 @@ impl VxLanguageServer {
             .errors()
             .iter()
             .map(|err| Diagnostic {
-                range: state.to_lsp_range(err.range),
+                range: state.to_lsp_range(err.primary_span().range),
                 severity: Some(DiagnosticSeverity::ERROR),
                 source: Some("vx-parser".to_string()),
-                message: err.message.clone(),
+                message: format_parse_diagnostic(err),
                 ..Default::default()
             })
             .collect();
@@ -1704,6 +1704,53 @@ impl VxLanguageServer {
         self.client
             .publish_diagnostics(uri.clone(), diagnostics, None)
             .await;
+    }
+}
+
+/// Render a [`vx_parser::ParseDiagnostic`] to an LSP-protocol message
+/// string. The structured diagnostic itself stays string-free; we only
+/// stringify here at the boundary.
+fn format_parse_diagnostic(diag: &vx_parser::ParseDiagnostic) -> String {
+    use vx_parser::{ExpectedKind, LegacySyntaxKind, ParseDiagnostic};
+    match diag {
+        ParseDiagnostic::Expected { what, .. } => match what {
+            ExpectedKind::Token(kind) => format!("expected `{:?}`", kind),
+            ExpectedKind::TokenOrSemicolon(kind) => format!("expected `{:?}` or `;`", kind),
+            ExpectedKind::Declaration => "expected a declaration".to_string(),
+            ExpectedKind::AttributeKey => "expected an attribute key".to_string(),
+            ExpectedKind::TypeName => "expected a type name".to_string(),
+            ExpectedKind::InlineTypeDeclaration => {
+                "expected an inline type declaration".to_string()
+            }
+            ExpectedKind::FieldName => "expected a field name".to_string(),
+            ExpectedKind::VariantName => "expected a variant name".to_string(),
+            ExpectedKind::KeywordParameterName => "expected a keyword parameter name".to_string(),
+            ExpectedKind::TypeParameter => "expected a type parameter".to_string(),
+            ExpectedKind::TypeMember => "expected a type member".to_string(),
+            ExpectedKind::BindingPattern => "expected a binding pattern".to_string(),
+            ExpectedKind::StructPatternField => "expected a struct pattern field".to_string(),
+            ExpectedKind::BarePathOrPathLiteral => {
+                "expected a bare path or `@(...)` path literal".to_string()
+            }
+            ExpectedKind::ShorthandFieldName => "expected a shorthand field name".to_string(),
+            ExpectedKind::RecordFieldName => "expected a record field name".to_string(),
+            ExpectedKind::StructFieldName => "expected a struct field name".to_string(),
+            ExpectedKind::FieldPath => "expected a field path".to_string(),
+            ExpectedKind::SymbolName => "expected a symbol name".to_string(),
+            ExpectedKind::Identifier => "expected an identifier".to_string(),
+            ExpectedKind::StringLiteral => "expected a string literal".to_string(),
+            ExpectedKind::Type => "expected a type".to_string(),
+            ExpectedKind::Expression => "expected an expression".to_string(),
+            ExpectedKind::Pattern => "expected a pattern".to_string(),
+            ExpectedKind::InterpolatedStringContent => {
+                "expected interpolated string content".to_string()
+            }
+        },
+        ParseDiagnostic::LegacySyntax { kind, .. } => match kind {
+            LegacySyntaxKind::AtAttribute => {
+                "old `@attribute` syntax is no longer supported; use `#[...]`".to_string()
+            }
+        },
     }
 }
 
