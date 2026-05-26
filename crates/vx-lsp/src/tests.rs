@@ -140,15 +140,21 @@ fn build() {
     let tree = definition_named(&state, "tree");
 
     assert_eq!(
-        state
-            .inferred_def_type(proc)
-            .map(|ty| ty.display_with_env(&state.types().env).to_string()),
+        state.inferred_def_type(proc).map(|ty| state
+            .types()
+            .env
+            .get_ty(ty)
+            .display_with_env(&state.types().env)
+            .to_string()),
         Some(String::from("Process"))
     );
     assert_eq!(
-        state
-            .inferred_def_type(tree)
-            .map(|ty| ty.display_with_env(&state.types().env).to_string()),
+        state.inferred_def_type(tree).map(|ty| state
+            .types()
+            .env
+            .get_ty(ty)
+            .display_with_env(&state.types().env)
+            .to_string()),
         Some(String::from("Tree"))
     );
 }
@@ -169,9 +175,12 @@ fn build() {
     let output = definition_named(&state, "output");
 
     assert_eq!(
-        state
-            .inferred_def_type(output)
-            .map(|ty| ty.display_with_env(&state.types().env).to_string()),
+        state.inferred_def_type(output).map(|ty| state
+            .types()
+            .env
+            .get_ty(ty)
+            .display_with_env(&state.types().env)
+            .to_string()),
         Some(String::from("Tree"))
     );
 }
@@ -193,9 +202,12 @@ fn build() {
     let cexec = definition_named(&state, "cexec");
 
     assert_eq!(
-        state
-            .inferred_def_type(cexec)
-            .map(|ty| ty.display_with_env(&state.types().env).to_string()),
+        state.inferred_def_type(cexec).map(|ty| state
+            .types()
+            .env
+            .get_ty(ty)
+            .display_with_env(&state.types().env)
+            .to_string()),
         Some(String::from("Fn(Array[ExecInput]) -> Tree"))
     );
 }
@@ -322,9 +334,14 @@ fn demo(host: Host) {
 
     let state = DocumentState::new_with_uri(text.to_string(), None);
     let offset = TextSize::new(text.find("host.which").unwrap() as u32);
-    let host_id = *state.types().env.lookup("Host").first().expect("Host type");
+    let host_def = *state
+        .types()
+        .env
+        .lookup_def("Host")
+        .first()
+        .expect("Host type");
     let host_ty = vx_types::Ty::Opaque(vx_types::OpaqueTy {
-        id: host_id,
+        def: host_def,
         type_args: vec![],
     });
     let items = completions_for_type(&host_ty, &state, offset).expect("member completions");
@@ -358,10 +375,23 @@ fn demo(values: Map[String, String]) {
 
     let state = DocumentState::new_with_uri(text.to_string(), None);
     let offset = TextSize::new(text.find("values.has").unwrap() as u32);
-    let map_ty = vx_types::Ty::Map(
-        Box::new(vx_types::Ty::Scalar(vx_types::Scalar::String)),
-        Box::new(vx_types::Ty::Scalar(vx_types::Scalar::String)),
-    );
+    // We need a TypeEnv to intern the Map type, but the test currently passes a Ty value.
+    // Reuse the document's env (it's already populated with stdlib) to intern.
+    let map_ty = {
+        // Use the document's env via DocumentState to intern. Take a snapshot of TypeId.
+        let state_env = state.types();
+        // intern is &mut on TypeEnv; since state.types() returns &TypeCollection, build a
+        // fresh local env by lookup. But the Map(K,V) type needs a TypeEnv for sub-ids.
+        // For this test we only need the *shape* of Ty::Map to drive `completions_for_type`
+        // — the inner key/value ids don't need to resolve from `state`'s env, because the
+        // function only inspects the variant tag (`Ty::Map`) to fetch the namespace name.
+        // Use placeholder TypeId(0) — `completions_for_type` doesn't dereference K or V.
+        let _ = state_env;
+        vx_types::Ty::Map(vx_types::MapTy {
+            key: vx_types::TypeId(0),
+            value: vx_types::TypeId(0),
+        })
+    };
     let items = completions_for_type(&map_ty, &state, offset).expect("member completions");
 
     let has = items

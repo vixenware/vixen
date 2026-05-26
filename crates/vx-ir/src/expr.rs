@@ -7,7 +7,7 @@
 
 use crate::{BodyId, ExprId, ItemId, PatternId, ScopeId, StmtId, TypeRefId};
 use vx_parser::SourceSpan;
-use vx_types::Ty;
+use vx_types::TypeId;
 
 /// An expression node in the VIR.
 #[derive(Debug, Clone)]
@@ -30,9 +30,10 @@ pub struct Expr {
     /// Populated during: CST walk.
     pub kind: ExprKind,
 
-    /// The inferred type of this expression.
+    /// The inferred type of this expression — an interned [`TypeId`] from
+    /// the enclosing [`vx_types::TypeEnv`].
     /// Populated during: type checking pass. `None` before that.
-    pub ty: Option<Ty>,
+    pub ty: Option<TypeId>,
 }
 
 // ---------------------------------------------------------------------------

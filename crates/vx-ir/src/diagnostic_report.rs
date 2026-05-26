@@ -64,8 +64,8 @@ impl IrDiagnostic {
                         *arg,
                         Some(format!(
                             "expected `{}`, found `{}`",
-                            expected.display_with_env(env),
-                            found.display_with_env(env)
+                            env.get_ty(*expected).display_with_env(env),
+                            env.get_ty(*found).display_with_env(env)
                         )),
                     ),
                     context(*param, Some("parameter declared here".to_string())),
@@ -90,12 +90,18 @@ impl IrDiagnostic {
                         Some(format!(
                             "`{}` cannot be applied to `{}` and `{}`",
                             op_kind_label(*op_kind),
-                            lhs_ty.display_with_env(env),
-                            rhs_ty.display_with_env(env)
+                            env.get_ty(*lhs_ty).display_with_env(env),
+                            env.get_ty(*rhs_ty).display_with_env(env)
                         )),
                     ),
-                    context(*lhs, Some(format!("{}", lhs_ty.display_with_env(env)))),
-                    context(*rhs, Some(format!("{}", rhs_ty.display_with_env(env)))),
+                    context(
+                        *lhs,
+                        Some(format!("{}", env.get_ty(*lhs_ty).display_with_env(env))),
+                    ),
+                    context(
+                        *rhs,
+                        Some(format!("{}", env.get_ty(*rhs_ty).display_with_env(env))),
+                    ),
                 ],
                 notes: Vec::new(),
                 sections: Vec::new(),
@@ -112,12 +118,15 @@ impl IrDiagnostic {
                         *method_call,
                         Some(format!(
                             "type `{}` has no method here",
-                            receiver_ty.display_with_env(env)
+                            env.get_ty(*receiver_ty).display_with_env(env)
                         )),
                     ),
                     context(
                         *receiver,
-                        Some(format!("{}", receiver_ty.display_with_env(env))),
+                        Some(format!(
+                            "{}",
+                            env.get_ty(*receiver_ty).display_with_env(env)
+                        )),
                     ),
                 ];
                 for candidate in candidates {

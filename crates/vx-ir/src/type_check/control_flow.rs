@@ -1,6 +1,6 @@
 //! If, match, block, and statement checking.
 
-use vx_types::Ty;
+use vx_types::TypeId;
 
 use crate::StmtId;
 use crate::expr::{BlockExpr, IfExpr, MatchExpr};
@@ -10,7 +10,7 @@ use super::TypeChecker;
 use super::patterns::type_pattern;
 use crate::diagnostic::IrDiagnostic;
 
-pub(crate) fn infer_block(tc: &mut TypeChecker, block: &BlockExpr) -> Ty {
+pub(crate) fn infer_block(tc: &mut TypeChecker, block: &BlockExpr) -> TypeId {
     let stmts = block.stmts.clone();
     let tail = block.tail;
     let is_synthetic = block.synthetic;
@@ -24,7 +24,7 @@ pub(crate) fn infer_block(tc: &mut TypeChecker, block: &BlockExpr) -> Ty {
     if let Some(tail_id) = tail {
         tc.infer_expr(tail_id)
     } else {
-        Ty::Unit
+        tc.unit()
     }
 }
 
@@ -37,13 +37,13 @@ fn check_stmt(tc: &mut TypeChecker, stmt_id: StmtId, is_tail: bool) {
             let annotation_ty = let_
                 .ty
                 .map(|tr_id| tc.resolve_type_ref_id(tr_id))
-                .filter(|t| !t.is_poison());
+                .filter(|t| !tc.types.env.get_ty(*t).is_poison());
 
             let inferred_ty = tc.infer_expr(let_.init);
             // Annotation wins, inferred is fallback.
             let ty = annotation_ty.unwrap_or(inferred_ty);
-            if !ty.is_poison() {
-                type_pattern(tc, let_.pattern, &ty);
+            if !tc.types.env.get_ty(ty).is_poison() {
+                type_pattern(tc, let_.pattern, ty);
             }
         }
         StmtKind::Assign(assign) => {
@@ -92,7 +92,7 @@ fn infer_update_fields(tc: &mut TypeChecker, updates: &[crate::expr::UpdateField
     }
 }
 
-pub(crate) fn infer_if(tc: &mut TypeChecker, if_: &IfExpr) -> Ty {
+pub(crate) fn infer_if(tc: &mut TypeChecker, if_: &IfExpr) -> TypeId {
     tc.infer_expr(if_.condition);
     let then_ty = tc.infer_expr(if_.then_branch);
     if let Some(else_br) = if_.else_branch {
@@ -102,15 +102,15 @@ pub(crate) fn infer_if(tc: &mut TypeChecker, if_: &IfExpr) -> Ty {
     then_ty
 }
 
-pub(crate) fn infer_match(tc: &mut TypeChecker, m: &MatchExpr) -> Ty {
+pub(crate) fn infer_match(tc: &mut TypeChecker, m: &MatchExpr) -> TypeId {
     let scrutinee_ty = tc.infer_expr(m.scrutinee);
 
-    let mut result_ty = Ty::Poison;
+    let mut result_ty = tc.poison();
     let arms = m.arms.clone();
     for arm in &arms {
-        type_pattern(tc, arm.pattern, &scrutinee_ty);
+        type_pattern(tc, arm.pattern, scrutinee_ty);
         let arm_ty = tc.infer_expr(arm.body);
-        if result_ty.is_poison() && !arm_ty.is_poison() {
+        if tc.types.env.get_ty(result_ty).is_poison() && !tc.types.env.get_ty(arm_ty).is_poison() {
             result_ty = arm_ty;
         }
     }

@@ -16,7 +16,7 @@ use vx_ir::expr::BinOp;
 use vx_ir::scope::DefTarget;
 use vx_ir::{BindingId, ItemId};
 use vx_parser::{SourceId, SourceSpan};
-use vx_types::{Scalar, Ty, TypeEnv};
+use vx_types::{Scalar, TypeEnv};
 
 fn span(start: u32, end: u32) -> SourceSpan {
     SourceSpan::new(
@@ -129,12 +129,14 @@ fn invalid_target_variant() {
 
 #[test]
 fn arg_type_mismatch_basic() {
-    let env = TypeEnv::new();
+    let mut env = TypeEnv::new();
+    let i64_ty = env.intern_scalar(Scalar::I64);
+    let string_ty = env.intern_scalar(Scalar::String);
     let diag = IrDiagnostic::ArgTypeMismatch {
         arg: span(10, 12),
         param: span(50, 55),
-        expected: Ty::Scalar(Scalar::I64),
-        found: Ty::Scalar(Scalar::String),
+        expected: i64_ty,
+        found: string_ty,
     };
 
     let report = diag.to_report(&env);
@@ -158,12 +160,14 @@ fn arg_type_mismatch_basic() {
 
 #[test]
 fn arg_type_mismatch_unit() {
-    let env = TypeEnv::new();
+    let mut env = TypeEnv::new();
+    let unit_ty = env.intern_unit();
+    let i64_ty = env.intern_scalar(Scalar::I64);
     let diag = IrDiagnostic::ArgTypeMismatch {
         arg: span(0, 4),
         param: span(20, 24),
-        expected: Ty::Unit,
-        found: Ty::Scalar(Scalar::I64),
+        expected: unit_ty,
+        found: i64_ty,
     };
 
     let report = diag.to_report(&env);
@@ -179,14 +183,16 @@ fn arg_type_mismatch_unit() {
 
 #[test]
 fn binary_op_mismatch_add() {
-    let env = TypeEnv::new();
+    let mut env = TypeEnv::new();
+    let i64_ty = env.intern_scalar(Scalar::I64);
+    let string_ty = env.intern_scalar(Scalar::String);
     let diag = IrDiagnostic::BinaryOpMismatch {
         op: span(10, 11),
         op_kind: BinOp::Add,
         lhs: span(5, 9),
         rhs: span(12, 16),
-        lhs_ty: Ty::Scalar(Scalar::I64),
-        rhs_ty: Ty::Scalar(Scalar::String),
+        lhs_ty: i64_ty,
+        rhs_ty: string_ty,
     };
 
     let report = diag.to_report(&env);
@@ -212,14 +218,15 @@ fn binary_op_mismatch_add() {
 
 #[test]
 fn binary_op_mismatch_pipe() {
-    let env = TypeEnv::new();
+    let mut env = TypeEnv::new();
+    let bool_ty = env.intern_scalar(Scalar::Bool);
     let diag = IrDiagnostic::BinaryOpMismatch {
         op: span(0, 2),
         op_kind: BinOp::Pipe,
         lhs: span(3, 6),
         rhs: span(7, 10),
-        lhs_ty: Ty::Scalar(Scalar::Bool),
-        rhs_ty: Ty::Scalar(Scalar::Bool),
+        lhs_ty: bool_ty,
+        rhs_ty: bool_ty,
     };
 
     let report = diag.to_report(&env);
@@ -235,11 +242,12 @@ fn binary_op_mismatch_pipe() {
 
 #[test]
 fn no_such_method_no_candidates() {
-    let env = TypeEnv::new();
+    let mut env = TypeEnv::new();
+    let i64_ty = env.intern_scalar(Scalar::I64);
     let diag = IrDiagnostic::NoSuchMethod {
         method_call: span(10, 20),
         receiver: span(0, 9),
-        receiver_ty: Ty::Scalar(Scalar::I64),
+        receiver_ty: i64_ty,
         candidates: Vec::new(),
     };
 
@@ -259,11 +267,12 @@ fn no_such_method_no_candidates() {
 
 #[test]
 fn no_such_method_with_candidates() {
-    let env = TypeEnv::new();
+    let mut env = TypeEnv::new();
+    let string_ty = env.intern_scalar(Scalar::String);
     let diag = IrDiagnostic::NoSuchMethod {
         method_call: span(10, 20),
         receiver: span(0, 9),
-        receiver_ty: Ty::Scalar(Scalar::String),
+        receiver_ty: string_ty,
         candidates: vec![
             MethodCandidate {
                 item: ItemId(1),

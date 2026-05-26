@@ -11,7 +11,7 @@
 
 use crate::{BodyId, ExprId, ScopeId};
 use vx_parser::SourceSpan;
-use vx_types::Ty;
+use vx_types::TypeId;
 
 /// A binding is a named slot that holds a value at runtime.
 ///
@@ -38,9 +38,10 @@ pub struct Binding {
     /// Populated during: CST walk.
     pub scope: ScopeId,
 
-    /// The inferred or declared type of this binding.
+    /// The inferred or declared type of this binding — an interned [`TypeId`]
+    /// from the enclosing [`vx_types::TypeEnv`].
     /// Populated during: type checking pass. `None` before that.
-    pub ty: Option<Ty>,
+    pub ty: Option<TypeId>,
 
     /// The initializer expression for this binding, if it's a simple `let`
     /// binding (not destructuring). `None` for parameters, match bindings,

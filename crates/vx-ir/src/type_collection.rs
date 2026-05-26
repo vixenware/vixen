@@ -6,26 +6,28 @@
 
 use std::collections::HashMap;
 
-use vx_types::{FnSig, Ty, TypeEnv, TypeId};
+use vx_types::{FnSig, TypeDefId, TypeEnv, TypeId};
 
 use crate::def::{DefSite, Definition};
 
 /// Result of type collection: a populated type environment plus lookup tables.
 pub struct TypeCollection {
-    /// The type environment containing all type definitions.
+    /// The type environment containing all type definitions and interned types.
     pub env: TypeEnv,
-    /// Map from definition sites to their TypeId (for structs, enums, newtypes, aliases).
-    pub def_to_type: HashMap<DefSite, TypeId>,
+    /// Map from definition sites to their [`TypeDefId`] (for structs, enums,
+    /// newtypes, aliases, opaques).
+    pub def_to_type: HashMap<DefSite, TypeDefId>,
     /// Map from definition sites to their function signature.
     pub def_to_fn_sig: HashMap<DefSite, FnSig>,
-    /// Map from type names to their TypeId and kind (for resolving type annotations).
-    pub name_to_id: HashMap<String, (TypeId, TypeKind)>,
+    /// Map from type names to their [`TypeDefId`] and kind (for resolving
+    /// type annotations).
+    pub name_to_id: HashMap<String, (TypeDefId, TypeKind)>,
     /// Full alternative sets for sum aliases like `ExecInput = String | Path | ...`.
-    pub alias_sum_alternatives: HashMap<TypeId, Vec<Ty>>,
+    pub alias_sum_alternatives: HashMap<TypeDefId, Vec<TypeId>>,
 }
 
 impl TypeCollection {
-    pub fn type_id_for_def(&self, def: &Definition) -> Option<TypeId> {
+    pub fn type_id_for_def(&self, def: &Definition) -> Option<TypeDefId> {
         self.def_to_type.get(&def.site()).copied()
     }
 

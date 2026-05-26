@@ -1,13 +1,13 @@
 //! Binary, prefix, and pipe operator inference.
 
-use vx_types::{Scalar, Ty};
+use vx_types::{Scalar, Ty, TypeId};
 
 use crate::diagnostic::IrDiagnostic;
 use crate::expr::{BinOp, BinaryExpr, PrefixExpr, PrefixOp};
 
 use super::TypeChecker;
 
-pub(crate) fn infer_binary(tc: &mut TypeChecker, bin: &BinaryExpr) -> Ty {
+pub(crate) fn infer_binary(tc: &mut TypeChecker, bin: &BinaryExpr) -> TypeId {
     if bin.op == BinOp::Pipe {
         return infer_pipe(tc, bin);
     }
@@ -18,43 +18,52 @@ pub(crate) fn infer_binary(tc: &mut TypeChecker, bin: &BinaryExpr) -> Ty {
     match bin.op {
         // Comparison/equality → Bool.
         BinOp::Eq | BinOp::Neq | BinOp::Lt | BinOp::LtEq | BinOp::Gt | BinOp::GtEq => {
-            Ty::Scalar(Scalar::Bool)
+            tc.types.env.intern_scalar(Scalar::Bool)
         }
         // Logical → Bool.
-        BinOp::And | BinOp::Or => Ty::Scalar(Scalar::Bool),
+        BinOp::And | BinOp::Or => tc.types.env.intern_scalar(Scalar::Bool),
         // Concat (++).
         BinOp::Concat => {
-            if lhs_ty.is_poison() || rhs_ty.is_poison() {
-                Ty::Poison
-            } else if let (Ty::Array(lhs_inner), Ty::Array(rhs_inner)) = (&lhs_ty, &rhs_ty) {
-                if tc.types_compatible(lhs_inner, rhs_inner) {
-                    Ty::Array(lhs_inner.clone())
+            let lhs_is_poison = tc.types.env.get_ty(lhs_ty).is_poison();
+            let rhs_is_poison = tc.types.env.get_ty(rhs_ty).is_poison();
+            if lhs_is_poison || rhs_is_poison {
+                tc.poison()
+            } else if let (Ty::Array(lhs_arr), Ty::Array(rhs_arr)) = (
+                tc.types.env.get_ty(lhs_ty).clone(),
+                tc.types.env.get_ty(rhs_ty).clone(),
+            ) {
+                if tc.types_compatible(lhs_arr.0, rhs_arr.0) {
+                    tc.types.env.intern_array(lhs_arr.0)
                 } else {
+                    let lhs_span = tc.arena[bin.lhs].span;
+                    let rhs_span = tc.arena[bin.rhs].span;
                     tc.push_diagnostic(IrDiagnostic::BinaryOpMismatch {
                         op: bin.op_span,
                         op_kind: bin.op,
-                        lhs: tc.arena[bin.lhs].span,
-                        rhs: tc.arena[bin.rhs].span,
+                        lhs: lhs_span,
+                        rhs: rhs_span,
                         lhs_ty,
                         rhs_ty,
                     });
-                    Ty::Poison
+                    tc.poison()
                 }
             } else {
+                let lhs_span = tc.arena[bin.lhs].span;
+                let rhs_span = tc.arena[bin.rhs].span;
                 tc.push_diagnostic(IrDiagnostic::BinaryOpMismatch {
                     op: bin.op_span,
                     op_kind: bin.op,
-                    lhs: tc.arena[bin.lhs].span,
-                    rhs: tc.arena[bin.rhs].span,
+                    lhs: lhs_span,
+                    rhs: rhs_span,
                     lhs_ty,
                     rhs_ty,
                 });
-                Ty::Poison
+                tc.poison()
             }
         }
         // Arithmetic: result type matches lhs (or rhs if lhs is Poison).
         BinOp::Add | BinOp::Sub | BinOp::Mul | BinOp::Div | BinOp::Rem => {
-            if !lhs_ty.is_poison() {
+            if !tc.types.env.get_ty(lhs_ty).is_poison() {
                 lhs_ty
             } else {
                 rhs_ty
@@ -64,7 +73,7 @@ pub(crate) fn infer_binary(tc: &mut TypeChecker, bin: &BinaryExpr) -> Ty {
     }
 }
 
-fn infer_pipe(tc: &mut TypeChecker, bin: &BinaryExpr) -> Ty {
+fn infer_pipe(tc: &mut TypeChecker, bin: &BinaryExpr) -> TypeId {
     let lhs_ty = tc.infer_expr(bin.lhs);
 
     // TODO: pipe placeholder (`_`) support requires implicit bindings.
@@ -72,35 +81,37 @@ fn infer_pipe(tc: &mut TypeChecker, bin: &BinaryExpr) -> Ty {
 
     let rhs_ty = tc.infer_expr(bin.rhs);
 
-    match rhs_ty {
+    let rhs_ty_clone = tc.types.env.get_ty(rhs_ty).clone();
+    match rhs_ty_clone {
         Ty::Function(ref function) if !function.params.is_empty() => {
-            let first_param = &function.params[0];
-            if !lhs_ty.is_poison()
-                && !first_param.is_poison()
-                && !tc.types_compatible(&lhs_ty, first_param)
-            {
+            let first_param = function.params[0];
+            let ret = function.ret;
+            let lhs_is_poison = tc.types.env.get_ty(lhs_ty).is_poison();
+            let first_is_poison = tc.types.env.get_ty(first_param).is_poison();
+            if !lhs_is_poison && !first_is_poison && !tc.types_compatible(lhs_ty, first_param) {
                 // The pipe target's parameter is anonymous in source —
                 // surface the operator token as the secondary "parameter"
                 // span so the diagnostic can point at where the pipe
                 // expects its input.
+                let lhs_span = tc.arena[bin.lhs].span;
                 tc.push_diagnostic(IrDiagnostic::ArgTypeMismatch {
-                    arg: tc.arena[bin.lhs].span,
+                    arg: lhs_span,
                     param: bin.op_span,
-                    expected: first_param.clone(),
+                    expected: first_param,
                     found: lhs_ty,
                 });
             }
-            (*function.ret).clone()
+            ret
         }
-        _ => Ty::Poison,
+        _ => tc.poison(),
     }
 }
 
-pub(crate) fn infer_prefix(tc: &mut TypeChecker, pre: &PrefixExpr) -> Ty {
+pub(crate) fn infer_prefix(tc: &mut TypeChecker, pre: &PrefixExpr) -> TypeId {
     let operand_ty = tc.infer_expr(pre.operand);
 
     match pre.op {
-        PrefixOp::Not => Ty::Scalar(Scalar::Bool),
+        PrefixOp::Not => tc.types.env.intern_scalar(Scalar::Bool),
         PrefixOp::Neg => operand_ty,
     }
 }

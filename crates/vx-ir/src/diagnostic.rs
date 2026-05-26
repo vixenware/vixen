@@ -14,7 +14,7 @@
 //! directly for structured handling.
 
 use vx_parser::SourceSpan;
-use vx_types::Ty;
+use vx_types::TypeId;
 
 use crate::ItemId;
 use crate::cap::CapSet;
@@ -55,12 +55,10 @@ pub enum IrDiagnostic {
         arg: SourceSpan,
         /// The parameter declaration's name token in the called fn.
         param: SourceSpan,
-        /// The parameter's declared type. Carries `Ty` rather than `TypeId`
-        /// because structural types (functions, tuples, arrays, …) are not
-        /// interned in [`vx_types::TypeEnv`].
-        expected: Ty,
-        /// The argument's inferred type. See `expected` for the `Ty` vs `TypeId` choice.
-        found: Ty,
+        /// The parameter's declared type, interned in [`vx_types::TypeEnv`].
+        expected: TypeId,
+        /// The argument's inferred type, interned in [`vx_types::TypeEnv`].
+        found: TypeId,
     },
     /// A binary operator does not apply to the operand types.
     BinaryOpMismatch {
@@ -72,11 +70,10 @@ pub enum IrDiagnostic {
         lhs: SourceSpan,
         /// Span of the RHS expression.
         rhs: SourceSpan,
-        /// Type of the LHS operand. Carries `Ty` rather than `TypeId`
-        /// because structural types are not interned.
-        lhs_ty: Ty,
-        /// Type of the RHS operand.
-        rhs_ty: Ty,
+        /// Type of the LHS operand, interned in [`vx_types::TypeEnv`].
+        lhs_ty: TypeId,
+        /// Type of the RHS operand, interned in [`vx_types::TypeEnv`].
+        rhs_ty: TypeId,
     },
     /// Method lookup failed on the given receiver type.
     NoSuchMethod {
@@ -84,9 +81,8 @@ pub enum IrDiagnostic {
         method_call: SourceSpan,
         /// Span of the receiver expression.
         receiver: SourceSpan,
-        /// The receiver's inferred type. Carries `Ty` rather than `TypeId`
-        /// because structural types are not interned.
-        receiver_ty: Ty,
+        /// The receiver's inferred type, interned in [`vx_types::TypeEnv`].
+        receiver_ty: TypeId,
         /// Method candidates discovered while searching (may be empty).
         candidates: Vec<MethodCandidate>,
     },

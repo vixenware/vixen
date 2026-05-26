@@ -7,19 +7,20 @@ use vx_ir::build::VirBuilder;
 use vx_ir::resolve::resolve_names;
 use vx_ir::type_check::{TypeCheckVirResult, type_check_vir};
 use vx_ir::type_collect::collect_types_vir;
+use vx_ir::type_collection::TypeCollection;
 use vx_ir::{ExprId, VirArena};
 use vx_parser::{SourceId, parse_source_file};
 use vx_types::{Scalar, Ty};
 
 /// Helper: build VIR, resolve names, collect types, run type checker.
-fn check_source(source: &str) -> (VirArena, TypeCheckVirResult) {
+fn check_source(source: &str) -> (VirArena, TypeCollection, TypeCheckVirResult) {
     let parsed = parse_source_file(source);
     let file = parsed.tree();
     let mut program = VirBuilder::build_program(&[(SourceId(0), file)]);
-    let tc = collect_types_vir(&mut program.arena);
+    let mut tc = collect_types_vir(&mut program.arena);
     let _resolve_errors = resolve_names(&mut program.arena);
-    let result = type_check_vir(&mut program.arena, &tc);
-    (program.arena, result)
+    let result = type_check_vir(&mut program.arena, &mut tc);
+    (program.arena, tc, result)
 }
 
 /// Helper: find the first expression of a given kind pattern.
@@ -35,37 +36,43 @@ fn find_expr(
     None
 }
 
+/// Helper: assert that an expression's type is the given Ty.
+fn assert_expr_ty(arena: &VirArena, tc: &TypeCollection, id: ExprId, expected: &Ty) {
+    let ty_id = arena[id].ty.expect("expression should be typed");
+    assert_eq!(tc.env.get_ty(ty_id), expected);
+}
+
 // =========================================================================
 // 1. Literal types
 // =========================================================================
 
 #[test]
 fn literal_int() {
-    let (arena, _) = check_source("42");
+    let (arena, tc, _) = check_source("42");
     // Find the int literal.
     let id = find_expr(&arena, |k| matches!(k, vx_ir::expr::ExprKind::Literal(l) if matches!(l.value, vx_ir::expr::LitKind::Int { .. }))).unwrap();
-    assert_eq!(arena[id].ty, Some(Ty::Scalar(Scalar::U64)));
+    assert_expr_ty(&arena, &tc, id, &Ty::Scalar(Scalar::U64));
 }
 
 #[test]
 fn literal_float() {
-    let (arena, _) = check_source("3.14");
+    let (arena, tc, _) = check_source("3.14");
     let id = find_expr(&arena, |k| matches!(k, vx_ir::expr::ExprKind::Literal(l) if matches!(l.value, vx_ir::expr::LitKind::Float { .. }))).unwrap();
-    assert_eq!(arena[id].ty, Some(Ty::Scalar(Scalar::F64)));
+    assert_expr_ty(&arena, &tc, id, &Ty::Scalar(Scalar::F64));
 }
 
 #[test]
 fn literal_string() {
-    let (arena, _) = check_source("\"hello\"");
+    let (arena, tc, _) = check_source("\"hello\"");
     let id = find_expr(&arena, |k| matches!(k, vx_ir::expr::ExprKind::Literal(l) if matches!(l.value, vx_ir::expr::LitKind::String { .. }))).unwrap();
-    assert_eq!(arena[id].ty, Some(Ty::Scalar(Scalar::String)));
+    assert_expr_ty(&arena, &tc, id, &Ty::Scalar(Scalar::String));
 }
 
 #[test]
 fn literal_bool() {
-    let (arena, _) = check_source("true");
+    let (arena, tc, _) = check_source("true");
     let id = find_expr(&arena, |k| matches!(k, vx_ir::expr::ExprKind::Literal(l) if matches!(l.value, vx_ir::expr::LitKind::Bool(true)))).unwrap();
-    assert_eq!(arena[id].ty, Some(Ty::Scalar(Scalar::Bool)));
+    assert_expr_ty(&arena, &tc, id, &Ty::Scalar(Scalar::Bool));
 }
 
 // =========================================================================
@@ -74,23 +81,23 @@ fn literal_bool() {
 
 #[test]
 fn binary_add() {
-    let (arena, _) = check_source("1 + 2");
+    let (arena, tc, _) = check_source("1 + 2");
     let id = find_expr(&arena, |k| matches!(k, vx_ir::expr::ExprKind::Binary(_))).unwrap();
-    assert_eq!(arena[id].ty, Some(Ty::Scalar(Scalar::U64)));
+    assert_expr_ty(&arena, &tc, id, &Ty::Scalar(Scalar::U64));
 }
 
 #[test]
 fn binary_comparison() {
-    let (arena, _) = check_source("1 == 2");
+    let (arena, tc, _) = check_source("1 == 2");
     let id = find_expr(&arena, |k| matches!(k, vx_ir::expr::ExprKind::Binary(_))).unwrap();
-    assert_eq!(arena[id].ty, Some(Ty::Scalar(Scalar::Bool)));
+    assert_expr_ty(&arena, &tc, id, &Ty::Scalar(Scalar::Bool));
 }
 
 #[test]
 fn binary_logical() {
-    let (arena, _) = check_source("true && false");
+    let (arena, tc, _) = check_source("true && false");
     let id = find_expr(&arena, |k| matches!(k, vx_ir::expr::ExprKind::Binary(_))).unwrap();
-    assert_eq!(arena[id].ty, Some(Ty::Scalar(Scalar::Bool)));
+    assert_expr_ty(&arena, &tc, id, &Ty::Scalar(Scalar::Bool));
 }
 
 // =========================================================================
@@ -99,16 +106,16 @@ fn binary_logical() {
 
 #[test]
 fn prefix_not() {
-    let (arena, _) = check_source("!true");
+    let (arena, tc, _) = check_source("!true");
     let id = find_expr(&arena, |k| matches!(k, vx_ir::expr::ExprKind::Prefix(_))).unwrap();
-    assert_eq!(arena[id].ty, Some(Ty::Scalar(Scalar::Bool)));
+    assert_expr_ty(&arena, &tc, id, &Ty::Scalar(Scalar::Bool));
 }
 
 #[test]
 fn prefix_neg() {
-    let (arena, _) = check_source("-42");
+    let (arena, tc, _) = check_source("-42");
     let id = find_expr(&arena, |k| matches!(k, vx_ir::expr::ExprKind::Prefix(_))).unwrap();
-    assert_eq!(arena[id].ty, Some(Ty::Scalar(Scalar::U64)));
+    assert_expr_ty(&arena, &tc, id, &Ty::Scalar(Scalar::U64));
 }
 
 // =========================================================================
@@ -117,10 +124,10 @@ fn prefix_neg() {
 
 #[test]
 fn function_call_return_type() {
-    let (arena, _) = check_source("fn add(x: U64, y: U64) -> U64 ( x + y ); add(1, 2)");
+    let (arena, tc, _) = check_source("fn add(x: U64, y: U64) -> U64 ( x + y ); add(1, 2)");
     // Find the Call expression.
     let id = find_expr(&arena, |k| matches!(k, vx_ir::expr::ExprKind::Call(_))).unwrap();
-    assert_eq!(arena[id].ty, Some(Ty::Scalar(Scalar::U64)));
+    assert_expr_ty(&arena, &tc, id, &Ty::Scalar(Scalar::U64));
 }
 
 // =========================================================================
@@ -129,10 +136,10 @@ fn function_call_return_type() {
 
 #[test]
 fn if_expression_type() {
-    let (arena, _) = check_source("if true ( 1 ) else ( 2 )");
+    let (arena, tc, _) = check_source("if true ( 1 ) else ( 2 )");
     let id = find_expr(&arena, |k| matches!(k, vx_ir::expr::ExprKind::If(_))).unwrap();
     // Old checker returns then-branch type.
-    assert_eq!(arena[id].ty, Some(Ty::Scalar(Scalar::U64)));
+    assert_expr_ty(&arena, &tc, id, &Ty::Scalar(Scalar::U64));
 }
 
 // =========================================================================
@@ -141,10 +148,10 @@ fn if_expression_type() {
 
 #[test]
 fn let_binding_type() {
-    let (arena, _) = check_source("let x = 42; x");
-    // Find the binding.
+    let (arena, tc, _) = check_source("let x = 42; x");
     let binding = arena.bindings.iter().find(|b| b.name == "x").unwrap();
-    assert_eq!(binding.ty, Some(Ty::Scalar(Scalar::U64)));
+    let ty_id = binding.ty.unwrap();
+    assert_eq!(tc.env.get_ty(ty_id), &Ty::Scalar(Scalar::U64));
 }
 
 // =========================================================================
@@ -153,9 +160,10 @@ fn let_binding_type() {
 
 #[test]
 fn let_annotation_wins() {
-    let (arena, _) = check_source("let x: F64 = 42; x");
+    let (arena, tc, _) = check_source("let x: F64 = 42; x");
     let binding = arena.bindings.iter().find(|b| b.name == "x").unwrap();
-    assert_eq!(binding.ty, Some(Ty::Scalar(Scalar::F64)));
+    let ty_id = binding.ty.unwrap();
+    assert_eq!(tc.env.get_ty(ty_id), &Ty::Scalar(Scalar::F64));
 }
 
 // =========================================================================
@@ -164,12 +172,13 @@ fn let_annotation_wins() {
 
 #[test]
 fn struct_literal_type() {
-    let (arena, _) = check_source("struct Point { x: U64, y: U64 }; Point { x: 1, y: 2 }");
+    let (arena, tc, _) = check_source("struct Point { x: U64, y: U64 }; Point { x: 1, y: 2 }");
     let id = find_expr(&arena, |k| {
         matches!(k, vx_ir::expr::ExprKind::StructLiteral(_))
     })
     .unwrap();
-    let ty = arena[id].ty.as_ref().unwrap();
+    let ty_id = arena[id].ty.unwrap();
+    let ty = tc.env.get_ty(ty_id);
     assert!(matches!(ty, Ty::Struct(_)), "expected Struct, got {:?}", ty);
 }
 
@@ -179,13 +188,14 @@ fn struct_literal_type() {
 
 #[test]
 fn tuple_type() {
-    let (arena, _) = check_source("(1, \"hello\")");
+    let (arena, tc, _) = check_source("(1, \"hello\")");
     let id = find_expr(&arena, |k| matches!(k, vx_ir::expr::ExprKind::Tuple(_))).unwrap();
-    let ty = arena[id].ty.as_ref().unwrap();
+    let ty_id = arena[id].ty.unwrap();
+    let ty = tc.env.get_ty(ty_id);
     if let Ty::Tuple(t) = ty {
-        assert_eq!(t.elements.len(), 2);
-        assert_eq!(t.elements[0], Ty::Scalar(Scalar::U64));
-        assert_eq!(t.elements[1], Ty::Scalar(Scalar::String));
+        assert_eq!(t.0.len(), 2);
+        assert_eq!(tc.env.get_ty(t.0[0]), &Ty::Scalar(Scalar::U64));
+        assert_eq!(tc.env.get_ty(t.0[1]), &Ty::Scalar(Scalar::String));
     } else {
         panic!("expected Tuple, got {:?}", ty);
     }
@@ -197,10 +207,15 @@ fn tuple_type() {
 
 #[test]
 fn array_type() {
-    let (arena, _) = check_source("[1, 2, 3]");
+    let (arena, tc, _) = check_source("[1, 2, 3]");
     let id = find_expr(&arena, |k| matches!(k, vx_ir::expr::ExprKind::Array(_))).unwrap();
-    let ty = arena[id].ty.as_ref().unwrap();
-    assert_eq!(*ty, Ty::Array(Box::new(Ty::Scalar(Scalar::U64))));
+    let ty_id = arena[id].ty.unwrap();
+    let ty = tc.env.get_ty(ty_id);
+    if let Ty::Array(arr) = ty {
+        assert_eq!(tc.env.get_ty(arr.0), &Ty::Scalar(Scalar::U64));
+    } else {
+        panic!("expected Array, got {:?}", ty);
+    }
 }
 
 // =========================================================================
@@ -209,10 +224,15 @@ fn array_type() {
 
 #[test]
 fn fallible_wraps_in_optional() {
-    let (arena, _) = check_source("42?");
+    let (arena, tc, _) = check_source("42?");
     let id = find_expr(&arena, |k| matches!(k, vx_ir::expr::ExprKind::Fallible(_))).unwrap();
-    let ty = arena[id].ty.as_ref().unwrap();
-    assert_eq!(*ty, Ty::Optional(Box::new(Ty::Scalar(Scalar::U64))));
+    let ty_id = arena[id].ty.unwrap();
+    let ty = tc.env.get_ty(ty_id);
+    if let Ty::Optional(opt) = ty {
+        assert_eq!(tc.env.get_ty(opt.0), &Ty::Scalar(Scalar::U64));
+    } else {
+        panic!("expected Optional, got {:?}", ty);
+    }
 }
 
 // =========================================================================
@@ -221,14 +241,14 @@ fn fallible_wraps_in_optional() {
 
 #[test]
 fn function_param_has_type() {
-    let (arena, _) = check_source("fn f(x: U64) -> U64 ( x )");
+    let (arena, tc, _) = check_source("fn f(x: U64) -> U64 ( x )");
     // The name ref `x` inside the body should be typed.
     let x_ref = find_expr(
         &arena,
         |k| matches!(k, vx_ir::expr::ExprKind::NameRef(nr) if nr.name == "x"),
     )
     .unwrap();
-    assert_eq!(arena[x_ref].ty, Some(Ty::Scalar(Scalar::U64)));
+    assert_expr_ty(&arena, &tc, x_ref, &Ty::Scalar(Scalar::U64));
 }
 
 // =========================================================================
@@ -238,10 +258,10 @@ fn function_param_has_type() {
 #[test]
 fn function_no_return_type_unit() {
     // The body's root expression should still be typed.
-    let (arena, _) = check_source("fn noop() ( 1 )");
+    let (arena, tc, _) = check_source("fn noop() ( 1 )");
     // Body root should be an int literal with U64 type.
     let int_lit = find_expr(&arena, |k| matches!(k, vx_ir::expr::ExprKind::Literal(l) if matches!(l.value, vx_ir::expr::LitKind::Int { .. }))).unwrap();
-    assert_eq!(arena[int_lit].ty, Some(Ty::Scalar(Scalar::U64)));
+    assert_expr_ty(&arena, &tc, int_lit, &Ty::Scalar(Scalar::U64));
 }
 
 // =========================================================================
@@ -250,7 +270,8 @@ fn function_no_return_type_unit() {
 
 #[test]
 fn no_none_after_full_check() {
-    let (arena, _) = check_source("fn add(x: U64, y: U64) -> U64 ( x + y ); let z = add(1, 2); z");
+    let (arena, _, _) =
+        check_source("fn add(x: U64, y: U64) -> U64 ( x + y ); let z = add(1, 2); z");
     for (i, expr) in arena.exprs.iter().enumerate() {
         assert!(
             expr.ty.is_some(),
@@ -268,12 +289,12 @@ fn no_none_after_full_check() {
 
 #[test]
 fn interpolated_string_type() {
-    let (arena, _) = check_source("`hello {42}`");
+    let (arena, tc, _) = check_source("`hello {42}`");
     let id = find_expr(&arena, |k| {
         matches!(k, vx_ir::expr::ExprKind::InterpolatedString(_))
     })
     .unwrap();
-    assert_eq!(arena[id].ty, Some(Ty::Scalar(Scalar::String)));
+    assert_expr_ty(&arena, &tc, id, &Ty::Scalar(Scalar::String));
 }
 
 // =========================================================================
@@ -282,7 +303,7 @@ fn interpolated_string_type() {
 
 #[test]
 fn match_returns_first_non_poison_arm() {
-    let (arena, _) = check_source("match 1 { 1 => \"a\", _ => \"b\" }");
+    let (arena, tc, _) = check_source("match 1 { 1 => \"a\", _ => \"b\" }");
     let id = find_expr(&arena, |k| matches!(k, vx_ir::expr::ExprKind::Match(_))).unwrap();
-    assert_eq!(arena[id].ty, Some(Ty::Scalar(Scalar::String)));
+    assert_expr_ty(&arena, &tc, id, &Ty::Scalar(Scalar::String));
 }

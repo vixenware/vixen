@@ -7,7 +7,7 @@
 use crate::expr::LitKind;
 use crate::{BindingId, BodyId, ItemId, PatternId, ScopeId};
 use vx_parser::SourceSpan;
-use vx_types::Ty;
+use vx_types::TypeId;
 
 /// A pattern node in the VIR.
 #[derive(Debug, Clone)]
@@ -28,9 +28,10 @@ pub struct Pattern {
     /// Populated during: CST walk.
     pub kind: PatternKind,
 
-    /// The type this pattern matches against.
+    /// The type this pattern matches against — an interned [`TypeId`] from
+    /// the enclosing [`vx_types::TypeEnv`].
     /// Populated during: type checking pass. `None` before that.
-    pub ty: Option<Ty>,
+    pub ty: Option<TypeId>,
 }
 
 /// Discriminant for all pattern forms.

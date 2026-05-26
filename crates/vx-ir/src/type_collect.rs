@@ -9,7 +9,7 @@ use vx_parser::SourceId;
 use vx_types::{
     AliasDef, DeserContainerAttrs, DeserFieldAttrs, DeserRenameRule, EnumDef, FieldDef,
     FieldDefaultValue, FnSig, KeywordParamDef, NewtypeDef, OpaqueDef, ParamDef, Scalar, StructDef,
-    Ty, TypeDef, TypeEnv, TypeId,
+    TypeDef, TypeDefId, TypeEnv, TypeId, TypeParam,
 };
 
 use crate::arena::VirArena;
@@ -31,7 +31,7 @@ pub fn collect_types_vir(arena: &mut VirArena) -> TypeCollection {
     let mut def_to_type = HashMap::new();
     let mut def_to_fn_sig = HashMap::new();
     let mut alias_sum_alternatives = HashMap::new();
-    let mut name_to_id: HashMap<String, (TypeId, TypeKind)> = HashMap::new();
+    let mut name_to_id: HashMap<String, (TypeDefId, TypeKind)> = HashMap::new();
 
     // Clear all item type_ids before populating.
     for item in &mut arena.items {
@@ -137,8 +137,8 @@ fn register_type_decls_recursive(
     items: &[ItemId],
     source_id: SourceId,
     env: &mut TypeEnv,
-    name_to_id: &mut HashMap<String, (TypeId, TypeKind)>,
-    def_to_type: &mut HashMap<DefSite, TypeId>,
+    name_to_id: &mut HashMap<String, (TypeDefId, TypeKind)>,
+    def_to_type: &mut HashMap<DefSite, TypeDefId>,
 ) {
     for &item_id in items {
         let item = &arena[item_id];
@@ -150,10 +150,10 @@ fn register_type_decls_recursive(
                 register_enum(arena, e, source_id, env, name_to_id, def_to_type);
             }
             ItemKind::Newtype(n) => {
-                register_newtype(n, source_id, env, name_to_id, def_to_type);
+                register_newtype(env, n, source_id, name_to_id, def_to_type);
             }
             ItemKind::TypeAlias(t) => {
-                register_type_alias(t, source_id, env, name_to_id, def_to_type);
+                register_type_alias(env, t, source_id, name_to_id, def_to_type);
             }
             ItemKind::Namespace(ns) => {
                 let child_items: Vec<ItemId> = ns.items.clone();
@@ -176,8 +176,8 @@ fn register_struct(
     s: &StructItem,
     _source_id: SourceId,
     env: &mut TypeEnv,
-    name_to_id: &mut HashMap<String, (TypeId, TypeKind)>,
-    def_to_type: &mut HashMap<DefSite, TypeId>,
+    name_to_id: &mut HashMap<String, (TypeDefId, TypeKind)>,
+    def_to_type: &mut HashMap<DefSite, TypeDefId>,
 ) {
     let id = env.define(
         &s.name,
@@ -198,8 +198,8 @@ fn register_enum(
     e: &EnumItem,
     _source_id: SourceId,
     env: &mut TypeEnv,
-    name_to_id: &mut HashMap<String, (TypeId, TypeKind)>,
-    def_to_type: &mut HashMap<DefSite, TypeId>,
+    name_to_id: &mut HashMap<String, (TypeDefId, TypeKind)>,
+    def_to_type: &mut HashMap<DefSite, TypeDefId>,
 ) {
     let id = env.define(
         &e.name,
@@ -215,18 +215,19 @@ fn register_enum(
 }
 
 fn register_newtype(
+    env: &mut TypeEnv,
     n: &NewtypeItem,
     _source_id: SourceId,
-    env: &mut TypeEnv,
-    name_to_id: &mut HashMap<String, (TypeId, TypeKind)>,
-    def_to_type: &mut HashMap<DefSite, TypeId>,
+    name_to_id: &mut HashMap<String, (TypeDefId, TypeKind)>,
+    def_to_type: &mut HashMap<DefSite, TypeDefId>,
 ) {
+    let poison = env.intern_poison();
     let id = env.define(
         &n.name,
         TypeDef::Newtype(NewtypeDef {
             name: n.name.clone(),
             type_params: n.type_params.clone(),
-            inner: Ty::Poison, // filled in pass 2
+            inner: poison, // filled in pass 2
         }),
     );
     name_to_id.insert(n.name.clone(), (id, TypeKind::Newtype));
@@ -234,18 +235,19 @@ fn register_newtype(
 }
 
 fn register_type_alias(
+    env: &mut TypeEnv,
     t: &TypeAliasItem,
     _source_id: SourceId,
-    env: &mut TypeEnv,
-    name_to_id: &mut HashMap<String, (TypeId, TypeKind)>,
-    def_to_type: &mut HashMap<DefSite, TypeId>,
+    name_to_id: &mut HashMap<String, (TypeDefId, TypeKind)>,
+    def_to_type: &mut HashMap<DefSite, TypeDefId>,
 ) {
     let (def, kind) = if t.aliased_ty.is_some() {
+        let poison = env.intern_poison();
         (
             TypeDef::Alias(AliasDef {
                 name: t.name.clone(),
                 type_params: t.type_params.clone(),
-                target: Ty::Poison, // filled in pass 2
+                target: poison, // filled in pass 2
             }),
             TypeKind::Alias,
         )
@@ -272,13 +274,13 @@ fn fill_types_recursive(
     arena: &VirArena,
     items: &[ItemId],
     source_id: SourceId,
-    name_to_id: &HashMap<String, (TypeId, TypeKind)>,
+    name_to_id: &HashMap<String, (TypeDefId, TypeKind)>,
     env: &mut TypeEnv,
-    def_to_type: &mut HashMap<DefSite, TypeId>,
+    def_to_type: &mut HashMap<DefSite, TypeDefId>,
     def_to_fn_sig: &mut HashMap<DefSite, FnSig>,
-    alias_sum_alternatives: &mut HashMap<TypeId, Vec<Ty>>,
+    alias_sum_alternatives: &mut HashMap<TypeDefId, Vec<TypeId>>,
     parent_type_params: &[String],
-    parent_self_ty: Option<&Ty>,
+    parent_self_ty: Option<TypeId>,
 ) {
     for &item_id in items {
         let item = &arena[item_id];
@@ -300,6 +302,7 @@ fn fill_types_recursive(
                     arena,
                     f,
                     name_to_id,
+                    env,
                     def_to_fn_sig,
                     parent_type_params,
                     parent_self_ty,
@@ -325,11 +328,11 @@ fn fill_types_recursive(
 fn fill_struct(
     arena: &VirArena,
     s: &StructItem,
-    name_to_id: &HashMap<String, (TypeId, TypeKind)>,
+    name_to_id: &HashMap<String, (TypeDefId, TypeKind)>,
     env: &mut TypeEnv,
 ) {
     let (id, _) = name_to_id[&s.name];
-    let fields = collect_field_defs(arena, &s.fields, name_to_id, &s.type_params);
+    let fields = collect_field_defs(arena, &s.fields, name_to_id, &s.type_params, env);
     if let TypeDef::Struct(ref mut sd) = env[id] {
         sd.fields = fields;
     }
@@ -339,27 +342,43 @@ fn fill_enum(
     arena: &VirArena,
     e: &EnumItem,
     _source_id: SourceId,
-    name_to_id: &HashMap<String, (TypeId, TypeKind)>,
+    name_to_id: &HashMap<String, (TypeDefId, TypeKind)>,
     env: &mut TypeEnv,
-    def_to_type: &mut HashMap<DefSite, TypeId>,
+    def_to_type: &mut HashMap<DefSite, TypeDefId>,
 ) {
     let (enum_id, _) = name_to_id[&e.name];
     let mut variant_ids = Vec::new();
 
-    for variant in &e.variants {
-        let fields = collect_variant_field_defs(arena, variant, name_to_id, &e.type_params);
+    // Collect variants first (need &mut env each iteration).
+    let variants_data: Vec<(
+        String,
+        Vec<FieldDef>,
+        DeserContainerAttrs,
+        vx_parser::SourceSpan,
+    )> = e
+        .variants
+        .iter()
+        .map(|variant| {
+            let fields =
+                collect_variant_field_defs(arena, variant, name_to_id, &e.type_params, env);
+            let attrs = collect_container_attrs_vir(arena, &variant.attributes);
+            (variant.name.clone(), fields, attrs, variant.name_span)
+        })
+        .collect();
+
+    for (name, fields, attrs, name_span) in variants_data {
         let vid = env.define(
-            &variant.name,
+            &name,
             TypeDef::Struct(StructDef {
-                name: variant.name.clone(),
+                name: name.clone(),
                 parent_enum: Some(enum_id),
                 type_params: e.type_params.clone(),
-                attrs: collect_container_attrs_vir(arena, &variant.attributes),
+                attrs,
                 fields,
             }),
         );
         variant_ids.push(vid);
-        def_to_type.insert(variant.name_span, vid);
+        def_to_type.insert(name_span, vid);
     }
 
     if let TypeDef::Enum(ref mut ed) = env[enum_id] {
@@ -370,14 +389,14 @@ fn fill_enum(
 fn fill_newtype(
     arena: &VirArena,
     n: &NewtypeItem,
-    name_to_id: &HashMap<String, (TypeId, TypeKind)>,
+    name_to_id: &HashMap<String, (TypeDefId, TypeKind)>,
     env: &mut TypeEnv,
 ) {
     let (id, _) = name_to_id[&n.name];
-    let inner = n
-        .inner_ty
-        .map(|tr| resolve_type_ref(arena, tr, name_to_id, &n.type_params, None))
-        .unwrap_or(Ty::Poison);
+    let inner = match n.inner_ty {
+        Some(tr) => resolve_type_ref(arena, tr, name_to_id, &n.type_params, None, env),
+        None => env.intern_poison(),
+    };
     if let TypeDef::Newtype(ref mut nd) = env[id] {
         nd.inner = inner;
     }
@@ -386,22 +405,22 @@ fn fill_newtype(
 fn fill_type_alias(
     arena: &VirArena,
     t: &TypeAliasItem,
-    name_to_id: &HashMap<String, (TypeId, TypeKind)>,
+    name_to_id: &HashMap<String, (TypeDefId, TypeKind)>,
     env: &mut TypeEnv,
-    alias_sum_alternatives: &mut HashMap<TypeId, Vec<Ty>>,
+    alias_sum_alternatives: &mut HashMap<TypeDefId, Vec<TypeId>>,
 ) {
     let Some(aliased_tr) = t.aliased_ty else {
         return;
     };
     let (id, _) = name_to_id[&t.name];
-    let target = resolve_type_ref(arena, aliased_tr, name_to_id, &t.type_params, None);
+    let target = resolve_type_ref(arena, aliased_tr, name_to_id, &t.type_params, None, env);
 
     // If the aliased type is a sum, record the alternatives.
     if let TypeRefKind::Sum(ref sum) = arena.type_refs[aliased_tr.0 as usize].kind {
-        let alternatives = sum
-            .alternatives
-            .iter()
-            .map(|&alt| resolve_type_ref(arena, alt, name_to_id, &t.type_params, None))
+        let alts_ids: Vec<TypeRefId> = sum.alternatives.clone();
+        let alternatives: Vec<TypeId> = alts_ids
+            .into_iter()
+            .map(|alt| resolve_type_ref(arena, alt, name_to_id, &t.type_params, None, env))
             .collect();
         alias_sum_alternatives.insert(id, alternatives);
     }
@@ -411,19 +430,21 @@ fn fill_type_alias(
     }
 }
 
+#[allow(clippy::too_many_arguments)]
 fn fill_function(
     arena: &VirArena,
     f: &FunctionItem,
-    name_to_id: &HashMap<String, (TypeId, TypeKind)>,
+    name_to_id: &HashMap<String, (TypeDefId, TypeKind)>,
+    env: &mut TypeEnv,
     def_to_fn_sig: &mut HashMap<DefSite, FnSig>,
     parent_type_params: &[String],
-    self_ty: Option<&Ty>,
+    self_ty: Option<TypeId>,
 ) {
     // Merge parent type params (from namespace) with function-level type params.
     let mut type_params: Vec<String> = parent_type_params.to_vec();
     type_params.extend(f.type_params.iter().cloned());
 
-    let sig = collect_fn_sig_from_body(arena, f, name_to_id, &type_params, self_ty);
+    let sig = collect_fn_sig_from_body(arena, f, name_to_id, &type_params, self_ty, env);
     def_to_fn_sig.insert(f.name_span, sig);
 }
 
@@ -432,16 +453,17 @@ fn fill_namespace(
     arena: &VirArena,
     ns: &NamespaceItem,
     source_id: SourceId,
-    name_to_id: &HashMap<String, (TypeId, TypeKind)>,
+    name_to_id: &HashMap<String, (TypeDefId, TypeKind)>,
     env: &mut TypeEnv,
-    def_to_type: &mut HashMap<DefSite, TypeId>,
+    def_to_type: &mut HashMap<DefSite, TypeDefId>,
     def_to_fn_sig: &mut HashMap<DefSite, FnSig>,
-    alias_sum_alternatives: &mut HashMap<TypeId, Vec<Ty>>,
+    alias_sum_alternatives: &mut HashMap<TypeDefId, Vec<TypeId>>,
 ) {
-    let namespace_type_params = &ns.type_params;
+    let namespace_type_params = ns.type_params.clone();
 
     // Compute namespace self_ty: resolve the namespace name as a type with type params.
-    let namespace_self_ty = compute_namespace_self_ty(&ns.name, namespace_type_params, name_to_id);
+    let namespace_self_ty =
+        compute_namespace_self_ty(&ns.name, &namespace_type_params, name_to_id, env);
 
     let child_items: Vec<ItemId> = ns.items.clone();
     fill_types_recursive(
@@ -453,8 +475,8 @@ fn fill_namespace(
         def_to_type,
         def_to_fn_sig,
         alias_sum_alternatives,
-        namespace_type_params,
-        namespace_self_ty.as_ref(),
+        &namespace_type_params,
+        namespace_self_ty,
     );
 }
 
@@ -465,48 +487,69 @@ fn fill_namespace(
 fn collect_fn_sig_from_body(
     arena: &VirArena,
     func: &FunctionItem,
-    name_to_id: &HashMap<String, (TypeId, TypeKind)>,
+    name_to_id: &HashMap<String, (TypeDefId, TypeKind)>,
     type_params: &[String],
-    self_ty: Option<&Ty>,
+    self_ty: Option<TypeId>,
+    env: &mut TypeEnv,
 ) -> FnSig {
     let body = &arena[func.body];
 
     let mut positional_params: Vec<ParamDef> = Vec::new();
     let mut keyword_params: Vec<KeywordParamDef> = Vec::new();
 
-    for param in &body.params {
-        let pname = param_name(arena, param);
-        let pname_span = param_name_span(arena, param);
-        let ty = param
-            .ty
-            .map(|tr| resolve_type_ref(arena, tr, name_to_id, type_params, self_ty))
-            .or_else(|| (pname == "self").then(|| self_ty.cloned()).flatten())
-            .unwrap_or(Ty::Poison);
+    // Cache the params we need to walk; avoid holding &arena[body] across &mut env calls.
+    struct ParamData {
+        name: String,
+        name_span: vx_parser::SourceSpan,
+        ty_ref: Option<TypeRefId>,
+        is_keyword: bool,
+        has_default: bool,
+        doc: Option<String>,
+    }
+    let params_data: Vec<ParamData> = body
+        .params
+        .iter()
+        .map(|param| ParamData {
+            name: param_name(arena, param),
+            name_span: param_name_span(arena, param),
+            ty_ref: param.ty,
+            is_keyword: param.is_keyword,
+            has_default: param.has_default,
+            doc: param.doc.clone(),
+        })
+        .collect();
 
-        if param.is_keyword {
-            // Keyword param: check if it has a default value.
-            let has_default = param_has_default(arena, param);
+    for p in params_data {
+        let ty = if let Some(tr) = p.ty_ref {
+            resolve_type_ref(arena, tr, name_to_id, type_params, self_ty, env)
+        } else if p.name == "self" {
+            self_ty.unwrap_or_else(|| env.intern_poison())
+        } else {
+            env.intern_poison()
+        };
+
+        if p.is_keyword {
             keyword_params.push(KeywordParamDef {
-                name: pname,
-                name_span: pname_span,
+                name: p.name,
+                name_span: p.name_span,
                 ty,
-                has_default,
-                doc: param.doc.clone(),
+                has_default: p.has_default,
+                doc: p.doc,
             });
         } else {
             positional_params.push(ParamDef {
-                name: pname,
-                name_span: pname_span,
+                name: p.name,
+                name_span: p.name_span,
                 ty,
-                doc: param.doc.clone(),
+                doc: p.doc,
             });
         }
     }
 
-    let ret = body
-        .return_ty
-        .map(|tr| resolve_type_ref(arena, tr, name_to_id, type_params, self_ty))
-        .unwrap_or(Ty::Unit);
+    let ret = match body.return_ty {
+        Some(tr) => resolve_type_ref(arena, tr, name_to_id, type_params, self_ty, env),
+        None => env.intern_unit(),
+    };
 
     let capabilities = body
         .capabilities
@@ -547,11 +590,6 @@ fn param_name_span(arena: &VirArena, param: &Param) -> vx_parser::SourceSpan {
     }
 }
 
-/// Check if a keyword parameter has a default value.
-fn param_has_default(_arena: &VirArena, param: &Param) -> bool {
-    param.has_default
-}
-
 // ---------------------------------------------------------------------------
 // Namespace self_ty
 // ---------------------------------------------------------------------------
@@ -559,66 +597,70 @@ fn param_has_default(_arena: &VirArena, param: &Param) -> bool {
 fn compute_namespace_self_ty(
     name: &str,
     type_params: &[String],
-    name_to_id: &HashMap<String, (TypeId, TypeKind)>,
-) -> Option<Ty> {
-    let type_args: Vec<Ty> = type_params
+    name_to_id: &HashMap<String, (TypeDefId, TypeKind)>,
+    env: &mut TypeEnv,
+) -> Option<TypeId> {
+    let type_args: Vec<TypeId> = type_params
         .iter()
         .enumerate()
         .map(|(index, name)| {
-            Ty::Param(vx_types::TypeParam {
+            env.intern_param(TypeParam {
                 name: name.clone(),
                 index: index as u32,
             })
         })
         .collect();
-    resolve_named_type(name, type_args, name_to_id)
+    resolve_named_type(name, type_args, name_to_id, env)
 }
 
 // ---------------------------------------------------------------------------
 // Type ref resolution — exact clone of TypeResolver::resolve_type()
 // ---------------------------------------------------------------------------
 
-/// Resolve a VIR TypeRef to a Ty.
+/// Resolve a VIR TypeRef to a [`TypeId`], interning constructed types into `env`.
 ///
 /// This intentionally mirrors the old collector's `TypeResolver::resolve_type_in_context`
 /// exactly, including limitations like ignoring multi-segment paths.
 pub fn resolve_type_ref(
     arena: &VirArena,
     type_ref_id: TypeRefId,
-    name_to_id: &HashMap<String, (TypeId, TypeKind)>,
+    name_to_id: &HashMap<String, (TypeDefId, TypeKind)>,
     type_params: &[String],
-    self_ty: Option<&Ty>,
-) -> Ty {
+    self_ty: Option<TypeId>,
+    env: &mut TypeEnv,
+) -> TypeId {
     let tr = &arena.type_refs[type_ref_id.0 as usize];
     match &tr.kind {
-        TypeRefKind::Path(path) => resolve_type_path(
-            arena,
-            &path.segments,
-            &path.type_args,
-            name_to_id,
-            type_params,
-            self_ty,
-        ),
+        TypeRefKind::Path(path) => {
+            let segments = path.segments.clone();
+            let type_args = path.type_args.clone();
+            resolve_type_path(
+                arena,
+                &segments,
+                &type_args,
+                name_to_id,
+                type_params,
+                self_ty,
+                env,
+            )
+        }
         TypeRefKind::Optional(opt) => {
-            let inner = resolve_type_ref(arena, opt.inner, name_to_id, type_params, self_ty);
-            Ty::Optional(Box::new(inner))
+            let inner_ref = opt.inner;
+            let inner = resolve_type_ref(arena, inner_ref, name_to_id, type_params, self_ty, env);
+            env.intern_optional(inner)
         }
         TypeRefKind::Tuple(tup) => {
-            let elements: Vec<Ty> = tup
-                .elements
-                .iter()
-                .map(|&e| resolve_type_ref(arena, e, name_to_id, type_params, self_ty))
+            let elem_refs = tup.elements.clone();
+            let elements: Vec<TypeId> = elem_refs
+                .into_iter()
+                .map(|e| resolve_type_ref(arena, e, name_to_id, type_params, self_ty, env))
                 .collect();
-            Ty::Tuple(vx_types::TupleTy { elements })
+            env.intern_tuple(elements)
         }
         TypeRefKind::Function(func) => {
-            let params: Vec<Ty> = func
-                .params
-                .iter()
-                .map(|&p| resolve_type_ref(arena, p, name_to_id, type_params, self_ty))
-                .collect();
-            let ret = resolve_type_ref(arena, func.ret, name_to_id, type_params, self_ty);
-            let capabilities = func
+            let param_refs = func.params.clone();
+            let ret_ref = func.ret;
+            let capabilities: Vec<vx_types::Capability> = func
                 .capabilities
                 .iter()
                 .map(|tag| vx_types::Capability {
@@ -626,108 +668,121 @@ pub fn resolve_type_ref(
                     name_span: tag.name_span,
                 })
                 .collect();
-            Ty::Function(vx_types::FunctionTy {
-                params,
-                ret: Box::new(ret),
-                capabilities,
-            })
+            let params: Vec<TypeId> = param_refs
+                .into_iter()
+                .map(|p| resolve_type_ref(arena, p, name_to_id, type_params, self_ty, env))
+                .collect();
+            let ret = resolve_type_ref(arena, ret_ref, name_to_id, type_params, self_ty, env);
+            env.intern_function(params, ret, capabilities)
         }
         TypeRefKind::Sum(sum) => {
             // Sum types: resolve each variant. Same behavior as old collector —
             // returns first alternative if multiple (sum types are stored as
             // AliasDef targets, not as a Ty variant).
-            let alts: Vec<Ty> = sum
-                .alternatives
-                .iter()
-                .map(|&a| resolve_type_ref(arena, a, name_to_id, type_params, self_ty))
+            let alt_refs = sum.alternatives.clone();
+            let alts: Vec<TypeId> = alt_refs
+                .into_iter()
+                .map(|a| resolve_type_ref(arena, a, name_to_id, type_params, self_ty, env))
                 .collect();
-            if alts.len() == 1 {
-                alts.into_iter().next().unwrap()
+            if alts.is_empty() {
+                env.intern_poison()
             } else {
-                alts.into_iter().next().unwrap_or(Ty::Poison)
+                alts[0]
             }
         }
-        TypeRefKind::Error => Ty::Poison,
+        TypeRefKind::Error => env.intern_poison(),
     }
 }
 
+#[allow(clippy::too_many_arguments)]
 fn resolve_type_path(
     arena: &VirArena,
     segments: &[String],
     type_arg_refs: &[TypeRefId],
-    name_to_id: &HashMap<String, (TypeId, TypeKind)>,
+    name_to_id: &HashMap<String, (TypeDefId, TypeKind)>,
     type_params: &[String],
-    self_ty: Option<&Ty>,
-) -> Ty {
+    self_ty: Option<TypeId>,
+    env: &mut TypeEnv,
+) -> TypeId {
     // Use first segment only — old collector ignores subsequent segments.
     let name = match segments.first() {
-        Some(n) => n,
-        None => return Ty::Poison,
+        Some(n) => n.clone(),
+        None => return env.intern_poison(),
     };
 
     // Check Self.
     if name == "Self" {
-        return self_ty.cloned().unwrap_or(Ty::Poison);
+        return self_ty.unwrap_or_else(|| env.intern_poison());
     }
 
     // Check type params by position index.
-    if let Some(index) = type_params.iter().position(|p| p == name) {
-        return Ty::Param(vx_types::TypeParam {
-            name: name.clone(),
+    if let Some(index) = type_params.iter().position(|p| *p == name) {
+        return env.intern_param(TypeParam {
+            name,
             index: index as u32,
         });
     }
 
     // Resolve type args.
-    let type_args: Vec<Ty> = type_arg_refs
+    let type_args: Vec<TypeId> = type_arg_refs
         .iter()
-        .map(|&tr| resolve_type_ref(arena, tr, name_to_id, type_params, self_ty))
+        .map(|&tr| resolve_type_ref(arena, tr, name_to_id, type_params, self_ty, env))
         .collect();
 
-    resolve_named_type(name, type_args, name_to_id).unwrap_or(Ty::Poison)
+    resolve_named_type(&name, type_args, name_to_id, env).unwrap_or_else(|| env.intern_poison())
 }
 
 fn resolve_named_type(
     name: &str,
-    type_args: Vec<Ty>,
-    name_to_id: &HashMap<String, (TypeId, TypeKind)>,
-) -> Option<Ty> {
+    type_args: Vec<TypeId>,
+    name_to_id: &HashMap<String, (TypeDefId, TypeKind)>,
+    env: &mut TypeEnv,
+) -> Option<TypeId> {
     // Builtins first — exact same order as old collector.
     match name {
-        "U64" => return Some(Ty::Scalar(Scalar::U64)),
-        "I64" => return Some(Ty::Scalar(Scalar::I64)),
-        "F64" => return Some(Ty::Scalar(Scalar::F64)),
-        "Bool" => return Some(Ty::Scalar(Scalar::Bool)),
-        "String" => return Some(Ty::Scalar(Scalar::String)),
-        "Unit" => return Some(Ty::Unit),
+        "U64" => return Some(env.intern_scalar(Scalar::U64)),
+        "I64" => return Some(env.intern_scalar(Scalar::I64)),
+        "F64" => return Some(env.intern_scalar(Scalar::F64)),
+        "Bool" => return Some(env.intern_scalar(Scalar::Bool)),
+        "String" => return Some(env.intern_scalar(Scalar::String)),
+        "Unit" => return Some(env.intern_unit()),
         "Option" => {
-            let inner = type_args.into_iter().next().unwrap_or(Ty::Poison);
-            return Some(Ty::Optional(Box::new(inner)));
+            let inner = type_args
+                .into_iter()
+                .next()
+                .unwrap_or_else(|| env.intern_poison());
+            return Some(env.intern_optional(inner));
         }
         "Array" => {
-            let inner = type_args.into_iter().next().unwrap_or(Ty::Poison);
-            return Some(Ty::Array(Box::new(inner)));
+            let inner = type_args
+                .into_iter()
+                .next()
+                .unwrap_or_else(|| env.intern_poison());
+            return Some(env.intern_array(inner));
         }
         "Map" => {
             let mut iter = type_args.into_iter();
-            let key = iter.next().unwrap_or(Ty::Poison);
-            let val = iter.next().unwrap_or(Ty::Poison);
-            return Some(Ty::Map(Box::new(key), Box::new(val)));
+            let key = iter.next().unwrap_or_else(|| env.intern_poison());
+            let val = iter.next().unwrap_or_else(|| env.intern_poison());
+            return Some(env.intern_map(key, val));
         }
         "Stream" => {
-            let inner = type_args.into_iter().next().unwrap_or(Ty::Poison);
-            return Some(Ty::Stream(Box::new(inner)));
+            let inner = type_args
+                .into_iter()
+                .next()
+                .unwrap_or_else(|| env.intern_poison());
+            return Some(env.intern_stream(inner));
         }
         _ => {}
     }
 
     let &(id, kind) = name_to_id.get(name)?;
     Some(match kind {
-        TypeKind::Struct => Ty::Struct(vx_types::StructTy { id, type_args }),
-        TypeKind::Enum => Ty::Enum(vx_types::EnumTy { id, type_args }),
-        TypeKind::Newtype => Ty::Newtype(vx_types::NewtypeTy { id, type_args }),
-        TypeKind::Alias => Ty::Alias(vx_types::AliasTy { id, type_args }),
-        TypeKind::Opaque => Ty::Opaque(vx_types::OpaqueTy { id, type_args }),
+        TypeKind::Struct => env.intern_struct(id, type_args),
+        TypeKind::Enum => env.intern_enum(id, type_args),
+        TypeKind::Newtype => env.intern_newtype(id, type_args),
+        TypeKind::Alias => env.intern_alias(id, type_args),
+        TypeKind::Opaque => env.intern_opaque(id, type_args),
     })
 }
 
@@ -738,37 +793,40 @@ fn resolve_named_type(
 fn collect_field_defs(
     arena: &VirArena,
     fields: &[FieldDecl],
-    name_to_id: &HashMap<String, (TypeId, TypeKind)>,
+    name_to_id: &HashMap<String, (TypeDefId, TypeKind)>,
     type_params: &[String],
+    env: &mut TypeEnv,
 ) -> Vec<FieldDef> {
-    fields
-        .iter()
-        .map(|f| {
-            let ty =
-                f.ty.map(|tr| resolve_type_ref(arena, tr, name_to_id, type_params, None))
-                    .unwrap_or(Ty::Poison);
-            let default_value = f
-                .default_value
-                .and_then(|expr_id| extract_default_value(arena, expr_id));
-            FieldDef {
-                name: f.name.clone(),
-                ty,
-                attrs: collect_field_attrs_vir(arena, &f.attributes),
-                has_default: f.has_default,
-                default_value,
-                name_span: f.name_span,
-            }
-        })
-        .collect()
+    // Walk in an explicit loop because we need &mut env per field.
+    let mut out = Vec::with_capacity(fields.len());
+    for f in fields {
+        let ty = match f.ty {
+            Some(tr) => resolve_type_ref(arena, tr, name_to_id, type_params, None, env),
+            None => env.intern_poison(),
+        };
+        let default_value = f
+            .default_value
+            .and_then(|expr_id| extract_default_value(arena, expr_id));
+        out.push(FieldDef {
+            name: f.name.clone(),
+            ty,
+            attrs: collect_field_attrs_vir(arena, &f.attributes),
+            has_default: f.has_default,
+            default_value,
+            name_span: f.name_span,
+        });
+    }
+    out
 }
 
 fn collect_variant_field_defs(
     arena: &VirArena,
     variant: &VariantDecl,
-    name_to_id: &HashMap<String, (TypeId, TypeKind)>,
+    name_to_id: &HashMap<String, (TypeDefId, TypeKind)>,
     type_params: &[String],
+    env: &mut TypeEnv,
 ) -> Vec<FieldDef> {
-    collect_field_defs(arena, &variant.fields, name_to_id, type_params)
+    collect_field_defs(arena, &variant.fields, name_to_id, type_params, env)
 }
 
 /// Extract a FieldDefaultValue from a VIR expression.

@@ -7,7 +7,7 @@ use crate::{BodyId, ExprId, ItemId, ScopeId, TypeRefId};
 use vx_parser::SourceSpan;
 
 use crate::def::DefId;
-use vx_types::TypeId;
+use vx_types::TypeDefId;
 
 /// A top-level declaration item.
 #[derive(Debug, Clone)]
@@ -80,7 +80,7 @@ pub struct FunctionItem {
     pub body: BodyId,
     /// The TypeId assigned during type collection, if applicable.
     /// Populated during: CST walk (from type collection results).
-    pub type_id: Option<TypeId>,
+    pub type_id: Option<TypeDefId>,
     /// Attributes on this function.
     pub attributes: Vec<Attribute>,
 }
@@ -110,7 +110,7 @@ pub struct StructItem {
     /// Span of the name token.
     pub name_span: SourceSpan,
     /// The TypeId assigned during type collection.
-    pub type_id: Option<TypeId>,
+    pub type_id: Option<TypeDefId>,
     /// Type parameter names (e.g. `["T", "U"]`).
     pub type_params: Vec<String>,
     /// The struct fields.
@@ -140,7 +140,7 @@ pub struct EnumItem {
     /// Span of the name token.
     pub name_span: SourceSpan,
     /// The TypeId assigned during type collection.
-    pub type_id: Option<TypeId>,
+    pub type_id: Option<TypeDefId>,
     /// Type parameter names.
     pub type_params: Vec<String>,
     /// The enum variants.
@@ -157,7 +157,7 @@ pub struct NewtypeItem {
     /// Span of the name token.
     pub name_span: SourceSpan,
     /// The TypeId assigned during type collection.
-    pub type_id: Option<TypeId>,
+    pub type_id: Option<TypeDefId>,
     /// Type parameter names.
     pub type_params: Vec<String>,
     /// The inner type.
@@ -174,7 +174,7 @@ pub struct TypeAliasItem {
     /// Span of the name token.
     pub name_span: SourceSpan,
     /// The TypeId assigned during type collection.
-    pub type_id: Option<TypeId>,
+    pub type_id: Option<TypeDefId>,
     /// Type parameter names.
     pub type_params: Vec<String>,
     /// The aliased type.

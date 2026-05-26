@@ -106,9 +106,9 @@ impl DocumentState {
         let mut program = vx_ir::build::VirBuilder::build_program(&sources);
         vx_ir::compile::inject_implicit_stdlib_imports(&mut program);
 
-        let types = vx_ir::type_collect::collect_types_vir(&mut program.arena);
+        let mut types = vx_ir::type_collect::collect_types_vir(&mut program.arena);
         let resolve_errors = vx_ir::resolve::resolve_names(&mut program.arena);
-        let type_check = vx_ir::type_check::type_check_vir(&mut program.arena, &types);
+        let type_check = vx_ir::type_check::type_check_vir(&mut program.arena, &mut types);
         let cap_check =
             vx_ir::cap_check::check_capabilities_vir(&program.arena, &types, &type_check);
 
@@ -162,9 +162,9 @@ impl DocumentState {
     }
 
     /// Lookup the expression at exactly this span (unwrapping parens via CST).
-    fn expr_ty_at(&self, span: SourceSpan) -> Option<vx_types::Ty> {
+    fn expr_ty_at(&self, span: SourceSpan) -> Option<vx_types::TypeId> {
         let expr_id = self.span_index.expr_at(span)?;
-        self.arena[expr_id].ty.clone()
+        self.arena[expr_id].ty
     }
 
     /// Walk the CST to unwrap paren expressions, return the inner span.
@@ -406,10 +406,10 @@ impl DocumentState {
         FnDecl::cast(self.declaration_node_for(def)?)
     }
 
-    pub(crate) fn inferred_def_type(&self, def: &Definition) -> Option<vx_types::Ty> {
+    pub(crate) fn inferred_def_type(&self, def: &Definition) -> Option<vx_types::TypeId> {
         // For local bindings & parameters: type is on Binding.ty.
         if let Some(binding_id) = self.span_index.binding_at_name_span(def.name_span)
-            && let Some(ty) = self.arena[binding_id].ty.clone()
+            && let Some(ty) = self.arena[binding_id].ty
         {
             return Some(ty);
         }
@@ -426,7 +426,7 @@ impl DocumentState {
                 continue;
             };
             if target_def.id == def.id
-                && let Some(ty) = expr.ty.clone()
+                && let Some(ty) = expr.ty
             {
                 return Some(ty);
             }
@@ -691,10 +691,11 @@ impl LanguageServer for VxLanguageServer {
             {
                 let field_name = field_name_tok.text();
                 if let Some(receiver_expr) = field_node.receiver() {
-                    let receiver_ty =
+                    let receiver_ty_id =
                         state.expr_ty_at(state.span_unwrapping_parens(&receiver_expr));
-                    if let Some(vx_types::Ty::Struct(struct_ty)) = receiver_ty
-                        && let vx_types::TypeDef::Struct(sdef) = &state.types.env[struct_ty.id]
+                    if let Some(ty_id) = receiver_ty_id
+                        && let vx_types::Ty::Struct(struct_ty) = state.types.env.get_ty(ty_id)
+                        && let vx_types::TypeDef::Struct(sdef) = &state.types.env[struct_ty.def]
                         && let Some(fdef) = sdef.fields.iter().find(|f| f.name == field_name)
                     {
                         return Some(GotoDefinitionResponse::Scalar(Location {
@@ -839,7 +840,11 @@ impl LanguageServer for VxLanguageServer {
                 if let Some(sig) = state.types.fn_sig_for_def(&def) {
                     markdown.push_str(&format!(
                         "\n\nReturns `{}`",
-                        sig.ret.display_with_env(&state.types.env)
+                        state
+                            .types
+                            .env
+                            .get_ty(sig.ret)
+                            .display_with_env(&state.types.env)
                     ));
                 }
 
@@ -847,7 +852,11 @@ impl LanguageServer for VxLanguageServer {
                 if matches!(def.kind, DefKind::Parameter | DefKind::Binding)
                     && let Some(ty) = state.inferred_def_type(&def)
                 {
-                    let display = ty.display_with_env(&state.types.env);
+                    let display = state
+                        .types
+                        .env
+                        .get_ty(ty)
+                        .display_with_env(&state.types.env);
                     markdown.push_str(&format!("\n\nType: `{display}`"));
                 }
 
@@ -860,14 +869,18 @@ impl LanguageServer for VxLanguageServer {
                                 markdown.push_str(&format!(
                                     "- `{}`: `{}`\n",
                                     f.name,
-                                    f.ty.display_with_env(&state.types.env)
+                                    state
+                                        .types
+                                        .env
+                                        .get_ty(f.ty)
+                                        .display_with_env(&state.types.env)
                                 ));
                             }
                         }
                         vx_types::TypeDef::Enum(e) if !e.variants.is_empty() => {
                             markdown.push_str("\n\n**Variants:**\n");
                             for &vid in &e.variants {
-                                let vname = state.types.env[vid].name();
+                                let vname = state.types.env.get_def(vid).name();
                                 markdown.push_str(&format!("- `{vname}`\n"));
                             }
                         }
@@ -897,7 +910,11 @@ impl LanguageServer for VxLanguageServer {
                 if let Some(expr) = vx::Expr::cast(n.clone())
                     && let Some(ty) = state.expr_ty_at(state.span_unwrapping_parens(&expr))
                 {
-                    let display = ty.display_with_env(&state.types.env);
+                    let display = state
+                        .types
+                        .env
+                        .get_ty(ty)
+                        .display_with_env(&state.types.env);
                     let markdown = format!("```vx\n{display}\n```");
                     return Some(Hover {
                         contents: HoverContents::Markup(MarkupContent {
@@ -1722,8 +1739,8 @@ fn format_ir_diagnostic(
             format!(
                 "type mismatch for `{}`: expected `{}`, found `{}`",
                 state.text_at(*param),
-                expected.display_with_env(env),
-                found.display_with_env(env),
+                env.get_ty(*expected).display_with_env(env),
+                env.get_ty(*found).display_with_env(env),
             ),
             "vx-type",
         ),
@@ -1733,8 +1750,8 @@ fn format_ir_diagnostic(
             format!(
                 "cannot apply `{}` to `{}` and `{}`",
                 state.text_at(*op),
-                lhs_ty.display_with_env(env),
-                rhs_ty.display_with_env(env),
+                env.get_ty(*lhs_ty).display_with_env(env),
+                env.get_ty(*rhs_ty).display_with_env(env),
             ),
             "vx-type",
         ),
@@ -1747,7 +1764,7 @@ fn format_ir_diagnostic(
             let mut msg = format!(
                 "no method `{}` on type `{}`",
                 state.text_at(*method_call),
-                receiver_ty.display_with_env(env),
+                env.get_ty(*receiver_ty).display_with_env(env),
             );
             if !candidates.is_empty() {
                 let suffix: Vec<String> = candidates
@@ -2001,7 +2018,7 @@ fn struct_literal_completions(
     let name = name_tok.text().to_string();
 
     // Resolve the struct type
-    let type_ids = state.types.env.lookup(&name);
+    let type_ids = state.types.env.lookup_def(&name);
     let struct_def = type_ids.iter().find_map(|&id| match &state.types.env[id] {
         vx_types::TypeDef::Struct(s) => Some(s),
         _ => None,
@@ -2021,7 +2038,14 @@ fn struct_literal_completions(
         .map(|f| CompletionItem {
             label: f.name.clone(),
             kind: Some(CompletionItemKind::FIELD),
-            detail: Some(format!("{}", f.ty.display_with_env(&state.types.env))),
+            detail: Some(format!(
+                "{}",
+                state
+                    .types
+                    .env
+                    .get_ty(f.ty)
+                    .display_with_env(&state.types.env)
+            )),
             insert_text: Some(format!("{}: $0", f.name)),
             insert_text_format: Some(InsertTextFormat::SNIPPET),
             ..Default::default()
@@ -2092,7 +2116,8 @@ fn dot_completions(
 
             // If it's a binding or parameter, offer completions based on inferred type
             if matches!(def.kind, DefKind::Binding | DefKind::Parameter) {
-                if let Some(ty) = state.inferred_def_type(&def)
+                if let Some(ty_id) = state.inferred_def_type(&def)
+                    && let ty = state.types.env.get_ty(ty_id).clone()
                     && let Some(items) = completions_for_type(&ty, state, offset)
                 {
                     return Some(items);
@@ -2106,7 +2131,8 @@ fn dot_completions(
             // If it's a function, offer completions on the return type
             if def.kind == DefKind::Function
                 && let Some(sig) = state.types.fn_sig_for_def(&def)
-                && let Some(items) = completions_for_type(&sig.ret, state, offset)
+                && let ret_ty = state.types.env.get_ty(sig.ret).clone()
+                && let Some(items) = completions_for_type(&ret_ty, state, offset)
             {
                 return Some(items);
             }
@@ -2116,7 +2142,8 @@ fn dot_completions(
         _ => {
             // For any other expression, try the type checker's expr_types
             let receiver_span = state.span_unwrapping_parens(&receiver_expr);
-            if let Some(ty) = state.expr_ty_at(receiver_span) {
+            if let Some(ty_id) = state.expr_ty_at(receiver_span) {
+                let ty = state.types.env.get_ty(ty_id).clone();
                 return completions_for_type(&ty, state, offset);
             }
             None
@@ -2132,12 +2159,14 @@ fn resolve_binding_fields(def: &Definition, state: &DocumentState) -> Option<Vec
             if param.name == def.name {
                 // This is a rough match — in a real type checker you'd match by range.
                 // For now, check if the param name matches and the Ty is a struct.
-                return struct_fields_from_ty(&param.ty, state);
+                let ty = state.types.env.get_ty(param.ty).clone();
+                return struct_fields_from_ty(&ty, state);
             }
         }
         for kw in &sig.keyword_params {
             if kw.name == def.name {
-                return struct_fields_from_ty(&kw.ty, state);
+                let ty = state.types.env.get_ty(kw.ty).clone();
+                return struct_fields_from_ty(&ty, state);
             }
         }
     }
@@ -2151,7 +2180,10 @@ pub(crate) fn completions_for_type(
     offset: rowan::TextSize,
 ) -> Option<Vec<CompletionItem>> {
     match ty {
-        vx_types::Ty::Optional(inner) => completions_for_type(inner, state, offset),
+        vx_types::Ty::Optional(opt) => {
+            let inner = state.types.env.get_ty(opt.0).clone();
+            completions_for_type(&inner, state, offset)
+        }
         _ => struct_fields_from_ty(ty, state),
     }
     .or_else(|| {
@@ -2179,14 +2211,21 @@ pub(crate) fn completions_for_type(
 fn struct_fields_from_ty(ty: &vx_types::Ty, state: &DocumentState) -> Option<Vec<CompletionItem>> {
     match ty {
         vx_types::Ty::Struct(s) => {
-            if let vx_types::TypeDef::Struct(sdef) = &state.types.env[s.id] {
+            if let vx_types::TypeDef::Struct(sdef) = &state.types.env[s.def] {
                 let items: Vec<CompletionItem> = sdef
                     .fields
                     .iter()
                     .map(|f| CompletionItem {
                         label: f.name.clone(),
                         kind: Some(CompletionItemKind::FIELD),
-                        detail: Some(f.ty.display_with_env(&state.types.env).to_string()),
+                        detail: Some(
+                            state
+                                .types
+                                .env
+                                .get_ty(f.ty)
+                                .display_with_env(&state.types.env)
+                                .to_string(),
+                        ),
                         ..Default::default()
                     })
                     .collect();
@@ -2195,7 +2234,10 @@ fn struct_fields_from_ty(ty: &vx_types::Ty, state: &DocumentState) -> Option<Vec
                 None
             }
         }
-        vx_types::Ty::Optional(inner) => struct_fields_from_ty(inner, state),
+        vx_types::Ty::Optional(opt) => {
+            let inner = state.types.env.get_ty(opt.0).clone();
+            struct_fields_from_ty(&inner, state)
+        }
         _ => None,
     }
 }
@@ -2444,14 +2486,19 @@ pub(crate) fn collect_inlay_hints(state: &DocumentState) -> Vec<InlayHint> {
         let Some(binding_id) = state.span_index.binding_at_name_span(name_span) else {
             continue;
         };
-        let Some(ty) = state.arena[binding_id].ty.clone() else {
+        let Some(ty_id) = state.arena[binding_id].ty else {
             continue;
         };
 
         let pos = state.line_index.position(name_tok.text_range().end());
+        let ty_display = state
+            .types
+            .env
+            .get_ty(ty_id)
+            .display_with_env(&state.types.env);
         hints.push(InlayHint {
             position: Position::new(pos.line, pos.col),
-            label: InlayHintLabel::String(format!(": {}", ty.display_with_env(&state.types.env))),
+            label: InlayHintLabel::String(format!(": {ty_display}")),
             kind: Some(InlayHintKind::TYPE),
             text_edits: None,
             tooltip: None,
@@ -2757,13 +2804,13 @@ fn namespace_name_for_receiver(
         Ty::Scalar(Scalar::String) => Some("String".to_string()),
         Ty::Optional(_) => Some("Option".to_string()),
         Ty::Array(_) => Some("Array".to_string()),
-        Ty::Map(_, _) => Some("Map".to_string()),
+        Ty::Map(_) => Some("Map".to_string()),
         Ty::Stream(_) => Some("Stream".to_string()),
-        Ty::Struct(struct_ty) => Some(env.get(struct_ty.id).name().to_string()),
-        Ty::Enum(enum_ty) => Some(env.get(enum_ty.id).name().to_string()),
-        Ty::Newtype(newtype_ty) => Some(env.get(newtype_ty.id).name().to_string()),
-        Ty::Alias(alias_ty) => Some(env.get(alias_ty.id).name().to_string()),
-        Ty::Opaque(opaque_ty) => Some(env.get(opaque_ty.id).name().to_string()),
+        Ty::Struct(struct_ty) => Some(env.get_def(struct_ty.def).name().to_string()),
+        Ty::Enum(enum_ty) => Some(env.get_def(enum_ty.def).name().to_string()),
+        Ty::Newtype(newtype_ty) => Some(env.get_def(newtype_ty.def).name().to_string()),
+        Ty::Alias(alias_ty) => Some(env.get_def(alias_ty.def).name().to_string()),
+        Ty::Opaque(opaque_ty) => Some(env.get_def(opaque_ty.def).name().to_string()),
         _ => None,
     }
 }

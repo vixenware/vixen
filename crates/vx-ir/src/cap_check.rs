@@ -311,7 +311,7 @@ impl CapChecker<'_> {
         };
 
         for (arg, param) in args.iter().zip(sig.positional_params.iter()) {
-            if let Ty::Function(ref fn_ty) = param.ty {
+            if let Ty::Function(fn_ty) = self.types.env.get_ty(param.ty) {
                 let mask = caps_from_fn_ty_capabilities(&fn_ty.capabilities);
                 self.check_closure_mask(arg.expr, mask, param.name_span);
             }
@@ -347,7 +347,7 @@ impl CapChecker<'_> {
         // Check positional args if present.
         if let Some(args) = &positional_args {
             for (arg, param) in args.iter().zip(sig.positional_params.iter()) {
-                if let Ty::Function(ref fn_ty) = param.ty {
+                if let Ty::Function(fn_ty) = self.types.env.get_ty(param.ty) {
                     let mask = caps_from_fn_ty_capabilities(&fn_ty.capabilities);
                     self.check_closure_mask(arg.expr, mask, param.name_span);
                 }
@@ -363,7 +363,7 @@ impl CapChecker<'_> {
         for field in &record.fields {
             // Try keyword params first.
             if let Some(kw_param) = sig.keyword_params.iter().find(|p| p.name == field.name) {
-                if let Ty::Function(ref fn_ty) = kw_param.ty {
+                if let Ty::Function(fn_ty) = self.types.env.get_ty(kw_param.ty) {
                     let mask = caps_from_fn_ty_capabilities(&fn_ty.capabilities);
                     self.check_closure_mask(field.value, mask, kw_param.name_span);
                 }
@@ -371,7 +371,7 @@ impl CapChecker<'_> {
             }
             // Fall back to positional params by name.
             if let Some(pos_param) = sig.positional_params.iter().find(|p| p.name == field.name)
-                && let Ty::Function(ref fn_ty) = pos_param.ty
+                && let Ty::Function(fn_ty) = self.types.env.get_ty(pos_param.ty)
             {
                 let mask = caps_from_fn_ty_capabilities(&fn_ty.capabilities);
                 self.check_closure_mask(field.value, mask, pos_param.name_span);

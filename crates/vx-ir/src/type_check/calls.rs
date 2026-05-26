@@ -1,6 +1,6 @@
 //! Call, where, invoke, and partial application inference.
 
-use vx_types::{FnSig, KeywordParamDef, ParamDef, Ty};
+use vx_types::{FnSig, KeywordParamDef, ParamDef, Ty, TypeId};
 
 use crate::ExprId;
 use crate::expr::{CallExpr, ExprKind, InvokeExpr, PartialAppExpr, RecordField, WhereExpr};
@@ -14,7 +14,7 @@ use super::names::{sig_for_name_ref_target, variant_sig};
 use super::subst::{infer_type_params, substitute_bound_type_params};
 use crate::diagnostic::IrDiagnostic;
 
-pub(crate) fn infer_call(tc: &mut TypeChecker, expr_id: ExprId, call: &CallExpr) -> Ty {
+pub(crate) fn infer_call(tc: &mut TypeChecker, expr_id: ExprId, call: &CallExpr) -> TypeId {
     let callee_kind = tc.arena[call.callee].kind.clone();
 
     match callee_kind {
@@ -30,19 +30,19 @@ pub(crate) fn infer_call(tc: &mut TypeChecker, expr_id: ExprId, call: &CallExpr)
                 populate_callback_param_types(tc, call, &sig);
                 check_call_args(tc, call, &sig);
                 infer_extra_call_args(tc, call, sig.positional_params.len());
-                return sig.ret.clone();
+                return sig.ret;
             }
             // Fallback: infer the callee normally.
             tc.infer_expr(call.callee);
             infer_call_arg_exprs(tc, call);
-            Ty::Poison
+            tc.poison()
         }
         ExprKind::Field(ref field) => {
             // Static namespace call: Namespace.method(args)
             if let Some(sig) = infer_static_namespace_call_sig(tc, call, field) {
                 // Type the callee field expression.
                 let callee_ty = tc.function_ty_from_sig(&sig);
-                tc.arena[call.callee].ty = Some(callee_ty.clone());
+                tc.arena[call.callee].ty = Some(callee_ty);
                 // Also type the receiver (namespace) if it's a NameRef.
                 tc.infer_expr(field.receiver);
 
@@ -59,29 +59,32 @@ pub(crate) fn infer_call(tc: &mut TypeChecker, expr_id: ExprId, call: &CallExpr)
             };
 
             if let Some(method_sig) =
-                resolve_method_for_call(tc, &receiver_ty, &method_name, expr_id)
+                resolve_method_for_call(tc, receiver_ty, &method_name, expr_id)
             {
                 // Type the callee field expression as the method's function type.
-                let method_ty = Ty::Function(vx_types::FunctionTy {
-                    params: method_sig.params.iter().map(|p| p.ty.clone()).collect(),
-                    ret: Box::new(method_sig.ret.clone()),
-                    capabilities: method_sig.capabilities.clone(),
-                });
+                let params: Vec<TypeId> = method_sig.params.iter().map(|p| p.ty).collect();
+                let method_ty = tc.types.env.intern_function(
+                    params,
+                    method_sig.ret,
+                    method_sig.capabilities.clone(),
+                );
                 tc.arena[call.callee].ty = Some(method_ty);
 
                 check_method_args(tc, call, &method_sig.params, &method_name);
                 infer_extra_call_args(tc, call, method_sig.params.len());
-                return method_sig.ret.clone();
+                return method_sig.ret;
             }
 
             // Type the callee as Poison if method not found.
-            tc.arena[call.callee].ty = Some(Ty::Poison);
+            let poison = tc.poison();
+            tc.arena[call.callee].ty = Some(poison);
 
-            if receiver_ty != Ty::Poison {
+            if !tc.types.env.get_ty(receiver_ty).is_poison() {
+                let receiver_span = tc.arena[field.receiver].span;
                 tc.push_diagnostic(IrDiagnostic::NoSuchMethod {
                     method_call: field.field_span,
-                    receiver: tc.arena[field.receiver].span,
-                    receiver_ty: receiver_ty.clone(),
+                    receiver: receiver_span,
+                    receiver_ty,
                     // Candidate enumeration deferred — the diagnostic still
                     // carries the structural slot for it.
                     candidates: Vec::new(),
@@ -92,14 +95,15 @@ pub(crate) fn infer_call(tc: &mut TypeChecker, expr_id: ExprId, call: &CallExpr)
             let _ = method_name;
 
             infer_call_arg_exprs(tc, call);
-            Ty::Poison
+            tc.poison()
         }
         _ => {
             let callee_ty = tc.infer_expr(call.callee);
             infer_call_arg_exprs(tc, call);
-            match callee_ty {
-                Ty::Function(fn_ty) => (*fn_ty.ret).clone(),
-                _ => Ty::Poison,
+            let callee_ty_clone = tc.types.env.get_ty(callee_ty).clone();
+            match callee_ty_clone {
+                Ty::Function(fn_ty) => fn_ty.ret,
+                _ => tc.poison(),
             }
         }
     }
@@ -108,7 +112,7 @@ pub(crate) fn infer_call(tc: &mut TypeChecker, expr_id: ExprId, call: &CallExpr)
 fn call_sig_for_target(tc: &mut TypeChecker, target: DefTarget) -> Option<FnSig> {
     match target {
         DefTarget::Item(item_id) => {
-            let kind = &tc.arena[item_id].kind;
+            let kind = tc.arena[item_id].kind.clone();
             match kind {
                 ItemKind::Function(f) => tc.types.def_to_fn_sig.get(&f.name_span).cloned(),
                 ItemKind::Namespace(ns) => {
@@ -142,10 +146,11 @@ fn instantiate_call_sig(tc: &mut TypeChecker, call: &CallExpr, mut sig: FnSig) -
         return sig;
     }
 
-    let mut substitutions = vec![None; sig.type_params.len()];
+    let mut substitutions: Vec<Option<TypeId>> = vec![None; sig.type_params.len()];
 
     // Explicit type args.
-    for (slot, &tr_id) in substitutions.iter_mut().zip(call.type_args.iter()) {
+    let type_arg_refs: Vec<crate::TypeRefId> = call.type_args.clone();
+    for (slot, tr_id) in substitutions.iter_mut().zip(type_arg_refs) {
         let resolved = tc.resolve_type_ref_id(tr_id);
         *slot = Some(resolved);
     }
@@ -153,28 +158,30 @@ fn instantiate_call_sig(tc: &mut TypeChecker, call: &CallExpr, mut sig: FnSig) -
     // Infer from positional args.
     for (arg, param) in call.args.iter().zip(sig.positional_params.iter()) {
         // Skip closures — they need callback binding first.
-        let arg_kind = &tc.arena[arg.expr].kind;
-        if matches!(param.ty, Ty::Function(_)) && matches!(arg_kind, ExprKind::Closure(_)) {
+        let arg_kind = tc.arena[arg.expr].kind.clone();
+        let param_ty = tc.types.env.get_ty(param.ty).clone();
+        if matches!(param_ty, Ty::Function(_)) && matches!(arg_kind, ExprKind::Closure(_)) {
             continue;
         }
         let arg_ty = tc.infer_expr(arg.expr);
-        infer_type_params(&param.ty, &arg_ty, &mut substitutions);
+        infer_type_params(param.ty, arg_ty, &mut substitutions, &tc.types.env);
     }
 
     for param in &mut sig.positional_params {
-        param.ty = substitute_bound_type_params(&param.ty, &substitutions);
+        param.ty = substitute_bound_type_params(param.ty, &substitutions, &mut tc.types.env);
     }
     for param in &mut sig.keyword_params {
-        param.ty = substitute_bound_type_params(&param.ty, &substitutions);
+        param.ty = substitute_bound_type_params(param.ty, &substitutions, &mut tc.types.env);
     }
-    sig.ret = substitute_bound_type_params(&sig.ret, &substitutions);
+    sig.ret = substitute_bound_type_params(sig.ret, &substitutions, &mut tc.types.env);
     sig
 }
 
 fn populate_callback_param_types(tc: &mut TypeChecker, call: &CallExpr, sig: &FnSig) {
     // Positional args.
     for (arg, param) in call.args.iter().zip(sig.positional_params.iter()) {
-        if let Ty::Function(ref fn_ty) = param.ty {
+        let param_ty = tc.types.env.get_ty(param.ty).clone();
+        if let Ty::Function(fn_ty) = param_ty {
             let arg_kind = tc.arena[arg.expr].kind.clone();
             if let ExprKind::Closure(ref closure) = arg_kind {
                 bind_closure_params(
@@ -190,14 +197,18 @@ fn populate_callback_param_types(tc: &mut TypeChecker, call: &CallExpr, sig: &Fn
 }
 
 fn check_call_args(tc: &mut TypeChecker, call: &CallExpr, sig: &FnSig) {
-    for (arg, param) in call.args.iter().zip(sig.positional_params.iter()) {
+    let args = call.args.clone();
+    let params = sig.positional_params.clone();
+    for (arg, param) in args.iter().zip(params.iter()) {
         let arg_ty = tc.infer_expr(arg.expr);
-        if !arg_ty.is_poison() && !param.ty.is_poison() && !tc.types_compatible(&arg_ty, &param.ty)
-        {
+        let arg_is_poison = tc.types.env.get_ty(arg_ty).is_poison();
+        let param_is_poison = tc.types.env.get_ty(param.ty).is_poison();
+        if !arg_is_poison && !param_is_poison && !tc.types_compatible(arg_ty, param.ty) {
+            let arg_span = tc.arena[arg.expr].span;
             tc.push_diagnostic(IrDiagnostic::ArgTypeMismatch {
-                arg: tc.arena[arg.expr].span,
+                arg: arg_span,
                 param: param.name_span,
-                expected: param.ty.clone(),
+                expected: param.ty,
                 found: arg_ty,
             });
         }
@@ -210,14 +221,18 @@ fn check_method_args(
     params: &[ParamDef],
     _method_name: &str,
 ) {
-    for (arg, param) in call.args.iter().zip(params.iter()) {
+    let args = call.args.clone();
+    let params: Vec<ParamDef> = params.to_vec();
+    for (arg, param) in args.iter().zip(params.iter()) {
         let arg_ty = tc.infer_expr(arg.expr);
-        if !arg_ty.is_poison() && !param.ty.is_poison() && !tc.types_compatible(&arg_ty, &param.ty)
-        {
+        let arg_is_poison = tc.types.env.get_ty(arg_ty).is_poison();
+        let param_is_poison = tc.types.env.get_ty(param.ty).is_poison();
+        if !arg_is_poison && !param_is_poison && !tc.types_compatible(arg_ty, param.ty) {
+            let arg_span = tc.arena[arg.expr].span;
             tc.push_diagnostic(IrDiagnostic::ArgTypeMismatch {
-                arg: tc.arena[arg.expr].span,
+                arg: arg_span,
                 param: param.name_span,
-                expected: param.ty.clone(),
+                expected: param.ty,
                 found: arg_ty,
             });
         }
@@ -225,14 +240,21 @@ fn check_method_args(
 }
 
 fn infer_extra_call_args(tc: &mut TypeChecker, call: &CallExpr, checked_positional: usize) {
-    for arg in call.args.iter().skip(checked_positional) {
-        tc.infer_expr(arg.expr);
+    let arg_ids: Vec<ExprId> = call
+        .args
+        .iter()
+        .skip(checked_positional)
+        .map(|a| a.expr)
+        .collect();
+    for id in arg_ids {
+        tc.infer_expr(id);
     }
 }
 
 fn infer_call_arg_exprs(tc: &mut TypeChecker, call: &CallExpr) {
-    for arg in &call.args {
-        tc.infer_expr(arg.expr);
+    let arg_ids: Vec<ExprId> = call.args.iter().map(|a| a.expr).collect();
+    for id in arg_ids {
+        tc.infer_expr(id);
     }
 }
 
@@ -256,19 +278,22 @@ fn infer_static_namespace_call_sig(
         return None;
     };
 
-    for &child_id in &ns.items {
+    let child_ids: Vec<crate::ItemId> = ns.items.clone();
+    for child_id in child_ids {
         if let ItemKind::Function(ref f) = tc.arena[child_id].kind
             && f.name == *field_name
-            && let Some(sig) = tc.types.def_to_fn_sig.get(&f.name_span)
         {
-            return Some(instantiate_call_sig(tc, call, sig.clone()));
+            let name_span = f.name_span;
+            if let Some(sig) = tc.types.def_to_fn_sig.get(&name_span).cloned() {
+                return Some(instantiate_call_sig(tc, call, sig));
+            }
         }
     }
 
     None
 }
 
-pub(crate) fn infer_where(tc: &mut TypeChecker, w: &WhereExpr) -> Ty {
+pub(crate) fn infer_where(tc: &mut TypeChecker, w: &WhereExpr) -> TypeId {
     // A `where` either decorates a Call (`exec(...) where {...}`) or a
     // PartialApp (`partial exec where {...}` / `partial exec where common`).
     // In both cases we need to inspect the underlying function's signature so
@@ -282,7 +307,7 @@ pub(crate) fn infer_where(tc: &mut TypeChecker, w: &WhereExpr) -> Ty {
             None => {
                 tc.infer_expr(w.callee);
                 tc.infer_expr(w.keywords);
-                return tc.arena[w.callee].ty.clone().unwrap_or(Ty::Poison);
+                return tc.arena[w.callee].ty.unwrap_or_else(|| tc.poison());
             }
         },
         ExprKind::PartialApp(pa) => match underlying_partial_sig(tc, pa) {
@@ -290,7 +315,7 @@ pub(crate) fn infer_where(tc: &mut TypeChecker, w: &WhereExpr) -> Ty {
             None => {
                 tc.infer_expr(w.callee);
                 tc.infer_expr(w.keywords);
-                return tc.arena[w.callee].ty.clone().unwrap_or(Ty::Poison);
+                return tc.arena[w.callee].ty.unwrap_or_else(|| tc.poison());
             }
         },
         // Bare NameRef: `f where {...}` returns a partially-applied function.
@@ -311,23 +336,25 @@ pub(crate) fn infer_where(tc: &mut TypeChecker, w: &WhereExpr) -> Ty {
         }
     };
 
-    let mut substitutions: Vec<Option<Ty>> = vec![None; sig.type_params.len()];
+    let mut substitutions: Vec<Option<TypeId>> = vec![None; sig.type_params.len()];
 
     // Seed substitutions from positional args, where present.
     if let WhereCalleeKind::Call(ref call) = kind {
         // Explicit type args.
-        for (slot, &tr_id) in substitutions.iter_mut().zip(call.type_args.iter()) {
+        let type_arg_refs: Vec<crate::TypeRefId> = call.type_args.clone();
+        for (slot, tr_id) in substitutions.iter_mut().zip(type_arg_refs) {
             let resolved = tc.resolve_type_ref_id(tr_id);
             *slot = Some(resolved);
         }
         for (arg, param) in call.args.iter().zip(sig.positional_params.iter()) {
             let arg_kind = tc.arena[arg.expr].kind.clone();
+            let param_ty = tc.types.env.get_ty(param.ty).clone();
             // Skip closures here — they need callback binding from the param type first.
-            if matches!(param.ty, Ty::Function(_)) && matches!(arg_kind, ExprKind::Closure(_)) {
+            if matches!(param_ty, Ty::Function(_)) && matches!(arg_kind, ExprKind::Closure(_)) {
                 continue;
             }
             let arg_ty = tc.infer_expr(arg.expr);
-            infer_type_params(&param.ty, &arg_ty, &mut substitutions);
+            infer_type_params(param.ty, arg_ty, &mut substitutions, &tc.types.env);
         }
     }
 
@@ -358,12 +385,12 @@ pub(crate) fn infer_where(tc: &mut TypeChecker, w: &WhereExpr) -> Ty {
     // that the inner Call/PartialApp's recorded type still looks right.
     let mut callee_sig = sig.clone();
     for param in &mut callee_sig.positional_params {
-        param.ty = substitute_bound_type_params(&param.ty, &substitutions);
+        param.ty = substitute_bound_type_params(param.ty, &substitutions, &mut tc.types.env);
     }
     for param in &mut callee_sig.keyword_params {
-        param.ty = substitute_bound_type_params(&param.ty, &substitutions);
+        param.ty = substitute_bound_type_params(param.ty, &substitutions, &mut tc.types.env);
     }
-    callee_sig.ret = substitute_bound_type_params(&sig.ret, &substitutions);
+    callee_sig.ret = substitute_bound_type_params(sig.ret, &substitutions, &mut tc.types.env);
 
     // Walk through the underlying callee expression to populate its types.
     // The closures inside the keyword record have already been bound, so any
@@ -434,36 +461,43 @@ fn process_record_keywords(
     tc: &mut TypeChecker,
     fields: &[RecordField],
     keyword_params: &[KeywordParamDef],
-    substitutions: &mut [Option<Ty>],
+    substitutions: &mut [Option<TypeId>],
 ) {
+    let fields = fields.to_vec();
+    let keyword_params = keyword_params.to_vec();
     for field in fields {
         let Some(param) = keyword_params.iter().find(|p| p.name == field.name) else {
             // Unknown keyword — still infer to keep the arena consistent.
             tc.infer_expr(field.value);
             continue;
         };
-        let param_ty = substitute_bound_type_params(&param.ty, substitutions);
+        let param_ty = substitute_bound_type_params(param.ty, substitutions, &mut tc.types.env);
 
         let value_kind = tc.arena[field.value].kind.clone();
-        if let Ty::Function(ref fn_ty) = param_ty
-            && let ExprKind::Closure(ref closure) = value_kind
-        {
-            bind_closure_params(
-                tc,
-                closure.body,
-                &fn_ty.params,
-                param.doc.as_deref(),
-                &param.name,
-            );
-            let value_ty = tc.infer_expr(field.value);
-            // The closure's inferred return type feeds substitution against
-            // the slot's declared return type.
-            if let Ty::Function(ref value_fn) = value_ty {
-                infer_type_params(&fn_ty.ret, &value_fn.ret, substitutions);
+        let param_ty_clone = tc.types.env.get_ty(param_ty).clone();
+        if let Ty::Function(ref fn_ty) = param_ty_clone {
+            if let ExprKind::Closure(ref closure) = value_kind {
+                bind_closure_params(
+                    tc,
+                    closure.body,
+                    &fn_ty.params,
+                    param.doc.as_deref(),
+                    &param.name,
+                );
+                let value_ty = tc.infer_expr(field.value);
+                // The closure's inferred return type feeds substitution against
+                // the slot's declared return type.
+                let value_ty_clone = tc.types.env.get_ty(value_ty).clone();
+                if let Ty::Function(ref value_fn) = value_ty_clone {
+                    infer_type_params(fn_ty.ret, value_fn.ret, substitutions, &tc.types.env);
+                }
+            } else {
+                let value_ty = tc.infer_expr(field.value);
+                infer_type_params(param.ty, value_ty, substitutions, &tc.types.env);
             }
         } else {
             let value_ty = tc.infer_expr(field.value);
-            infer_type_params(&param.ty, &value_ty, substitutions);
+            infer_type_params(param.ty, value_ty, substitutions, &tc.types.env);
         }
     }
 }
@@ -510,7 +544,7 @@ fn let_binds(tc: &TypeChecker, pattern_id: crate::PatternId, binding_id: crate::
     }
 }
 
-pub(crate) fn infer_invoke(tc: &mut TypeChecker, inv: &InvokeExpr) -> Ty {
+pub(crate) fn infer_invoke(tc: &mut TypeChecker, inv: &InvokeExpr) -> TypeId {
     let callee_kind = tc.arena[inv.callee].kind.clone();
 
     match callee_kind {
@@ -518,35 +552,36 @@ pub(crate) fn infer_invoke(tc: &mut TypeChecker, inv: &InvokeExpr) -> Ty {
             let receiver_ty = tc.infer_expr(field.receiver);
             let method_name = match &field.field {
                 crate::expr::FieldKey::Name(n) => n.clone(),
-                _ => return Ty::Poison,
+                _ => return tc.poison(),
             };
 
             // Try method resolution with no args.
-            let namespace_name =
-                super::fields::namespace_name_for_receiver_pub(&receiver_ty, &tc.types.env);
-            if let Some(ref ns_name) = namespace_name {
-                // Find method and check it's zero-arg.
-                if let Some(sig) = find_namespace_method_sig(tc, ns_name, &method_name)
-                    && let Some(method_sig) = instantiate_method_sig(tc, &receiver_ty, &sig, &[])
-                    && method_sig.params.is_empty()
-                {
-                    return method_sig.ret;
-                }
+            let namespace_name = super::fields::namespace_name_for_receiver_pub(
+                tc.types.env.get_ty(receiver_ty),
+                &tc.types.env,
+            );
+            if let Some(ns_name) = namespace_name
+                && let Some(sig) = find_namespace_method_sig(tc, &ns_name, &method_name)
+                && let Some(method_sig) = instantiate_method_sig(tc, receiver_ty, &sig, &[])
+                && method_sig.params.is_empty()
+            {
+                return method_sig.ret;
             }
 
-            Ty::Poison
+            tc.poison()
         }
         _ => {
             let callee_ty = tc.infer_expr(inv.callee);
-            match callee_ty {
-                Ty::Function(fn_ty) if fn_ty.params.is_empty() => (*fn_ty.ret).clone(),
-                _ => Ty::Poison,
+            let callee_ty_clone = tc.types.env.get_ty(callee_ty).clone();
+            match callee_ty_clone {
+                Ty::Function(fn_ty) if fn_ty.params.is_empty() => fn_ty.ret,
+                _ => tc.poison(),
             }
         }
     }
 }
 
-pub(crate) fn infer_partial_app(tc: &mut TypeChecker, pa: &PartialAppExpr) -> Ty {
+pub(crate) fn infer_partial_app(tc: &mut TypeChecker, pa: &PartialAppExpr) -> TypeId {
     let callee_kind = tc.arena[pa.callee].kind.clone();
 
     if let ExprKind::NameRef(ref nr) = callee_kind

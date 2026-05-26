@@ -1,6 +1,6 @@
 //! Field access and method resolution.
 
-use vx_types::{FnSig, ParamDef, Ty};
+use vx_types::{FnSig, ParamDef, Ty, TypeEnv, TypeId};
 
 use crate::ExprId;
 use crate::def::{DefKind, Definition};
@@ -11,17 +11,18 @@ use crate::scope::DefTarget;
 use super::subst::{bind_type_params, infer_type_params, substitute_bound_type_params};
 use super::{BoundMethodSig, TypeChecker};
 
-pub(crate) fn infer_field(tc: &mut TypeChecker, _expr_id: ExprId, f: &FieldExpr) -> Ty {
+pub(crate) fn infer_field(tc: &mut TypeChecker, _expr_id: ExprId, f: &FieldExpr) -> TypeId {
     let FieldKey::Name(ref field_name) = f.field else {
         // Tuple index access.
         let receiver_ty = tc.infer_expr(f.receiver);
-        if let Ty::Tuple(ref tuple_ty) = receiver_ty
+        let receiver_ty_clone = tc.types.env.get_ty(receiver_ty).clone();
+        if let Ty::Tuple(ref tuple_ty) = receiver_ty_clone
             && let FieldKey::Index(idx) = f.field
-            && let Some(elem) = tuple_ty.elements.get(idx as usize)
+            && let Some(&elem) = tuple_ty.0.get(idx as usize)
         {
-            return elem.clone();
+            return elem;
         }
-        return Ty::Poison;
+        return tc.poison();
     };
 
     // Check if this is a static namespace member access.
@@ -32,27 +33,28 @@ pub(crate) fn infer_field(tc: &mut TypeChecker, _expr_id: ExprId, f: &FieldExpr)
     let receiver_ty = tc.infer_expr(f.receiver);
 
     // Check namespace methods on the receiver type.
-    if let Some(method_sig) = resolve_method_on_receiver(tc, &receiver_ty, field_name) {
-        return Ty::Function(vx_types::FunctionTy {
-            params: method_sig.params.into_iter().map(|p| p.ty).collect(),
-            ret: Box::new(method_sig.ret),
-            capabilities: method_sig.capabilities,
-        });
+    if let Some(method_sig) = resolve_method_on_receiver(tc, receiver_ty, field_name) {
+        let params: Vec<TypeId> = method_sig.params.into_iter().map(|p| p.ty).collect();
+        return tc
+            .types
+            .env
+            .intern_function(params, method_sig.ret, method_sig.capabilities);
     }
 
     // Check struct fields.
-    if let Ty::Struct(ref struct_ty) = receiver_ty
-        && let vx_types::TypeDef::Struct(ref s) = tc.types.env[struct_ty.id]
+    let receiver_ty_clone = tc.types.env.get_ty(receiver_ty).clone();
+    if let Ty::Struct(ref struct_ty) = receiver_ty_clone
+        && let vx_types::TypeDef::Struct(ref s) = tc.types.env[struct_ty.def]
         && let Some(field_def) = s.fields.iter().find(|fd| fd.name == *field_name)
     {
-        return field_def.ty.clone();
+        return field_def.ty;
     }
 
-    Ty::Poison
+    tc.poison()
 }
 
 /// Static namespace field: `Namespace.member` where Namespace is a namespace item.
-fn infer_static_namespace_field(tc: &mut TypeChecker, f: &FieldExpr) -> Option<Ty> {
+fn infer_static_namespace_field(tc: &mut TypeChecker, f: &FieldExpr) -> Option<TypeId> {
     let FieldKey::Name(ref field_name) = f.field else {
         return None;
     };
@@ -70,12 +72,15 @@ fn infer_static_namespace_field(tc: &mut TypeChecker, f: &FieldExpr) -> Option<T
     };
 
     // Find a child function matching field_name.
-    for &child_id in &ns.items {
+    let ns_items: Vec<crate::ItemId> = ns.items.clone();
+    for child_id in ns_items {
         if let ItemKind::Function(ref child_f) = tc.arena[child_id].kind
             && child_f.name == *field_name
-            && let Some(sig) = tc.types.def_to_fn_sig.get(&child_f.name_span)
         {
-            return Some(tc.function_ty_from_sig(sig));
+            let name_span = child_f.name_span;
+            if let Some(sig) = tc.types.def_to_fn_sig.get(&name_span).cloned() {
+                return Some(tc.function_ty_from_sig(&sig));
+            }
         }
     }
 
@@ -84,11 +89,12 @@ fn infer_static_namespace_field(tc: &mut TypeChecker, f: &FieldExpr) -> Option<T
 
 /// Resolve a method on a receiver type by looking up the type's namespace.
 fn resolve_method_on_receiver(
-    tc: &TypeChecker,
-    receiver_ty: &Ty,
+    tc: &mut TypeChecker,
+    receiver_ty: TypeId,
     method_name: &str,
 ) -> Option<BoundMethodSig> {
-    let namespace_name = namespace_name_for_receiver(receiver_ty, &tc.types.env)?;
+    let namespace_name =
+        namespace_name_for_receiver(tc.types.env.get_ty(receiver_ty), &tc.types.env)?;
 
     // Look up the namespace item in the arena by scanning all items.
     let ns_item_id = tc.arena.items.iter().enumerate().find_map(|(i, item)| {
@@ -105,63 +111,66 @@ fn resolve_method_on_receiver(
     };
 
     // Find the method in the namespace.
-    for &child_id in &ns.items {
+    let ns_items: Vec<crate::ItemId> = ns.items.clone();
+    for child_id in ns_items {
         if let ItemKind::Function(ref f) = tc.arena[child_id].kind
             && f.name == method_name
-            && let Some(sig) = tc.types.def_to_fn_sig.get(&f.name_span)
         {
-            return instantiate_method_sig(tc, receiver_ty, sig, &[]);
+            let name_span = f.name_span;
+            if let Some(sig) = tc.types.def_to_fn_sig.get(&name_span).cloned() {
+                return instantiate_method_sig(tc, receiver_ty, &sig, &[]);
+            }
         }
     }
 
     None
 }
 
-pub(crate) fn namespace_name_for_receiver_pub(
-    receiver_ty: &Ty,
-    env: &vx_types::TypeEnv,
-) -> Option<String> {
+pub(crate) fn namespace_name_for_receiver_pub(receiver_ty: &Ty, env: &TypeEnv) -> Option<String> {
     namespace_name_for_receiver(receiver_ty, env)
 }
 
-fn namespace_name_for_receiver(receiver_ty: &Ty, env: &vx_types::TypeEnv) -> Option<String> {
+fn namespace_name_for_receiver(receiver_ty: &Ty, env: &TypeEnv) -> Option<String> {
     match receiver_ty {
         Ty::Scalar(vx_types::Scalar::String) => Some("String".to_string()),
         Ty::Optional(_) => Some("Option".to_string()),
         Ty::Array(_) => Some("Array".to_string()),
-        Ty::Map(_, _) => Some("Map".to_string()),
+        Ty::Map(_) => Some("Map".to_string()),
         Ty::Stream(_) => Some("Stream".to_string()),
-        Ty::Struct(s) => Some(env.get(s.id).name().to_string()),
-        Ty::Enum(e) => Some(env.get(e.id).name().to_string()),
-        Ty::Newtype(n) => Some(env.get(n.id).name().to_string()),
-        Ty::Alias(a) => Some(env.get(a.id).name().to_string()),
-        Ty::Opaque(o) => Some(env.get(o.id).name().to_string()),
+        Ty::Struct(s) => Some(env.get_def(s.def).name().to_string()),
+        Ty::Enum(e) => Some(env.get_def(e.def).name().to_string()),
+        Ty::Newtype(n) => Some(env.get_def(n.def).name().to_string()),
+        Ty::Alias(a) => Some(env.get_def(a.def).name().to_string()),
+        Ty::Opaque(o) => Some(env.get_def(o.def).name().to_string()),
         _ => None,
     }
 }
 
 /// Instantiate a method signature by binding the self param to receiver_ty.
 pub(crate) fn instantiate_method_sig(
-    _tc: &TypeChecker,
-    receiver_ty: &Ty,
+    tc: &mut TypeChecker,
+    receiver_ty: TypeId,
     sig: &FnSig,
-    arg_tys: &[Ty],
+    arg_tys: &[TypeId],
 ) -> Option<BoundMethodSig> {
     let (self_param, params) = sig.positional_params.split_first()?;
-    if self_param.name != "self" || sig.ret.is_poison() {
+    if self_param.name != "self" || tc.types.env.get_ty(sig.ret).is_poison() {
         return None;
     }
 
+    let receiver_ty_clone = tc.types.env.get_ty(receiver_ty).clone();
     // Special methods.
     if sig.name == "flatten"
         && params.is_empty()
-        && let Ty::Stream(inner) = receiver_ty
+        && let Ty::Stream(stream) = receiver_ty_clone.clone()
     {
-        let ret = match inner.as_ref() {
-            Ty::Array(item) => Ty::Stream(item.clone()),
-            Ty::Stream(item) => Ty::Stream(item.clone()),
+        let inner_ty = tc.types.env.get_ty(stream.0).clone();
+        let item = match inner_ty {
+            Ty::Array(arr) => arr.0,
+            Ty::Stream(s) => s.0,
             _ => return None,
         };
+        let ret = tc.types.env.intern_stream(item);
         return Some(BoundMethodSig {
             params: Vec::new(),
             ret,
@@ -170,65 +179,81 @@ pub(crate) fn instantiate_method_sig(
     }
     if sig.name == "to_map"
         && params.is_empty()
-        && let Ty::Stream(inner) = receiver_ty
+        && let Ty::Stream(stream) = receiver_ty_clone
     {
-        let Ty::Tuple(ref tuple) = **inner else {
+        let inner_ty = tc.types.env.get_ty(stream.0).clone();
+        let Ty::Tuple(ref tuple) = inner_ty else {
             return None;
         };
-        if tuple.elements.len() != 2 {
+        if tuple.0.len() != 2 {
             return None;
         }
+        let k = tuple.0[0];
+        let v = tuple.0[1];
+        let ret = tc.types.env.intern_map(k, v);
         return Some(BoundMethodSig {
             params: Vec::new(),
-            ret: Ty::Map(
-                Box::new(tuple.elements[0].clone()),
-                Box::new(tuple.elements[1].clone()),
-            ),
+            ret,
             capabilities: sig.capabilities.clone(),
         });
     }
 
-    let mut substitutions = vec![None; sig.type_params.len()];
-    bind_type_params(&self_param.ty, receiver_ty, &mut substitutions);
+    let mut substitutions: Vec<Option<TypeId>> = vec![None; sig.type_params.len()];
+    bind_type_params(
+        self_param.ty,
+        receiver_ty,
+        &mut substitutions,
+        &tc.types.env,
+    );
 
-    let mut bound_params: Vec<ParamDef> = params
+    let params_snapshot: Vec<ParamDef> = params.to_vec();
+
+    let mut bound_params: Vec<ParamDef> = params_snapshot
         .iter()
         .map(|p| ParamDef {
             name: p.name.clone(),
             name_span: p.name_span,
-            ty: substitute_bound_type_params(&p.ty, &substitutions),
+            ty: substitute_bound_type_params(p.ty, &substitutions, &mut tc.types.env),
             doc: p.doc.clone(),
         })
         .collect();
-    for (p, arg_ty) in bound_params.iter().zip(arg_tys.iter()) {
-        infer_type_params(&p.ty, arg_ty, &mut substitutions);
+    for (p, &arg_ty) in bound_params.iter().zip(arg_tys.iter()) {
+        infer_type_params(p.ty, arg_ty, &mut substitutions, &tc.types.env);
     }
-    bound_params = params
+    bound_params = params_snapshot
         .iter()
         .map(|p| ParamDef {
             name: p.name.clone(),
             name_span: p.name_span,
-            ty: substitute_bound_type_params(&p.ty, &substitutions),
+            ty: substitute_bound_type_params(p.ty, &substitutions, &mut tc.types.env),
             doc: p.doc.clone(),
         })
         .collect();
 
-    let mut ret = substitute_bound_type_params(&sig.ret, &substitutions);
+    let mut ret = substitute_bound_type_params(sig.ret, &substitutions, &mut tc.types.env);
 
     // flat_map special case.
     if sig.name == "flat_map"
         && params.len() == 1
-        && let Some(Ty::Function(function)) = arg_tys.first()
+        && let Some(&arg_ty) = arg_tys.first()
     {
-        let flattened = match function.ret.as_ref() {
-            Ty::Array(item) => item.clone(),
-            Ty::Stream(item) => item.clone(),
-            _ => return None,
-        };
-        ret = Ty::Stream(flattened);
+        let arg_ty_clone = tc.types.env.get_ty(arg_ty).clone();
+        if let Ty::Function(function) = arg_ty_clone {
+            let ret_ty_clone = tc.types.env.get_ty(function.ret).clone();
+            let flattened = match ret_ty_clone {
+                Ty::Array(a) => a.0,
+                Ty::Stream(s) => s.0,
+                _ => return None,
+            };
+            ret = tc.types.env.intern_stream(flattened);
+        }
     }
 
-    if ret.is_poison() || bound_params.iter().any(|p| p.ty.is_poison()) {
+    if tc.types.env.get_ty(ret).is_poison()
+        || bound_params
+            .iter()
+            .any(|p| tc.types.env.get_ty(p.ty).is_poison())
+    {
         return None;
     }
 
@@ -242,11 +267,12 @@ pub(crate) fn instantiate_method_sig(
 /// Resolve method and get a bound sig suitable for a call context.
 pub(crate) fn resolve_method_for_call(
     tc: &mut TypeChecker,
-    receiver_ty: &Ty,
+    receiver_ty: TypeId,
     method_name: &str,
     call_expr_id: ExprId,
 ) -> Option<BoundMethodSig> {
-    let namespace_name = namespace_name_for_receiver(receiver_ty, &tc.types.env)?;
+    let namespace_name =
+        namespace_name_for_receiver(tc.types.env.get_ty(receiver_ty), &tc.types.env)?;
 
     let ns_item_id = tc.arena.items.iter().enumerate().find_map(|(i, item)| {
         if let ItemKind::Namespace(ref _ns) = item.kind
@@ -310,11 +336,12 @@ pub(crate) fn resolve_method_for_call(
     let crate::expr::ExprKind::Call(ref call) = call_kind else {
         return Some(initial);
     };
-    let arg_tys: Vec<Ty> = call
+    let initial_param_count = initial.params.len();
+    let arg_tys: Vec<TypeId> = call
         .args
         .iter()
-        .zip(initial.params.iter())
-        .map(|(arg, _param)| tc.infer_expr(arg.expr))
+        .take(initial_param_count)
+        .map(|arg| tc.infer_expr(arg.expr))
         .collect();
 
     if found_name == "flat_map" && !arg_tys.is_empty() {

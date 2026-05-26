@@ -25,7 +25,7 @@ pub mod subst;
 use std::collections::HashMap;
 
 use vx_parser::SourceSpan;
-use vx_types::{Capability, FnSig, ParamDef, Ty};
+use vx_types::{Capability, FnSig, ParamDef, Ty, TypeId};
 
 use crate::arena::VirArena;
 use crate::def::Definition;
@@ -54,7 +54,7 @@ pub struct TypeCheckVirResult {
 ///
 /// Writes `Expr.ty`, `Binding.ty`, and `Pattern.ty` directly onto arena nodes.
 /// Clears all types to `None` before starting.
-pub fn type_check_vir(arena: &mut VirArena, types: &TypeCollection) -> TypeCheckVirResult {
+pub fn type_check_vir(arena: &mut VirArena, types: &mut TypeCollection) -> TypeCheckVirResult {
     // Clear all types up front.
     for expr in &mut arena.exprs {
         expr.ty = None;
@@ -93,7 +93,7 @@ pub fn type_check_vir(arena: &mut VirArena, types: &TypeCollection) -> TypeCheck
 /// The type checker state.
 pub(crate) struct TypeChecker<'a> {
     pub(crate) arena: &'a mut VirArena,
-    pub(crate) types: &'a TypeCollection,
+    pub(crate) types: &'a mut TypeCollection,
     pub(crate) member_defs: HashMap<SourceSpan, Definition>,
     pub(crate) closure_param_docs: HashMap<BindingId, String>,
     pub(crate) errors: Vec<IrDiagnostic>,
@@ -103,7 +103,7 @@ pub(crate) struct TypeChecker<'a> {
 #[derive(Clone)]
 pub(crate) struct BoundMethodSig {
     pub(crate) params: Vec<ParamDef>,
-    pub(crate) ret: Ty,
+    pub(crate) ret: TypeId,
     pub(crate) capabilities: Vec<Capability>,
 }
 
@@ -114,12 +114,20 @@ impl<'a> TypeChecker<'a> {
         }
     }
 
+    pub(crate) fn poison(&mut self) -> TypeId {
+        self.types.env.intern_poison()
+    }
+
+    pub(crate) fn unit(&mut self) -> TypeId {
+        self.types.env.intern_unit()
+    }
+
     /// Infer the type of an expression, write it onto the node, and return it.
-    pub(crate) fn infer_expr(&mut self, expr_id: ExprId) -> Ty {
+    pub(crate) fn infer_expr(&mut self, expr_id: ExprId) -> TypeId {
         let kind = self.arena[expr_id].kind.clone();
 
         let ty = match kind {
-            ExprKind::Literal(ref lit) => literals::infer_literal(lit),
+            ExprKind::Literal(ref lit) => literals::infer_literal(self, lit),
             ExprKind::PathLiteral(_) => literals::infer_path_literal(self),
             ExprKind::InterpolatedString(ref is) => literals::infer_interpolated_string(self, is),
             ExprKind::NameRef(ref nr) => names::infer_name_ref(self, expr_id, nr),
@@ -144,17 +152,17 @@ impl<'a> TypeChecker<'a> {
             ExprKind::Fail(ref f) => special::infer_fail(self, f),
             ExprKind::Range(_) => special::infer_range(self, expr_id),
             ExprKind::TypeOp(ref top) => special::infer_type_op(self, top),
-            ExprKind::Import(_) => Ty::Poison,
+            ExprKind::Import(_) => self.poison(),
             ExprKind::Index(ref idx) => {
                 self.infer_expr(idx.receiver);
                 self.infer_expr(idx.index);
-                Ty::Poison
+                self.poison()
             }
-            ExprKind::Error => Ty::Poison,
+            ExprKind::Error => self.poison(),
         };
 
         // Always write the type. Some(Poison) = checked but failed.
-        self.arena[expr_id].ty = Some(ty.clone());
+        self.arena[expr_id].ty = Some(ty);
         ty
     }
 
@@ -186,63 +194,60 @@ impl<'a> TypeChecker<'a> {
         }
     }
 
-    /// Look up a nominal type by name (e.g. "Path" → Ty::Struct/Enum/etc).
-    pub(crate) fn nominal_ty(&self, name: &str) -> Ty {
-        let Some(&id) = self.types.env.lookup(name).first() else {
-            return Ty::Poison;
+    /// Look up a nominal type by name (e.g. "Path" → Ty::Struct/Enum/etc),
+    /// returning its interned TypeId.
+    pub(crate) fn nominal_ty(&mut self, name: &str) -> TypeId {
+        let Some(&id) = self.types.env.lookup_def(name).first() else {
+            return self.poison();
         };
-        match self.types.env.get(id) {
-            vx_types::TypeDef::Struct(_) => Ty::Struct(vx_types::StructTy {
-                id,
-                type_args: vec![],
-            }),
-            vx_types::TypeDef::Enum(_) => Ty::Enum(vx_types::EnumTy {
-                id,
-                type_args: vec![],
-            }),
-            vx_types::TypeDef::Newtype(_) => Ty::Newtype(vx_types::NewtypeTy {
-                id,
-                type_args: vec![],
-            }),
-            vx_types::TypeDef::Alias(_) => Ty::Alias(vx_types::AliasTy {
-                id,
-                type_args: vec![],
-            }),
-            vx_types::TypeDef::Opaque(_) => Ty::Opaque(vx_types::OpaqueTy {
-                id,
-                type_args: vec![],
-            }),
+        match self.types.env.get_def(id) {
+            vx_types::TypeDef::Struct(_) => self.types.env.intern_struct(id, vec![]),
+            vx_types::TypeDef::Enum(_) => self.types.env.intern_enum(id, vec![]),
+            vx_types::TypeDef::Newtype(_) => self.types.env.intern_newtype(id, vec![]),
+            vx_types::TypeDef::Alias(_) => self.types.env.intern_alias(id, vec![]),
+            vx_types::TypeDef::Opaque(_) => self.types.env.intern_opaque(id, vec![]),
         }
     }
 
-    pub(crate) fn alias_target(&self, ty: &Ty) -> Option<Ty> {
-        let Ty::Alias(alias_ty) = ty else {
+    /// Resolve an alias `ty` to its target (substituted), if it is one.
+    pub(crate) fn alias_target(&mut self, ty: TypeId) -> Option<TypeId> {
+        let Ty::Alias(alias_ty) = self.types.env.get_ty(ty).clone() else {
             return None;
         };
-        let vx_types::TypeDef::Alias(alias_def) = self.types.env.get(alias_ty.id) else {
+        let vx_types::TypeDef::Alias(alias_def) = self.types.env.get_def(alias_ty.def) else {
             return None;
         };
+        let target = alias_def.target;
+        let args = alias_ty.type_args;
         Some(subst::substitute_type_params(
-            &alias_def.target,
-            &alias_ty.type_args,
+            target,
+            &args,
+            &mut self.types.env,
         ))
     }
 
-    pub(crate) fn alias_sum_alternatives(&self, ty: &Ty) -> Option<Vec<Ty>> {
-        let Ty::Alias(alias_ty) = ty else {
+    pub(crate) fn alias_sum_alternatives(&mut self, ty: TypeId) -> Option<Vec<TypeId>> {
+        let Ty::Alias(alias_ty) = self.types.env.get_ty(ty).clone() else {
             return None;
         };
-        let alternatives = self.types.alias_sum_alternatives.get(&alias_ty.id)?;
+        let alternatives = self
+            .types
+            .alias_sum_alternatives
+            .get(&alias_ty.def)?
+            .clone();
+        let args = alias_ty.type_args;
         Some(
             alternatives
-                .iter()
-                .map(|alt| subst::substitute_type_params(alt, &alias_ty.type_args))
+                .into_iter()
+                .map(|alt| subst::substitute_type_params(alt, &args, &mut self.types.env))
                 .collect(),
         )
     }
 
-    pub(crate) fn types_compatible(&self, actual: &Ty, expected: &Ty) -> bool {
-        if actual.is_poison() || expected.is_poison() {
+    pub(crate) fn types_compatible(&mut self, actual: TypeId, expected: TypeId) -> bool {
+        let actual_ty = self.types.env.get_ty(actual);
+        let expected_ty = self.types.env.get_ty(expected);
+        if actual_ty.is_poison() || expected_ty.is_poison() {
             return true;
         }
         if actual == expected {
@@ -251,40 +256,36 @@ impl<'a> TypeChecker<'a> {
         if let Some(alternatives) = self.alias_sum_alternatives(expected) {
             return alternatives
                 .iter()
-                .any(|alt| self.types_compatible(actual, alt));
+                .any(|alt| self.types_compatible(actual, *alt));
         }
         if let Some(alternatives) = self.alias_sum_alternatives(actual) {
             return alternatives
                 .iter()
-                .any(|alt| self.types_compatible(alt, expected));
+                .any(|alt| self.types_compatible(*alt, expected));
         }
         if let Some(target) = self.alias_target(expected) {
-            return self.types_compatible(actual, &target);
+            return self.types_compatible(actual, target);
         }
         if let Some(target) = self.alias_target(actual) {
-            return self.types_compatible(&target, expected);
+            return self.types_compatible(target, expected);
         }
 
-        match (actual, expected) {
-            (Ty::Optional(actual_inner), Ty::Optional(expected_inner)) => {
-                self.types_compatible(actual_inner, expected_inner)
+        let actual_ty = self.types.env.get_ty(actual).clone();
+        let expected_ty = self.types.env.get_ty(expected).clone();
+        match (actual_ty, expected_ty) {
+            (Ty::Optional(a), Ty::Optional(e)) => self.types_compatible(a.0, e.0),
+            (Ty::Array(a), Ty::Array(e)) => self.types_compatible(a.0, e.0),
+            (Ty::Map(a), Ty::Map(e)) => {
+                self.types_compatible(a.key, e.key) && self.types_compatible(a.value, e.value)
             }
-            (Ty::Array(actual_inner), Ty::Array(expected_inner)) => {
-                self.types_compatible(actual_inner, expected_inner)
-            }
-            (Ty::Map(ak, av), Ty::Map(ek, ev)) => {
-                self.types_compatible(ak, ek) && self.types_compatible(av, ev)
-            }
-            (Ty::Stream(actual_inner), Ty::Stream(expected_inner)) => {
-                self.types_compatible(actual_inner, expected_inner)
-            }
+            (Ty::Stream(a), Ty::Stream(e)) => self.types_compatible(a.0, e.0),
             (Ty::Tuple(at), Ty::Tuple(et)) => {
-                at.elements.len() == et.elements.len()
+                at.0.len() == et.0.len()
                     && at
-                        .elements
+                        .0
                         .iter()
-                        .zip(et.elements.iter())
-                        .all(|(a, e)| self.types_compatible(a, e))
+                        .zip(et.0.iter())
+                        .all(|(a, e)| self.types_compatible(*a, *e))
             }
             (Ty::Function(af), Ty::Function(ef)) => {
                 af.params.len() == ef.params.len()
@@ -292,26 +293,33 @@ impl<'a> TypeChecker<'a> {
                         .params
                         .iter()
                         .zip(ef.params.iter())
-                        .all(|(a, e)| self.types_compatible(a, e))
-                    && self.types_compatible(&af.ret, &ef.ret)
+                        .all(|(a, e)| self.types_compatible(*a, *e))
+                    && self.types_compatible(af.ret, ef.ret)
             }
-            _ => matches!(
-                (actual, expected),
+            (a, e) => matches!(
+                (a, e),
                 (Ty::Infer(_), _) | (_, Ty::Infer(_)) | (Ty::Param(_), _) | (_, Ty::Param(_))
             ),
         }
     }
 
     /// Resolve a VIR TypeRefId to a Ty using the type collection's name_to_id.
-    pub(crate) fn resolve_type_ref_id(&self, tr_id: TypeRefId) -> Ty {
-        resolve_type_ref(self.arena, tr_id, &self.types.name_to_id, &[], None)
+    pub(crate) fn resolve_type_ref_id(&mut self, tr_id: TypeRefId) -> TypeId {
+        let name_to_id = self.types.name_to_id.clone();
+        resolve_type_ref(
+            self.arena,
+            tr_id,
+            &name_to_id,
+            &[],
+            None,
+            &mut self.types.env,
+        )
     }
 
-    pub(crate) fn function_ty_from_sig(&self, sig: &FnSig) -> Ty {
-        Ty::Function(vx_types::FunctionTy {
-            params: sig.positional_params.iter().map(|p| p.ty.clone()).collect(),
-            ret: Box::new(sig.ret.clone()),
-            capabilities: sig.capabilities.clone(),
-        })
+    pub(crate) fn function_ty_from_sig(&mut self, sig: &FnSig) -> TypeId {
+        let params: Vec<TypeId> = sig.positional_params.iter().map(|p| p.ty).collect();
+        let ret = sig.ret;
+        let caps = sig.capabilities.clone();
+        self.types.env.intern_function(params, ret, caps)
     }
 }

@@ -128,12 +128,12 @@ pub fn compile_source(
     inject_implicit_stdlib_imports(&mut program);
 
     // Semantic passes.
-    let types = collect_types_vir(&mut program.arena);
+    let mut types = collect_types_vir(&mut program.arena);
     let resolve_errors = resolve_names(&mut program.arena);
     if !resolve_errors.is_empty() {
         return Err(CompileError::Resolve(resolve_errors));
     }
-    let tc_result = type_check_vir(&mut program.arena, &types);
+    let tc_result = type_check_vir(&mut program.arena, &mut types);
     if !tc_result.errors.is_empty() {
         return Err(CompileError::Type(tc_result.errors.clone()));
     }
@@ -226,13 +226,13 @@ fn probe() #discover -> String (
     #[test]
     fn semantic_pipeline_resolves_discover_and_executor_class_from_stdlib() {
         let mut program = semantically_analyze(SOURCE_DISCOVER_WHICH);
-        let types = collect_types_vir(&mut program.arena);
+        let mut types = collect_types_vir(&mut program.arena);
         let resolve_errors = resolve_names(&mut program.arena);
         assert!(
             resolve_errors.is_empty(),
             "expected stdlib names to resolve, got {resolve_errors:?}"
         );
-        let tc_result = type_check_vir(&mut program.arena, &types);
+        let tc_result = type_check_vir(&mut program.arena, &mut types);
         assert!(
             tc_result.errors.is_empty(),
             "expected discover source to type-check, got {:?}",
@@ -259,13 +259,13 @@ fn probe() #discover -> String (
     #[test]
     fn semantic_pipeline_resolves_exec_and_observer_from_stdlib() {
         let mut program = semantically_analyze(SOURCE_EXEC_STDOUT);
-        let types = collect_types_vir(&mut program.arena);
+        let mut types = collect_types_vir(&mut program.arena);
         let resolve_errors = resolve_names(&mut program.arena);
         assert!(
             resolve_errors.is_empty(),
             "expected stdlib names to resolve, got {resolve_errors:?}"
         );
-        let tc_result = type_check_vir(&mut program.arena, &types);
+        let tc_result = type_check_vir(&mut program.arena, &mut types);
         assert!(
             tc_result.errors.is_empty(),
             "expected exec source to type-check, got {:?}",

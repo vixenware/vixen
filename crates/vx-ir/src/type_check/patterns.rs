@@ -1,6 +1,6 @@
 //! Pattern typing — assign types to bindings introduced by patterns.
 
-use vx_types::Ty;
+use vx_types::{Ty, TypeId};
 
 use crate::PatternId;
 use crate::pattern::PatternKind;
@@ -9,14 +9,15 @@ use super::TypeChecker;
 use super::subst::substitute_type_params;
 
 /// Assign types to all bindings introduced by a pattern, given the type of the matched value.
-pub(crate) fn type_pattern(tc: &mut TypeChecker, pat_id: PatternId, ty: &Ty) {
+pub(crate) fn type_pattern(tc: &mut TypeChecker, pat_id: PatternId, ty: TypeId) {
     let kind = tc.arena[pat_id].kind.clone();
-    tc.arena[pat_id].ty = Some(ty.clone());
+    tc.arena[pat_id].ty = Some(ty);
+    let is_poison = tc.types.env.get_ty(ty).is_poison();
 
     match kind {
         PatternKind::Binding(bp) => {
-            if !ty.is_poison() {
-                tc.arena[bp.binding].ty = Some(ty.clone());
+            if !is_poison {
+                tc.arena[bp.binding].ty = Some(ty);
             }
         }
         PatternKind::Wildcard
@@ -26,58 +27,63 @@ pub(crate) fn type_pattern(tc: &mut TypeChecker, pat_id: PatternId, ty: &Ty) {
             // No bindings to type.
         }
         PatternKind::Tuple(tp) => {
-            if let Ty::Tuple(tuple_ty) = ty {
-                for (elem_pat, elem_ty) in tp.elements.iter().zip(tuple_ty.elements.iter()) {
-                    type_pattern(tc, *elem_pat, elem_ty);
+            let ty_clone = tc.types.env.get_ty(ty).clone();
+            if let Ty::Tuple(tuple_ty) = ty_clone {
+                for (elem_pat, elem_ty) in tp.elements.iter().zip(tuple_ty.0.iter()) {
+                    type_pattern(tc, *elem_pat, *elem_ty);
                 }
             }
         }
         PatternKind::Struct(sp) => {
-            if let Ty::Struct(struct_ty) = ty
-                && let vx_types::TypeDef::Struct(ref sdef) = tc.types.env[struct_ty.id]
+            let ty_clone = tc.types.env.get_ty(ty).clone();
+            if let Ty::Struct(struct_ty) = ty_clone
+                && let vx_types::TypeDef::Struct(ref sdef) = tc.types.env[struct_ty.def]
             {
+                // Snapshot to release the immutable borrow.
+                let fields_snapshot: Vec<(String, TypeId)> =
+                    sdef.fields.iter().map(|f| (f.name.clone(), f.ty)).collect();
                 for field in &sp.fields {
-                    let field_ty = sdef
-                        .fields
+                    let field_ty = fields_snapshot
                         .iter()
-                        .find(|f| f.name == field.name)
-                        .map(|f| f.ty.clone())
-                        .unwrap_or(Ty::Poison);
-                    type_pattern(tc, field.pattern, &field_ty);
+                        .find(|(n, _)| *n == field.name)
+                        .map(|(_, t)| *t)
+                        .unwrap_or_else(|| tc.poison());
+                    type_pattern(tc, field.pattern, field_ty);
                 }
             }
         }
         PatternKind::Variant(vp) => {
             let variant_fields = resolve_variant_fields(tc, &vp.name, ty);
-            if let Some(ref fields) = vp.fields {
-                for field in fields {
+            if let Some(ref vp_fields) = vp.fields {
+                for field in vp_fields {
                     let field_ty = variant_fields
                         .as_ref()
-                        .and_then(|vf| vf.iter().find(|f| f.name == field.name))
-                        .map(|f| f.ty.clone())
-                        .unwrap_or(Ty::Poison);
-                    type_pattern(tc, field.pattern, &field_ty);
+                        .and_then(|vf| vf.iter().find(|(n, _)| *n == field.name))
+                        .map(|(_, t)| *t)
+                        .unwrap_or_else(|| tc.poison());
+                    type_pattern(tc, field.pattern, field_ty);
                 }
             }
         }
         PatternKind::Array(arr) => {
-            if let Ty::Array(elem_ty) = ty {
+            let ty_clone = tc.types.env.get_ty(ty).clone();
+            if let Ty::Array(arr_ty) = ty_clone {
                 for &elem_pat in &arr.elements {
-                    type_pattern(tc, elem_pat, elem_ty);
+                    type_pattern(tc, elem_pat, arr_ty.0);
                 }
             }
         }
         PatternKind::ArrayRest(rest) => {
             if let Some(binding_id) = rest.binding {
-                // Rest binding gets Array type.
-                if let Ty::Array(_) = ty {
-                    tc.arena[binding_id].ty = Some(ty.clone());
+                // Rest binding gets the full Array type.
+                if matches!(tc.types.env.get_ty(ty), Ty::Array(_)) {
+                    tc.arena[binding_id].ty = Some(ty);
                 }
             }
         }
         PatternKind::At(at) => {
-            if !ty.is_poison() {
-                tc.arena[at.binding].ty = Some(ty.clone());
+            if !is_poison {
+                tc.arena[at.binding].ty = Some(ty);
             }
             type_pattern(tc, at.inner, ty);
         }
@@ -89,68 +95,71 @@ pub(crate) fn type_pattern(tc: &mut TypeChecker, pat_id: PatternId, ty: &Ty) {
     }
 }
 
-/// Resolve a variant pattern's field types from the scrutinee type.
+/// Resolve a variant pattern's field types from the scrutinee type. Returns
+/// the variant's field (name, [`TypeId`]) pairs, with type parameters
+/// substituted from the scrutinee.
 fn resolve_variant_fields(
-    tc: &TypeChecker,
+    tc: &mut TypeChecker,
     variant_name: &str,
-    scrutinee_ty: &Ty,
-) -> Option<Vec<vx_types::FieldDef>> {
+    scrutinee_ty: TypeId,
+) -> Option<Vec<(String, TypeId)>> {
+    let scrutinee = tc.types.env.get_ty(scrutinee_ty).clone();
     // Optional variants: substitute type param.
-    if let Ty::Optional(inner) = scrutinee_ty {
+    if let Ty::Optional(opt) = scrutinee {
+        let inner = opt.0;
         let option_id = tc
             .types
             .env
-            .lookup("Option")
+            .lookup_def("Option")
             .iter()
             .copied()
-            .find(|&id| matches!(tc.types.env.get(id), vx_types::TypeDef::Enum(_)))?;
-        let vx_types::TypeDef::Enum(enum_def) = tc.types.env.get(option_id) else {
+            .find(|&id| matches!(tc.types.env.get_def(id), vx_types::TypeDef::Enum(_)))?;
+        let vx_types::TypeDef::Enum(enum_def) = tc.types.env.get_def(option_id) else {
             return None;
         };
         let variant_id = enum_def.variants.iter().copied().find(|vid| {
             matches!(
-                tc.types.env.get(*vid),
+                tc.types.env.get_def(*vid),
                 vx_types::TypeDef::Struct(s) if s.name == variant_name
             )
         })?;
         let vx_types::TypeDef::Struct(ref sdef) = tc.types.env[variant_id] else {
             return None;
         };
-        let fields = sdef
-            .fields
-            .iter()
-            .map(|f| vx_types::FieldDef {
-                name: f.name.clone(),
-                ty: substitute_type_params(&f.ty, &[(*inner.clone())]),
-                attrs: f.attrs.clone(),
-                has_default: f.has_default,
-                default_value: f.default_value.clone(),
-                name_span: f.name_span,
+        let fields_snapshot: Vec<(String, TypeId)> =
+            sdef.fields.iter().map(|f| (f.name.clone(), f.ty)).collect();
+        let substitutions = [inner];
+        let fields = fields_snapshot
+            .into_iter()
+            .map(|(name, ty)| {
+                let substituted = substitute_type_params(ty, &substitutions, &mut tc.types.env);
+                (name, substituted)
             })
             .collect();
         return Some(fields);
     }
 
     // Enum variants.
-    if let Ty::Enum(enum_ty) = scrutinee_ty
-        && let vx_types::TypeDef::Enum(ref edef) = tc.types.env[enum_ty.id]
+    if let Ty::Enum(enum_ty) = scrutinee
+        && let vx_types::TypeDef::Enum(ref edef) = tc.types.env[enum_ty.def]
     {
-        for &variant_id in &edef.variants {
+        let variants = edef.variants.clone();
+        for variant_id in variants {
             if let vx_types::TypeDef::Struct(ref sdef) = tc.types.env[variant_id]
                 && sdef.name == variant_name
             {
-                return Some(sdef.fields.clone());
+                return Some(sdef.fields.iter().map(|f| (f.name.clone(), f.ty)).collect());
             }
         }
     }
 
     // Fallback: look up by name.
-    let type_ids = tc.types.env.lookup(variant_name);
-    for &id in type_ids {
+    let type_ids: Vec<vx_types::TypeDefId> = tc.types.env.lookup_def(variant_name).to_vec();
+    for id in type_ids {
         if let vx_types::TypeDef::Struct(ref sdef) = tc.types.env[id]
             && sdef.parent_enum.is_some()
         {
-            return Some(sdef.fields.clone());
+            return Some(sdef.fields.iter().map(|f| (f.name.clone(), f.ty)).collect());
         }
     }
 

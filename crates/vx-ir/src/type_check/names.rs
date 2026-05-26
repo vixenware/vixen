@@ -1,6 +1,6 @@
 //! Name reference inference and definition type lookup.
 
-use vx_types::{FnSig, InferVar, ParamDef, Ty};
+use vx_types::{FnSig, InferVar, ParamDef, TypeId};
 
 use crate::binding::BindingKind;
 use crate::expr::NameRefExpr;
@@ -10,9 +10,9 @@ use crate::{BindingId, ExprId, ItemId};
 
 use super::TypeChecker;
 
-pub(crate) fn infer_name_ref(tc: &mut TypeChecker, _expr_id: ExprId, nr: &NameRefExpr) -> Ty {
+pub(crate) fn infer_name_ref(tc: &mut TypeChecker, _expr_id: ExprId, nr: &NameRefExpr) -> TypeId {
     let Some(target) = nr.resolved else {
-        return Ty::Poison;
+        return tc.poison();
     };
 
     match target {
@@ -26,35 +26,35 @@ pub(crate) fn infer_name_ref(tc: &mut TypeChecker, _expr_id: ExprId, nr: &NameRe
 }
 
 /// Get the type of a binding.
-pub(crate) fn type_of_binding(tc: &mut TypeChecker, binding_id: BindingId) -> Ty {
+pub(crate) fn type_of_binding(tc: &mut TypeChecker, binding_id: BindingId) -> TypeId {
     let binding = &tc.arena[binding_id];
 
     // If already typed (e.g. by let-stmt processing), return it.
-    if let Some(ref ty) = binding.ty {
-        return ty.clone();
+    if let Some(ty) = binding.ty {
+        return ty;
     }
 
     match binding.kind {
         BindingKind::Parameter => {
             // Look up type from the enclosing function's FnSig and persist it.
             if let Some(ty) = param_type_from_fn_sig(tc, binding_id) {
-                tc.arena[binding_id].ty = Some(ty.clone());
+                tc.arena[binding_id].ty = Some(ty);
                 return ty;
             }
-            Ty::Poison
+            tc.poison()
         }
         BindingKind::Let
         | BindingKind::PatternMatch
         | BindingKind::AtPattern
         | BindingKind::ArrayRest => {
             // Should have been populated by type_pattern or let-stmt handling.
-            Ty::Poison
+            tc.poison()
         }
     }
 }
 
 /// Look up a parameter's type from its enclosing function's FnSig.
-fn param_type_from_fn_sig(tc: &TypeChecker, binding_id: BindingId) -> Option<Ty> {
+fn param_type_from_fn_sig(tc: &TypeChecker, binding_id: BindingId) -> Option<TypeId> {
     let binding = &tc.arena[binding_id];
     let body_id = binding.body;
     let body = &tc.arena[body_id];
@@ -75,15 +75,15 @@ fn param_type_from_fn_sig(tc: &TypeChecker, binding_id: BindingId) -> Option<Ty>
 
     // Match by name in positional params.
     for param in &sig.positional_params {
-        if param.name == binding.name && !param.ty.is_poison() {
-            return Some(param.ty.clone());
+        if param.name == binding.name && !tc.types.env.get_ty(param.ty).is_poison() {
+            return Some(param.ty);
         }
     }
 
     // Match by name in keyword params.
     for param in &sig.keyword_params {
-        if param.name == binding.name && !param.ty.is_poison() {
-            return Some(param.ty.clone());
+        if param.name == binding.name && !tc.types.env.get_ty(param.ty).is_poison() {
+            return Some(param.ty);
         }
     }
 
@@ -91,21 +91,19 @@ fn param_type_from_fn_sig(tc: &TypeChecker, binding_id: BindingId) -> Option<Ty>
 }
 
 /// Get the type of an item reference (function, struct constructor, etc.).
-pub(crate) fn type_of_item(tc: &TypeChecker, item_id: ItemId) -> Ty {
-    let item = &tc.arena[item_id];
-    let kind = &item.kind;
+pub(crate) fn type_of_item(tc: &mut TypeChecker, item_id: ItemId) -> TypeId {
+    let kind = tc.arena[item_id].kind.clone();
 
     match kind {
         ItemKind::Function(f) => {
             let def_site = f.name_span;
-            if let Some(sig) = tc.types.def_to_fn_sig.get(&def_site) {
-                return Ty::Function(vx_types::FunctionTy {
-                    params: sig.positional_params.iter().map(|p| p.ty.clone()).collect(),
-                    ret: Box::new(sig.ret.clone()),
-                    capabilities: sig.capabilities.clone(),
-                });
+            if let Some(sig) = tc.types.def_to_fn_sig.get(&def_site).cloned() {
+                let params: Vec<TypeId> = sig.positional_params.iter().map(|p| p.ty).collect();
+                let ret = sig.ret;
+                let caps = sig.capabilities;
+                return tc.types.env.intern_function(params, ret, caps);
             }
-            Ty::Poison
+            tc.poison()
         }
         ItemKind::Namespace(ns) => {
             // If namespace has exactly one constructor function, return its type.
@@ -120,79 +118,84 @@ pub(crate) fn type_of_item(tc: &TypeChecker, item_id: ItemId) -> Ty {
             if sigs.len() == 1 {
                 return tc.function_ty_from_sig(&sigs[0]);
             }
-            Ty::Poison
+            tc.poison()
         }
-        _ => Ty::Poison,
+        _ => tc.poison(),
     }
 }
 
 /// Get the type of a variant reference.
-pub(crate) fn type_of_variant(tc: &TypeChecker, enum_item: ItemId, variant_index: u32) -> Ty {
+pub(crate) fn type_of_variant(
+    tc: &mut TypeChecker,
+    enum_item: ItemId,
+    variant_index: u32,
+) -> TypeId {
     let ItemKind::Enum(ref enum_item_data) = tc.arena[enum_item].kind else {
-        return Ty::Poison;
+        return tc.poison();
     };
 
     let Some(_variant) = enum_item_data.variants.get(variant_index as usize) else {
-        return Ty::Poison;
+        return tc.poison();
     };
 
-    // Look up the variant's TypeId from the type collection.
+    // Look up the variant's TypeDefId from the type collection.
     let enum_name_span = enum_item_data.name_span;
-    let Some(&enum_type_id) = tc.types.def_to_type.get(&enum_name_span) else {
-        return Ty::Poison;
+    let Some(&enum_def_id) = tc.types.def_to_type.get(&enum_name_span) else {
+        return tc.poison();
     };
 
-    let vx_types::TypeDef::Enum(ref enum_def) = tc.types.env[enum_type_id] else {
-        return Ty::Poison;
+    let (variant_def_id, enum_name) = {
+        let vx_types::TypeDef::Enum(ref enum_def) = tc.types.env[enum_def_id] else {
+            return tc.poison();
+        };
+        let Some(&v) = enum_def.variants.get(variant_index as usize) else {
+            return tc.poison();
+        };
+        (v, enum_def.name.clone())
     };
 
-    let Some(&variant_type_id) = enum_def.variants.get(variant_index as usize) else {
-        return Ty::Poison;
-    };
-
-    let vx_types::TypeDef::Struct(ref variant_struct) = tc.types.env[variant_type_id] else {
-        return Ty::Poison;
+    // Snapshot variant struct fields.
+    let fields_snapshot: Vec<(String, TypeId)> = {
+        let vx_types::TypeDef::Struct(ref variant_struct) = tc.types.env[variant_def_id] else {
+            return tc.poison();
+        };
+        variant_struct
+            .fields
+            .iter()
+            .map(|f| (f.name.clone(), f.ty))
+            .collect()
     };
 
     // Unit variant (no fields) → value type.
-    if variant_struct.fields.is_empty() {
-        if enum_def.name == "Option" {
-            return Ty::Optional(Box::new(Ty::Infer(InferVar(0))));
+    if fields_snapshot.is_empty() {
+        if enum_name == "Option" {
+            let infer = tc.types.env.intern_infer(InferVar(0));
+            return tc.types.env.intern_optional(infer);
         }
-        return Ty::Enum(vx_types::EnumTy {
-            id: enum_type_id,
-            type_args: vec![],
-        });
+        return tc.types.env.intern_enum(enum_def_id, vec![]);
     }
 
     // Variant with fields → constructor function type.
-    let ret = if enum_def.name == "Option" {
-        let inner = variant_struct
-            .fields
+    let ret = if enum_name == "Option" {
+        let inner = fields_snapshot
             .iter()
-            .find(|f| f.name == "value")
-            .map(|f| f.ty.clone())
-            .unwrap_or(Ty::Infer(InferVar(0)));
-        Ty::Optional(Box::new(inner))
+            .find(|(n, _)| n == "value")
+            .map(|(_, t)| *t)
+            .unwrap_or_else(|| tc.types.env.intern_infer(InferVar(0)));
+        tc.types.env.intern_optional(inner)
     } else {
-        Ty::Enum(vx_types::EnumTy {
-            id: enum_type_id,
-            type_args: vec![],
-        })
+        tc.types.env.intern_enum(enum_def_id, vec![])
     };
 
-    Ty::Function(vx_types::FunctionTy {
-        params: variant_struct.fields.iter().map(|f| f.ty.clone()).collect(),
-        ret: Box::new(ret),
-        capabilities: vec![],
-    })
+    let params: Vec<TypeId> = fields_snapshot.iter().map(|(_, t)| *t).collect();
+    tc.types.env.intern_function(params, ret, vec![])
 }
 
 /// Get the FnSig for a name ref, considering function/variant/namespace overloads.
-pub(crate) fn sig_for_name_ref_target(tc: &TypeChecker, target: DefTarget) -> Option<FnSig> {
+pub(crate) fn sig_for_name_ref_target(tc: &mut TypeChecker, target: DefTarget) -> Option<FnSig> {
     match target {
         DefTarget::Item(item_id) => {
-            let kind = &tc.arena[item_id].kind;
+            let kind = tc.arena[item_id].kind.clone();
             match kind {
                 ItemKind::Function(f) => tc.types.def_to_fn_sig.get(&f.name_span).cloned(),
                 ItemKind::Namespace(ns) => {
@@ -219,7 +222,7 @@ pub(crate) fn sig_for_name_ref_target(tc: &TypeChecker, target: DefTarget) -> Op
 
 /// Build a FnSig for a variant constructor.
 pub(crate) fn variant_sig(
-    tc: &TypeChecker,
+    tc: &mut TypeChecker,
     enum_item: ItemId,
     variant_index: u32,
 ) -> Option<FnSig> {
@@ -227,43 +230,44 @@ pub(crate) fn variant_sig(
         return None;
     };
 
-    let variant = enum_item_data.variants.get(variant_index as usize)?;
+    let variant = enum_item_data.variants.get(variant_index as usize)?.clone();
     let enum_name_span = enum_item_data.name_span;
-    let &enum_type_id = tc.types.def_to_type.get(&enum_name_span)?;
-    let vx_types::TypeDef::Enum(ref enum_def) = tc.types.env[enum_type_id] else {
-        return None;
+    let &enum_def_id = tc.types.def_to_type.get(&enum_name_span)?;
+    let (variant_def_id, enum_name, type_params) = {
+        let vx_types::TypeDef::Enum(ref enum_def) = tc.types.env[enum_def_id] else {
+            return None;
+        };
+        let &v = enum_def.variants.get(variant_index as usize)?;
+        (v, enum_def.name.clone(), enum_def.type_params.clone())
     };
-    let &variant_type_id = enum_def.variants.get(variant_index as usize)?;
-    let vx_types::TypeDef::Struct(ref variant_struct) = tc.types.env[variant_type_id] else {
-        return None;
+    let fields_snapshot: Vec<vx_types::FieldDef> = {
+        let vx_types::TypeDef::Struct(ref variant_struct) = tc.types.env[variant_def_id] else {
+            return None;
+        };
+        variant_struct.fields.clone()
     };
 
-    let ret = if enum_def.name == "Option" {
-        let inner = variant_struct
-            .fields
+    let ret = if enum_name == "Option" {
+        let inner = fields_snapshot
             .iter()
             .find(|f| f.name == "value")
-            .map(|f| f.ty.clone())
-            .unwrap_or(Ty::Infer(InferVar(0)));
-        Ty::Optional(Box::new(inner))
+            .map(|f| f.ty)
+            .unwrap_or_else(|| tc.types.env.intern_infer(InferVar(0)));
+        tc.types.env.intern_optional(inner)
     } else {
-        Ty::Enum(vx_types::EnumTy {
-            id: enum_type_id,
-            type_args: vec![],
-        })
+        tc.types.env.intern_enum(enum_def_id, vec![])
     };
 
     Some(FnSig {
         name: variant.name.clone(),
         name_span: variant.name_span,
-        type_params: enum_def.type_params.clone(),
-        positional_params: variant_struct
-            .fields
-            .iter()
+        type_params,
+        positional_params: fields_snapshot
+            .into_iter()
             .map(|f| ParamDef {
-                name: f.name.clone(),
+                name: f.name,
                 name_span: f.name_span,
-                ty: f.ty.clone(),
+                ty: f.ty,
                 doc: None,
             })
             .collect(),

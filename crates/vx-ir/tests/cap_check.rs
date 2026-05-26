@@ -16,9 +16,9 @@ fn cap_check_source(source: &str) -> Vec<(IrDiagnostic, String)> {
     let parsed = parse_source_file(source);
     let file = parsed.tree();
     let mut program = VirBuilder::build_program(&[(SourceId(0), file)]);
-    let tc = collect_types_vir(&mut program.arena);
+    let mut tc = collect_types_vir(&mut program.arena);
     let _resolve_errors = resolve_names(&mut program.arena);
-    let tc_result = type_check_vir(&mut program.arena, &tc);
+    let tc_result = type_check_vir(&mut program.arena, &mut tc);
     let cap_result = check_capabilities_vir(&program.arena, &tc, &tc_result);
     cap_result
         .errors
