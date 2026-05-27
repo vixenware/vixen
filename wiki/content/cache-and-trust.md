@@ -87,7 +87,7 @@ Substrate is the same — CAS, VFS, sandbox, RPC over Vox — but the deployment
 | Store access | Read-only on public store; demand signals on miss | Direct write (trusted-builder-signed) to public store; full access to private store |
 | Toolchain ownership | Customer's installs (proprietary discovered, OSS hermetic-from-public-store) | Vixen-installed under Vixen's own licenses; private-CAS-served |
 | VFS backend (macOS) | FSKit — supported, no kext entitlement needed, slower | MacFUSE (paid license) or custom kext — faster, operational complexity acceptable on hardware we control |
-| VFS backend (Windows) | ProjFS | Open — dev-mode driver, or a paid third-party |
+| VFS backend (Windows) | ProjFS | WinFsp / Dokany / custom dev-mode driver — faster than ProjFS, operational complexity acceptable on hardware we control |
 | VFS backend (Linux) | FUSE | FUSE / direct mount — fewer constraints |
 
 This is deliberate posture, not accidental asymmetry. Each row trades a property based on what changes between contexts:
