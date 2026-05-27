@@ -90,3 +90,53 @@ Implications:
 - The shape becomes uniform across kinds of work: `exec`, `acquire`, `render`, `stabilize` all produce a `T`; all cache that `T` against inputs. There is no "process result" cache vs "computed result" cache.
 
 The price (observer changes = cache miss) is paid willingly. The observer should be tiny anyway — the idiomatic shape is "observer = the small function that extracts the structured value the caller cares about." Big logic belongs in the rest of the Vixen program.
+
+## Which intrinsics get persisted
+
+The persistent cache stores only the results of intrinsics worth storing — the cost of writing to and reading from the cache must beat the cost of recomputing. That's a per-intrinsic decision, not a user-visible knob. See [Vixen language → Demand-driven evaluation](/vixen-language/#demand-driven-evaluation) for the user-facing framing; this section covers the runtime mechanism.
+
+Policy lives on the intrinsic's Rust impl:
+
+```rust
+trait Intrinsic {
+    fn cache_policy(&self) -> CachePolicy;
+    fn evaluate(&self, ctx: &mut Ctx, args: &[Value]) -> Result<Value>;
+}
+
+enum CachePolicy {
+    Persist,    // exec, acquire, Http, Toml/Json/Yaml::parse, pubgrub_solve, render, stabilize, discover-tuples
+    InMemory,   // String::concat, equality, hash, arithmetic, value construction, Tree projection
+}
+```
+
+The evaluator dispatches on policy. `Persist` → derive cache key from arg identities, consult cache, on miss compute and store. `InMemory` → just compute and let the per-evaluation memo table handle dedup within the run.
+
+### Four categories anchor the policy
+
+- **External I/O.** `exec`, `acquire`, `Http`, `host.exec`, `host.read`, `host.which`, the rest of the `Host` surface. Network or process round-trip. Recompute cost is orders of magnitude above cache I/O. Always `Persist`. For `Host` operations, what gets persisted is the obligation tuple — recording the call + observed result — not the host's bytes themselves.
+- **Substantial pure CPU.** `pubgrub_solve`, `Toml/Json/Yaml::parse`, `render`. Deterministic and expensive. Parsing a 30k-line `Cargo.toml`, solving a constraint graph with thousands of crates, rendering a templated config — all beat cache I/O cost. `Persist`.
+- **Trivial pure CPU.** `String::concat`, `Hash::of`, equality, scalar arithmetic, record/list construction, `Tree::file`, `Map::get`, `Array::index`. Computing the result is faster than hashing the inputs to derive a cache key. `InMemory`.
+- **Stabilisation.** `stabilize` exists *as* a cache boundary; `Persist` by definition. It is also the one opt-in surface a user has: explicit `stabilize(expr)` forces persistence of an intermediate whose intrinsics are otherwise `InMemory` or whose enclosing function is pure-user-code.
+
+### The cache layer is bypassed for `InMemory`, not consulted-and-missed
+
+The key-derivation cost is itself non-trivial — hashing a `Tree` to get its content identity is real work. For an `InMemory` intrinsic the evaluator does not derive a persistent key at all. The per-evaluation memo table keys by structural identity, but it's an in-memory hash table that lives for the duration of `main` and goes away when it returns.
+
+### Pure user functions are `InMemory`-only
+
+A function declared in `.vx` with a body is pure. The evaluator memoises it per evaluation by `(function-identity, argument-identities)` and does not persist that memo. Two reasons:
+
+1. The runtime can't tell whether a pure user function is expensive. `fn add (a, b) = a + b` and `fn slow_check (x) = expensive_pure_thing(x)` look identical from the evaluator's vantage point.
+2. The valuable expensive parts inside user functions are intrinsic calls, which are cached at their own boundaries. If `@vixen/cargo::resolve_workspace` is slow, the slow parts are the `pubgrub_solve` and `Toml::parse` calls inside it — those hit the persistent cache. The user function's whole-result identity isn't separately worth storing because its constituent intrinsic results already are.
+
+Recomputing `resolve_workspace(manifest)` after a process restart re-walks the Vixen code, but every expensive intrinsic call inside it hits the persistent cache. End-to-end cost is the same as caching the whole thing, without duplicating stored values. If a user really wants to persist a pure-user-code intermediate, `stabilize(expr)` is the lever.
+
+### Caching is per-result, not per-aggregate
+
+A `Tree` value built up from many `exec`-produced blobs is not cached as one artifact. The Tree's identity is a Merkle root over its entries; the entries' identities are the cached `exec` results. Constructing the Tree from those entries is `InMemory` (record construction). The cache holds the leaves; the aggregate is rebuilt cheaply from leaf identities on demand. Same for any aggregate (`Map[K, V]`, `Array[T]`) — the expensive elementwise work is what's persisted.
+
+### Open questions
+
+- **Empirical thresholds.** Some intrinsics are borderline (`render` on a 200-byte template). When in doubt, start `InMemory` and promote to `Persist` based on observed cost. Promoting an intrinsic from `InMemory` to `Persist` is monotonic-safe — old runs simply have no cache entries for it; future runs do. Same shape as cache-key tightening above.
+- **Size-aware policy.** Could the same intrinsic be `Persist` for some inputs and `InMemory` for others (e.g. `Toml::parse` for big files, `InMemory` for tiny ones)? Possible but adds branching at the dispatch point. Defer; flat per-intrinsic policy is fine for v1.
+- **Per-cache policy.** Whether the public cache accepts every `Persist`-produced result is a separate question from whether the local cache does. The local cache `Persist`s everything in category; the public cache only accepts trusted-builder-signed entries via the per-cache trust gate above.

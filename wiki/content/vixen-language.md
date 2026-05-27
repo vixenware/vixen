@@ -194,7 +194,7 @@ Within a single evaluation, the evaluator memoises every demanded thunk by its i
 
 Not every value's identity is worth materialising to disk. Pure arithmetic, value construction, string operations, equality — cheaper to recompute than to round-trip through a cache. The persistent cache writes only the results of intrinsics that did external or substantial work: `exec`, `acquire`, `Http`, `Toml/Json/Yaml::parse`, `pubgrub_solve`, `render`, `stabilize`, and the recorded-obligation tuples from `discover`. Trivial intrinsics (`String::concat`, equality, hash, arithmetic on scalars, Tree projection) and all pure Vixen function calls stay in the per-evaluation memo table.
 
-The cutoff is a property of each intrinsic, decided in the runtime, not a user-visible knob. *Cacheable by the type system* (every value can in principle be cached) is not the same as *worth caching* (the lookup cost beats the recompute cost).
+The cutoff is a property of each intrinsic, decided in the runtime, not a user-visible knob. *Cacheable by the type system* (every value can in principle be cached) is not the same as *worth caching* (the lookup cost beats the recompute cost). See [Cache and trust → Which intrinsics get persisted](/cache-and-trust/#which-intrinsics-get-persisted) for the categories, the dispatch mechanism, and the treatment of pure user functions.
 
 ## Cargo-resolution-as-Vixen, lockfiles-as-outputs
 
