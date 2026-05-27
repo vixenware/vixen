@@ -93,6 +93,16 @@ The cache, the executor fleet, the closure-shipping story, the demand-warmed flo
 - No reflection on internal layout. The language exposes the canonical form; the runtime picks the in-memory representation.
 - Wire format is implicit. The language doesn't expose a "write to bytes" primitive; values flow through cache and wire transparently.
 
+## Closures ship as canonical IR
+
+A direct consequence of "values are hashable, comparable, serialisable" applied to closures. When an `exec` runs on a remote executor, its `observer: Fn(Process, Tree) -> T` ships to that executor as a value like any other.
+
+The wire form is **canonical Vixen IR** — sorted record fields, normalised binder names, deterministic ordering for sets/maps, no source-text whitespace or comments. Two closures that mean the same thing hash to the same bytes regardless of where they were typed. Captures are recursively values, recursively canonical; the closure's content hash is the hash of the IR mixed with each capture's hash.
+
+The receiving executor needs a compatible runtime to evaluate the IR. That compatibility is an executor ability — `struct VixenRuntime { version: SemVer, intrinsic_set: Hash }` — pinned by the build's predicate. Mismatch is a routing failure caught before dispatch, not a mid-build error. See [Executor abilities](/executor-abilities/).
+
+Failure modes are idempotent. A closure that trips a runtime invariant returns a structured `Diagnostic` and poisons the exec; a lost-mid-eval failure is retryable on another eligible executor; a missing intrinsic marks the executor stale on that intrinsic. Retries are safe because nothing the closure does on the executor is observable elsewhere until the exec result is.
+
 ## Syntax: kwargs use `with`, not `where`
 
 Function signatures separate positional arguments from named arguments with defaults via a `with { … }` block:
@@ -160,9 +170,31 @@ fn main(workspace: Tree) with {
 } -> Tree
 ```
 
-The workspace is positional; `args` and `env` are keyword arguments (the `with` block). The return type is typically `Tree` (the build's output Tree, materialised by `vx` to the customer's filesystem) but can be any value the subcommand's contract requires.
+The workspace is positional; `args` and `env` are keyword arguments (the `with` block). `main` always returns a `Tree`.
+
+### The returned Tree overlays onto the workspace
+
+The Tree `main` returns has **workspace-relative paths**, and `vx` merges it onto the customer's workspace — overlay semantics, not replace. `@vixen/cargo::main` returns `Tree { "./target/release/foo": <bin>, "./target/release/build/...": ..., "./Cargo.lock": ... }`; `vx` lands `./target/...` and updates `./Cargo.lock` because that's where the Tree said they go. The `./target/` convention lives in `@vixen/cargo`'s implementation, not in `vx` or the language.
+
+A minimal subcommand can be as small as "return `Tree { "./out/app": <bin> }`". Make, Bazel, and cargo all spent decades layering convention on top of that statement; the language reduces it to *the Tree is what the workspace should look like after the build*.
+
+Mechanism of the overlay (copy vs VFS-mount vs hard-link) is open — see [Design build-output materialisation](/materialise-build-output/).
 
 The current stdlib has a `build(entry: Fn(...) -> T) -> T;` intrinsic that takes a closure — that's legacy. The new convention removes that wrapper.
+
+## Demand-driven evaluation
+
+`let x = exec [...]` does not run anything. It produces a graph node — a thunk identified by its inputs — and binds `x` to it. Same for `acquire`, `render`, `pubgrub_solve`, and every other intrinsic that does substantial work. The body of `main` is a graph-construction phase: the evaluator threads values through the user's code, but no work happens.
+
+Forcing — actually computing — is triggered by **demand from the host boundary**. The `vx` CLI forces `main`'s return value. Forcing a `Tree` lazily forces its entries; forcing a `Blob` entry forces the `exec` node that produced it; transitively. Subgraphs no demand reaches never run. `vx cargo build -p foo` evaluates the dep graph reachable from `foo` and ignores the rest of the workspace.
+
+Within a single evaluation, the evaluator memoises every demanded thunk by its identity. Two demands for the same node share one in-flight evaluation. Across evaluations, the persistent cache plays that role — for the subset of intrinsics whose results are worth storing.
+
+### Persistent cache cutoff is per-intrinsic
+
+Not every value's identity is worth materialising to disk. Pure arithmetic, value construction, string operations, equality — cheaper to recompute than to round-trip through a cache. The persistent cache writes only the results of intrinsics that did external or substantial work: `exec`, `acquire`, `Http`, `Toml/Json/Yaml::parse`, `pubgrub_solve`, `render`, `stabilize`, and the recorded-obligation tuples from `discover`. Trivial intrinsics (`String::concat`, equality, hash, arithmetic on scalars, Tree projection) and all pure Vixen function calls stay in the per-evaluation memo table.
+
+The cutoff is a property of each intrinsic, decided in the runtime, not a user-visible knob. *Cacheable by the type system* (every value can in principle be cached) is not the same as *worth caching* (the lookup cost beats the recompute cost).
 
 ## Cargo-resolution-as-Vixen, lockfiles-as-outputs
 
