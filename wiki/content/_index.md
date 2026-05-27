@@ -12,6 +12,8 @@ Durable home for multi-thread architectural work on Vixen. Substrate is dodeca; 
 - [Vixen language](/vixen-language/) — runtime-vs-Vixen split, the FFI shape (body-absent intrinsics, parser-into-typed-values), the hashable/comparable/serialisable property, kwargs via `with`, effect annotations.
 - [Build and resolution](/build-and-resolution/) — hermetic vs discovered inputs, obligations and poison-and-redispatch, per-toolchain resolution, lockfiles-as-outputs, PubGrub for both cargo and Vixen package resolution.
 - [Packages and publishing](/packages-and-publishing/) — manifest + entry-point shape, scoped names, Vixen-org-to-external-org identity flow, OIDC-only publish, registry-as-index over content-addressed Store.
+- [Executor abilities](/executor-abilities/) — abilities (not identities) as the lockfile-pinned thing; typed values per domain; three-layer separation of abilities / identity / availability; probe lifecycle; opt-in responsibilities.
+- [Epic: vx cargo build, end-to-end](/vx-cargo-build-trace/) — the runtime trace from `vx cargo build` to a built binary, recorded incrementally.
 - [Glossary](/glossary/) — short term definitions.
 
 ## Tasks
