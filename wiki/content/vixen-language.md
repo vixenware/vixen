@@ -43,11 +43,11 @@ fn exec[T](
   args: Array[ExecInput]
 ) with {
   env: Map[String, ExecInput] = %{},
-  observer: Fn(Process, Tree) #sandbox -> T,
+  observer: Fn(Process, Tree) -> T,
 } -> T;
 ```
 
-The trailing semicolon, no body — that's an intrinsic. No special annotation, no `#native` effect, no `extern` keyword. Inputs, outputs, capability annotations on the signature behave like any other function. The mechanism is invisible at the call site: callers don't know (or care) whether the callee is body-Vixen or body-Rust.
+The trailing semicolon, no body — that's an intrinsic. No special annotation, no `#native` effect, no `extern` keyword. The mechanism is invisible at the call site: callers don't know (or care) whether the callee is body-Vixen or body-Rust.
 
 ### Parser: Rust parses into Vixen types
 
@@ -58,14 +58,14 @@ A specific instance. When `@vixen/rust` needs to read a `Cargo.toml`, it declare
 From `core.vx` and `build.vx`:
 - Process execution under sandbox: `exec`, plus everything in the observer signature.
 - Content-addressed fetch: `acquire(url) with {digest}`, `acquire(url) with {digest, extract}`.
-- Local-host filesystem (under `#fs`): `read_file`, `read_dir`, `glob`, `exists`, `metadata`.
-- Build evaluation entry: `build(entry) -> T`.
-- Host discovery: `discover[T](class, probe) #discover -> T`.
+- Host discovery: `discover[T](class, probe) -> T` — the probe takes a `Host` value provided by the runtime.
 - Template rendering: `render[T](template) with {bindings} -> Blob`.
 - Stabilisation across builds: `stabilize`.
 - Operations on `String`, `Symbol`, `Tree`, `Stream`, `Map`, `Array`, `Path`, `Blob`, `Bytes`, plus the `Toml`/`Json`/`Yaml`/`Http` namespaces.
 
 The list grows when the runtime needs a new primitive (a new sandbox capability, a new solver algorithm). It does *not* grow when domain logic changes — that's a Vixen-package concern.
+
+The stdlib in the repo today still contains `read_file`/`read_dir`/`glob`/`exists`/`metadata` as free `#fs`-effect intrinsics plus a `build(entry)` intrinsic taking a closure. Both are legacy from before the design simplifications below; user-facing build code uses the `Tree`-as-workspace + `fn main`-direct-entry pattern instead, and host-filesystem access is reachable only through a `Host` capability obtained from a discovery probe.
 
 ## Values are hashable, comparable, serialisable
 
@@ -110,16 +110,59 @@ Earlier the keyword was `where`. That collided with Rust's generic-bounds `where
 
 Mechanical migration: every `where { … }` on function signatures becomes `with { … }`. `where` becomes available as an identifier; `with` becomes reserved.
 
-## Effects: `#fs`, `#discover`, `#host`, `#sandbox`
+## No effect annotations — capabilities are object types
 
-Capability annotations on function signatures, declared at the type level. They denote *where* the function expects to be evaluated:
+The language has **no effect-annotation system** (`#fs`, `#discover`, `#host`, `#sandbox` and so on are not in the user-facing surface). Capabilities are conveyed by parameter types alone — object-capability style. Whoever has a reference to an object of a capability-carrying type has the runtime's permission to do what that type allows. Whoever doesn't, can't.
 
-- `#fs` — local-host filesystem access. `read_file`, `glob`, etc.
-- `#discover` — using a representative executor to learn host facts. `discover(...)` itself, plus the probe it accepts.
-- `#host` — host-inspection authority inside an executor's probe.
-- `#sandbox` — running inside an executor's sandbox. Observers in `exec` are `#sandbox`.
+### Non-constructible types
 
-Effects propagate through call sites. The full semantics — declared vs inferred, static vs runtime checked — are documented in the language spec elsewhere in the tree. The salient property for build-system purposes: a function's effect signature is part of its type, so the cache key for any call mixing effect handling captures which authority context the call evaluated under.
+Capability-bearing types are **non-constructible by user code.** Only the runtime can hand you one:
+
+- **`Host`** — runtime gives the user code a `Host` value as a parameter to a probe (the closure passed into the `discover` intrinsic). User code can't manufacture a `Host`; there's no public constructor. A probe holds one for its duration; it can call methods on it (`host.os`, `host.which`, `host.read`, `host.exec`); when the probe returns, the runtime drops the `Host` reference.
+- **`Process` and the sandbox-output `Tree`** — runtime gives these as parameters to the observer of an `exec` call. Same non-constructibility property. The observer can read from the `Process` (stdout / stderr / exit code) and the `Tree` (write-set); when it returns, the references drop.
+
+The type's existence in a function's scope conveys the authority — nothing else needed.
+
+### Operations on a `Host` are recorded as obligations
+
+`Host` is a live mutable host. It can't be content-addressed. So whenever user code calls a method on a `Host` value, the runtime **records the call + its observed result** as part of the value the probe will return. The recorded tuple is the **obligation**.
+
+A probe returning, for example, a `MacToolchain` value: the returned struct's identity (for caching purposes) is derived from the recorded operations + their results. Downstream nodes consuming the `MacToolchain` (an `exec` that mounts the toolchain at compile time) incorporate that identity into their own cache keys, transitively.
+
+**Verification races with the work** that consumes the capability. The runtime re-runs the recorded operations against the live host; if a recorded op now produces a different result, the obligation is broken. Poison-or-take-notes per the rules in [Executor abilities](/executor-abilities/).
+
+### Operations on `Process` and `Tree` don't need recording
+
+`Process` and `Tree` from an `exec` are already content-addressed by the sandbox's read-set discipline. Their methods are pure functions on declared inputs — no hidden world state. No obligation needed.
+
+### What the probe context can do is narrower than what an observer can
+
+The exec observer gets a rich `Process` (stdout / stderr / exit code) plus a write-set `Tree`. A probe doesn't — `host.exec(args)` returns a small typed result (the output bytes; exit code) rather than a full `Process` value. The probe context surface stays narrow to keep the obligation tuple small and the recorded operations tractable.
+
+This is type-level separation: probe-context author never holds a `Process` value; observer never holds a `Host` value. The runtime never crosses them.
+
+### Cache-friendliness comes from non-impurity, not from positive marking
+
+A function that only takes content-addressed parameters and produces a value from them is *trivially cacheable*. No annotation needed — its identity is its source plus its parameters' identities.
+
+A function consuming a `Host` is **not** trivially cacheable in the same way; its result depends on operations recorded against the host. The runtime handles that as a special case driven by the `Host` type, not by a `#host` annotation propagating through call chains.
+
+The result is that build code authors don't think about effects at all. They consume the typed values they're given, return typed values, and the runtime takes care of the rest.
+
+## Package entry is `fn main`, called directly
+
+Each Vixen package that ships a `vx`-level subcommand exports a function named `main`. `vx`-the-CLI invokes `main` directly; there's no wrapper intrinsic.
+
+```
+fn main(workspace: Tree) with {
+  args: Array[String],
+  env: Map[String, String],
+} -> Tree
+```
+
+The workspace is positional; `args` and `env` are keyword arguments (the `with` block). The return type is typically `Tree` (the build's output Tree, materialised by `vx` to the customer's filesystem) but can be any value the subcommand's contract requires.
+
+The current stdlib has a `build(entry: Fn(...) -> T) -> T;` intrinsic that takes a closure — that's legacy. The new convention removes that wrapper.
 
 ## Cargo-resolution-as-Vixen, lockfiles-as-outputs
 
