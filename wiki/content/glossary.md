@@ -8,9 +8,9 @@ updated = "2026-05-26"
 
 Short definitions. Anything that needs more than three sentences belongs in [the relevant doc](/), not here.
 
-## CCC (Cargo Compile Cache)
+## CCC (Cargo Cloud Cache)
 
-The Tier 1 product. A forked cargo distributed as a rustup mirror; sends the build graph to ccc-backend in one RPC, materialises only what the user demands. See [The pitch](/pitch/#tier-1-ccc).
+The Tier 1 product. A forked cargo distributed as a rustup mirror; sends the build graph to ccc-backend in one RPC, materialises only what the user demands. A standalone product, separate from Vixen Build. See [CCC](/ccc/).
 
 ## ccc-backend
 

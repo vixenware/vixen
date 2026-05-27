@@ -4,17 +4,27 @@ title = "vixen wiki"
 
 Durable home for multi-thread architectural work on Vixen. Substrate is dodeca; substance is human-authored.
 
-## Docs
+## Two products
 
-- [The pitch](/pitch/) — the three-tier product strategy with the corrected Tier 1 mechanism, buyer profiles, pricing, and the full enterprise feature catalogue.
-- [Cache and trust](/cache-and-trust/) — cache-key correctness, per-cache trust gates, declared-identity shortcuts, the demand-warmed flow, backfill sandbox discipline.
-- [Architecture and infrastructure](/architecture-and-infrastructure/) — components and where they run. Cargo fork, rustup mirror, ccc-backend (two-layer), Store with retention dimension, per-OS VFS+sandbox stack, the trusted-builder fleet (Hetzner Hel1 + US expansion), OIDC auth, build-graph-as-provenance.
-- [Vixen language](/vixen-language/) — runtime-vs-Vixen split, the FFI shape (body-absent intrinsics, parser-into-typed-values), the hashable/comparable/serialisable property, kwargs via `with`, effect annotations.
-- [Build and resolution](/build-and-resolution/) — hermetic vs discovered inputs, obligations and poison-and-redispatch, per-toolchain resolution, lockfiles-as-outputs, PubGrub for both cargo and Vixen package resolution.
-- [Packages and publishing](/packages-and-publishing/) — manifest + entry-point shape, scoped names, Vixen-org-to-external-org identity flow, OIDC-only publish, registry-as-index over content-addressed Store.
-- [Executor abilities](/executor-abilities/) — abilities (not identities) as the lockfile-pinned thing; typed values per domain; three-layer separation of abilities / identity / availability; probe lifecycle; opt-in responsibilities.
-- [Epic: vx cargo build, end-to-end](/vx-cargo-build-trace/) — the runtime trace from `vx cargo build` to a built binary, recorded incrementally.
+We ship two distinct products. They are not tiers of one product. Conflating them produces broken framing fast.
+
+- [The pitch](/pitch/) — one-paragraph overview of each product and how they relate.
+- [CCC (Cargo Cloud Cache)](/ccc/) — the standalone Rust-cache product. Forked cargo, rustup mirror, ccc-backend, one-RPC graph lookup.
+- [Vixen Build](/vixen-build/) — the standalone build-system product (with Vixen CI as its public-language surface). `vx cargo build`, Vixen executors, sandbox+VFS, package manager.
+
+## Cross-cutting substance
+
+- [Cache and trust](/cache-and-trust/) — disciplines that apply to both products (tightening monotonic, per-cache trust, declared identity). Mechanism differences are noted per product.
+- [Architecture and infrastructure](/architecture-and-infrastructure/) — components and where they run.
 - [Glossary](/glossary/) — short term definitions.
+
+## Vixen Build subsystem docs
+
+- [Vixen language](/vixen-language/)
+- [Build and resolution](/build-and-resolution/)
+- [Packages and publishing](/packages-and-publishing/)
+- [Executor abilities](/executor-abilities/)
+- [Epic: vx cargo build, end-to-end](/vx-cargo-build-trace/)
 
 ## Tasks
 
