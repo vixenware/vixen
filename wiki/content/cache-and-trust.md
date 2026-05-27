@@ -78,6 +78,37 @@ Two reasons:
 
 We do not maintain a "lightweight" backfill path and a "real" customer-build path. The sandbox + VFS is the only path; backfill exercises it because it is the substrate.
 
+## Asymmetric infrastructure: customer-facing vs fleet-facing
+
+Substrate is the same — CAS, VFS, sandbox, RPC over Vox — but the deployment posture differs by who controls the machine. Customer-facing paths favour ease of install and safety in heterogeneous environments. Fleet-facing paths favour performance and operational integration on hardware we own.
+
+| Layer | Customer-facing | Vixen fleet |
+| --- | --- | --- |
+| Store access | Read-only on public store; demand signals on miss | Direct write (trusted-builder-signed) to public store; full access to private store |
+| Toolchain ownership | Customer's installs (proprietary discovered, OSS hermetic-from-public-store) | Vixen-installed under Vixen's own licenses; private-CAS-served |
+| VFS backend (macOS) | FSKit — supported, no kext entitlement needed, slower | MacFUSE (paid license) or custom kext — faster, operational complexity acceptable on hardware we control |
+| VFS backend (Windows) | ProjFS | Open — dev-mode driver, or a paid third-party |
+| VFS backend (Linux) | FUSE | FUSE / direct mount — fewer constraints |
+
+This is deliberate posture, not accidental asymmetry. Each row trades a property based on what changes between contexts:
+
+- **Trust gate orientation.** Customer machines can read the public cache through a verifying gate; they cannot write. Fleet machines write to caches whose trust policy accepts trusted-builder signatures. See [Trust is per-cache, not global](#trust-is-per-cache-not-global).
+- **Bytes that can't be redistributed stay private.** Apple's and Microsoft's EULAs prohibit transferring Xcode / MSVC bytes to third parties. They don't prohibit Vixen storing its own licensed copy in a private CAS and mounting via VFS on its own hardware — same legal posture as MacStadium or GitHub Actions Mac runners. The bytes never leave Vixen's licensed environment.
+- **VFS backend choice follows entitlement and performance.** A kext on a consumer's Mac is a non-starter — entitlement complications, install friction. On hardware Vixen owns, the operational cost of a kext (or paid MacFUSE) is acceptable for the performance win.
+
+## Public store vs private store
+
+Concrete partition by content type:
+
+- **Public store.** OSS toolchains (Rust, C/clang, protobuf, zig, …), customer-build artifacts produced by trusted builders, anything redistributable. Read-accessible by authenticated customers; demand signals trigger backfill. Multi-tenant CAS with the trust gate as ingress policy.
+- **Private store.** Xcode, MSVC, any proprietary toolchains Vixen holds licenses for. Same CAS substrate (CDC chunks, VFS mounting), access-controlled to Vixen fleet executors. Customer builds never receive the bytes — only artifacts produced *by* the proprietary toolchain on a Vixen executor.
+
+A single Vixen fleet executor pulls chunks from both stores: OSS bytes from the public store, Xcode/MSVC bytes from the private store. CDC chunking means closely-related versions (Xcode 14.2 and 14.3) share most chunks structurally — cache warmth across versions is automatic, not "pre-install N variants per executor."
+
+Whether Xcode and MSVC actually function correctly served from chunked CAS via VFS is empirically unknown — code signing, `dyld` interactions, framework lookups, mmap on a VFS-backed path may or may not survive. Legal is settled (internal storage is fine; only redistribution to third parties is forbidden); technical is open. If the VFS path doesn't work, fall back to "pre-installed on each Mac/Windows fleet box" — still legal, just less elastic. Customer-side discovery is unaffected either way.
+
+Customer-local discovery for proprietary toolchains is the one place this partition forces ambient: see [Executor abilities → Customer-local](/executor-abilities/#customer-local-the-one-place-ambient-discovery-is-forced).
+
 ## exec caches the observer's return value, not the Process bytes
 
 A Tier 2 detail. `exec(args) with { ..., observer: Fn(Process, Tree) #sandbox -> T }` is the central build primitive. When the runtime demands its result, the cache stores the **observer's `T`**, not the underlying `Process` bytes (stdout, stderr, exit, write-set Tree).
