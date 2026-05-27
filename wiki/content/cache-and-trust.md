@@ -118,7 +118,7 @@ Implications:
 - Hits are cheap: a cached value is ready; no process runs, no observer re-evaluates.
 - Streams in return values are fully realised on hit — `Stream[U]` yields its elements at full bandwidth, backpressure semantics are vestigial.
 - Observer source identity is part of the cache key. Revving the observer invalidates downstream entries.
-- The shape becomes uniform across kinds of work: `exec`, `acquire`, `render`, `stabilize` all produce a `T`; all cache that `T` against inputs. There is no "process result" cache vs "computed result" cache.
+- The shape becomes uniform across kinds of work: `exec`, `acquire`, `render`, and the other persisted intrinsics all produce a `T`; all cache that `T` against inputs. There is no "process result" cache vs "computed result" cache.
 
 The price (observer changes = cache miss) is paid willingly. The observer should be tiny anyway — the idiomatic shape is "observer = the small function that extracts the structured value the caller cares about." Big logic belongs in the rest of the Vixen program.
 

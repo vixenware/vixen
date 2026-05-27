@@ -10,7 +10,9 @@ tags = ["scheduler", "runtime", "executor"]
 created = "2026-05-26"
 +++
 
-When `@vixen/cargo` (or any Vixen build code) writes `exec` with `executor_class "default"`, the runtime's scheduler decides where each call actually runs. The decision weighs availability, online status, customer tier, historical data, and user-supplied constraints. The scheduler is supposed to be smart; the user is supposed to be able to constrain it.
+When `@vixen/cargo` (or any Vixen build code) writes `exec`, the runtime's scheduler decides which eligible executor actually runs it. Eligibility comes from value provenance: an `exec` consuming a `MacToolchain` value runs on the executor that produced that value (or any other satisfying the same predicate, for hermetic fetched-from-store toolchains). See [Executor abilities](/executor-abilities/) for the typed-ability surface.
+
+Among eligible executors the scheduler still has work to do — weighing availability, latency, cache warmth, fleet load, online status, customer tier, historical data. These are all *invisible to build code* (the language has no soft-ranking surface; see [Executor abilities → No soft ranking](/executor-abilities/#no-soft-ranking-at-the-language-level)) but they're real decisions the orchestrator makes.
 
 The detailed shape is open.
 
@@ -25,7 +27,7 @@ The detailed shape is open.
 
 ## What unblocks resolution
 
-Concrete shape of the first deployment — single-region fleet, one or two executor classes — plus actual customer build traces from Tier 1 to inform the heuristics. The detailed scheduler design isn't a Tier-2-launch blocker; an opinionated default (cache first, else fleet, else local, with explicit user override) is enough to ship.
+Concrete shape of the first deployment — single-region fleet, a handful of ability domains advertised (a `LinuxToolchain`, a `MacToolchain`) — plus actual customer build traces from Tier 1 to inform the heuristics. The detailed scheduler design isn't a Tier-2-launch blocker; an opinionated default (cache first, else fleet, else local, with explicit user override) is enough to ship.
 
 ## Related
 

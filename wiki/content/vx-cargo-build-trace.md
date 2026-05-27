@@ -144,15 +144,17 @@ So the runtime sees the graph of exec calls produced by `@vixen/cargo`, threads 
 
 ## Step 8: Where each exec actually runs — the scheduler decides
 
-`@vixen/cargo` doesn't pick. It writes `exec` calls that fall back to `executor_class "default"`. The runtime's scheduler decides where each one actually runs, weighing:
+`@vixen/cargo` doesn't pick. It writes `exec` calls that consume ability values (e.g. `mac_toolchain.clang`), and the runtime threads routing constraints from the values' provenance. See [Executor abilities → Routing falls out of provenance](/executor-abilities/#routing-falls-out-of-provenance) and [No soft ranking at the language level](/executor-abilities/#no-soft-ranking-at-the-language-level).
 
-- **What's available right now.** Is the local host capable of this work? Is the Vixen executor fleet reachable? Is the relevant executor class warm?
-- **Online status.** Offline → local-only.
+Among eligible executors (those satisfying the ability predicates), the orchestrator weighs invisible-to-build-code variables:
+
+- **What's available right now.** Is the local host capable of this work? Is the Vixen executor fleet reachable? Which fleet boxes have the relevant chunks warm in their VFS cache?
+- **Online status.** Offline → local-only (build fails if requirements can't be satisfied locally).
 - **What the customer pays for.** Tier 2 customers get remote execution; Tier 1 customers don't.
-- **Historical build data.** Where did this exec succeed last time? Where did it run fastest? Where did it cache-hit?
-- **User-supplied constraints.** Workspace config, CLI flags, environment — the customer can pin a build to local, prefer remote, restrict to a subset of executor classes.
+- **Historical build data.** Where did this exec succeed last time? Where did it run fastest?
+- **User-supplied constraints at the CLI / config level.** `--local` flag, workspace config — the customer can pin a build to local execution, force remote, restrict to a region. These constraints live outside the build code's view; the build code never asks "am I running locally?"
 
-The scheduler is supposed to be smart. The user is supposed to be able to constrain it. The detailed shape — exact inputs, priority rules, fallback semantics, how the constraint surface looks from `@vixen/cargo`'s perspective — is genuinely open design work. See [Task: design the executor scheduler](/design-executor-scheduler/).
+The detailed shape — exact inputs, priority rules, fallback semantics — is genuinely open design work. See [Task: design the executor scheduler](/design-executor-scheduler/).
 
 ## Step 9: Final binary, link, and output materialisation — open
 
