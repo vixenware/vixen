@@ -4,22 +4,12 @@ title = "Executor abilities"
 [extra]
 type = "Doc"
 tiers = ["2", "3"]
-updated = "2026-05-26"
+updated = "2026-05-27"
 +++
 
-How the runtime decides which executor a piece of work runs on, without caring about *which physical executor* — only about *what abilities it has*.
+How work is routed across the fleet — what defines an executor's capacity to satisfy a build, how builds request what they need, and how policy gets expressed at the language level.
 
-## Abilities, not identities
-
-The build's lockfile pins **executor abilities** — typed values describing what an executor can satisfy — not specific executors. "I need a Mac box with Xcode 14.2, macOS SDK 14.4, arm64, rustc 1.91" is the durable thing the lockfile records. *Which* physical executor matches that on any given build is the orchestrator's problem.
-
-Consequences:
-
-- **Capacity scales transparently.** New executors come online matching your ability spec — they become routable as soon as they register. Nothing in the lockfile changes.
-- **Cross-version dispatch doesn't happen.** The ability spec says "Xcode 14.2"; executors with 14.3 aren't eligible. The orchestrator picks among the eligible by latency / load. The "two executors with different Xcode versions" question reduces to "filter, then schedule," not "dispatch and hope the linker copes."
-- **The poison-vs-take-notes question shrinks.** If the orchestrator only routes to executors *matching* the locked ability, mid-build obligation drift is rare — the executor was selected because its abilities matched at routing time. Verification-races-with-work catches the remaining "host changed mid-compile" failure mode.
-
-## Abilities are typed Vixen values
+## Abilities are typed values defined by packages
 
 Each ability domain is a struct declared by the package that owns the domain:
 
@@ -38,68 +28,158 @@ struct LinuxToolchain {
   rustc: RustToolchain,
   arch: Arch,
 }
+
+// in @vixen/cuda
+struct CudaCapable {
+  compute_capability: SemVer,
+  vram_gb: U64,
+}
 ```
 
-The strong type system that the rest of Vixen is built on applies here too. Abilities are typed values, not stringly-keyed property bags. Different ability domains live in different types; orthogonal concerns can't accidentally merge into one untyped blob.
+The package owns the type. The type is its contribution. New ability domains ship as packages — `@vixen/freebsd`, `@vixen/wasi`, whatever — and existing executors and builds keep working while new builds can match against them.
 
-New ability domains ship as packages: `@vixen/cuda` declares `struct CudaCapable { compute_capability: SemVer, vram_gb: U64, ... }` and existing builds keep working while new builds can match against it.
+There is **no `ExecutorClass`-style stringly-typed selector**. That was the wrong concept; routing is type-driven, not name-driven. Build code does not pass an `executor:` kwarg to `exec`. See [Routing falls out of provenance](#routing-falls-out-of-provenance).
+
+## Builds request abilities at runtime
+
+Build code actively requests abilities as it evaluates:
+
+```vixen
+let mac = discover[MacToolchain](mac_probe);
+let rust = discover[RustToolchain](rust_probe).or_else(|| {
+    @vixen/rust.fetch_toolchain("stable")
+});
+```
+
+This is **active request**, not declarative lockfile pinning. The lockfile records what got satisfied during evaluation, for reproducibility; it doesn't pin upfront before the build code has a chance to express policy.
+
+**Policy is user-Vixen code**, not framework configuration:
+
+- "Try discovering an ambient Xcode on this machine; fail if not present" — ordinary `match` on `Option`.
+- "Try discovering Rust locally; if not present, fetch a stable toolchain from the public store" — `or_else` or pattern match.
+- "Cross-compile to Mac via real Apple toolchain if available remotely; fall back to local zigbuild" — same pattern.
+
+The language ingredients are already there (`Option`, pattern matching, imports). The runtime exposes the request primitives (`discover`, fetch-via-acquire); user code composes.
+
+## Routing falls out of provenance
+
+When an `exec` consumes a value, the runtime knows where that value was produced. An `exec` that uses `mac.clang` runs on whatever executor produced `mac`. There is no `executor:` kwarg on `exec`; routing follows the flow of ability values through the build graph.
+
+```vixen
+let mac = discover[MacToolchain](mac_probe);
+let bin = exec [mac.clang, "main.c", "-o", "app"] with {
+  observer: fn (proc, tree) -> tree.file "./app",
+};
+// `bin` is produced on the same executor as `mac`. The runtime threads the constraint automatically.
+```
+
+For hermetic toolchains fetched from the store, the resulting value is provenance-free — any eligible executor in the fleet can run an exec consuming it. Routing variables (load, latency, cache warmth) are settled by the orchestrator using fleet-scheduling signals invisible to build code.
+
+## No soft ranking at the language level
+
+The language gives build code **one** routing knob: predicate match. "I need `MacToolchain` matching `xcode >= "14.0" && arch == arch_arm64`." Either an executor satisfies the predicate or it doesn't.
+
+There is no `prefer:` kwarg, no cost function, no partial order over candidates. When multiple executors satisfy the predicate, the orchestrator picks among them using fleet-scheduling variables that build code never sees:
+
+- Current load / capacity
+- Latency from the calling daemon
+- Cache warmth — whether this executor recently mounted the relevant chunks
+- Geographic proximity
+
+These are orchestrator concerns. Build code doesn't weigh "ambient 1.95 on a 2-core box vs 32-core needing setup" because that tradeoff doesn't exist in our model: OSS toolchains are always-hermetic from store; proprietary toolchains are either installed on a fleet box or they're not. The classic ranking problem dissolves.
+
+## Cross-compilation: alternate providers as alternate abilities
+
+A real Mac fleet executor and a Linux box with `cargo-zigbuild` can both, in some sense, "produce aarch64-apple-darwin artifacts." But the artifacts they produce are not interchangeable — different linker, possibly different SDK headers, ABI-equivalent only at the margins. They are **different abilities**, not different satisfactions of the same predicate.
+
+Two ways to encode the distinction; not picked yet:
+
+- **Distinct types.** `AppleMacToolchain` vs `ZigMacCross`. Build code asks for one.
+- **One type with a provider discriminant.** `MacToolchain { provider: Apple | ZigCross, ... }`. Build code predicates `provider == Apple` for ABI-critical paths; `provider in (Apple, ZigCross)` for testing.
+
+Policy belongs in the package. `@vixen/cargo` (or a `@vixen/cross-rust` helper) knows that "build for App Store submission" requires the Apple provider and "local cross-test on my Linux dev box" accepts either. Customer overrides via CLI flag if needed.
+
+Same shape applies to Windows: real-MSVC fleet executor vs local `cargo-xwin`. Different abilities; package policy chooses per target.
+
+## Continuous cross-target validation — the LSP killer feature
+
+A Mac developer writing code in their editor can see Windows compile errors as they save — produced by a remote Vixen executor that holds warm graph state for their editing session. Cross-platform validation moves from "wait for CI in minutes" to "see in seconds while you type."
+
+Architecture shape:
+
+- The local `vx-daemon` (a long-lived process; see `vx-daemon` crate) coordinates per-target evaluation streams.
+- **Per-target sticky session.** Each non-native target is bound to a specific remote executor for the duration of the editing session. That executor holds the parsed workspace, resolved dep graph, last-compile state. A save sends the diff; the executor incrementally recomputes; diagnostics stream back.
+- **Multi-stream evaluation.** Local-native + remote-Windows + remote-Linux all evaluate concurrently against the same edit stream. Each produces its own coherent stream of diagnostics; per-target IDE display.
+- **Per-unit diagnostic caching.** Changing one file invalidates only its compilation unit's cached diagnostic; sibling units served from cache.
+
+This makes `exec` observers returning `Stream[Diagnostic]` load-bearing — see [Streams as first Tier-2 primitive](/streams-first-primitive/). The streams Task is foundational for this product feature, not a Tier-2 nicety.
+
+Single editing session can mix local + remote evaluation streams freely. The "no mixing local + remote artifacts" rule applies to **artifact production**, not editor-time validation: each target's stream produces its own artifact (or its own set of diagnostics) coherently within itself.
 
 ## Three separable layers
 
-| Layer            | What                                              | Where it lives                | What changes it    |
-| ---------------- | ------------------------------------------------- | ----------------------------- | ------------------ |
-| **Abilities**    | Typed values describing what an executor can do   | Build lockfile + fleet registry | Discovery probes, user lockfile updates |
-| **Identity**     | UUID, endpoint, signing key                       | Fleet registry                | Executor registration, key rotation |
-| **Availability** | Current load, latency-from-customer, online state | Orchestrator (runtime)        | Constantly changing |
+| Layer | What | Where it lives | What changes it |
+|---|---|---|---|
+| **Abilities** | Typed values describing what an executor can do | Build lockfile (output) + fleet registry | Discovery probes, package definitions |
+| **Identity** | UUID, endpoint, signing key | Fleet registry | Executor registration, key rotation |
+| **Availability** | Current load, latency, cache warmth, online state | Orchestrator (runtime) | Constantly changing |
 
-The build cares only about layer 1. The orchestrator threads layers 2 and 3 at routing time, after matching layer 1.
+Build code touches only layer 1. The orchestrator threads layers 2 and 3 at routing time, after matching layer 1.
 
 ## How abilities are advertised
 
-Each ability type ships with a **probe** — Vixen code provided by the package that owns the type. `@vixen/mac` ships `fn probe_mac_toolchain (Host) #host -> MacToolchain`.
+Each ability type ships with a probe — Vixen code provided by the package that owns the type. `@vixen/mac` ships something like `fn probe_mac_toolchain(Host) -> Option[MacToolchain]`.
 
-When an executor joins the fleet, it runs every probe whose ability type is opted-in for that host (see [Who decides the opt-in set](#who-decides-the-opt-in-set)). Each probe produces a typed value. The executor publishes `{identity, [typed ability values]}` to the fleet registry over Vox. Re-publishes when a value changes.
+When an executor joins the fleet, it runs every probe whose ability type is opted-in for that host. Each probe produces a typed value (or `None`). The executor publishes `{identity, [typed ability values]}` to the fleet registry over Vox. Re-publishes on changes.
 
-The orchestrator queries the registry by **ability predicate** expressed in Vixen — `MacToolchain.xcode >= "14.0" && MacToolchain.arch == arch_arm64` or similar — and receives back the set of executor identities whose advertised values match. Strong typing on both sides: typed values published; typed predicates matching; structural match.
+The orchestrator queries the registry by ability predicate expressed in Vixen — `MacToolchain.xcode >= "14.0" && MacToolchain.arch == arch_arm64` — and receives the set of executor identities whose advertised values match. Strong typing on both sides.
 
-## When abilities are refreshed
+For customer-local builds, "advertised abilities" is the local discovery the customer's `vx-daemon` performs at startup against the customer's own host.
+
+## Refresh discipline
 
 Layered cadence:
 
 - **On executor startup.** Mandatory. Sets the initial published set.
-- **On host-state-change triggers.** Filesystem watches on the paths the probes inspect (`/Applications/Xcode.app/Contents/version.plist`, `/usr/local/bin/clang`, etc.); install hooks from package managers where available. Fast detection of intentional changes.
-- **Long periodic timer** (hourly, configurable). Backstop for missed triggers.
-- **Not on every dispatch.** Too expensive — re-probing Xcode on every Mac dispatch eats the latency win we got from caching. Dispatch trusts the last-published value; the verification-races-with-work mechanism catches drift between dispatch and build commit.
+- **On host-state-change triggers.** Filesystem watches on probe-inspected paths; install hooks from package managers where available.
+- **Long periodic timer** (hourly, configurable). Backstop.
+- **Not on every dispatch.** Too expensive. Dispatch trusts the last-published value; verification-races-with-work catches drift.
 
-The build's lockfile can declare a per-ability-type max-staleness tolerance for runs where stricter is required. Default: trust last-published as of dispatch.
+The build's lockfile can declare a per-ability-type max-staleness tolerance for stricter runs. Default: trust last-published as of dispatch.
 
 ## Who decides the opt-in set
 
-Three responsibilities, three places. No coordination required between layers.
-
-- **Package authors own the ability *types*.** Each domain package owns its types and ships the probes. `@vixen/mac` defines what "having a Mac toolchain" means.
-- **Executor operators own the ability *domains* their executor advertises.** When standing up a fleet box, the operator opts it in to the ability domains it can satisfy: "this machine runs `@vixen/mac` probes; it does not run `@vixen/cuda` probes." Small config at the executor; possibly inferred from "what's installed" but explicit is safer.
-- **Build authors own the ability *predicates* they require.** The build's lockfile declares "I need a `MacToolchain` matching this predicate." That's the customer's pinning surface.
+- **Package authors own the ability *types*.** `@vixen/mac` defines what "having a Mac toolchain" means; ships the probe.
+- **Executor operators own the *domains* their executor advertises.** A fleet operator (Vixen-the-org on its own fleet) opts each box into the ability domains it can satisfy: "this box runs `@vixen/mac` probes; it does not run `@vixen/cuda` probes." Explicit is safer than inferred.
+- **Build authors own the *requests*.** Build code says "I need `MacToolchain` matching this predicate" via `discover` or fetch. That's the build-side surface.
 
 New ability domains ship as packages with no changes needed at the registry, the orchestrator, or existing executors.
+
+## Customer-local: the one place ambient discovery is forced
+
+Most of the fleet runs hermetic toolchains from the public Vixen store, or proprietary toolchains Vixen installed under its own licenses. Discovery against the host is mostly vestigial for fleet boxes — declared identity collapses the read-set (see [Cache and trust](/cache-and-trust/#declared-identity-collapses-the-read-set-under-trust)).
+
+Customer-local builds are different. The customer is the licensed end-user on their own machine. For proprietary toolchains (Xcode, MSVC), Vixen cannot ship the bytes to them; the customer's local install — or absence — is the only source. Discovery + obligations + verification-races-with-work is the mechanism that makes reuse safe across heterogeneous customer machines.
+
+For OSS toolchains, customer-local can fetch from the public store (network available) or use any locally-cached chunks. Ambient discovery for OSS on customer machines is *available* but typically not preferred — hermetic from store is faster and more reproducible.
 
 ## Mid-build verification and ability drift
 
 The orchestrator picks an executor at routing time based on its *advertised* abilities. Between the last probe that produced those values and the build that uses them, the host could have changed (someone updated Xcode, swapped a linker, edited a sysroot file). The advertised value is therefore a hypothesis until verified.
 
-A verifier runs alongside the build, re-probing the abilities the build depends on. Compare against the lockfile predicate (not against the advertised value — what matters is satisfaction of the customer's stated requirement). Three cases:
+A verifier runs alongside the build, re-probing the abilities the build depends on. Compare against the request predicate (not against the advertised value — what matters is satisfaction of the build's stated requirement). Three cases:
 
-- **Out-of-predicate drift, or original misadvertisement.** The executor was routed against a claim it doesn't honour — the actual re-probed value of ability `A` on executor `E` doesn't satisfy the lockfile predicate. Mark `(E, A)` stale at the fleet registry. Force a re-probe of `A` on `E`. Throw away in-flight work on this build that used `(E, A)`; re-route those units to executors whose `A` is still current and satisfies the predicate. `E` remains eligible for any other ability domain it advertises — only the specific `(E, A)` is invalidated.
-- **Within-predicate drift, multi-executor build.** Re-probed value differs from advertised but still satisfies the lockfile predicate (advertised was 14.2, actual is 14.3, lockfile requires `>= 14.0`). Coherence is the concern: if some units committed against 14.2 and others against 14.3, link-time incompatibility can result. Mark `(E, A)` stale, throw away work that used `(E, A)`, re-route affected units. Other abilities of `E` continue serving — those values weren't disturbed.
+- **Out-of-predicate drift, or original misadvertisement.** The executor was routed against a claim it doesn't honour — the actual re-probed value of ability `A` on executor `E` doesn't satisfy the predicate. Mark `(E, A)` stale at the fleet registry. Force a re-probe of `A` on `E`. Throw away in-flight work on this build that used `(E, A)`; re-route those units to executors whose `A` is still current and satisfies the predicate. `E` remains eligible for any other ability domain it advertises — only the specific `(E, A)` is invalidated.
+- **Within-predicate drift, multi-executor build.** Re-probed value differs from advertised but still satisfies the predicate (advertised was 14.2, actual is 14.3, requirement was `>= 14.0`). Coherence is the concern: if some units committed against 14.2 and others against 14.3, link-time incompatibility can result. Mark `(E, A)` stale, throw away work that used `(E, A)`, re-route affected units. Other abilities of `E` continue serving — those values weren't disturbed.
 - **Within-predicate drift, single-executor build.** Take notes. Per-unit cache keys reflect what was actually used; cross-unit coherence has the same risk as any mid-build host mutation on a local machine, with the linker as the last line of defence. No fleet ceremony.
 
-The per-ability granularity matters. An executor advertising `MacToolchain`, `LinuxToolchain`, and `CudaCapable` doesn't get blacklisted when one of those drifts; only the drifted ability is marked stale. Other ability domains the executor exposes stay valid for builds that need them.
+The per-ability granularity matters. An executor advertising `MacToolchain`, `LinuxToolchain`, and `CudaCapable` doesn't get blacklisted when one of those drifts; only the drifted ability is marked stale.
 
-If marking `(E, A)` stale leaves the build with no eligible executors for ability `A`, the build fails. Successful builds report any drift events at the end as an informational signal so operators can investigate why a published value was stale beyond its expected cadence.
+If marking `(E, A)` stale leaves the build with no eligible executors for ability `A`, the build fails. Successful builds report drift events at the end as an informational signal so operators can investigate.
 
 ## What the lockfile records
 
-A typed map keyed by some build-internal name, with each value being a typed ability instance:
+A typed map keyed by some build-internal name, with each value being a typed ability instance — the **resolved** abilities, what got satisfied during this build's evaluation:
 
 ```
 [abilities]
@@ -116,12 +196,16 @@ linux_target = LinuxToolchain {
 }
 ```
 
-Exact serialisation surface TBD (probably styx, given the rest of Vixen's config story). The shape is "Vixen values written to a file"; the type system is the schema.
+The lockfile is an **output** of resolution, not a hand-authored pinning file — see [Build and resolution → lockfiles-as-outputs](/build-and-resolution/#lockfiles-are-build-outputs-not-input-mutations). Re-running the same build code against the same registry view + same probes produces the same lockfile.
+
+Exact serialisation surface TBD (probably styx). The shape is "Vixen values written to a file"; the type system is the schema.
 
 ## Related
 
-- [Architecture and infrastructure](/architecture-and-infrastructure/) — the trusted-builder fleet shape that this model generalises.
-- [Build and resolution](/build-and-resolution/) — the discovery + obligations mechanism that powers probes.
-- [Cache and trust](/cache-and-trust/) — the verification-races-with-work and tightening-monotonic disciplines that apply to ability values as much as to anything else cached.
-- [Design the executor scheduler](/design-executor-scheduler/) — the remaining Task: orchestrator routing logic *given* the ability model.
+- [Architecture and infrastructure](/architecture-and-infrastructure/) — the trusted-builder fleet shape this model generalises.
+- [Build and resolution](/build-and-resolution/) — discovery + obligations mechanism; lockfile-as-output framing.
+- [Cache and trust](/cache-and-trust/) — declared-identity, verification-races-with-work, public vs private store partition, asymmetric infra.
+- [Vixen language](/vixen-language/) — `Option`, pattern matching, imports, and the demand-driven evaluator that ties together user-Vixen policy code.
+- [Design the executor scheduler](/design-executor-scheduler/) — the remaining Task: orchestrator routing logic given the ability model.
+- [Streams as first Tier-2 primitive](/streams-first-primitive/) — load-bearing for continuous cross-target validation.
 - [Epic: vx cargo build, end-to-end](/vx-cargo-build-trace/) — the trace this fits into.
