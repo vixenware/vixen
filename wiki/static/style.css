@@ -141,6 +141,12 @@ a:hover {
 }
 .masthead-back:hover { color: var(--ember); }
 
+.masthead-search {
+    flex: 1;
+    max-width: 360px;
+    margin: 0 1.5rem;
+}
+
 /* ── Layout ────────────────────────────────────────────────────────── */
 
 main {

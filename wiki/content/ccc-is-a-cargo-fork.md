@@ -28,7 +28,7 @@ A cargo fork. `RUSTC_WRAPPER` and sidecars are insufficient.
 
 - **Tighter cache keys.** A wrapper only sees the rustc invocation. It doesn't see the workspace, the lockfile, the resolved dep graph, the target or profile, whether this is `build.rs` vs lib vs bin. Argv parsing recovers some of that, unreliably. A fork sees all of it natively.
 - **Coverage beyond rustc.** A wrapper wraps only rustc. Linking, `build.rs` execution, proc-macro expansion, codegen-backend invocation — none of those have cargo-level wrapper hooks. To cache them, you have to be inside cargo.
-- **Crates.io fetches.** A fork can redirect crates.io fetches to a Vixen-controlled artifact source. A wrapper cannot.
+- **Crates.io fetches stay direct at Tier 1** — `cargo-vixen` hits crates.io as plain cargo would. We deliberately do *not* proxy source-byte fetches at launch; see [[No crates.io proxy at Tier 1]]. The fork *could* redirect them, which a wrapper couldn't, but that's a deferred capability, not a Tier 1 feature.
 - **Subgraph elision.** A wrapper caches the invocations it sees; a fork can decide *not to invoke rustc at all* when the downstream artifact is already in cache. See [[Subgraph elision]] — this is the foundational property that separates CCC from sccache-shaped solutions.
 - **Maintenance cost.** Tracking upstream cargo releases. This is intentionally absorbed; CCC's distribution channel ([[CCC is distributed as a rustup mirror]]) is designed around it.
 - **We do *not* extend `Cargo.toml`'s schema.** A fork *could* add config sections; we deliberately don't. Source repos stay portable to plain cargo.

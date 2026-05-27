@@ -32,11 +32,17 @@ How the cache gets populated without extending push access to clients.
 
 It's the difference between a cache and a CVE. Once clients can write, any compromised client can poison every reader. The only way to keep the cache safe is to make writes structurally impossible from the untrusted side.
 
-## Why the demand signal isn't a privacy hole
+## What the demand signal actually carries
 
-The signal is `(cache_key)`. The key is a hash of inputs. It contains no plaintext source. Two customers building the same dep produce the same signal; this is a feature (it warms the cache for both), not a leak.
+Not just the cache key. The signal carries the **structured inputs** — argv, env subset, read-set as Store content-addressed handles, write-set spec, working directory — because the trusted-builder fleet needs enough information to actually replay the invocation on official infrastructure. A bare key has no replay value. See [[CCC service]].
 
-We do *not* attach customer identity, repo URL, or any other PII to the demand signal in the basic flow. Premium tiers can opt in to attaching identity if they want priority queue placement.
+The inputs reference Store-addressed content; they do *not* embed file bytes inline. A trusted builder picking up the queue entry fetches the read-set from Store on its own, materialises it inside a sandbox VFS, executes, and pushes the output back into the cache under the derived key.
+
+## Privacy
+
+The inputs are not plaintext source. The read-set is content-addressed handles into Store; only Store knows what bytes those handles resolve to, and Store is gated by the same trust model. argv and env are visible to us — they have to be for replay to work — but `cargo-vixen` filters env to a determined-relevant subset before sending.
+
+We do *not* attach customer identity, repo URL, or other tenant metadata to the public demand signal in the basic flow. Premium tiers can opt in to attaching identity if they want priority queue placement. See [[Tier 2 pricing shape]].
 
 ## Failure modes
 

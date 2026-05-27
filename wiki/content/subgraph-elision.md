@@ -5,42 +5,35 @@ title = "Subgraph elision"
 type = "ArchitectureNote"
 topic = "cache"
 created = "2026-05-26"
+updated = "2026-05-26"
 tags = ["ccc", "cache", "fork-rationale"]
 +++
 
-The foundational property that separates a [[CCC is a cargo fork, not a rustc wrapper|cargo fork]] from a `RUSTC_WRAPPER`-style sidecar. It is the reason "cache rustc invocations" is not the right framing of what CCC does.
+The property that separates a cargo fork from a `RUSTC_WRAPPER`-style sidecar. The reason "cache rustc invocations" is not the right framing of what CCC does.
 
 ## The wrapper view
 
-A `RUSTC_WRAPPER` sees one rustc invocation at a time. For each one it asks the cache "do you have the output for these exact inputs?" If yes, return cached bytes. If no, invoke rustc, then upload the result.
+A `RUSTC_WRAPPER` sees one rustc invocation at a time. For each one it asks the cache "do you have the output for these exact inputs?" — one round-trip per unit. On hit, return cached bytes; write them to `target/`. On miss, invoke rustc; upload the result.
 
-Every invocation is examined, every input read, every intermediate `.rlib`/`.rmeta` materialised to disk so the next rustc invocation up the dep chain can read it. The wrapper has saved CPU on the rustc step but has done *all the I/O* and *all the orchestration*.
+Every invocation is examined sequentially, every input read locally, every intermediate `.rlib` / `.rmeta` materialised to disk so the next rustc invocation up the dep chain can read it. The wrapper saves CPU on rustc steps but pays all the I/O, all the per-unit RPCs, and all the orchestration cost.
 
 ## The fork view
 
-A cargo fork sees the *whole dep graph* before it invokes anything. It can ask the cache "do you have the final artifact for this build?" If yes, skip every intermediate step — no rustc, no linker, no `build.rs` execution, no `.rlib` writes, no disk I/O. The downstream artifact is the only thing the user needs; everything upstream of it was a means to that end.
+A cargo fork sees the *whole dep graph* before it invokes anything. It sends the entire set of unit identities to ccc-backend in **one RPC**. ccc-backend responds with the hit/miss partition for every unit at once. The fork then materialises only the artifacts the user actually demands — typically just the final binary on a full hit — and runs rustc locally only for the missed units.
 
-If the *final* artifact isn't cached but some *intermediate* one is, the fork can elide that intermediate's whole subgraph — its dependencies, its `build.rs`, its proc-macro expansion — and only do the work that's downstream of the cache hit.
+For each unit the fork knows the stable identity (for crates.io deps that's `(crate-name, version, registry-hash)` plus compile args plus toolchain identity — no source hashing). The cache lookup is one batched call; the demand signal for misses is implicit in the same RPC.
 
 ## Why this matters
 
-The wrapper-vs-fork distinction looks small on a single invocation. It is enormous on a real workspace:
-
-- A workspace with 200 crates does ~200 rustc invocations on a clean build. A wrapper hitting cache for all of them still pays the cost of *invoking* 200 processes (fork/exec/argv/env), materialising 200 `.rlib`s to disk, running cargo's own dep traversal. Wall-clock savings cap at "no rustc work" but pay all the orchestration.
-- A fork that hits the cache for the final binary returns one bag of bytes and exits. Zero process invocations. Zero `.rlib` writes. Zero traversal beyond what's needed to compute the cache key.
+- A workspace with 200 crates does ~200 rustc invocations on a clean build. A wrapper paying per-unit overhead on full hits still forks 200 wrapper subprocesses, materialises 200 `.rlib`s to disk, runs cargo's full traversal. Latency caps at "no rustc CPU" but pays everything else.
+- A fork sees the whole graph, asks ccc-backend once. On a full hit, the fork downloads only the final binary, writes it to its expected path, and exits. No intermediate `.rlib`s touched. No per-unit subprocess. One RPC, one disk write.
 
 The CPU-second savings are similar; the latency savings are orders of magnitude apart. CCC competes on wall-clock for the *whole* build, not on rustc-CPU-saved.
 
-## Mechanism
+## Mechanism for the partial-hit case
 
-For the fork to skip materialising an intermediate that *some downstream rustc invocation will still read*, the fork either:
-- Pre-materialises the cached intermediate from the cache before invoking the downstream rustc (works with unmodified rustc, requires cargo to know all the files rustc will read), or
-- Lets rustc itself read directly from the cache (requires forking rustc too).
-
-Which of these is achievable depends on cargo's knowledge of rustc's read set — see [[Does cargo know enough to pre-materialise rustc's read set?]]. The eventual outcome is a rustc fork regardless; this Decision decides whether that fork happens with CCC or after it.
+When some intermediate units miss while others hit, the fork has to materialise just enough cached intermediates so the missed units' rustc invocations can find their deps. Cargo's existing `--extern` machinery enumerates the exact paths where each dep is expected; the fork places the cached bytes at those paths before invoking rustc for the missed units. The "extra" intermediates whose downstream is fully cached are never materialised.
 
 ## Related
 
-- [[Tier 1 — CCC]]
-- [[CCC is a cargo fork, not a rustc wrapper]]
-- [[Does cargo know enough to pre-materialise rustc's read set?]]
+- [The pitch](/pitch/) — Tier 1 mechanism.
