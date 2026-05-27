@@ -83,6 +83,20 @@ Three responsibilities, three places. No coordination required between layers.
 
 New ability domains ship as packages with no changes needed at the registry, the orchestrator, or existing executors.
 
+## Mid-build verification and ability drift
+
+The orchestrator picks an executor at routing time based on its *advertised* abilities. Between the last probe that produced those values and the build that uses them, the host could have changed (someone updated Xcode, swapped a linker, edited a sysroot file). The advertised value is therefore a hypothesis until verified.
+
+A verifier runs alongside the build, re-probing the abilities the build depends on. Compare against the lockfile predicate (not against the advertised value — what matters is satisfaction of the customer's stated requirement). Three cases:
+
+- **Out-of-predicate drift, or original misadvertisement.** The executor was routed against a claim it doesn't honour — the actual re-probed value of ability `A` on executor `E` doesn't satisfy the lockfile predicate. Mark `(E, A)` stale at the fleet registry. Force a re-probe of `A` on `E`. Throw away in-flight work on this build that used `(E, A)`; re-route those units to executors whose `A` is still current and satisfies the predicate. `E` remains eligible for any other ability domain it advertises — only the specific `(E, A)` is invalidated.
+- **Within-predicate drift, multi-executor build.** Re-probed value differs from advertised but still satisfies the lockfile predicate (advertised was 14.2, actual is 14.3, lockfile requires `>= 14.0`). Coherence is the concern: if some units committed against 14.2 and others against 14.3, link-time incompatibility can result. Mark `(E, A)` stale, throw away work that used `(E, A)`, re-route affected units. Other abilities of `E` continue serving — those values weren't disturbed.
+- **Within-predicate drift, single-executor build.** Take notes. Per-unit cache keys reflect what was actually used; cross-unit coherence has the same risk as any mid-build host mutation on a local machine, with the linker as the last line of defence. No fleet ceremony.
+
+The per-ability granularity matters. An executor advertising `MacToolchain`, `LinuxToolchain`, and `CudaCapable` doesn't get blacklisted when one of those drifts; only the drifted ability is marked stale. Other ability domains the executor exposes stay valid for builds that need them.
+
+If marking `(E, A)` stale leaves the build with no eligible executors for ability `A`, the build fails. Successful builds report any drift events at the end as an informational signal so operators can investigate why a published value was stale beyond its expected cadence.
+
 ## What the lockfile records
 
 A typed map keyed by some build-internal name, with each value being a typed ability instance:
