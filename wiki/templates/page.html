@@ -10,6 +10,9 @@
     <link rel="stylesheet" href="/style.css">
 </head>
 <body>
+    {% set page_parent = page.path | path_parent %}
+    {% set page_file = "/wiki/content" ~ (page_parent if page_parent != "/" else "") ~ "/" ~ (page.path | path_basename) ~ ".md" %}
+
     <header class="masthead">
         <div class="masthead-row">
             <a href="/" class="brand">
@@ -17,7 +20,10 @@
                 <span class="brand-text">vixen.wiki</span>
             </a>
             <div id="search" class="masthead-search"></div>
-            <a href="/" class="masthead-back">← Index</a>
+            <div class="masthead-actions">
+                <a class="masthead-action" href="https://code.vixen.rs/vixen/vixen/src/branch/main{{ page_file }}" target="_blank" rel="noopener">Edit on Forgejo</a>
+                <a href="/" class="masthead-back">← Index</a>
+            </div>
         </div>
     </header>
 
@@ -55,8 +61,5 @@
         </article>
     </main>
 
-    <footer class="footer">
-        <span class="footer-meta">vixen-wiki@1 · rendered by dodeca</span>
-    </footer>
 </body>
 </html>

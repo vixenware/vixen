@@ -17,7 +17,10 @@
                 <span class="brand-text">vixen.wiki</span>
             </a>
             <div id="search" class="masthead-search"></div>
-            <a href="/" class="masthead-back">← Index</a>
+            <div class="masthead-actions">
+                <a class="masthead-action" href="https://code.vixen.rs/vixen/vixen/src/branch/main/wiki/content/_index.md" target="_blank" rel="noopener">Edit on Forgejo</a>
+                <a href="/" class="masthead-back">← Index</a>
+            </div>
         </div>
     </header>
 
@@ -29,12 +32,9 @@
             {% for page in section.pages %}
             <li class="entry">
                 <a href="{{ page.permalink }}" class="entry-link">
-                    <span class="entry-counter"></span>
                     <span class="entry-title">{{ page.title }}</span>
                     {% if "status" in page.extra %}
                     <span class="status status-{{ page.extra.status }}">{{ page.extra.status }}</span>
-                    {% else %}
-                    <span></span>
                     {% endif %}
                 </a>
             </li>
@@ -42,9 +42,5 @@
         </ol>
         {% endif %}
     </main>
-
-    <footer class="footer">
-        <span class="footer-meta">vixen-wiki@1 · rendered by dodeca</span>
-    </footer>
 </body>
 </html>

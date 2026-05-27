@@ -17,7 +17,7 @@
                 <span class="brand-text">vixen.wiki</span>
             </a>
             <div id="search" class="masthead-search"></div>
-            <span class="masthead-meta">internal · architecture · records</span>
+            <a class="masthead-action" href="https://code.vixen.rs/vixen/vixen/src/branch/main/wiki/content" target="_blank" rel="noopener">Browse on Forgejo</a>
         </div>
     </header>
 
@@ -30,8 +30,8 @@
         </section>
 
         {% set types = [
-            {"name": "Doc",  "label": "Docs",  "mark": "◆"},
-            {"name": "Task", "label": "Tasks", "mark": "▲"}
+            {"name": "Doc",  "label": "Docs"},
+            {"name": "Task", "label": "Tasks"}
         ] %}
 
         {% for t in types %}
@@ -39,7 +39,6 @@
             {% if type_pages | length > 0 %}
             <section class="type-section">
                 <h2 class="type-section-title">
-                    <span class="type-mark">{{ t.mark }}</span>
                     <span class="type-name">{{ t.label }}</span>
                     <span class="type-count">{{ type_pages | length }} entr{% if type_pages | length == 1 %}y{% else %}ies{% endif %}</span>
                 </h2>
@@ -47,7 +46,6 @@
                     {% for page in type_pages %}
                     <li class="entry">
                         <a href="{{ page.permalink }}" class="entry-link">
-                            <span class="entry-counter"></span>
                             <span class="entry-title">{{ page.title }}</span>
                             {% if "status" in page.extra %}
                             <span class="status status-{{ page.extra.status }}">{{ page.extra.status }}</span>
@@ -60,9 +58,5 @@
             {% endif %}
         {% endfor %}
     </main>
-
-    <footer class="footer">
-        <span class="footer-meta">vixen-wiki@1 · rendered by dodeca</span>
-    </footer>
 </body>
 </html>
