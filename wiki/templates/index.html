@@ -30,13 +30,8 @@
         </section>
 
         {% set types = [
-            {"name": "Vision",           "label": "Visions",            "mark": "✦"},
-            {"name": "Milestone",        "label": "Milestones",         "mark": "▲"},
-            {"name": "Decision",         "label": "Decisions",          "mark": "◆"},
-            {"name": "Question",         "label": "Questions",          "mark": "?"},
-            {"name": "Experiment",       "label": "Experiments",        "mark": "⟁"},
-            {"name": "ArchitectureNote", "label": "Architecture notes", "mark": "▦"},
-            {"name": "Glossary",         "label": "Glossary",           "mark": "§"}
+            {"name": "Doc",  "label": "Docs",  "mark": "◆"},
+            {"name": "Task", "label": "Tasks", "mark": "▲"}
         ] %}
 
         {% for t in types %}
@@ -56,8 +51,6 @@
                             <span class="entry-title">{{ page.title }}</span>
                             {% if "status" in page.extra %}
                             <span class="status status-{{ page.extra.status }}">{{ page.extra.status }}</span>
-                            {% else %}
-                            <span></span>
                             {% endif %}
                         </a>
                     </li>
