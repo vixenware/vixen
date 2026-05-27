@@ -135,19 +135,18 @@ trait Intrinsic {
 }
 
 enum CachePolicy {
-    Persist,    // exec, acquire, Http, Toml/Json/Yaml::parse, pubgrub_solve, render, stabilize, discover-tuples
+    Persist,    // exec, acquire, Http, Toml/Json/Yaml::parse, pubgrub_solve, render, discover-tuples
     InMemory,   // String::concat, equality, hash, arithmetic, value construction, Tree projection
 }
 ```
 
 The evaluator dispatches on policy. `Persist` → derive cache key from arg identities, consult cache, on miss compute and store. `InMemory` → just compute and let the per-evaluation memo table handle dedup within the run.
 
-### Four categories anchor the policy
+### Three categories anchor the policy
 
 - **External I/O.** `exec`, `acquire`, `Http`, `host.exec`, `host.read`, `host.which`, the rest of the `Host` surface. Network or process round-trip. Recompute cost is orders of magnitude above cache I/O. Always `Persist`. For `Host` operations, what gets persisted is the obligation tuple — recording the call + observed result — not the host's bytes themselves.
 - **Substantial pure CPU.** `pubgrub_solve`, `Toml/Json/Yaml::parse`, `render`. Deterministic and expensive. Parsing a 30k-line `Cargo.toml`, solving a constraint graph with thousands of crates, rendering a templated config — all beat cache I/O cost. `Persist`.
 - **Trivial pure CPU.** `String::concat`, `Hash::of`, equality, scalar arithmetic, record/list construction, `Tree::file`, `Map::get`, `Array::index`. Computing the result is faster than hashing the inputs to derive a cache key. `InMemory`.
-- **Stabilisation.** `stabilize` exists *as* a cache boundary; `Persist` by definition. It is also the one opt-in surface a user has: explicit `stabilize(expr)` forces persistence of an intermediate whose intrinsics are otherwise `InMemory` or whose enclosing function is pure-user-code.
 
 ### The cache layer is bypassed for `InMemory`, not consulted-and-missed
 
@@ -160,7 +159,7 @@ A function declared in `.vx` with a body is pure. The evaluator memoises it per 
 1. The runtime can't tell whether a pure user function is expensive. `fn add (a, b) = a + b` and `fn slow_check (x) = expensive_pure_thing(x)` look identical from the evaluator's vantage point.
 2. The valuable expensive parts inside user functions are intrinsic calls, which are cached at their own boundaries. If `@vixen/cargo::resolve_workspace` is slow, the slow parts are the `pubgrub_solve` and `Toml::parse` calls inside it — those hit the persistent cache. The user function's whole-result identity isn't separately worth storing because its constituent intrinsic results already are.
 
-Recomputing `resolve_workspace(manifest)` after a process restart re-walks the Vixen code, but every expensive intrinsic call inside it hits the persistent cache. End-to-end cost is the same as caching the whole thing, without duplicating stored values. If a user really wants to persist a pure-user-code intermediate, `stabilize(expr)` is the lever.
+Recomputing `resolve_workspace(manifest)` after a process restart re-walks the Vixen code, but every expensive intrinsic call inside it hits the persistent cache. End-to-end cost is the same as caching the whole thing, without duplicating stored values. There is no user-facing opt-in to persist a pure-user-code intermediate; if a computation is expensive enough to be worth caching, it's because of the intrinsics it calls, and those cache themselves.
 
 ### Caching is per-result, not per-aggregate
 

@@ -58,9 +58,8 @@ A specific instance. When `@vixen/rust` needs to read a `Cargo.toml`, it declare
 From `core.vx` and `build.vx`:
 - Process execution under sandbox: `exec`, plus everything in the observer signature.
 - Content-addressed fetch: `acquire(url) with {digest}`, `acquire(url) with {digest, extract}`.
-- Host discovery: `discover[T](class, probe) -> T` — the probe takes a `Host` value provided by the runtime.
+- Host discovery: `discover[T](probe) -> Option[T]` — the probe takes a `Host` value provided by the runtime; the type parameter `T` determines which executor population is probed. See [Executor abilities](/executor-abilities/).
 - Template rendering: `render[T](template) with {bindings} -> Blob`.
-- Stabilisation across builds: `stabilize`.
 - Operations on `String`, `Symbol`, `Tree`, `Stream`, `Map`, `Array`, `Path`, `Blob`, `Bytes`, plus the `Toml`/`Json`/`Yaml`/`Http` namespaces.
 
 The list grows when the runtime needs a new primitive (a new sandbox capability, a new solver algorithm). It does *not* grow when domain logic changes — that's a Vixen-package concern.
@@ -119,6 +118,24 @@ fn exec[T](
 Earlier the keyword was `where`. That collided with Rust's generic-bounds `where` and created persistent reader confusion. `with` reads sentence-wise: "exec args, with env and observer." No conflict with Rust precedent.
 
 Mechanical migration: every `where { … }` on function signatures becomes `with { … }`. `where` becomes available as an identifier; `with` becomes reserved.
+
+## Imports
+
+Modules are records. The `import` expression returns a module value, bound with `let`:
+
+```
+let config = import("vixen:config")
+let c = import("c")
+```
+
+The string identifies the target:
+
+- **`vixen:<name>`** — stdlib or first-party package (`@vixen/...` scope).
+- **Bare name** — workspace-local sibling `.vx` file, or a package declared as a dependency in the manifest.
+
+Same shape across all three sources (stdlib, cross-package, intra-package). Dotted access on the returned record reaches the module's exports: `config.linux_executor`, `c.discover_toolchain()`.
+
+Stdlib intrinsics (`exec`, `acquire`, `discover`, `Toml::parse`, …) are in scope via an implicit prelude — no explicit `import("vixen:core")` needed. Users writing build code see the intrinsic surface as ambient identifiers.
 
 ## No effect annotations — capabilities are object types
 
@@ -195,6 +212,20 @@ Within a single evaluation, the evaluator memoises every demanded thunk by its i
 Not every value's identity is worth materialising to disk. Pure arithmetic, value construction, string operations, equality — cheaper to recompute than to round-trip through a cache. The persistent cache writes only the results of intrinsics that did external or substantial work: `exec`, `acquire`, `Http`, `Toml/Json/Yaml::parse`, `pubgrub_solve`, `render`, `stabilize`, and the recorded-obligation tuples from `discover`. Trivial intrinsics (`String::concat`, equality, hash, arithmetic on scalars, Tree projection) and all pure Vixen function calls stay in the per-evaluation memo table.
 
 The cutoff is a property of each intrinsic, decided in the runtime, not a user-visible knob. *Cacheable by the type system* (every value can in principle be cached) is not the same as *worth caching* (the lookup cost beats the recompute cost). See [Cache and trust → Which intrinsics get persisted](/cache-and-trust/#which-intrinsics-get-persisted) for the categories, the dispatch mechanism, and the treatment of pure user functions.
+
+## Errors are Diagnostics that poison the build
+
+There is no `Result[T, E]` propagation surface for user code, no exception machinery. When an intrinsic fails — `Toml::parse` on malformed input, `acquire` on a digest mismatch, `Http` on a 404, `exec` on a sandbox violation — it emits a structured `Diagnostic` and **poisons** the demand chain rooted at the failing call. The build collects all Diagnostics that fired during evaluation and reports them at the end.
+
+Process exit codes are a separate concern. A non-zero exit from a process the observer is reading is *not* an automatic poison — the observer receives the `Process` value (with its exit code) and decides what to do. "Compilation failed with this error message" is a value flowing through user code; "the runtime couldn't parse your TOML" is poison.
+
+The explicit poison primitive is `fail "message"` — emits a Diagnostic and stops the current branch.
+
+### `?` recovers from poison as Option (TBD)
+
+Under consideration: a postfix `?` operator that catches poison from the preceding call and turns it into `Option`. `Toml::parse(blob)` poisons on failure; `Toml::parse(blob)?` returns `Option[Manifest]` and lets the caller fall back. Inverted from Rust's `?` (which unwraps and re-propagates); Vixen's would catch.
+
+Marked TBD because it lets user code silently swallow Diagnostics, which is sometimes what you want and sometimes a footgun. Not yet decided whether to ship.
 
 ## Cargo-resolution-as-Vixen, lockfiles-as-outputs
 
