@@ -100,7 +100,7 @@ There is one syntactic form for "do something with a value": **`F payload`** —
 
 ```vixen
 import "vixen:rust"                          // import applied to a string
-Tree { "foo" => 42, "bar" => 99 }            // Tree (constructor) applied to a map-shaped payload
+Tree %{ "foo" => 42, "bar" => 99 }           // Tree (constructor) applied to a map-shaped payload
 exec [rustc, src, "-o", "out"]               // exec applied to an array-shaped payload
 workspace "src/main.rs"                      // workspace (a Tree, callable as String -> Value) applied to a string
 (exec […]) "app"                             // the result of exec, itself a Tree, applied to a string
@@ -180,23 +180,24 @@ Multi-statement form uses `;` as the separator; the last expression (without tra
 fn build_app(workspace: Tree) -> Tree (
     let rust = RustToolchain where (version >= 1.91);
     let bin = exec [rust.rustc, workspace "src/main.rs", "-o", "out/app"] "app";
-    Tree { "target/release/app" => bin }
+    Tree %{ "target/release/app" => bin }
 )
 ```
 
 The "function body uses parens" choice is the most visually unusual decision the language makes. It buys uniformity: `( ... )` is one thing everywhere; you never have to scan inside to know what kind of bracket you're reading.
 
-### `{ ... }` — structural values with named entries
+### `{ ... }` and `%{ ... }` — structural values with named entries
 
-`{ ... }` always means "a value whose structure is a set of named entries." The entries' separator inside is always `,` (or newline; the two are interchangeable). Never `;` — semicolons live only in `( ... )`.
+Braces hold "a value whose structure is a set of named entries." The entries' separator inside is always `,` (or newline; the two are interchangeable). Never `;` — semicolons live only in `( ... )`.
 
-Modes, distinguished by what's *inside* the braces:
+Two brace forms split records from maps: bare `{ ... }` is a **record** (fielded entries), and `%{ ... }` is a **map / tree** (keyed entries). The `%` sigil is redundant with `field:` vs `key =>` for non-empty literals, but it's load-bearing for the two cases the separator can't disambiguate — the empty literal (`{}` is an empty record, `%{}` an empty map) and the spread-only literal (`{ ..r }` is a record spread, `%{ ..m }` a map spread). So `%{}` is always a writable empty-map literal, no type context required.
 
-| Mode | Inner shape | Example |
-|---|---|---|
-| Record literal | `field: value` | `Point { x: 1, y: 2 }` |
-| Map / tree literal | `key => value` | `Tree { "k" => v }` |
-| Spread | `..other` | `with { ..VixenMain }` |
+| Mode | Form | Inner shape | Example |
+|---|---|---|---|
+| Record literal | `{ ... }` | `field: value` | `Point { x: 1, y: 2 }` |
+| Map / tree literal | `%{ ... }` | `key => value` | `Tree %{ "k" => v }` |
+| Record spread | `{ ..r }` | `..other` | `with { ..VixenMain }` |
+| Map spread | `%{ ..m }` | `..other` | `%{ ..base, "k" => v }` |
 
 Kwargs application reuses the record form: `f payload with { x: 1, y: 2 }` is `f payload` followed by `with` applied to a record. Struct update is the same — `value with { field: new_value }` applies `with` to a record of updates.
 
@@ -376,7 +377,7 @@ Each Vixen package that ships a `vx`-level subcommand exports a function named `
 
 ```vixen
 fn main(workspace: Tree) with { ..VixenMain } -> Tree (
-    Tree { "target/release" => exec [stable.rustc, workspace "src/main.rs", "-o", "out/app"] }
+    Tree %{ "target/release" => exec [stable.rustc, workspace "src/main.rs", "-o", "out/app"] }
 )
 ```
 
@@ -390,9 +391,9 @@ Paths in the example are ordinary strings. There is no separate path-literal syn
 
 ### The returned Tree overlays onto the workspace
 
-The Tree `main` returns has **workspace-relative paths**, and `vx` merges it onto the customer's workspace — overlay semantics, not replace. `@vixen/cargo`'s `main` returns a Tree like `Tree { "target/release/foo" => <bin>, "target/release/build/..." => ..., "Cargo.lock" => ... }`; `vx` lands `target/...` and updates `Cargo.lock` because that's where the Tree said they go. The `target/` convention lives in `@vixen/cargo`'s implementation, not in `vx` or the language.
+The Tree `main` returns has **workspace-relative paths**, and `vx` merges it onto the customer's workspace — overlay semantics, not replace. `@vixen/cargo`'s `main` returns a Tree like `Tree %{ "target/release/foo" => <bin>, "target/release/build/..." => ..., "Cargo.lock" => ... }`; `vx` lands `target/...` and updates `Cargo.lock` because that's where the Tree said they go. The `target/` convention lives in `@vixen/cargo`'s implementation, not in `vx` or the language.
 
-A minimal subcommand can be as small as "return `Tree { "out/app" => <bin> }`". Make, Bazel, and cargo all spent decades layering convention on top of that statement; the language reduces it to *the Tree is what the workspace should look like after the build*.
+A minimal subcommand can be as small as "return `Tree %{ "out/app" => <bin> }`". Make, Bazel, and cargo all spent decades layering convention on top of that statement; the language reduces it to *the Tree is what the workspace should look like after the build*.
 
 Mechanism of the overlay (copy vs VFS-mount vs hard-link) is open — see [Design build-output materialisation](/materialise-build-output/).
 
