@@ -58,7 +58,7 @@ A specific instance. When `@vixen/rust` needs to read a `Cargo.toml`, it declare
 From `core.vx` and `build.vx`:
 - Process execution under sandbox: `exec`, plus everything in the observer signature.
 - Content-addressed fetch: `acquire(url) with {digest}`, `acquire(url) with {digest, extract}`.
-- Ability request: `Type where { constraint clauses }` — predicate-identified value; planner resolves at exec sites. See [Executor abilities](/executor-abilities/#builds-request-abilities-at-runtime). Host probing itself is not a user-Vixen-callable intrinsic; it happens inside the daemon, reading from capability probe packages (see [Executor abilities → How abilities are advertised](/executor-abilities/#how-abilities-are-advertised)).
+- Ability request: `Type where (boolean expression)` — predicate-identified value; planner resolves at exec sites. See [Executor abilities](/executor-abilities/#builds-request-abilities-at-runtime). Host probing itself is not a user-Vixen-callable intrinsic; it happens inside the daemon, reading from capability probe packages (see [Executor abilities → How abilities are advertised](/executor-abilities/#how-abilities-are-advertised)).
 - Template rendering: `render[T](template) with {bindings} -> Blob`.
 - Operations on `String`, `Symbol`, `Tree`, `Stream`, `Map`, `Array`, `Path`, `Blob`, `Bytes`, plus the `Toml`/`Json`/`Yaml`/`Http` namespaces.
 

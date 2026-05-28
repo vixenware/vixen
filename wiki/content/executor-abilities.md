@@ -56,7 +56,7 @@ This is **active request**, not declarative lockfile pinning. The lockfile recor
 
 **Policy is user-Vixen code**, not framework configuration. Fallback ladders ("try this, else that"), conditional resolution based on args, multi-target fan-out — all expressed via ordinary pattern matching and control flow.
 
-The language ingredients are already there: `Option`, pattern matching, imports, the `where { … }` constraint blocks (see [Vixen language → Constraint expressions](/vixen-language/#constraint-expressions)). The runtime exposes `request` plus the fleet matching machinery; user code composes.
+The language ingredients are already there: `Option`, pattern matching, imports, the `where (...)` constraint expressions (see [Vixen language → Constraint expressions](/vixen-language/#constraint-expressions)). The runtime exposes the fleet matching machinery; user code composes.
 
 ## Routing via predicate-identified values; planner aggregates at exec sites
 
@@ -68,12 +68,10 @@ let rust = RustToolchain where (version >= 1.91)
 
 let bin = exec [
     rust.rustc,
-    workspace.file(@src/main.rs),
+    workspace "src/main.rs",
     "-C", `linker=${mac.linker}`,
-    "-o", @out/app,
-] with {
-    observer: (proc, tree) => tree.file(@out/app)
-}
+    "-o", "out/app",
+] "app"
 // Planner sees bin needs both mac and rust; picks one executor matching both constraints.
 ```
 
