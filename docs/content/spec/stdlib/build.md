@@ -135,10 +135,11 @@ model, but they are not part of the core language syntax.
 
 > r[store.tree.file]
 >
-> `tree.file(path)` returns the `Blob` at the given relative path
-> within the tree. Poisons if the path does not exist or points to a
-> directory. The fallible version `tree.file(path)?` returns
-> `Option[Blob]`.
+> `tree.file(path)` returns the `Blob` at the given relative path within
+> the tree, and **poisons** if the path does not exist or points to a
+> directory. `tree.find(path)` is the recoverable form: it returns
+> `Option[Blob]` — `None` if the path is absent (still poisons if the
+> path resolves to a directory).
 
 > r[store.path]
 >
@@ -484,7 +485,7 @@ model, but they are not part of the core language syntax.
 >
 > ```vixen
 > namespace Host {
->   fn which(self, name: String) -> String;
+>   fn which(self, name: String) -> Option[String];
 >   fn read(self, path: String) -> Blob;
 >   fn hash(self, path: String) -> Blob;
 >   fn exec(self, args: Array[String]) -> HostOutput;
@@ -494,9 +495,9 @@ model, but they are not part of the core language syntax.
 > ```
 >
 > These operations are read-only and deterministic with respect to the
-> concrete executor instance. `host.which(name)` poisons if the tool is
-> missing; callers that want `Option[String]` can use the ordinary
-> fallible form on the call. `host.hash(path)` uses Blake3 and records the
+> concrete executor instance. `host.which(name)` returns `Option[String]`
+> — `None` if the tool isn't found, since probing for presence is
+> inherently recoverable. `host.hash(path)` uses Blake3 and records the
 > observed host fact. `host.exec(args)` runs a tool and returns a small
 > `HostOutput` (captured output bytes and exit code) — deliberately
 > narrower than the observer's `Process`, to keep the recorded obligation
@@ -583,8 +584,8 @@ model, but they are not part of the core language syntax.
 > (`host.which`, `host.read`, `host.hash`, `host.exec`). Those
 > observations become verification obligations attached to the values that
 > flow out of the probe (see [exec.verifier], [exec.verifier.compose]).
-> Recoverable fallible conversion preserves them: if `host.which(name)?`
-> yields `None`, the returned `Option` still carries the recorded
+> The `Option`-returning forms preserve them: if `host.which(name)`
+> yields `None`, that `Option` still carries the recorded
 > `Which { expected_path: None }` obligation. Reuse across builds is
 > governed by those obligations and verification-races-with-work, not by a
 > separate persistence primitive: the runtime rechecks the relevant
@@ -682,9 +683,9 @@ model, but they are not part of the core language syntax.
 > r[string.parse]
 >
 > `s.parse_u64()`, `s.parse_i64()`, and `s.parse_f64()` parse strings to
-> numbers. They poison on invalid input. The fallible forms
-> `s.parse_u64()?`, `s.parse_i64()?`, and `s.parse_f64()?` return `Option`
-> instead.
+> numbers, returning `Option` — `None` on invalid input, since parsing
+> external text is a recoverable outcome to branch on. Use `.unwrap()`
+> (poisons on `None`) where a valid number is required.
 
 > r[string.regex]
 >

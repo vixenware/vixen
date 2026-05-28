@@ -155,7 +155,7 @@ weight = 20
 >
 > Pipe: `|>` (free-function / pipeline chaining).
 >
-> Other: `?` (fallible suffix), `@`
+> Other: `?` (Option type sugar `T?`, and part of the `as?` conversion), `@`
 > (pattern binding), `#` (attribute opener in `#[...]`),
 > `:` (named slots — type annotations and field-value pairs), `::`
 > (expression-level type ascription, distinct from `as` conversion).
@@ -213,13 +213,13 @@ weight = 20
 > | 10         | unary `-` `!`          | prefix        | Negation, logical NOT       |
 > | 11         | `as` `as?` `is` `::`   | left          | Type cast / test / ascription |
 > | 12         | application            | left          | Unary application           |
-> | 13         | postfix chain          | left          | `.name`, `?`                |
+> | 13         | postfix chain          | left          | `.name`                     |
 >
 > Assignment (`=`) is a statement, not an expression. The postfix chain
 > associates left-to-right:
 >
 > ```vixen
-> x.y.z?    // means: (((x).y).z)?
+> x.y.z     // means: ((x).y).z
 > f(x).y    // group the application result before navigating it
 > ```
 >
@@ -681,7 +681,7 @@ weight = 20
 > access tuple elements by position (underscore prefix avoids ambiguity
 > with float literals). Zero-arg method calls use ordinary `()`, so
 > `value.field` is the bound method value and `value.field()` invokes it.
-> `.` and postfix `?` form one left-associative postfix chain.
+> Field and method navigation (`.`) forms one left-associative postfix chain.
 
 > r[expr.field.variant]
 >
@@ -902,17 +902,6 @@ weight = 20
 >   use_edition(edition)
 > )
 > ```
-
-### Fallible expressions
-
-> r[expr.fallible]
->
-> The `?` suffix catches poisoning and returns `Option` instead:
-> success becomes `Some`, failure becomes `None`. It applies to any
-> expression that may poison — unary application (`f(x)?`) and zero-arg
-> invocation (`value.method()?`).
-> The `as?` operator
-> follows the same pattern (see `r[type.as-fallible]`).
 
 ### Statements
 
@@ -1550,12 +1539,11 @@ weight = 20
 
 > r[comb.next]
 >
-> `.next()` returns the first element to resolve from a `Stream[T]`.
-> It poisons if the stream completes cleanly with no elements. The
-> fallible form `.next()?` returns `Option[T]` instead. If multiple
-> elements may resolve, the chosen element is whichever resolves first.
-> Use `.next()` only when that race is semantically intended or when the
-> stream is known to contain at most one element.
+> `.next()` returns the first element to resolve from a `Stream[T]` as an
+> `Option[T]` — `None` if the stream completes cleanly with no elements.
+> If multiple elements may resolve, the chosen element is whichever
+> resolves first. Use `.next()` only when that race is semantically
+> intended or when the stream is known to contain at most one element.
 
 > r[comb.fold]
 >
@@ -1676,6 +1664,9 @@ weight = 20
 > r[option.methods]
 >
 > Option methods: `.unwrap_or default` provides a fallback value.
+> `.unwrap()` returns the inner value and **poisons** on `None`;
+> `.expect msg` does the same with a caller-supplied message. These are
+> the assert-it's-present path now that there is no `?` operator.
 > `.map f` transforms the inner value (`None` stays `None`).
 > `.and_then f` flat maps — `f` returns `Option`, the result is
 > flattened. `.is_some()` and `.is_none()` return `Bool`.
@@ -1721,14 +1712,27 @@ weight = 20
 > inputs are poisoned, all errors are collected. Error reporting is
 > deterministic.
 
-> r[error.catch]
+> r[error.option]
 >
-> The `?` suffix catches poisoning and returns `Option`. It applies to
-> unary application and zero-arg invocation. `f(x)?` returns
-> `None` on failure, `Some(result)` on success. The `?` suffix always
-> means "the fallible version that returns Option instead of poisoning."
+> There is **no `?` poison-recovery operator.** A postfix `?` that caught
+> poison and yielded `Option` was considered and rejected: it silently
+> swallows Diagnostics and hides recoverable failure from type signatures.
+> Instead, fallibility is expressed by the operation's return type:
 >
-> This is the same pattern as `as` / `as?`.
+> - An operation poisons when failure means the build is malformed — a
+>   declared input is missing or invalid, with nothing useful to recover
+>   to. Callers do nothing special; the poison propagates.
+> - An operation returns `Option[T]` when failure is a normal outcome to
+>   branch on — a probe, an optional lookup, a parse of external text.
+>   Recoverability is then visible in the signature.
+>
+> Where both uses are real, the poisoning operation is primary and an
+> `Option`-returning sibling serves recovery (e.g. `tree.file` poisons,
+> `tree.find` returns `Option`). `Option` composes with `match`,
+> `.unwrap_or`, `.map`, `.and_then`; `.unwrap()` / `.expect msg` poison on
+> `None` for the assert-it's-present path. `as?` (fallible *conversion* to
+> `Option`, see [r[type.as-fallible]](#)) is unaffected — it is
+> Option-by-design, not poison-catching.
 
 ## Streams
 
