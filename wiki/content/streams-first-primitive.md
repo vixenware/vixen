@@ -10,7 +10,7 @@ tags = ["language", "tier-2", "streams"]
 created = "2026-05-26"
 +++
 
-Tier 2 needs several foundational primitives — streams as runtime values, executor classes with selection / fan-out, closure shipping, TreeEntry, cache-key + sandbox design, HTTP fetch + tarball extract, multi-source dep resolution. Each is independently implementable with its own narrow failing test.
+Tier 2 needs several foundational primitives — streams as runtime values, ability-based executor selection / fan-out, closure shipping, TreeEntry, cache-key + sandbox design, HTTP fetch + tarball extract, multi-source dep resolution. Each is independently implementable with its own narrow failing test.
 
 Streams first. Reasons:
 

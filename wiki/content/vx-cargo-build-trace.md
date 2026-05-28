@@ -52,7 +52,7 @@ The convention scales: any package owning a Vixen subcommand verb exports `main`
 
 ### The workspace is a Tree, not a Path
 
-A load-bearing point: Vixen-level code never sees disk paths. The workspace handed to `main` is a `Tree` — a [Merkle-rooted content-addressed directory structure](/glossary/#subgraph-elision) of the customer's repo, ingested into the local store (chunked via CDC) by `vx` before `main` is invoked. From `main`'s perspective there's no `read_file("Cargo.toml") #fs`; there's `workspace.file("Cargo.toml") -> Blob`, a pure Tree operation. No `#fs` effect required at this level.
+A load-bearing point: Vixen-level code never sees disk paths. The workspace handed to `main` is a `Tree` — a [Merkle-rooted content-addressed directory structure](/glossary/#subgraph-elision) of the customer's repo, ingested into the local store (chunked via CDC) by `vx` before `main` is invoked. From `main`'s perspective there's no host-filesystem read at all; there's `workspace.file("Cargo.toml") -> Blob`, a pure Tree operation. Reading host bytes outside an ingested tree requires a `Host` capability, which `main` is never handed.
 
 Why this matters:
 
@@ -61,7 +61,7 @@ Why this matters:
 - **Caching falls out.** The Tree is content-hashed; everything that depends on it is cacheable by that hash.
 - **Provenance flows through.** The Tree's identity participates in cache keys for every node downstream of it.
 
-The `#fs` effect exists for the case where Vixen code genuinely needs to read host-side bytes outside of any ingested tree (a local-discovery probe inspecting `/usr/bin/...`, for example). For normal build code operating on workspace contents, it doesn't.
+Host-side byte access outside an ingested tree is reachable only through a `Host` capability — handed to a local-discovery probe inspecting `/usr/bin/...`, for example, and never to normal build code operating on workspace contents.
 
 ## Step 4: Parse `Cargo.toml`
 
@@ -80,7 +80,7 @@ let manifest: CargoManifest = Toml::parse[CargoManifest](manifest_blob);
 
 Layering — whether the registry-protocol bits live directly inside `@vixen/cargo` or in a separate `@vixen/crates-io` library it depends on — is a code-organisation question, not a caching question. Cache semantics are identical either way: the same intrinsic calls happen with the same arguments; intermediate Vixen function calls add no overhead because pure functions over the same inputs produce the same output and the same content-addressed identity. Modular for engineering hygiene; defer the exact factoring to implementation time.
 
-Cache key for the resolution operation is `(CargoManifest, registry view at this moment, resolver version)`. Same inputs ⇒ same lockfile ⇒ instant hit. New version published on crates.io ⇒ different registry view ⇒ miss, re-resolve. See [Build and resolution](/build-and-resolution/) for the lockfile-as-output framing.
+Cache key for the resolution operation is `(CargoManifest, registry view at this moment, resolver version)`. Same inputs ⇒ same lockfile ⇒ instant hit. But that node is *forced* only when the committed `Cargo.lock` can't serve as the solution (missing, manifest changed, or explicit `cargo update`) — an ordinary build with a valid lock never demands it, so a new upstream publish does not re-resolve. See [Build and resolution](/build-and-resolution/) for the lockfile-as-output framing.
 
 ## Step 6: Fetching dep sources
 

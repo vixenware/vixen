@@ -55,7 +55,7 @@ Picks one toolchain identity per requirement. Different builds may resolve the s
 
 There is no single "all local vs all remote" switch at the top of a build. Resolution is **per-toolchain**: each requirement resolves against the union of inventories and picks whichever satisfies.
 
-The non-mixing constraint is at the *artifact coherence* level: any one artifact's toolchain set must be internally compatible. You can't link half a crate's transitive deps against the macOS 13 SDK and half against the 15 SDK — the ABI doesn't match. So a single artifact commits to one coherent toolchain set. Fan-out across executor classes (Linux × macOS × Windows × arm/x86 for a cross-compile matrix) is fine because each branch of the fan-out is internally coherent.
+The non-mixing constraint is at the *artifact coherence* level: any one artifact's toolchain set must be internally compatible. You can't link half a crate's transitive deps against the macOS 13 SDK and half against the 15 SDK — the ABI doesn't match. So a single artifact commits to one coherent toolchain set. Fan-out across executors (Linux × macOS × Windows × arm/x86 for a cross-compile matrix) is fine because each branch of the fan-out is internally coherent.
 
 If the same `Cargo.toml` would resolve differently locally vs against Vixen executors (because available toolchain versions differ between local discovery and remote inventory), the cache buckets differ — the lockfile-as-output for "build against local toolchains" is different from "build against remote toolchains." Same shape as cargo's existing target-specific lockfile mechanism.
 
@@ -75,14 +75,18 @@ The resolution operation is:
 (Cargo.toml, registry view, resolver version, toolchain pins) → solve → Cargo.lock
 ```
 
-`Cargo.lock` is an output. The fact that it lands at the same on-disk path as a previous lockfile is a file-system convention, not a semantic mutation. The cache stores `(inputs → Cargo.lock)`; same inputs → same lockfile → instant. New version published on crates.io → different registry view → cache miss → re-resolve. `cargo update` is "force re-resolution against today's registry, ignore prior lockfile output."
+`Cargo.lock` is an output. The fact that it lands at the same on-disk path as a previous lockfile is a file-system convention, not a semantic mutation. When the resolution node *is* run, the cache stores `(inputs → Cargo.lock)`; same inputs → same lockfile → instant.
+
+But resolution is **demand-gated, not triggered by registry drift.** On an ordinary build the committed `Cargo.lock` *is* the solution — `@vixen/cargo` reads it, checks it still satisfies `Cargo.toml`, and if so never forces the resolution node at all. A new version published on crates.io does **not** re-resolve; the lock pins what you build. The registry view enters only the resolution node's key, and an ordinary build never demands that node.
+
+The node is forced only when the lock can't serve as the solution — it's missing, the manifest changed in a way the lock can't satisfy, or the user asked. In those cases the prior lock is fed back in as an **input preference** (keep existing pins, change only what must), not the authoritative solution. `cargo update` is exactly that forced re-resolution with the preference relaxed: bare `update` ignores the prior lock as a solution and resolves to latest compatible; `update -p foo` keeps every pin except `foo`. No special primitive — `@vixen/cargo` chooses whether to force the node and how strongly to weight the prior lock, and the resolver intrinsic accepts that prior solution as a preference input.
 
 Implications:
 
 - No "stale lockfile" guessing. The cache decides.
 - Lockfiles cross-target cleanly. Workspaces targeting different toolchain sets produce different lockfiles; both are valid outputs of the same shape of operation.
 - Package-version pins fit the same model. A workspace also depends on specific Vixen-package versions (`@vixen/rust@2.4.1`); those pins are inputs to the resolution operation; they appear in the lockfile output. See [Packages and publishing](/packages-and-publishing/).
-- If `cargo build` modifies your checked-in `Cargo.lock`, the diff is honest: the inputs (registry state, resolver version) changed since the lockfile was checked in.
+- If a build changes your checked-in `Cargo.lock`, the diff is honest: it means the lock could no longer serve as the solution (the manifest changed, or you ran `cargo update`) — not that the registry moved underneath a plain build.
 
 ## PubGrub solves both cargo and Vixen package resolution
 

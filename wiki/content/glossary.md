@@ -32,9 +32,9 @@ A trusted shortcut that replaces hashing a toolchain's bytes with one opaque tok
 
 A constraint produced by a discovery probe that must be verified on later builds. Not just a fingerprint — a claim ("clang at this path has hash X") that gets re-checked concurrently with the work. Mismatch poisons the build and triggers re-dispatch. See [Build and resolution](/build-and-resolution/#discovery-produces-obligations-not-fingerprints).
 
-## Executor class
+## Executor ability
 
-A type identifying which executors are interchangeable for a given workload — `linux-x86_64`, `darwin-arm64`, exotic targets like `freebsd-aarch64`. Build closures are typed against an executor class; the runtime selects an actual executor at evaluation time and can fan out across all members of a class for multi-platform builds.
+A typed value describing something an executor can do — `RustToolchain`, `MacToolchain`, `CudaCapable`, etc. — each a struct owned by the package that defines the domain. Builds request abilities structurally (`MacToolchain where (xcode >= 14.0)`); the orchestrator matches the predicate against advertised abilities, selects an executor, and fans out across matches for multi-platform builds. Replaces the older stringly-typed "executor class" selector, which was the wrong concept — routing is type-driven, not name-driven. See [Executor abilities](/executor-abilities/).
 
 ## Subgraph elision
 

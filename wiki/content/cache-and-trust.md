@@ -112,7 +112,7 @@ Customer-local discovery for proprietary toolchains is the one place this partit
 
 ## exec caches the observer's return value, not the Process bytes
 
-A Tier 2 detail. `exec(args) with { ..., observer: Fn(Process, Tree) #sandbox -> T }` is the central build primitive. When the runtime demands its result, the cache stores the **observer's `T`**, not the underlying `Process` bytes (stdout, stderr, exit, write-set Tree).
+A Tier 2 detail. `exec(args) with { ..., observer: Fn(Process, Tree) -> T }` is the central build primitive. When the runtime demands its result, the cache stores the **observer's `T`**, not the underlying `Process` bytes (stdout, stderr, exit, write-set Tree).
 
 Implications:
 
