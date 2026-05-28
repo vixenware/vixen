@@ -109,7 +109,7 @@ What is clear about where it sits:
 - **The cfg attribute set for a target is data the runtime can supply.** `rustc --print cfg --target <triple>` yields the concrete cfg key/values and bare flags for that target — an `exec` whose observer returns the parsed set. Given that set, evaluating a `cfg(...)` expression is ordinary boolean logic (`all`/`any`/`not`, key-equality, flag membership) expressible with the built-in operators over plain data.
 - **Explicit-triple tables** are a string match on the resolved target triple; those *do* fall out of ordinary projection + comparison.
 
-Open: how `@vixen/rust` parses the `cfg(...)` mini-language (its own small parser vs. a runtime intrinsic), how the per-target cfg set is acquired and cached (declared-identity on a Vixen executor vs. discovered on a customer host), and how cfg-conditional edges thread into the PubGrub solve so the lockfile is byte-identical to cargo's for a given target. Tracked here as a compat blocker for the cargo path.
+Open: how `@vixen/rust` parses the `cfg(...)` mini-language (its own small parser vs. a runtime intrinsic), how the per-target cfg set is acquired and cached (declared-identity on a Vixen executor vs. discovered on a customer host), and how cfg-conditional edges thread into the PubGrub solve so a target resolves to the same dependency set cargo would pick — functional equivalence, not a byte-identical lockfile. Tracked here as a compat blocker for the cargo path.
 
 ## Bootstrap is clean
 

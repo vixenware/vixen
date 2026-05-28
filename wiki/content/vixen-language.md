@@ -418,7 +418,7 @@ Without `?`, the footgun (silent Diagnostic swallowing) goes away. Recoverable f
 
 A consequence worth calling out for the cargo-replacement use case.
 
-`@vixen/rust`'s resolver is Vixen code. It reads `Cargo.toml`, talks to the crates.io registry (via the `Http` intrinsic), runs PubGrub (intrinsic) over the constraints, emits a `Cargo.lock` byte-identical to upstream cargo's.
+`@vixen/rust`'s resolver is Vixen code. It reads `Cargo.toml`, talks to the crates.io registry (via the `Http` intrinsic), runs PubGrub (intrinsic) over the constraints, and emits a `Cargo.lock`. The bar is **functional equivalence** — resolve the same versions cargo would and produce a working build — not a byte-identical lockfile. Matching cargo's exact text or tie-breaking in every corner is a needlessly high bar we don't sign up for.
 
 The resolution operation is a build-graph node: inputs are `Cargo.toml` + the registry view at this moment + the resolver code's version; output is `Cargo.lock`. The fact that the output lands at the conventional on-disk path is a file-system convention, not a semantic mutation. When the resolution node is run, the cache stores `(inputs → Cargo.lock)`; same inputs → same lockfile → instant. But resolution is **demand-gated**: an ordinary build whose committed `Cargo.lock` still satisfies `Cargo.toml` never forces this node, so a new upstream publish does not re-resolve. The node is forced only when the lock can't serve as the solution (missing, manifest changed, or explicit `cargo update`), with the prior lock fed back as an input *preference* rather than the solution.
 
