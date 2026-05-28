@@ -156,10 +156,10 @@ model, but they are not part of the core language syntax.
 > In `exec`, Paths in `args` and `env` are resolved to VFS locations
 > directly. The executor rewrites `/` separators as needed for the host
 > platform when launching the process. `Path` is a locator only — reads
-> through `#fs` or through `Tree` operations create dependencies and
-> yield `Blob` or `Tree` values. Bare `Path` values do not carry store
-> identity and are not themselves cross-boundary content. See
-> [exec.mount].
+> through `Tree` operations (or, inside a probe, through the `Host`
+> capability) create dependencies and yield `Blob` or `Tree` values. Bare
+> `Path` values do not carry store identity and are not themselves
+> cross-boundary content. See [exec.mount].
 >
 > Interpolated path literals produce a plain `Path` when every
 > interpolated value is `String` or `Path`. If an interpolated path
@@ -399,11 +399,12 @@ model, but they are not part of the core language syntax.
 > same language semantics as the orchestrator. The observer receives a
 > `Process` and the VFS root as a `Tree`, and returns `T`.
 >
-> The observer runs under `#sandbox`. It may inspect the process result
-> and sandbox contents exposed through those arguments, but it has no
-> ambient executor-host authority. In particular, an observer cannot
-> inspect the unsandboxed host environment unless such data was already
-> captured into ordinary values before shipping.
+> The observer's authority is exactly the `Process` and sandbox `Tree` it
+> receives — it may inspect the process result and sandbox contents
+> exposed through those arguments, but it holds no `Host` and has no
+> ambient executor-host authority. An observer cannot inspect the
+> unsandboxed host environment; only data already captured into ordinary
+> (content-addressable) values before shipping is available to it.
 
 > r[exec.observer.materialization]
 >
@@ -446,29 +447,30 @@ model, but they are not part of the core language syntax.
 
 > r[exec.verifier]
 >
-> `exec` automatically rechecks any discovery-derived host obligations
-> carried by its inputs on the concrete executor instance that is about
-> to run the process. Verification is derived from recorded host
-> observations; the normal user-facing model does not include a
-> handwritten verifier closure.
+> `exec` automatically rechecks any host obligations carried by its
+> inputs on the concrete executor instance that is about to run the
+> process. Verification is derived from recorded host observations; the
+> normal user-facing model does not include a handwritten verifier
+> closure.
 >
-> These obligations live on values. If a discovery closure observed
-> `host.which("cc")` and `host.hash(cc_path)`, then the discovered tool
-> value carries those facts with it. Destructuring or embedding that
-> value does not erase its obligations.
+> These obligations live on values. If a capability probe observed
+> `host.which("cc")` and `host.hash(cc_path)`, then the probed tool value
+> carries those facts with it. Destructuring or embedding that value does
+> not erase its obligations.
 >
 > Verification does not gate execution. The process runs speculatively
 > while verification proceeds concurrently. If verification fails after
 > the process completes, the result is discarded and the exec poisons
 > with a **verification failure**, a distinct poison kind that signals
-> the executor's environment has drifted from the recorded discovery.
+> the executor's environment has drifted from what the probe recorded.
 
 > r[exec.verifier.host]
 >
 > `Host` is an opaque, executor-local, read-only view of the unsandboxed
-> machine. It exists inside discovery callbacks and future advanced
-> host-side escape hatches. Host paths are ordinary `String` values, not
-> `Path`, because they refer to the executor's real filesystem rather
+> machine, handed to a capability probe (see [discover.probe]). It is a
+> non-constructible capability value (see [cap.types]), region-scoped to
+> the probe (see [cap.region]). Host paths are ordinary `String` values,
+> not `Path`, because they refer to the executor's real filesystem rather
 > than to Vixen's VFS namespace.
 >
 > ```vixen
@@ -476,6 +478,7 @@ model, but they are not part of the core language syntax.
 >   fn which(self, name: String) -> String;
 >   fn read(self, path: String) -> Blob;
 >   fn hash(self, path: String) -> Blob;
+>   fn exec(self, args: Array[String]) -> HostOutput;
 >   fn exec_subpath(self, root: String) -> SandboxExemption;
 >   fn read_subpath(self, root: String) -> SandboxExemption;
 > }
@@ -485,11 +488,15 @@ model, but they are not part of the core language syntax.
 > concrete executor instance. `host.which(name)` poisons if the tool is
 > missing; callers that want `Option[String]` can use the ordinary
 > fallible form on the call. `host.hash(path)` uses Blake3 and records the
-> observed host fact. `host.exec_subpath(root)` and
-> `host.read_subpath(root)` produce explicit coarse sandbox exemptions to
-> be carried out of `discover` and later passed back into `exec` through
-> `coarse_mounts`. These operations are for discovery and rechecking
-> discovered facts, not for general network access.
+> observed host fact. `host.exec(args)` runs a tool and returns a small
+> `HostOutput` (captured output bytes and exit code) — deliberately
+> narrower than the observer's `Process`, to keep the recorded obligation
+> tuple small. `host.exec_subpath(root)` and `host.read_subpath(root)`
+> produce explicit coarse sandbox exemptions to be carried out of a probe
+> and later passed back into `exec` through `coarse_mounts`. Every such
+> operation is recorded as an obligation on the values that flow out of
+> the probe. These operations are for probing and rechecking probed
+> facts, not for general network access.
 
 > r[exec.verifier.host.coarse]
 >
@@ -502,9 +509,9 @@ model, but they are not part of the core language syntax.
 > VFS, and the runtime cannot in general track every file read that later
 > host-side execution may perform beneath such a path.
 >
-> Coarse host facts are therefore justified by discovery and verification,
-> not by ordinary VFS tracking. Authored Vixen code must return explicit
-> `SandboxExemption` values from `discover` and pass them back into
+> Coarse host facts are therefore justified by probing and verification,
+> not by ordinary VFS tracking. Authored Vixen code must carry explicit
+> `SandboxExemption` values out of a probe and pass them back into
 > `exec` through `coarse_mounts`; the runtime does not invent coarse host
 > policy on behalf of the build. When a discovered exemption later
 > authorizes host-side access during `exec`, that access must be
@@ -515,92 +522,77 @@ model, but they are not part of the core language syntax.
 
 > r[exec.verifier.compose]
 >
-> When demanded discovery evaluation performs multiple host observations,
-> the returned value carries the union of the obligations attached to the
-> values that flow into that result. There is no separate user-written
-> composition step — obligation tracking follows the values produced by
-> discovery.
+> When a probe performs multiple host observations, the returned value
+> carries the union of the obligations attached to the values that flow
+> into that result. There is no separate user-written composition step —
+> obligation tracking follows the values the probe produces.
 >
 > Observations from expressions that do not flow into the returned value
 > do not contribute obligations. Such unused expression statements are a
 > static error.
 
-> r[exec.executor-class]
->
-> `ExecutorClass` is a distinct newtype over `String`.
-> `executor_class(label: String) -> ExecutorClass` wraps a label into a value
-> representing a class of executor environments (e.g.,
-> `executor_class("ubuntu-22.04")`). The class is the unit of cache
-> reuse for `exec` — cached results are keyed by executor class, not
-> by specific runner instance. Different instances of the same class
-> are expected to be equivalent; automatic verification from recorded
-> discovery observations detects when they are not.
-
 ## Executor discovery
 
-> r[exec.discover]
+> r[discover.probe]
 >
-> Some toolchains cannot be acquired through `acquire` — they are
-> non-redistributable (MSVC, Xcode) or must be found on the executor
-> host. `discover` probes an executor by shipping a closure there. It
-> requires the `#discover` capability.
+> Toolchains that cannot be acquired with a digest — non-redistributable
+> ones (MSVC, Xcode) or whatever is installed on an executor host — are
+> found by **capability probes**. There is no user-callable `discover`
+> intrinsic. A probe is a function declared in a capability-probe package,
+> by convention in the advertised type's namespace, taking a `Host` and
+> returning `Option[T]`:
 >
 > ```vixen
-> fn discover[T](
->   class: ExecutorClass,
->   probe: Fn(Host) #host -> T,
-> ) #discover -> T;
+> struct MacToolchain { xcode: SemVer, macos_sdk: SemVer, arch: Arch }
+>
+> namespace MacToolchain {
+>   fn probe(host: Host) -> Option[MacToolchain] ( ... )
+> }
 > ```
 >
-> The closure runs on a representative executor in the class with a
-> `Host` handle for that executor's unsandboxed environment. It returns
-> an ordinary typed Vixen value, not a command transcript.
+> The package manifest declares what it advertises:
+>
+> ```styx
+> capability { advertises MacToolchain }
+> ```
 
-> r[exec.discover.verifier]
+> r[discover.daemon]
 >
-> Discovery is an observed effect. While the discovery closure runs, the
-> runtime records the host facts it consulted: `host.which`, `host.hash`,
-> `host.read`, and future host-observation primitives.
->
-> Those recorded observations become hidden verification obligations
-> attached to the values that flow out of `discover`. The runtime, not
-> user code, derives later verification from that observation trace.
-> Recoverable fallible conversion preserves those observations: if
-> `host.which(name)?` yields `None`, the returned `Option` still carries
-> the recorded `Which { expected_path: None }` obligation.
+> A `vx-daemon` walks its configured probe list at startup, loads each
+> package, calls each `probe` with a `Host` for the daemon's own machine,
+> and publishes the `Some(T)` results to the fleet registry over Vox. A
+> probe that doesn't apply on the host (a Mac probe on Linux) returns
+> `None` and advertises nothing. Build code never invokes a probe: it
+> requests abilities structurally with `Type where (...)`, and the
+> orchestrator matches the request against advertised values. Probe
+> lifecycle, advertisement, and routing are specified by the
+> executor-abilities model.
 
-> r[exec.discover.reuse]
+> r[discover.obligations]
 >
-> `discover` and `stabilize` are separate tools. `discover` learns
-> executor-host facts and returns values carrying hidden verification
-> obligations. `stabilize` persists and reuses chosen results across
-> builds. When user code composes them, stabilization preserves the
-> obligations attached to the discovered values; it does not replace or
-> erase them.
->
-> Per-instance verification happens at every `exec`: the runtime rechecks
-> the relevant obligations on the actual runner that executes the work.
-> If verification fails (the runner drifted from what was discovered),
-> the exec poisons with a verification failure. The cached discovery for
-> that class is invalidated and rediscovery runs on retry.
+> While a probe runs, the runtime records the host facts it consulted
+> (`host.which`, `host.read`, `host.hash`, `host.exec`). Those
+> observations become verification obligations attached to the values that
+> flow out of the probe (see [exec.verifier], [exec.verifier.compose]).
+> Recoverable fallible conversion preserves them: if `host.which(name)?`
+> yields `None`, the returned `Option` still carries the recorded
+> `Which { expected_path: None }` obligation. Reuse across builds is
+> governed by those obligations and verification-races-with-work, not by a
+> separate persistence primitive: the runtime rechecks the relevant
+> obligations on the actual runner at every `exec`, and drift poisons with
+> a verification failure carrying structured expected-vs-observed evidence.
 
-> r[exec.discover.retry]
+> r[discover.http]
 >
-> A verification failure poison carries structured evidence: what was
-> expected, what was observed. This distinguishes it from other poison
-> kinds. The runtime or caller may retry by rerunning the `stabilize`
-> witness/resolve cycle to update the cached discovery, then retrying
-> the exec with the new discovered values.
-
-> r[exec.discover.http]
->
-> `Http.get(url)` performs an ordinary HTTP GET under `#discover` and
-> returns the response body as `Blob`. This is the low-level primitive
-> used for registry index queries, metadata fetches, and other volatile
-> network reads. Vixen does not provide ecosystem-specific registry
-> builtins in the core language model; package-resolution logic is
-> ordinary user code over `Http.get`, structured parsers, and normal
-> control flow.
+> `Http.get(url) -> Blob` performs an ordinary HTTP GET and returns the
+> response body. It is the low-level primitive for registry index queries,
+> metadata fetches, and other volatile network reads. Vixen provides no
+> ecosystem-specific registry builtins in the core model; package
+> resolution is ordinary code over `Http.get`, structured parsers, and the
+> resolver intrinsic (see [resolve]). Because the result is volatile,
+> `Http.get` is not a from-cache pure value the way `acquire` is; its use
+> in resolution is demand-gated through the lockfile, so registry drift
+> does not re-resolve a still-valid lock.
 
 
 ## Deserialization
@@ -756,112 +748,31 @@ model, but they are not part of the core language syntax.
 > runtime can provide. The evaluator rejects user code that attempts to
 > construct a capability value or implement such an intrinsic.
 
-## Stabilize
+## Resolution
 
-> r[stabilize.model]
+> r[resolve]
 >
-> Some operations consult changing external state — resolving a toolchain
-> channel, querying a registry, performing dependency resolution. These
-> are not reproducible by themselves. `stabilize` bridges discovery and
-> reproducible reuse by splitting such computations into two callbacks
-> with different capability masks: a **witness** that captures the
-> dependency frontier, and a **resolve** that performs discovery.
-
-> r[stabilize.signature]
+> **Status: stub — design pending (do not treat as normative yet).**
+> Dependency resolution — cargo's PubGrub solve, and the equivalent for
+> any other ecosystem — is exposed as a runtime intrinsic, not hand-written
+> in `.vx`. The intrinsic takes the constraint inputs plus a **prior
+> solution as a preference**, so that minimal-update and `--precise`
+> semantics live in `@vixen/cargo` rather than in a runtime lockfile
+> primitive:
 >
-> ```vixen
-> fn stabilize[W, T](
->   witness: Fn() #fs -> W,
->   resolve: Fn(W) #discover -> T,
-> ) -> T;
-> ```
+> - An ordinary build whose committed lockfile still satisfies the
+>   manifest never demands this node — the lock *is* the solution, and
+>   registry drift cannot re-resolve it.
+> - When the node is forced (lock missing, manifest changed, or explicit
+>   `cargo update`), the prior lock is fed in as a preference, relaxed by
+>   the command: keep all pins (minimal change) / keep all but `-p X` /
+>   ignore as solution and take latest compatible.
 >
-> The witness callback runs under `#fs` — it can read the filesystem but
-> cannot perform discovery. The resolve callback runs under `#discover` —
-> it can query external state but cannot access the filesystem. All
-> local/project state the resolve callback needs must be summarized in
-> the witness value it receives.
-
-> r[stabilize.witness]
+> The replaced `stabilize` primitive is gone: lockfile stability comes
+> from the lock being an ordinary workspace `Tree` file plus demand-gated
+> evaluation, not from a runtime witness/resolve persistence mechanism.
 >
-> The witness callback computes the dependency frontier — the set of
-> local/project state that determines whether a previous resolution is
-> still valid. It reads manifests, walks directories, checks globs,
-> and returns a value that summarizes everything relevant. Its
-> dependencies are tracked by the same holistic machinery as any other
-> Vixen computation: code identity, captures, transitive calls, and all
-> values read. No special tracking rules are introduced for the witness.
-
-> r[stabilize.resolve]
->
-> The resolve callback performs discovery. It receives the witness value
-> and computes the final result — querying registries, resolving
-> dependency graphs, looking up versions. It cannot access the
-> filesystem; the `#discover` mask excludes `#fs`. This prevents
-> untracked filesystem reads from causing over-caching.
-
-> r[stabilize.reuse]
->
-> The witness value is the reuse key. If the current witness matches
-> the recorded witness from a previous build, the previous resolve
-> result is reused without running resolve again. If the witness
-> changes, resolve runs again. The witness execution trace — not a
-> user-supplied key — determines reuse.
-
-> r[stabilize.caching-bias]
->
-> Over-caching — reusing a stale result — must not happen. Under-caching
-> — recomputing when reuse was safe — is acceptable. The capability
-> split ensures correctness: the witness captures everything that
-> determines validity, and the resolve callback cannot introduce
-> untracked inputs.
-
-> r[stabilize.lockfile]
->
-> Lockfiles are ordinary artifacts. They are outputs of `stabilize` and
-> later inputs to reproducible builds. Evaluation never mutates
-> workspace files in place — a lockfile artifact is written to disk
-> only at the external boundary, like any other output.
->
-> "Normal build" vs "update lockfile" is not a semantic distinction.
-> The evaluator always computes the correct stabilized result. The
-> difference is whether the resulting artifact gets written back to the
-> repository.
-
-> r[stabilize.compat]
->
-> Ecosystem lockfiles (e.g. `Cargo.lock`) retain their native format —
-> `stabilize` does not own any particular lockfile syntax. Library code
-> provides package-manager-specific parsing and writing logic. Vixen
-> keeps its own reuse metadata (witness fingerprints, dependency traces)
-> separately.
-
-> r[stabilize.first-build]
->
-> On first evaluation of an existing project, `stabilize` runs the full
-> witness/resolve cycle and records its own reuse data. Any existing
-> ecosystem lockfile (e.g. a `Cargo.lock` written by `cargo`) may be
-> consumed by the resolve callback as an ordinary input, according to
-> that callback's logic.
-
-> r[stabilize.nested]
->
-> `stabilize` can appear anywhere in the build graph, including inside
-> a resolve callback. Nesting is safe because each `stabilize` call
-> enforces its own capability masks independently:
->
-> ```vixen
-> stabilize where {
->   witness: () => ( ... ),
->   resolve: (inputs) => (
->     // outer resolve has #discover, not #fs
->     stabilize where {
->       witness: () => ( ... ),
->       // inner witness: #fs granted by inner stabilize,
->       // #discover from outer resolve filtered by mask
->       resolve: (inner) => ( ... ),
->       // inner resolve: #discover granted by inner stabilize
->     }
->   ),
-> }
-> ```
+> The exact signature, the shape of the preference input, the keyed
+> inputs, and the cache policy are **open** and tracked for a dedicated
+> design pass. See Build and resolution (wiki) for the lockfile-as-output
+> framing this rests on.

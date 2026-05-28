@@ -9,8 +9,8 @@ weight = 30
 This chapter covers evaluation semantics that apply to Vixen programs
 independently of any particular standard-library surface.
 
-Build entry points and runtime-backed surfaces such as `build`, `exec`,
-`Blob`, `Tree`, `Path`, `acquire`, and `stabilize` are specified in the
+Build entry points and runtime-backed surfaces such as `main`, `exec`,
+`Blob`, `Tree`, `Path`, and `acquire` are specified in the
 [Build and Runtime Standard Library](../stdlib/build.md).
 
 ## Evaluation model

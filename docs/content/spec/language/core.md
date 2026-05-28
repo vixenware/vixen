@@ -155,10 +155,9 @@ weight = 20
 > Pipe: `|>` (free-function / pipeline chaining).
 >
 > Other: `?` (fallible suffix), `@`
-> (path prefix, pattern binding), `#` (capability tags on function
-> types, attribute opener in `#[...]`), `:` (named slots — type
-> annotations and field-value pairs), `::` (expression-level type
-> ascription, distinct from `as` conversion).
+> (path prefix, pattern binding), `#` (attribute opener in `#[...]`),
+> `:` (named slots — type annotations and field-value pairs), `::`
+> (expression-level type ascription, distinct from `as` conversion).
 
 > r[lex.delimiters]
 >
@@ -1304,13 +1303,13 @@ weight = 20
 
 > r[fn.type]
 >
-> Function types use `Fn(Args) -> Ret` syntax. Capability tags appear
-> between the parameter list and the return type arrow:
-> `Fn(Args) #fs -> Ret`. Keyword parameters use a trailing `where`
-> block:
+> Function types use `Fn(Args) -> Ret` syntax. There are no capability
+> tags — authority is conveyed by parameter types (see the capabilities
+> model in the build standard library). Keyword parameters use a trailing
+> `with` block:
 >
 > ```vixen
-> Fn(Path) where { mounts: Tree, loudly: Bool = false } -> Tree
+> Fn(Path) with { mounts: Tree, loudly: Bool = false } -> Tree
 > ```
 >
 > Multiple positional parameter types describe one tuple payload:
