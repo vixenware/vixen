@@ -172,8 +172,11 @@ weight = 20
 > underscores for readability: `1_000_000`. They default to `U64`.
 > Use type ascription (`::`) to specify a different type: `4::I64`.
 >
-> Float literals contain a decimal point: `3.14`, `0.5`. They default to
-> `F64`.
+> Dotted-numeric literals are `SemVer`, not floats — Vixen is a build
+> language and versions are the common case. `0.13`, `1.0`, `1.0.0`, and
+> `1.0.0-rc.1` are `SemVer` literals (two or three segments, optional
+> pre-release / build metadata). A `F64` literal requires the `f` suffix:
+> `3.14f`, `0.5f`.
 
 ### String literals
 
@@ -203,7 +206,7 @@ weight = 20
 > | 3          | `\|\|`                 | left          | Logical OR                  |
 > | 4          | `&&`                   | left          | Logical AND                 |
 > | 5          | `==` `!=`              | left          | Equality                    |
-> | 6          | `<` `<=` `>` `>=`      | left          | Comparison                  |
+> | 6          | `<` `<=` `>` `>=` `^=` `~=` `contains` `in` `matches` | left | Comparison, semver match, membership |
 > | 7          | `..` `..=`             | none          | Range                       |
 > | 8          | `+` `-`                | left          | Additive                    |
 > | 9          | `*` `/` `%`            | left          | Multiplicative              |
@@ -601,7 +604,7 @@ weight = 20
 >
 > `f { ... }` is ordinary unary application to a record payload.
 > `f %{ ... }` is ordinary unary application to a map payload.
-> Neither is keyword application. `where` is the only keyword-application
+> Neither is keyword application. `with` is the only keyword-application
 > form.
 >
 > A self-delimiting payload closes the application before any following
@@ -961,14 +964,17 @@ weight = 20
 
 > r[type.scalar]
 >
-> Vixen has scalar types: `U64`, `I64`, `F64`, `Bool`, `String`.
+> Vixen has scalar types: `U64`, `I64`, `F64`, `Bool`, `String`, `SemVer`.
+> `SemVer` is structured (segments plus optional pre-release / build
+> metadata) but built-in and first-class — versions are core to a build
+> language, so the runtime owns them rather than leaving them to a package.
 
 > r[type.scalar.literals]
 >
-> Integer literals default to `U64`. Float literals default to `F64`.
-> Literal syntax is specified in `r[lex.numeric]`, `r[lex.string]`, and
-> `r[lex.string.interpolation]`. Type ascription selects a different type:
-> `4::I64`.
+> Integer literals default to `U64`; dotted-numeric literals are `SemVer`
+> (floats require the `f` suffix). Literal syntax is specified in
+> `r[lex.numeric]`, `r[lex.string]`, and `r[lex.string.interpolation]`.
+> Type ascription selects a different type: `4::I64`.
 
 ## Newtypes
 
@@ -1757,3 +1763,91 @@ weight = 20
 > r[stream.of]
 >
 > `Stream.of value` creates a single-element stream.
+
+## Constraints and requirements
+
+> r[constraint.model]
+>
+> The comparison operators (`==`, `!=`, `<`, `<=`, `>`, `>=`), the
+> collection operators (`contains`, `in`, `matches`), and the semver
+> matchers (`^=`, `~=`, comparator sets, wildcards) **never return
+> `Bool`**. Each produces a `Constraint[T]` — a first-class, typed,
+> introspectable, composable, hashable value describing a structural
+> predicate over a `T`. There is exactly one return type for these
+> operators; `Bool` is reached only by coercion (`r[constraint.coerce]`).
+
+> r[constraint.coerce]
+>
+> `Constraint[T]` coerces to `Bool`, but only where a `Bool` is demanded
+> (an `if` / `while` condition, a boolean-position operand of `&&` / `||`
+> / `!`) and only when the constraint is **grounded** — every operand is a
+> concrete value. A grounded constraint coerces by evaluating the
+> predicate. Coercing an **ungrounded** constraint — one that still refers
+> to an unbound candidate — is a compile error: there is no value to
+> evaluate it against.
+>
+> ```vixen
+> let c = $.version >= 1.91   // Constraint[SemVer]; $ unbound — stays structural
+> if v >= 1.91 ( ... )        // v concrete — coerces to Bool for the condition
+> ```
+
+> r[constraint.combinators]
+>
+> `&&`, `||`, `!` are overloaded: on `Bool`s they are ordinary boolean
+> operators; on `Constraint`s they are structural intersection, union, and
+> negation, each producing a `Constraint`. A grounded `Constraint` in a
+> boolean position coerces per `r[constraint.coerce]` before the boolean
+> operator applies.
+
+> r[constraint.algebra]
+>
+> The constraint operator set is a **closed, entirely built-in algebra.**
+> A constraint expression is built from candidate field projection
+> (`$.field`, `$.field.subfield`) and the operators in
+> `r[constraint.operators]`, and nothing else. Applying any other
+> operation to an unbound candidate — an arbitrary method call, control
+> flow over `$` — is a compile error. There is no opaque per-candidate
+> fallback. This guarantees every constraint is structurally indexable: a
+> registry or resolver consuming a `Requirement[T]` can index, compose,
+> hash, and explain it without evaluating an opaque closure. User-defined
+> operators are not supported; new operators are deliberate built-in
+> additions.
+
+> r[constraint.operators]
+>
+> The built-in operator vocabulary:
+>
+> - comparisons: `==`, `!=`, `<`, `<=`, `>`, `>=`
+> - collections: `contains`, `in`, `matches` (regex)
+> - semver matching: `^=` (caret), `~=` (tilde), comparator sets,
+>   wildcards, exact, with pre-release rules
+> - boolean composition: `&&`, `||`, `!`
+> - field projection: `$.field`, nested `$.field.subfield`
+>
+> `^=`, `~=`, `contains`, `in`, and `matches` bind at comparison
+> precedence (`r[lex.precedence]`) and do not chain.
+
+> r[constraint.semver]
+>
+> `SemVer` is a built-in scalar (`r[type.scalar]`) and its match operators
+> are runtime built-ins, not package-declared functions — a build system
+> owns version semantics, and the registry indexes semver requirements
+> natively. Dotted-numeric literals are `SemVer` (`r[lex.numeric]`).
+
+> r[constraint.requirement]
+>
+> `T where (predicate)` lifts a `Constraint[T]` into a `Requirement[T]` —
+> a routable demand that a resolver (the executor orchestrator, a package
+> resolver) satisfies by selecting a concrete `T`. The `(predicate)` is an
+> ordinary `$`-closure body: `$` is the candidate, and candidate fields
+> are projected explicitly with `$.field`. There is **no implicit-field
+> sugar** — a bare identifier inside the predicate is resolved by ordinary
+> scoping, never rewritten to `$.field`.
+>
+> ```vixen
+> let rust = RustToolchain where ($.version >= 1.91 && $.targets contains "aarch64-apple-darwin")
+> ```
+>
+> `Requirement[T]` is itself a value: constructed where policy is
+> expressed, resolved lazily when something downstream demands the
+> concrete `T`.
