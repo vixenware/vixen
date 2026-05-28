@@ -409,11 +409,18 @@ Process exit codes are a separate concern. A non-zero exit from a process the ob
 
 The explicit poison primitive is `fail "message"` — emits a Diagnostic and stops the current branch.
 
-### `?` recovers from poison as Option (TBD)
+### No `?` recovery operator
 
-Under consideration: a postfix `?` operator that catches poison from the preceding call and turns it into `Option`. `Toml::parse(blob)` poisons on failure; `Toml::parse(blob)?` returns `Option[Manifest]` and lets the caller fall back. Inverted from Rust's `?` (which unwraps and re-propagates); Vixen's would catch.
+Considered and rejected. A postfix `?` that catches poison and yields `Option` was on the table, modelled after Swift's `try?`. Walking through Rust / C / C++ / container-image building scenarios, the case for it didn't hold up:
 
-Marked TBD because it lets user code silently swallow Diagnostics, which is sometimes what you want and sometimes a footgun. Not yet decided whether to ship.
+- **Manifest parse failures, resolution conflicts, sandbox violations** — these *should* be fatal. Catching them yields a `None` you can't usefully act on.
+- **Process exit codes from compilers and build scripts** — observable via the `Process` value in the observer; not a poison in the first place.
+- **Tree lookups, feature-detection probes, optional config files** — design these to return `Option[T]` directly. Composition with `match` / `or_else` / `unwrap_or` is clear and explicit.
+- **HTTP fetches with mirrors / retries** — runtime fetch policy concern, not user-code.
+
+The pattern: recoverable operations in build code are naturally `Option`-returning by API design. The genuinely fatal cases have nothing useful to recover to. The middle space — "an operation that morally should succeed but might fail and you want to fall back" — doesn't exist in build code.
+
+Without `?`, the footgun (silent Diagnostic swallowing) goes away. Recoverable failures are visible in type signatures; fatal failures end the build with a structured report. If a real use case shows up later, easier to add `?` than to remove it.
 
 ## Cargo-resolution-as-Vixen, lockfiles-as-outputs
 
