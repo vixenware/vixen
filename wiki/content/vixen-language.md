@@ -58,7 +58,7 @@ A specific instance. When `@vixen/rust` needs to read a `Cargo.toml`, it declare
 From `core.vx` and `build.vx`:
 - Process execution under sandbox: `exec`, plus everything in the observer signature.
 - Content-addressed fetch: `acquire(url) with {digest}`, `acquire(url) with {digest, extract}`.
-- Host discovery: `discover[T](probe) -> Option[T]` — the probe takes a `Host` value provided by the runtime; the type parameter `T` determines which executor population is probed. See [Executor abilities](/executor-abilities/).
+- Ability request: `Type.request where { constraint clauses } -> Type` — predicate-identified value; planner resolves at exec sites. See [Executor abilities](/executor-abilities/#builds-request-abilities-at-runtime). Host probing itself is not a user-Vixen-callable intrinsic; it happens inside the daemon, reading from capability probe packages (see [Executor abilities → How abilities are advertised](/executor-abilities/#how-abilities-are-advertised)).
 - Template rendering: `render[T](template) with {bindings} -> Blob`.
 - Operations on `String`, `Symbol`, `Tree`, `Stream`, `Map`, `Array`, `Path`, `Blob`, `Bytes`, plus the `Toml`/`Json`/`Yaml`/`Http` namespaces.
 
@@ -117,7 +117,7 @@ fn exec[T](
 
 Earlier the keyword was `where`. That collided with Rust's generic-bounds `where` and created persistent reader confusion. `with` reads sentence-wise: "exec args, with env and observer." No conflict with Rust precedent.
 
-Mechanical migration: every `where { … }` on function signatures becomes `with { … }`. `where` becomes available as an identifier; `with` becomes reserved.
+Mechanical migration: every `where { … }` on function signatures becomes `with { … }`. `with` becomes reserved. `where` is reserved for the [constraint-expression](#constraint-expressions) construct below — different syntactic role, no overlap with the old kwargs use.
 
 ## Imports
 
@@ -135,7 +135,67 @@ The string identifies the target:
 
 Same shape across all three sources (stdlib, cross-package, intra-package). Dotted access on the returned record reaches the module's exports: `config.linux_executor`, `c.discover_toolchain()`.
 
-Stdlib intrinsics (`exec`, `acquire`, `discover`, `Toml::parse`, …) are in scope via an implicit prelude — no explicit `import("vixen:core")` needed. Users writing build code see the intrinsic surface as ambient identifiers.
+Stdlib intrinsics (`exec`, `acquire`, `Toml::parse`, …) are in scope via an implicit prelude — no explicit `import("vixen:core")` needed. Users writing build code see the intrinsic surface as ambient identifiers.
+
+## Constraint expressions
+
+A first-class language construct for expressing *structural* requirements over typed values — the build-language equivalent of SQL's `WHERE` clause, scoped to a single type.
+
+Used pervasively: ability requests against the executor fleet, cargo-style dependency declarations, version-range constraints for any package manager, target predicates, anywhere a build queries structured values by structural predicates.
+
+### Shape
+
+A `where { … }` block following a type or value expression produces a typed `Requirement[T]` value:
+
+```vixen
+let rust = RustToolchain.request where {
+    version >= 1.91,
+    targets contains "aarch64-apple-darwin",
+}
+
+let serde = Crate.request where {
+    name == "serde",
+    version ^= 1.0,
+    features contains "derive",
+}
+```
+
+The `where { … }` payload is **not** a record literal. Inside, each entry is a *constraint clause* — a separate syntactic category in the same family as match-arm patterns. Clauses combine implicitly with AND. For disjunction or larger composition, requirement values combine with `&&` and `||` at the value level.
+
+### Constraint clauses are not expressions
+
+`serde ^= 1.0` is not a freestanding expression. It's a clause valid only inside a constraint-block context (after `where`, in match arm positions, anywhere the language expects a pattern-shaped thing). This keeps `^=` and the other constraint operators from leaking into ordinary expression contexts where they'd mean nothing.
+
+### Structural, hashable, inspectable values
+
+`Requirement[T]` is a typed value the runtime can introspect. Constraints aren't opaque closures — the orchestrator can index advertised abilities by `version >= X` queries, error messages can say "you required `version >= 1.91`; available: 1.89, 1.90," and two structurally-equivalent requirements share a canonical hash and therefore a cache key.
+
+The contrast worth being explicit about: a closure-shaped predicate like `(t) => t.version >= 1.91` would be evaluatable against candidates but opaque. The structural form is inspectable and indexable.
+
+### Type-extensible operator set
+
+Built-in clause operators: `==`, `!=`, `<`, `<=`, `>`, `>=`, `contains`, `in`, `matches`.
+
+Types declare their own constraint constructors via namespace functions. `SemVer` ships `^=` (caret-compatible) and `~=` (tilde-compatible):
+
+```vixen
+namespace SemVer {
+    fn (^=)(other: SemVer) -> Constraint[SemVer] { CaretMatch(other) }
+    fn (~=)(other: SemVer) -> Constraint[SemVer] { TildeMatch(other) }
+}
+```
+
+Then `version ^= 1.0` resolves to `SemVer.(^=)(1.0)`, returning a structural `Constraint[SemVer]` the runtime understands without further machinery. Cargo's caret/tilde/inequality matchers, cfg-expression matching, JSON-path matching — all extend the constraint vocabulary without changing the language.
+
+### Numeric literal rule (build-language flavour)
+
+Vixen is a build language; semver is the common case for dotted-numeric values, floats are the unusual case.
+
+- `0.13`, `1.0`, `1.0.0`, `1.0.0-rc.1` — `SemVer` literals. Two-or-three segment, optional pre-release / build metadata.
+- `1.34f` — `F64` literal. Floats require the `f` suffix.
+- `42`, `1_000_000` — `U64` literals as before.
+
+This kills the tension between "looks like 0.13 = serde version" and "looks like 0.13 = float" — in build code the answer is always SemVer unless the `f` suffix says otherwise. Matches what builders actually write in `Cargo.toml`.
 
 ## No effect annotations — capabilities are object types
 
@@ -145,7 +205,7 @@ The language has **no effect-annotation system** (`#fs`, `#discover`, `#host`, `
 
 Capability-bearing types are **non-constructible by user code.** Only the runtime can hand you one:
 
-- **`Host`** — runtime gives the user code a `Host` value as a parameter to a probe (the closure passed into the `discover` intrinsic). User code can't manufacture a `Host`; there's no public constructor. A probe holds one for its duration; it can call methods on it (`host.os`, `host.which`, `host.read`, `host.exec`); when the probe returns, the runtime drops the `Host` reference.
+- **`Host`** — runtime gives a `Host` value to a capability probe (the `Type.probe(host)` function declared in a capability probe package; see [Executor abilities](/executor-abilities/#how-abilities-are-advertised)). User code can't manufacture a `Host`; there's no public constructor. The probe holds one for its duration; it can call methods on it (`host.os`, `host.which`, `host.read`, `host.exec`); when the probe returns, the runtime drops the `Host` reference. Probe code runs inside the daemon process, not in the user's build code.
 - **`Process` and the sandbox-output `Tree`** — runtime gives these as parameters to the observer of an `exec` call. Same non-constructibility property. The observer can read from the `Process` (stdout / stderr / exit code) and the `Tree` (write-set); when it returns, the references drop.
 
 The type's existence in a function's scope conveys the authority — nothing else needed.

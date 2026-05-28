@@ -42,36 +42,48 @@ There is **no `ExecutorClass`-style stringly-typed selector**. That was the wron
 
 ## Builds request abilities at runtime
 
-Build code actively requests abilities as it evaluates:
+Build code actively requests abilities via the `Type.request` primitive, expressing constraints via the `where { … }` block:
 
 ```vixen
-let mac = discover[MacToolchain](mac_probe);
-let rust = discover[RustToolchain](rust_probe).or_else(|| {
-    @vixen/rust.fetch_toolchain("stable")
-});
+let mac = MacToolchain.request where {
+    xcode >= 14.0,
+    arch == arch_arm64,
+}
+
+let rust = RustToolchain.request where {
+    version >= 1.91,
+    targets contains "aarch64-apple-darwin",
+}
 ```
+
+`.request` is a runtime primitive (the only fleet-routing surface from user-Vixen). It returns a **predicate-identified value** — a thunk whose identity is the constraint, not yet bound to a specific executor. The actual fleet routing happens lazily, when something downstream demands the value.
 
 This is **active request**, not declarative lockfile pinning. The lockfile records what got satisfied during evaluation, for reproducibility; it doesn't pin upfront before the build code has a chance to express policy.
 
-**Policy is user-Vixen code**, not framework configuration:
+**Policy is user-Vixen code**, not framework configuration. Fallback ladders ("try this, else that"), conditional resolution based on args, multi-target fan-out — all expressed via ordinary pattern matching and control flow.
 
-- "Try discovering an ambient Xcode on this machine; fail if not present" — ordinary `match` on `Option`.
-- "Try discovering Rust locally; if not present, fetch a stable toolchain from the public store" — `or_else` or pattern match.
-- "Cross-compile to Mac via real Apple toolchain if available remotely; fall back to local zigbuild" — same pattern.
+The language ingredients are already there: `Option`, pattern matching, imports, the `where { … }` constraint blocks (see [Vixen language → Constraint expressions](/vixen-language/#constraint-expressions)). The runtime exposes `request` plus the fleet matching machinery; user code composes.
 
-The language ingredients are already there (`Option`, pattern matching, imports). The runtime exposes the request primitives (`discover`, fetch-via-acquire); user code composes.
+## Routing via predicate-identified values; planner aggregates at exec sites
 
-## Routing falls out of provenance
-
-When an `exec` consumes a value, the runtime knows where that value was produced. An `exec` that uses `mac.clang` runs on whatever executor produced `mac`. There is no `executor:` kwarg on `exec`; routing follows the flow of ability values through the build graph.
+Each `exec` aggregates the predicate-identified ability values flowing into it and asks the orchestrator for an executor satisfying the intersection of their constraints.
 
 ```vixen
-let mac = discover[MacToolchain](mac_probe);
-let bin = exec [mac.clang, "main.c", "-o", "app"] with {
-  observer: fn (proc, tree) -> tree.file "./app",
-};
-// `bin` is produced on the same executor as `mac`. The runtime threads the constraint automatically.
+let mac = MacToolchain.request where { xcode >= 14.0, arch == arch_arm64 }
+let rust = RustToolchain.request where { version >= 1.91 }
+
+let bin = exec [
+    rust.rustc,
+    workspace.file(@src/main.rs),
+    "-C", `linker=${mac.linker}`,
+    "-o", @out/app,
+] with {
+    observer: (proc, tree) => tree.file(@out/app)
+}
+// Planner sees bin needs both mac and rust; picks one executor matching both constraints.
 ```
+
+There is no `executor:` kwarg on `exec`. Routing follows the flow of predicate-identified values through the build graph. Each exec independently plans its joint resolution — **the same `mac` predicate-identified value, consumed in two execs with different additional requirements, may resolve to different executors per-exec.** The value's identity is its constraint, not the concrete executor.
 
 For hermetic toolchains fetched from the store, the resulting value is provenance-free — any eligible executor in the fleet can run an exec consuming it. Routing variables (load, latency, cache warmth) are settled by the orchestrator using fleet-scheduling signals invisible to build code.
 
@@ -128,13 +140,52 @@ Build code touches only layer 1. The orchestrator threads layers 2 and 3 at rout
 
 ## How abilities are advertised
 
-Each ability type ships with a probe — Vixen code provided by the package that owns the type. `@vixen/mac` ships something like `fn probe_mac_toolchain(Host) -> Option[MacToolchain]`.
+Each ability type ships in a **capability probe package** — a package whose manifest declares it provides a probe for a specific ability type.
 
-When an executor joins the fleet, it runs every probe whose ability type is opted-in for that host. Each probe produces a typed value (or `None`). The executor publishes `{identity, [typed ability values]}` to the fleet registry over Vox. Re-publishes on changes.
+`package.styx` (or frontmatter on `main.vx`; file shape TBD):
+```styx
+id "@vixen/mac"
+version 1.0.0
+description "macOS toolchain capability probe and types"
 
-The orchestrator queries the registry by ability predicate expressed in Vixen — `MacToolchain.xcode >= "14.0" && MacToolchain.arch == arch_arm64` — and receives the set of executor identities whose advertised values match. Strong typing on both sides.
+capability {
+    advertises MacToolchain
+}
+```
 
-For customer-local builds, "advertised abilities" is the local discovery the customer's `vx-daemon` performs at startup against the customer's own host.
+`main.vx`:
+```vixen
+struct MacToolchain {
+    xcode: SemVer,
+    macos_sdk: SemVer,
+    arch: Arch,
+}
+
+namespace MacToolchain {
+    fn probe(host: Host) -> Option[MacToolchain] {
+        // …
+    }
+}
+```
+
+The probe lives in the type's namespace **by convention**. The daemon reads `capability.advertises MacToolchain` and calls `MacToolchain.probe` without further configuration.
+
+When a `vx-daemon` starts, it walks its configured probe list (a flat sequence in `daemon.styx`):
+
+```styx
+probes (
+    @vixen/mac
+    @vixen/c
+    @vixen/rust
+    @vixen/cuda
+)
+```
+
+…loads each package, calls each probe with a `Host` capability, and publishes the `Some(T)` results to the fleet registry over Vox. Probes that don't apply on the host (a Mac probe on Linux) just return `None` and advertise nothing — no OS-filter metadata needed.
+
+The orchestrator queries the registry by structural constraint — `MacToolchain where { xcode >= 14.0, arch == arch_arm64 }` — and receives the set of executor identities whose advertised values match. Strong typing on both sides; constraints are structural, indexable, hashable values, not opaque closures.
+
+For customer-local builds, "advertised abilities" is what the customer's own `vx-daemon` published from its own probes at startup against its own host.
 
 ## Refresh discipline
 
@@ -151,7 +202,7 @@ The build's lockfile can declare a per-ability-type max-staleness tolerance for 
 
 - **Package authors own the ability *types*.** `@vixen/mac` defines what "having a Mac toolchain" means; ships the probe.
 - **Executor operators own the *domains* their executor advertises.** A fleet operator (Vixen-the-org on its own fleet) opts each box into the ability domains it can satisfy: "this box runs `@vixen/mac` probes; it does not run `@vixen/cuda` probes." Explicit is safer than inferred.
-- **Build authors own the *requests*.** Build code says "I need `MacToolchain` matching this predicate" via `discover` or fetch. That's the build-side surface.
+- **Build authors own the *requests*.** Build code says "I need `MacToolchain` matching this constraint" via `MacToolchain.request where { … }`. That's the build-side surface.
 
 New ability domains ship as packages with no changes needed at the registry, the orchestrator, or existing executors.
 
