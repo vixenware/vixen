@@ -14,27 +14,45 @@ How work is routed across the fleet — what defines an executor's capacity to s
 Each ability domain is a struct declared by the package that owns the domain:
 
 ```vixen
-// in @vixen/mac
-struct MacToolchain {
-  xcode: SemVer,
-  macos_sdk: SemVer,
-  arch: Arch,
-  rustc: RustToolchain,
+// in @vixen/rust
+struct RustToolchain {
+    host: Triple,
+    target: Triple,
+    version: SemVer,
+    provider: Provider,
+
+    // rustc-specific surface
+    rustc: ExecPath,
+    cargo: ExecPath,
+
+    // C compiler bundled with / paired-by-default-with this Rust toolchain
+    // Used for FFI deps; can be overridden by a more constrained CToolchain request
+    cc: ExecPath,
+    ld: ExecPath,
+    sysroot: TreePath,
 }
 
-// in @vixen/linux
-struct LinuxToolchain {
-  glibc: SemVer,
-  rustc: RustToolchain,
-  arch: Arch,
+// in @vixen/c
+struct CToolchain {
+    host: Triple,
+    target: Triple,
+    version: SemVer,
+    provider: Provider,  // Apple, ZigCross, Gcc, Clang, Msvc, Mingw, ...
+
+    cc: ExecPath,
+    ld: ExecPath,
+    ar: ExecPath,
+    sysroot: TreePath,
 }
 
 // in @vixen/cuda
 struct CudaCapable {
-  compute_capability: SemVer,
-  vram_gb: U64,
+    compute_capability: SemVer,
+    vram_gb: U64,
 }
 ```
+
+Per-language toolchain types are **coherent bundles** — everything you need for *this* language. `RustToolchain` exposes not just `rustc` but also `cc`, `ld`, `sysroot` (whatever the Rust toolchain pairs with for FFI deps). Most build code that wants to compile Rust *and* has C FFI deps doesn't reach for a separate `CToolchain`; it uses `rust.cc` directly. A user who specifically wants to *replace* the C compiler the Rust toolchain ships with reaches for a `CToolchain` constraint explicitly.
 
 The package owns the type. The type is its contribution. New ability domains ship as packages — `@vixen/freebsd`, `@vixen/wasi`, whatever — and existing executors and builds keep working while new builds can match against them.
 
@@ -57,6 +75,35 @@ This is **active request**, not declarative lockfile pinning. The lockfile recor
 **Policy is user-Vixen code**, not framework configuration. Fallback ladders ("try this, else that"), conditional resolution based on args, multi-target fan-out — all expressed via ordinary pattern matching and control flow.
 
 The language ingredients are already there: `Option`, pattern matching, imports, the `where (...)` constraint expressions (see [Vixen language → Constraint expressions](/vixen-language/#constraint-expressions)). The runtime exposes the fleet matching machinery; user code composes.
+
+## Packages wrap; users override
+
+For most user code, ability requests are not written directly. They live inside the package implementing the high-level operation. `@vixen/cargo::build_workspace` handles toolchain requests internally; the user's `main` is just:
+
+```vixen
+fn main(workspace: Tree) with { ..VixenMain } -> Tree (
+    let { build_workspace } = import "vixen:cargo"
+    build_workspace workspace
+)
+```
+
+When the user *does* want to override — pin a Rust version, restrict to a specific provider, target something non-native — the package's high-level operation takes overrides as kwargs, structured as constraints:
+
+```vixen
+build_workspace workspace with {
+    rust: RustToolchain where (version == 1.91),
+    target: "aarch64-apple-darwin",
+}
+```
+
+The override threads into the package's internal logic — `@vixen/cargo` uses the user's `rust` value where it would normally have built its own.
+
+This gives the user surface a smooth gradient:
+
+- **Tier 2 customer using `vx cargo` as a cache** — never writes `where`. The package handles everything.
+- **Tier 3 customer replacing CI with Vixen workflows** — writes Vixen code that orchestrates builds, reaches for `where (...)` regularly to pin versions, choose targets, select providers, declare canonical defaults for their organization. The same `where` syntax scales from "letting the package handle it" up to detailed CI authoring.
+
+The package author's job is to expose the override kwargs in a way that matches what users actually want to customize. `@vixen/cargo` exposes `rust`, `target`, `features`, `profile` — the things cargo users already think about. New packages establish their own override surfaces appropriate to their domain.
 
 ## Routing via predicate-identified values; planner aggregates at exec sites
 
