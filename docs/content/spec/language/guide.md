@@ -19,36 +19,33 @@ these pages win:
 The fastest way to understand Vixen is to read a small real build:
 
 ```vixen
-fn build(workspace: Path, args: Array[String], env: Map[String, String]) #discover -> Tree (
-  let class = executor_class("default");
-  let rustc = discover(class, (host) => host.which("rustc"));
-  let source = Tree %{
-    @main.rs => Blob("fn main() {\n  println!(\"hello from vx eval\");\n}\n"),
-  };
-
-  exec [rustc, @src/main.rs, "-o", @out/hello] where {
-    mounts: %{ @src => source },
-    writable: [@out],
+fn main(workspace: Tree) with { ..VixenMain } -> Tree (
+  let rust = RustToolchain where (version >= 1.91);
+  let hello = exec [rust.rustc, workspace "src/main.rs", "-o", "out/hello"] with {
+    writable: ["out"],
     observer: (proc, vfs) => (
       if proc.exit_code != 0 (
         fail `rustc failed`
       ) else (
-        vfs
+        vfs.file "out/hello"
       )
     ),
-  }
+  };
+  Tree %{ "target/debug/hello" => hello }
 )
 ```
 
 That one example already shows most of the authored surface:
 
-- `build` is an ordinary function that returns a `Tree`.
-- `discover` probes an executor host and returns an ordinary value.
-- `Tree %{ ... }` builds a tree from a map of paths to entries.
+- `main` is the package entry point. It takes the workspace as a `Tree` and
+  returns a `Tree` that overlays onto it.
+- `RustToolchain where (...)` requests a toolchain ability; the runtime
+  resolves it and routes the `exec` to a matching executor.
+- `Tree %{ ... }` builds a tree from a map of path-strings to entries.
 - `Blob("...")` builds a file-like value from text.
-- `exec [ ... ] where { ... }` runs a process with positional inputs and a
+- `exec [ ... ] with { ... }` runs a process with positional inputs and a
   keyword record.
-- `observer: (proc, vfs) => ...` is a closure.
+- `observer: (proc, vfs) => ...` is a closure that runs on the executor.
 - `if cond ( then ) else ( else )` is an expression.
 
 ## Records are not maps
@@ -57,7 +54,7 @@ Vixen uses two distinct literal forms that look similar at first:
 
 ```vixen
 let settings = { optimize: true, debug: false }
-let outputs = %{ @bin/app => binary, @lib/libapp.a => archive }
+let outputs = %{ "bin/app" => binary, "lib/libapp.a" => archive }
 ```
 
 - `{ field: value }` is a record.
@@ -67,39 +64,37 @@ That distinction matters everywhere:
 
 - record literals use field names
 - map literals use general key expressions
-- `where { ... }` passes keyword arguments as a record
+- `with { ... }` passes keyword arguments as a record
 - `Tree %{ ... }` takes a map payload, not a record payload
 
 If you remember one syntax rule, remember this one.
 
-## Paths are their own type
+## Paths are strings, distinguished by provenance
 
-`Path` is not just a `String`. Authored Vixen uses path literals heavily:
+There is no path-literal syntax. Path-shaped values are ordinary strings:
 
 ```vixen
-@src/main.rs
-@out/hello
-@(out/{name}.o)
-workspace / @zoo/lua-src
+"src/main.rs"
+"out/hello"
+`out/${name}.o`
+workspace "zoo/lua-src"
 ```
 
-Use path literals when you mean paths. Use strings when you mean text.
+What makes a string a "path" is **provenance**, not quoting. A string produced
+by projecting a `Tree` (`workspace "src/main.rs"`) carries tree-provenance, so
+the runtime mounts it into the sandbox and mixes it into cache keys; a plain
+`"-o"` does not. Build paths with `/` or backtick interpolation; `Path.join`
+and `Path.split` live on the value type. Provenance is preserved through `Path`
+joins and lost through arbitrary string munging.
 
-- `@src/main.rs` is a literal path.
-- `@(out/{name}.o)` is an interpolated path.
-- `workspace / @zoo/lua-src` joins paths with `/`.
-
-Paths show up constantly in `Tree` construction, `exec` arguments, and mount
-maps.
-
-## Calls and `where`
+## Calls and `with`
 
 Most Vixen code reads like ordinary function calls:
 
 ```vixen
 f(x)
 g [a, b, c]
-Tree %{ @bin/app => binary }
+Tree %{ "bin/app" => binary }
 Point { x: 1, y: 2 }
 ```
 
@@ -107,17 +102,17 @@ The practical rule is:
 
 - `f { ... }` passes a record payload
 - `f %{ ... }` passes a map payload
-- `where { ... }` is keyword application
+- `with { ... }` is keyword application
 
 So these are different:
 
 ```vixen
-exec [cc, "-c", file] where { mounts: %{ @src => source } }
+exec [cc, "-c", file] with { mounts: %{ "src" => source } }
 Point { x: 1, y: 2 }
-Tree %{ @bin/app => binary }
+Tree %{ "bin/app" => binary }
 ```
 
-`where` is the only keyword-argument form.
+`with` is the only keyword-argument form.
 
 ## Blocks, bindings, and conditionals
 
@@ -148,7 +143,7 @@ observer: (proc, vfs) => (
   if proc.exit_code != 0 (
     fail `process failed`
   ) else (
-    vfs.subtree(@out)
+    vfs.subtree("out")
   )
 )
 ```
@@ -166,20 +161,19 @@ They are common in combinators:
 
 ```vixen
 config.platforms(env)
-  .map((name) => Tree %{ @({name}) => compile_hello(config.executor_for_platform(name)) })
+  .map((name) => Tree %{ name => compile_hello(config.executor_for_platform(name)) })
   .merge()
 ```
 
 And in reusable partially applied helpers:
 
 ```vixen
-let cexec = partial exec where {
-  executor: class,
+let cexec = partial exec with {
   observer: (proc, vfs) => (
     if proc.exit_code != 0 (
       fail `process failed`
     ) else (
-      vfs.subtree(@out)
+      vfs.subtree("out")
     )
   ),
 };
@@ -188,9 +182,9 @@ let cexec = partial exec where {
 That lets later calls supply only the changing parts:
 
 ```vixen
-cexec [tc.cc, "-c", @(src/{file}), "-o", @(out/obj/{file}.o)] where {
-  mounts: %{ @src => src },
-  writable: [@out],
+cexec [tc.cc, "-c", `src/${file}`, "-o", `out/obj/${file}.o`] with {
+  mounts: %{ "src" => src },
+  writable: ["out"],
 }
 ```
 
@@ -202,8 +196,8 @@ Keep this split in mind while reading the rest of the spec:
   control flow, types, and modules
 - the evaluation chapter covers laziness, demand, forcing, memoization, and
   boundaries
-- the standard library covers `build`, `discover`, `exec`, `Blob`, `Tree`,
-  `Path`, and related runtime-backed APIs
+- the standard library covers `main`, `exec`, `acquire`, `Blob`, `Tree`,
+  `Path`, capability probes, and related runtime-backed APIs
 
 ## Read next
 

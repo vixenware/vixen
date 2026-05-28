@@ -142,29 +142,33 @@ model, but they are not part of the core language syntax.
 
 > r[store.path]
 >
-> `Path` is its own type at the language level, implemented as a
-> normalized slash-delimited path string rather than a plain `String`.
-> Root paths come from the build entry point, from `exec` mount keys,
-> and from path literals such as `@src` and `@(out/{name}.o)`.
-> Sub-paths are built with the `/` operator or with interpolated path
-> literals.
+> Path-shaped values are ordinary strings. There is no distinct
+> path-literal syntax: in `exec [rustc, workspace "src/main.rs", "-o",
+> "out/app"]` all four literals are plain strings. What distinguishes a
+> "path" from "text" is **provenance**, not quoting — the runtime tracks
+> which strings originated as `Tree` projections (or were derived from
+> them) and uses that provenance for cache keying and implicit sandbox
+> mounting.
 >
-> `Path(s)` parses and normalizes a string into a `Path`. It poisons if
-> the string is not a valid path in normalized slash-delimited form.
-> `path.to_string()` converts a `Path` back to its normalized spelling.
+> `Path` is the type a path-shaped value carries when its provenance is
+> known; it is a normalized slash-delimited string. `Path(s)` parses and
+> normalizes a string, poisoning if it is not a valid normalized path;
+> `path.to_string()` recovers the spelling; `path.join`, `path.split`, and
+> similar live on the value type. Sub-paths are built with the `/`
+> operator or with backtick interpolation (`` `out/${name}.o` ``).
+> Provenance is preserved through `Path` joins and lost through arbitrary
+> string transforms the runtime can't track — the result is then a plain
+> `String`.
 >
-> In `exec`, Paths in `args` and `env` are resolved to VFS locations
-> directly. The executor rewrites `/` separators as needed for the host
-> platform when launching the process. `Path` is a locator only — reads
-> through `Tree` operations (or, inside a probe, through the `Host`
-> capability) create dependencies and yield `Blob` or `Tree` values. Bare
-> `Path` values do not carry store identity and are not themselves
-> cross-boundary content. See [exec.mount].
->
-> Interpolated path literals produce a plain `Path` when every
-> interpolated value is `String` or `Path`. If an interpolated path
-> literal mentions a `Tree`, `Blob`, or `ExecPath`, the result is an
-> `ExecPath` instead; see [exec.arg.interpolation].
+> In `exec`, path-shaped values in `args` and `env` are resolved to VFS
+> locations directly. The executor rewrites `/` separators as needed for
+> the host platform when launching the process. A path is a locator only —
+> reads through `Tree` operations (or, inside a probe, through the `Host`
+> capability) create dependencies and yield `Blob` or `Tree` values. Plain
+> path strings do not carry store identity and are not themselves
+> cross-boundary content; provenance-bearing values (`Tree` / `Blob`
+> projections, `ExecPath`) do. See [exec.mount] and
+> [exec.arg.interpolation].
 
 ## Exec
 
@@ -276,8 +280,9 @@ model, but they are not part of the core language syntax.
 > ```
 >
 > These variants are explanatory. User code usually creates them by
-> passing a `Tree` or `Blob` directly to `exec`, or by using an
-> interpolated path literal that mentions mounted content.
+> passing a `Tree` or `Blob` directly to `exec`, or by projecting into a
+> tree (`tree "include/lua.h"`), whose result carries the tree's mount
+> provenance.
 
 > r[exec.arg.auto-mount]
 >
@@ -296,7 +301,7 @@ model, but they are not part of the core language syntax.
 > directly is sugar for:
 >
 > ```vixen
-> InBlob { blob: some_blob, leaf: @blob-<short-hash> }
+> InBlob { blob: some_blob, leaf: "blob-<short-hash>" }
 > ```
 >
 > The blob is mounted as a single-file tree and the process receives the
@@ -306,19 +311,23 @@ model, but they are not part of the core language syntax.
 
 > r[exec.arg.interpolation]
 >
-> Interpolated path literals can preserve mount provenance:
+> Mount provenance is carried by projecting a `Tree`, not by a special
+> literal. `tree "include/lua.h"` returns an `ExecPath` rooted in that
+> tree's mounted content — equivalent to
+> `InTree { tree, suffix: "include/lua.h" }`. Backtick interpolation
+> builds plain path strings:
 >
 > ```vixen
-> @({tree}/include/lua.h)
-> // means: InTree { tree, suffix: @include/lua.h }
+> tree "include/lua.h"          // ExecPath, carries tree provenance
+> `out/${name}.o`               // plain String, no provenance
 > ```
 >
-> If all interpolated values are `String` or `Path`, the result is a
-> plain `Path`. If exactly one interpolated value is `Tree`, `Blob`, or
-> `ExecPath`, the result is an `ExecPath` rooted in that mounted content.
-> Interpolating more than one mount-bearing value into the same path is
-> a type error. Appending further path segments to a blob-backed path is
-> also a type error — blobs are files, not directories.
+> A value built purely from `String` / `Path` pieces is a plain path with
+> no mount provenance. Provenance comes from a `Tree`, `Blob`, or
+> `ExecPath` source; combining more than one mount-bearing source into a
+> single path is a type error, and appending further segments to a
+> blob-backed path is also a type error — blobs are files, not
+> directories.
 
 > r[exec.arg.spread]
 >
@@ -358,11 +367,11 @@ model, but they are not part of the core language syntax.
 > additional directories to create under those roots before launch.
 >
 > ```vixen
-> exec [cc, "-c", @src/hello.c, "-o", @(out/obj/hello.o)] with {
->   mounts: %{ @src => source },
->   writable: [@out],
->   create_dirs: [@out/obj],
->   observer: (proc, vfs) => vfs.subtree(@out),
+> exec [cc, "-c", "src/hello.c", "-o", "out/obj/hello.o"] with {
+>   mounts: %{ "src" => source },
+>   writable: ["out"],
+>   create_dirs: ["out/obj"],
+>   observer: (proc, vfs) => vfs.subtree("out"),
 > }
 > ```
 >
@@ -373,7 +382,7 @@ model, but they are not part of the core language syntax.
 > If `writable` is omitted, the runtime may infer writable roots from
 > the parent directories of output `Path` arguments and environment
 > values, so long as those paths are not already satisfied by mounts.
-> In authored code, explicit `writable: [@out]` is preferred because it
+> In authored code, explicit `writable: ["out"]` is preferred because it
 > makes intended outputs obvious and avoids depending on inference.
 
 > r[exec.process]

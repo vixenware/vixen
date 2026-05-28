@@ -109,9 +109,10 @@ weight = 20
 > - Enum variants
 > - Function declarations
 >
-> `@` in pattern position (`name @ pattern`) is the binding operator.
-> `@` before a path literal (`@src/main.c`, `@(out/{name}.o)`) is path
-> syntax. Attributes no longer use `@`, so these forms do not conflict.
+> `@` in pattern position (`name @ pattern`) is the binding operator. It
+> has no other use: paths are ordinary strings distinguished by
+> provenance, not by syntax (see the Build and Runtime Standard Library),
+> and attributes use `#[...]`.
 
 ### Semicolons
 
@@ -131,7 +132,7 @@ weight = 20
 > function-only.
 >
 > Semicolons do not separate positional from keyword arguments. Keyword
-> application uses `where`, as described in `r[expr.call.where]`.
+> application uses `with`, as described in `r[expr.call.kwargs]`.
 
 ### Operators and delimiters
 
@@ -155,7 +156,7 @@ weight = 20
 > Pipe: `|>` (free-function / pipeline chaining).
 >
 > Other: `?` (fallible suffix), `@`
-> (path prefix, pattern binding), `#` (attribute opener in `#[...]`),
+> (pattern binding), `#` (attribute opener in `#[...]`),
 > `:` (named slots — type annotations and field-value pairs), `::`
 > (expression-level type ascription, distinct from `as` conversion).
 
@@ -398,19 +399,19 @@ weight = 20
 
 > r[decl.fn.keyword-args]
 >
-> Keyword parameters live in a separate `where { ... }` block after the
+> Keyword parameters live in a separate `with { ... }` block after the
 > positional parameter list. Keyword-ness and default-ness are separate:
 > a keyword parameter may be required (no default) or optional (with a
 > default).
 >
 > ```vixen
-> fn greet(name: String) where {
+> fn greet(name: String) with {
 >   cheerful: Bool = false,
 > } -> String (
 >   if cheerful (`Hey ${name}!!!`) else (`Hello ${name}`)
 > )
 >
-> greet("Amos") where { cheerful: true }
+> greet("Amos") with { cheerful: true }
 > ```
 
 ### Scope
@@ -530,7 +531,7 @@ weight = 20
 > Map literals use `%{ ... }` with general key expressions:
 >
 > ```vixen
-> let outputs = %{ @bin/lua => lua_exe, @lib/liblua.a => liblua }
+> let outputs = %{ "bin/lua" => lua_exe, "lib/liblua.a" => liblua }
 > let port_names = %{ 80 => "http", 443 => "https" }
 > ```
 >
@@ -549,14 +550,14 @@ weight = 20
 > f(x)
 > ```
 >
-> Array, record, map, and parenthesized-path payloads can also be applied
-> directly:
+> Array, record, map, string, and interpolated-string payloads can also
+> be applied directly:
 >
 > ```vixen
 > f [x, y]
 > f { left: x, right: y }
-> f %{ @bin/lua => exe }
-> f @(out/bin/lua)
+> f %{ "bin/lua" => exe }
+> f "out/bin/lua"
 > ```
 >
 > Canonical formatting has no space before `(`, and a separating space
@@ -572,9 +573,9 @@ weight = 20
 > ```
 >
 > Juxtaposition application is only allowed when the payload is
-> self-delimiting: `(...)`, `[...]`, `{...}`, `%{...}`, or `@(...)`. Bare
-> identifiers, bare path literals, and most other expressions must use
-> parentheses.
+> self-delimiting: `(...)`, `[...]`, `{...}`, `%{...}`, `"..."`, or
+> `` `...` `` (a string or interpolated string). Bare identifiers and most
+> other expressions must use parentheses.
 >
 > Chained application is left-associative:
 >
@@ -586,17 +587,17 @@ weight = 20
 > So:
 >
 > ```vixen
-> f(@out/bin/lua)
-> f @(out/bin/lua)
+> f("out/bin/lua")
+> f "out/bin/lua"
 > ```
 >
 > are valid, but:
 >
 > ```vixen
-> f @out/bin/lua
+> f x
 > ```
 >
-> is not.
+> is not (bare identifier — wrap as `f(x)`).
 >
 > `f { ... }` is ordinary unary application to a record payload.
 > `f %{ ... }` is ordinary unary application to a map payload.
@@ -623,27 +624,27 @@ weight = 20
 > (discover_tool(class)).path
 > ```
 
-> r[expr.call.where]
+> r[expr.call.kwargs]
 >
-> Keyword application uses `where expr`, where `expr` evaluates to a
+> Keyword application uses `with expr`, where `expr` evaluates to a
 > record-shaped value:
 >
 > ```vixen
-> exec [cc, "-c", file] where defaults
-> exec [cc, "-c", file] where { mounts: src }
+> exec [cc, "-c", file] with defaults
+> exec [cc, "-c", file] with { mounts: src }
 > ```
 >
-> `where expr` does not introduce a second positional argument. It
+> `with expr` does not introduce a second positional argument. It
 > applies the record value in keyword position against the callee's
 > declared keyword parameter set.
 
-> r[expr.call.where.spread]
+> r[expr.call.kwargs.spread]
 >
 > Record spread works inside keyword application. Spreads merge
 > left-to-right before keyword checking:
 >
 > ```vixen
-> exec [cc, "-c", file] where { ..common, mounts: src }
+> exec [cc, "-c", file] with { ..common, mounts: src }
 > ```
 >
 > After merge, keyword matching is closed: unknown fields are an error,
@@ -666,7 +667,7 @@ weight = 20
 > ```
 >
 > The same unary application model applies to non-record constructors:
-> `Tree %{ @bin/lua => exe }` is `Tree` applied to a map payload, not a
+> `Tree %{ "bin/lua" => exe }` is `Tree` applied to a map payload, not a
 > record payload.
 
 ### Field access expressions
@@ -803,19 +804,19 @@ weight = 20
 > arguments remain open:
 >
 > ```vixen
-> let cexec = partial exec where common
-> let loud_compile = partial compile where { loudly: true }
+> let cexec = partial exec with common
+> let loud_compile = partial compile with { loudly: true }
 > ```
 
 > r[expr.partial.keyword]
 >
-> Partial application can bind keyword arguments through `where`. Bound
+> Partial application can bind keyword arguments through `with`. Bound
 > keyword arguments are sealed — they cannot be overridden by the caller:
 >
 > ```vixen
-> fn compile(src: String) where { optimize: Bool = false, loudly: Bool = false } ( ... )
+> fn compile(src: String) with { optimize: Bool = false, loudly: Bool = false } ( ... )
 >
-> let loud_compile = partial compile where { loudly: true }
+> let loud_compile = partial compile with { loudly: true }
 > // loudly is sealed at true, optimize uses its default
 > ```
 
@@ -1478,7 +1479,7 @@ weight = 20
 > Map literals use `%{ ... }` and `=>`:
 >
 > ```vixen
-> let outputs = %{ @bin/lua => lua_exe, @lib/liblua.a => liblua }
+> let outputs = %{ "bin/lua" => lua_exe, "lib/liblua.a" => liblua }
 > let port_names = %{ 80 => "http", 443 => "https" }
 > let build_flags = %{ (target) => flags_for target }
 > ```
