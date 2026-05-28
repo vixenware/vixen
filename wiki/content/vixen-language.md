@@ -335,6 +335,15 @@ Capability-bearing types are **non-constructible by user code.** Only the runtim
 
 The type's existence in a function's scope conveys the authority — nothing else needed.
 
+### Capability values are region-scoped
+
+A capability value lives only within the callback the runtime handed it to. User code may call methods on it; it may **not** capture it into a closure, return it, or store it in a value that outlives the callback. This isn't a separate rule — it falls out of two invariants already in the language:
+
+- **Values are serialisable, and a closure can't ship until its captures resolve.** `Host`, `Process`, and the live sandbox `Tree` aren't content-addressable, so they can never be a closure capture — a closure that tried to capture a `Host` couldn't be serialised, so couldn't ship to an executor.
+- **A callback's return value crosses a boundary, so it materialises.** For `Process` and the sandbox `Tree` that's graceful — VFS content in the return value commits to the store, the handle dies, the data crosses as a store-backed value. `Host` isn't content-addressable, so a return value still holding a live `Host` has nothing to materialise into and is a compile error.
+
+So the discipline is borrow-like: capabilities are usable within their region, and data *derived* from them (a discovered toolchain struct, a store `Tree`, a realised `Stream`) flows out freely, but the live handle never escapes. The asymmetry between `Process`/`Tree` (escape-by-materialising) and `Host` (can't escape) is just content-addressability. The cost: you learn you've over-reached only when the thing you tried to return or capture fails to type — a compile error shaped by what you returned, not flagged at the capture site. Acceptable, and revisitable if it doesn't pan out.
+
 ### Operations on a `Host` are recorded as obligations
 
 `Host` is a live mutable host. It can't be content-addressed. So whenever user code calls a method on a `Host` value, the runtime **records the call + its observed result** as part of the value the probe will return. The recorded tuple is the **obligation**.

@@ -697,90 +697,64 @@ model, but they are not part of the core language syntax.
 
 > r[cap.model]
 >
-> Every closure and function has a **capability fingerprint** — the set
-> of capabilities it can exercise, inferred by the evaluator from the
-> operations it performs and the authority-bearing values it captures.
-> A function has zero capabilities by default. Capabilities are acquired
-> by capturing authority-bearing values from a scope where a capability
-> is active, or by being invoked through an intrinsic that grants a
-> capability.
+> Capabilities are conveyed by **parameter types**, object-capability
+> style. There is no effect-annotation system — no `#fs` / `#discover` /
+> `#sandbox` / `#host` tags, no capability fingerprints, no masks. A
+> function may perform an authority-bearing operation if and only if it
+> holds a value of a capability-bearing type, received as a parameter.
+> Whoever holds such a value has the runtime's permission to do what that
+> type allows; whoever does not, cannot. The type system already tracks
+> where a capability value flows, so nothing else is needed.
 
-> r[cap.tags]
+> r[cap.types]
 >
-> Capability tags on `Fn` types use `#name` syntax between the parameter
-> list and the return type arrow:
+> The capability-bearing types are:
 >
-> ```vixen
-> Fn() #fs -> W
-> Fn(W) #discover -> T
-> Fn(Process, Tree) #sandbox -> U
-> Fn(Host) #host -> ()
-> ```
+> - **`Host`** — a read-only view of an executor's unsandboxed machine,
+>   handed to a capability probe. Methods such as `host.which`,
+>   `host.read`, `host.hash` (see [exec.verifier.host]).
+> - **`Process`** and the **sandbox-output `Tree`** — handed to an `exec`
+>   observer. The observer reads the process result (stdout / stderr /
+>   exit code) and the write-set tree.
 >
-> Tags are valid only in function type and function signature position.
-> `#` is not an expression operator.
+> These types are **non-constructible by user code** — there is no public
+> constructor. Only the runtime produces them, by passing them into the
+> callback that needs them.
 
-> r[cap.mask]
+> r[cap.region]
 >
-> Capability tags on a `Fn` type are an **upper bound** (a mask), not
-> an exact requirement. A closure's inferred capability fingerprint must
-> be a **subset** of the tagged set. A closure with no capabilities
-> satisfies any mask. A closure with `#fs #discover` fails a mask that
-> only allows `#fs`.
+> A capability value is **region-scoped** to the callback the runtime
+> handed it to. User code may call methods on it, but may **not** capture
+> it into a closure, return it, or store it in any value that outlives the
+> callback. This is not a separate enforcement layer — it follows from two
+> invariants the language already has:
 >
-> A `Fn` type with no capability tags accepts only closures with an
-> empty fingerprint — pure functions.
-
-> r[cap.kinds]
+> - Values are serialisable, and a closure cannot ship until its captures
+>   are resolved (see [exec.observer]). `Host`, `Process`, and the live
+>   sandbox `Tree` are not content-addressable, so they can never be a
+>   closure capture.
+> - A callback's return value crosses a boundary and is materialised. For
+>   `Process` and the sandbox `Tree` this is graceful — VFS content in the
+>   return value commits to the store and crosses as a store-backed value
+>   (see [exec.observer.materialization]); the live handle dies. `Host` is
+>   not content-addressable, so a return value still holding a live `Host`
+>   has nothing to materialise into and is a static error.
 >
-> Four capabilities exist:
->
-> - **`#fs`** — filesystem access. Reading files, walking directories,
->   evaluating globs. Operates on local/project state on the
->   orchestrator or build host, and is cheap to check between builds.
-> - **`#discover`** — volatile external state. Registry queries,
->   toolchain channel resolution, latest-version lookups. Operates on
->   state that may differ between builds and is expensive to verify.
-> - **`#sandbox`** — executor sandbox access. Reading process outputs
->   and VFS-backed `Blob`/`Tree` values produced by a running `exec`.
->   This authority is confined to the sandbox namespace for that exec.
-> - **`#host`** — executor host introspection outside the sandbox.
->   Checking installed tools, reading host files, hashing binaries,
->   resolving executables on the concrete runner instance. `#host` is
->   read-only and does not imply `#discover`.
-
-> r[cap.propagation]
->
-> Capability fingerprints propagate through closures: if a closure
-> captures an authority-bearing value (a handle that can exercise a
-> capability), the closure carries that capability in its fingerprint.
-> Calling a function that requires a capability also propagates that
-> capability to the caller.
->
-> Propagation is about **authority**, not data provenance. A `String`
-> computed inside a `#discover` context is an ordinary `String` — capturing
-> it does not make another closure carry `#discover`. Only values that
-> can actually exercise authority (perform filesystem operations, issue
-> discovery requests, inspect sandbox state, inspect the executor host)
-> propagate capabilities. In particular, the sandbox `Tree` passed to an
-> `exec` observer and the `Host` handle passed to a `discover` callback
-> are authority-bearing values.
+> The discipline is borrow-like: capabilities are usable within their
+> region; data *derived* from them (a discovered toolchain struct, a store
+> `Tree`, a realised `Stream`) flows out freely; the live handle never
+> escapes. Over-reach is caught at compile time, when the value you tried
+> to return or capture fails to type or serialise.
 
 > r[cap.grant]
 >
-> User code can mention capability tags in function signatures — this
-> restricts what callbacks are accepted (masking). User code **cannot
-> implement** functions that grant capabilities. Only runtime intrinsics
-> can invoke a callback in a capability context the caller did not
-> already have.
->
-> This means `build` (which grants `#fs #discover`), `stabilize` (which
-> grants `#discover` to its resolve callback), `discover` (which grants
-> `#host` to its probe), and `exec` (which grants `#sandbox` to
-> observers) have signatures
-> expressible in Vixen but bodies that only the runtime can provide. The
-> evaluator rejects user code that attempts to implement a
-> capability-granting function.
+> Because capability-bearing types are non-constructible, user code cannot
+> manufacture a capability or write a function that produces one. Only
+> runtime intrinsics hand out capability values: `exec` passes a `Process`
+> and sandbox `Tree` to its observer; a capability probe receives a `Host`.
+> Those intrinsics have signatures expressible in Vixen but bodies only the
+> runtime can provide. The evaluator rejects user code that attempts to
+> construct a capability value or implement such an intrinsic.
 
 ## Stabilize
 
