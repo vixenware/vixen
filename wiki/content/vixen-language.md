@@ -97,18 +97,18 @@ The cache, the executor fleet, the closure-shipping story, the demand-warmed flo
 There is one syntactic form for "do something with a value": **`F payload`** — function `F` applied to payload, juxtaposition with self-delimiting payloads (or `F(payload)` with parens). Constructors, projections, lookups, calls — all the same shape.
 
 ```vixen
-import "vixen:rust"                    // import applied to a string
-Tree { foo => 42, bar => 99 }          // Tree (constructor) applied to a map-shaped payload
-exec [rustc, src, "-o", out]           // exec applied to an array-shaped payload
-workspace src/main.rs                  // workspace (a Tree, callable as Path -> Value) applied to a path
-(exec […]) app                         // the result of exec, itself a Tree, applied to a path
+import "vixen:rust"                          // import applied to a string
+Tree { "foo" => 42, "bar" => 99 }            // Tree (constructor) applied to a map-shaped payload
+exec [rustc, src, "-o", "out"]               // exec applied to an array-shaped payload
+workspace "src/main.rs"                      // workspace (a Tree, callable as String -> Value) applied to a string
+(exec […]) "app"                             // the result of exec, itself a Tree, applied to a string
 ```
 
-The Tree type is itself callable — `tree path` gives the value at that path. There is no separate "projection operator." Maps work the same way; arrays work the same way. Records use `.field` because field-projection is statically typed and known at compile time; that's the only case using different syntax.
+The Tree type is itself callable — `tree "some/path"` gives the value at that path. There is no separate "projection operator." Maps work the same way; arrays work the same way. Records use `.field` because field-projection is statically typed and known at compile time; that's the only case using different syntax.
 
-Self-delimiting payloads (no parens needed for juxtaposition): `(...)`, `[...]`, `{...}`, `%{...}`, `"..."`, `` `...` ``. Path literals join this list once their literal form is settled.
+Self-delimiting payloads (no parens needed for juxtaposition): `(...)`, `[...]`, `{...}`, `%{...}`, `"..."`, `` `...` ``.
 
-The chain `exec [...] app` parses left-associatively as `(exec [...]) app` — first apply `exec` to the array (producing the write-set tree), then apply that tree to the path `app`. No operator precedence to think about.
+The chain `exec [...] "app"` parses left-associatively as `(exec [...]) "app"` — first apply `exec` to the array (producing the write-set tree), then apply that tree to the string-shaped path `app`. No operator precedence to think about.
 
 ## Closures ship as canonical IR
 
@@ -263,8 +263,8 @@ Each Vixen package that ships a `vx`-level subcommand exports a function named `
 ```vixen
 fn main(workspace: Tree) with { ..VixenMain } -> Tree
     Tree {
-        target/release/app =>
-            exec [stable.rustc, workspace src/main.rs, "-o", out/app] app
+        "target/release/app" =>
+            exec [stable.rustc, workspace "src/main.rs", "-o", "out/app"] "app"
     }
 ```
 
@@ -272,13 +272,13 @@ The workspace is positional; the kwarg block uses the spread form `with { ..Vixe
 
 The body is a single expression — no extra block braces wrapping the return value. The `Tree { … }` is the function's return value.
 
-(Path-literal syntax in the example above — `src/main.rs`, `out/app`, `target/release/app` — is in flux; see [Open: path-literal syntax](#open-path-literal-syntax).)
+Paths in the example are ordinary strings. There is no separate path-literal syntax; the path-flavor comes from the value's provenance through Tree projection, not from how the literal was written. See [Paths are strings + provenance](#paths-are-strings--provenance) below.
 
 ### The returned Tree overlays onto the workspace
 
-The Tree `main` returns has **workspace-relative paths**, and `vx` merges it onto the customer's workspace — overlay semantics, not replace. `@vixen/cargo`'s `main` returns a Tree like `Tree { target/release/foo => <bin>, target/release/build/... => ..., Cargo.lock => ... }`; `vx` lands `target/...` and updates `Cargo.lock` because that's where the Tree said they go. The `target/` convention lives in `@vixen/cargo`'s implementation, not in `vx` or the language.
+The Tree `main` returns has **workspace-relative paths**, and `vx` merges it onto the customer's workspace — overlay semantics, not replace. `@vixen/cargo`'s `main` returns a Tree like `Tree { "target/release/foo" => <bin>, "target/release/build/..." => ..., "Cargo.lock" => ... }`; `vx` lands `target/...` and updates `Cargo.lock` because that's where the Tree said they go. The `target/` convention lives in `@vixen/cargo`'s implementation, not in `vx` or the language.
 
-A minimal subcommand can be as small as "return `Tree { out/app => <bin> }`". Make, Bazel, and cargo all spent decades layering convention on top of that statement; the language reduces it to *the Tree is what the workspace should look like after the build*.
+A minimal subcommand can be as small as "return `Tree { "out/app" => <bin> }`". Make, Bazel, and cargo all spent decades layering convention on top of that statement; the language reduces it to *the Tree is what the workspace should look like after the build*.
 
 Mechanism of the overlay (copy vs VFS-mount vs hard-link) is open — see [Design build-output materialisation](/materialise-build-output/).
 
@@ -322,17 +322,29 @@ The resolution operation is a build-graph node: inputs are `Cargo.toml` + the re
 
 `cargo update` is just "force re-resolution against current registry state, ignore prior lockfile."
 
-## Open: path-literal syntax
+## Paths are strings + provenance
 
-The literal form for paths is unsettled. What's committed:
+There is no distinct path-literal syntax. Path-shaped values are ordinary strings, distinguished from "plain strings" by **value provenance** — the runtime tracks which strings originated as Tree projections (or were derived from them) and uses that provenance for cache keying and implicit mounting into sandboxes.
 
-- Paths are a distinct type from strings (not the same as a string that "happens to look like a path"). Path values carry provenance the runtime uses for cache keying and implicit mounting into sandboxes.
-- Paths participate in function application like any other self-delimiting payload — `workspace some_path` is the projection, no special operator needed.
+The path-vs-string distinction the user briefly sees in the literal form is fake: in `exec [stable.rustc, workspace "src/main.rs", "-o", "out/app"]`, the four literals are all strings. What differs operationally is whether each value has tree-provenance:
 
-What's still open:
+- `stable.rustc` — value from a `RustToolchain` projection. Has provenance. Sandbox sees the provenance and implicitly mounts the toolchain.
+- `workspace "src/main.rs"` — Tree projection. The string `"src/main.rs"` is the projection key; the *result* of the projection has provenance. Mounted implicitly.
+- `"-o"` — plain string. No provenance, no mount, just argv.
+- `"out/app"` — plain string. The sandbox's writable-root rules govern the output location; the literal carries no provenance and needs none.
 
-- **Whether paths need their own literal syntax at all.** The old form `@path/to/file` is loud (many `@` symbols, visible space-sensitivity in the projection-via-`/` form we briefly explored). A proposed alternative — single quotes (`'path/to/file'`) distinguishing paths from strings (`"plain string"`) — has the visual cleanness but most paths in build code (process args, command-line `-o foo`, etc.) don't actually need the path-vs-string distinction. They're just strings being passed to executables.
-- **Provenance-tracking as the actual mechanism.** What matters at the runtime level is that values which originated as `Tree` projections (or are derived from them) carry their provenance through interpolation and into `exec` arguments — so the sandbox knows what to mount. The literal syntax might or might not be the right place to encode that; the type system + interpolation rules may carry it without a distinct literal form.
-- **Coercion rules.** If we collapse path and string literal forms, the language needs explicit rules for when a value-with-path-provenance "becomes" a plain string (e.g. when concatenated with a string suffix) and when provenance survives.
+Quote style is never the discriminator. Provenance is.
 
-To be revisited as a substantive design session.
+### Why no distinct quote form
+
+A distinct literal (e.g. `'src/main.rs'` for paths vs `"-o"` for strings) was considered and rejected. In realistic `exec` calls, most literal values are subprocess argv — `-o`, `--target`, `--edition=2021`, target triples, output paths. None of them have a meaningful semantic claim to being "a path" vs "a string"; they're tokens the subprocess interprets however it wants. Forcing the author to pick quote style would manufacture a question they can't meaningfully answer for most tokens, and the choice would either be arbitrary cognitive cost or a subtle footgun.
+
+The DX win — "this token visibly looks like a path" — exists but is small, and it cost a syntactic distinction the language doesn't need.
+
+### Where path-flavor surfaces in types
+
+When something genuinely wants the path API (splitting components, joining, manipulating relative-vs-absolute, etc.), the methods live on the value type — `Path.split`, `Path.join`, and similar — not on the literal form. A string with tree-provenance can be inspected as a path through those methods because the runtime knows its shape.
+
+### Coercion / loss of provenance
+
+When a path-shaped value with provenance is concatenated or transformed in a way the runtime can no longer track (e.g. extracted into a hand-built `${segment}-suffix` template), provenance is lost at the transformation point. The resulting value is a plain string. If the user wanted to keep provenance through that operation, they should use a `Path` API that preserves provenance through joins. Detailed coercion rules to be specified at implementation time.
