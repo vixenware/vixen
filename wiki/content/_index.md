@@ -9,6 +9,7 @@ Durable home for multi-thread architectural work on Vixen. Substrate is dodeca; 
 We ship two distinct products. They are not tiers of one product. Conflating them produces broken framing fast.
 
 - [The pitch](/pitch/) — one-paragraph overview of each product and how they relate.
+- [FAQ: settled decisions](/faq/) — answers to the objections we are done re-litigating (why a new language, why resolution-in-.vx, performance, "isn't this just <X>"). Point people here.
 - [CCC (Cargo Cloud Cache)](/ccc/) — the standalone Rust-cache product. Forked cargo, rustup mirror, ccc-backend, one-RPC graph lookup.
 - [Vixen Build](/vixen-build/) — the standalone build-system product (with Vixen CI as its public-language surface). `vx cargo build`, Vixen executors, sandbox+VFS, package manager.
 

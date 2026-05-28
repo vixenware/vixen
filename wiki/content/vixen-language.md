@@ -11,6 +11,8 @@ The build language Vixen evaluates. Stays internal at Tier 2; becomes a public A
 
 ## Domain logic lives in Vixen, not in the runtime
 
+> **This is settled and non-negotiable.** "Just shell out to cargo / reuse an existing tool" is not an open question — it throws away the entire value proposition. See [FAQ: settled decisions](/faq/) before raising it.
+
 The Rust runtime is a generic engine. It knows how to evaluate Vixen, mount a sandbox+VFS, talk HTTP, hash bytes, run a PubGrub constraint solver, parse TOML/YAML/JSON into typed Vixen values. It knows nothing about cargo, Rust crates, Xcode, protobuf, or any specific language.
 
 All of that lives in Vixen packages. `@vixen/rust` knows cargo: how a workspace is shaped, how features resolve, what `[patch]` does, what `[build-dependencies]` vs `[dependencies]` means semantically. `@vixen/c` knows clang and MSVC. `@vixen/protobuf` knows protoc. Adding a language is adding a package, not changing the runtime.

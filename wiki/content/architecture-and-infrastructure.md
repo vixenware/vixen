@@ -119,9 +119,9 @@ The pool of machines that materialise cache entries on demand-signal misses. Inp
 
 Notably *not* present at Tier 1: `vx-runner`. The runner service ships customer work into the executor fleet; that's Tier 2/3, not part of Tier 1 infrastructure.
 
-### Backfill runs inside the Tier-2 sandbox
+### Backfill runs under landlock-exec, keyed by descriptor
 
-The backfill workers do not just shell out and `cargo build`. They run inside the same sandbox+VFS substrate Tier 2 customer work uses. Two reasons: cache validity by construction (sandbox-observed read-set IS what the cache key hashes), and Tier-2 dogfooding (production exercises of the sandbox at scale, before customers depend on it).
+The backfill workers do not just shell out and `cargo build` unsandboxed. They run `rustc` under `landlock-exec` — but **not** through the Vixen runtime. The cache key is hand-derived from the crates.io descriptor `(crate, version, registry-hash, compile-args, toolchain-identity)`; `landlock-exec` enforces that nothing outside that set leaks, so the descriptor stays an honest read-set. No demand evaluator, no `exec` intrinsic, no VFS-observed read-set at Tier 1 — that machinery is Vixen Build's. See [Cache and trust → backfill](/cache-and-trust/#backfill-runs-sandboxed-the-keying-path-differs-by-product) and [CCC → backfill](/ccc/#backfill-is-direct-landlock-exec-not-the-vixen-runtime).
 
 ## Auth: OIDC
 

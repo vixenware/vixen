@@ -50,6 +50,12 @@ Unauthenticated requests miss across the board. No anonymous reads at launch. An
 
 Customer-side instances cannot poison the cache by construction; they have no ingress rights.
 
+### Backfill is direct `landlock-exec`, not the Vixen runtime
+
+CCC backfill does **not** go through the Vixen runtime — no demand evaluator, no `exec` intrinsic, no sandbox-observed read-set. A backfill worker derives the cache key by hand from the declarative descriptor `(crate-name, version, registry-hash, compile-args, toolchain-identity)`, fetches the source from crates.io, and runs `rustc` under `landlock-exec` directly. The descriptor *is* the key — declared identity, backed by crates.io's version immutability; `landlock-exec` enforces that the build can't read anything outside the declared set, so the descriptor stays an honest read-set.
+
+The Vixen language and runtime are therefore entirely off CCC's critical path. They are Vixen Build's substrate, developed behind CCC revenue — not blocking it. CCC ships as a cargo fork + ccc-backend + Store + a descriptor-keyed `landlock-exec` backfill fleet, none of which evaluates Vixen.
+
 ## crates.io fetches stay direct
 
 `cargo-vixen` does **not** redirect crates.io fetches. We do not operate a crates.io proxy at launch. The trusted-builder fleet fetches from crates.io itself during backfill; customer cargo also hits crates.io directly.

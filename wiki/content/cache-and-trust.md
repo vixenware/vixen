@@ -67,16 +67,17 @@ The demand signal is unprivileged — anyone, including unauthenticated callers,
 
 Free tier with anonymous reads is deferred until grant or VC funding underwrites the infrastructure. Architecturally, free-tier introduction is reversible — flip the read gate, leave the rest.
 
-## Backfill runs inside the same sandbox + VFS as Tier 2
+## Backfill runs sandboxed; the keying path differs by product
 
-A trusted-builder backfill does not just shell out and `cargo build`. It runs the build inside the same sandbox + VFS substrate Tier 2 customer work runs in — landlock on Linux today, seatbelt on macOS once restored, AppContainer on Windows once designed.
+A trusted-builder backfill never just shells out and `cargo build` unsandboxed. It runs under the sandbox — landlock on Linux today, seatbelt on macOS once restored, AppContainer on Windows once designed — so the build cannot read bytes outside the declared set. But **how the key is derived** differs by product, and the two paths are deliberately separate:
 
-Two reasons:
+- **CCC (Tier 1) backfill** keys by **declared identity** — the crates.io descriptor `(crate, version, registry-hash, compile-args, toolchain-identity)`. The worker runs `rustc` under `landlock-exec` directly; no Vixen runtime, no demand evaluator, no sandbox-observed read-set. The descriptor *is* the key; landlock enforces nothing outside it leaked, so the descriptor stays an honest read-set. See [CCC → backfill](/ccc/#backfill-is-direct-landlock-exec-not-the-vixen-runtime).
+- **Vixen Build (Tier 2) backfill** keys by the **sandbox-observed read-set**, derived through the Vixen runtime's `exec` evaluation — the same path Tier-2 customer work takes. Here the sandbox is the *source* of the key, not just an enforcement boundary.
 
-1. **Cache validity by construction.** The sandbox enforces that the build cannot read bytes outside the declared read-set. The cache key is derived from that same read-set. So the cache key faithfully captures everything the build depended on — by construction, not by audit. Without the sandbox, the build could quietly read `/etc/something` we didn't hash, and the cache entry would be subtly wrong.
-2. **Tier 2 dogfooding.** Every backfill is a production exercise of the sandbox + VFS. Bugs in the per-OS sandbox, in the VFS mount lifecycle, in the FUSE / FSKit / ProjFS layers — they get hit on real workloads before any customer's build depends on them.
+The sandbox is non-negotiable in both:
 
-We do not maintain a "lightweight" backfill path and a "real" customer-build path. The sandbox + VFS is the only path; backfill exercises it because it is the substrate.
+1. **Cache validity by construction.** The sandbox enforces that the build cannot read bytes outside the declared set. At Tier 1 that set is the descriptor; at Tier 2 it is the observed read-set the key hashes. Either way the key faithfully captures what the build depended on — by construction, not by audit. Without it, a build could quietly read `/etc/something` we didn't account for, and the entry would be subtly wrong.
+2. **Dogfooding the substrate.** Tier-2 backfill is a production exercise of the full runtime + sandbox + VFS — bugs in the per-OS sandbox, the VFS mount lifecycle, the FUSE / FSKit / ProjFS layers get hit on real workloads before any customer depends on them. CCC backfill exercises only `landlock-exec`, by design: it is the lighter path that keeps the runtime off CCC's critical path.
 
 ## Asymmetric infrastructure: customer-facing vs fleet-facing
 
