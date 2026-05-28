@@ -227,95 +227,75 @@ A first-class language construct for expressing *structural* requirements over t
 
 ### Shape
 
-`T where (expression)` produces a typed `Requirement[T]` value. The expression is a closure body returning a `Constraint[T]` (or a `Bool` derived from one). The candidate is bound to `$` (the language's standard implicit-closure parameter); inside the `where (...)` parens, a free identifier `field` desugars to `$.field` (see [Implicit-`$.` sugar](#implicit-sugar-inside-where) below).
+`T where (expression)` lifts a `Constraint[T]` into a `Requirement[T]` — a routable demand the orchestrator (or any resolver) satisfies by finding a concrete `T`. The `(expression)` is an ordinary `$`-closure body: `$` is the candidate, and you project its fields explicitly with `$.field`, exactly as `$` works everywhere else in the language (`.map($.utf8())`).
 
 ```vixen
-let rust = RustToolchain where (version >= 1.91 && targets contains "aarch64-apple-darwin")
+let rust = RustToolchain where ($.version >= 1.91 && $.targets contains "aarch64-apple-darwin")
 
-let serde = Crate where (name == "serde" && version ^= 1.0 && features contains "derive")
+let serde = Crate where ($.name == "serde" && $.version ^= 1.0 && $.features contains "derive")
 ```
 
 Multi-line via the regular expression-grouping `( ... )`:
 
 ```vixen
 let rust = RustToolchain where (
-    version >= 1.91
-    && targets contains "aarch64-apple-darwin"
+    $.version >= 1.91
+    && $.targets contains "aarch64-apple-darwin"
 )
 ```
 
 Disjunction, negation, and any other boolean composition come for free because the body is an ordinary expression:
 
 ```vixen
-let rust  = RustToolchain where (version ^= 1.91 || version ^= 1.90)
-let safe  = Crate where (!(features contains "unstable") && version >= 1.0)
+let rust  = RustToolchain where ($.version ^= 1.91 || $.version ^= 1.90)
+let safe  = Crate where (!($.features contains "unstable") && $.version >= 1.0)
 ```
 
-### Constraint operators are structured expressions
+There is **no implicit-field sugar**. A bare `version` inside `where (...)` is just the identifier `version` under ordinary scoping, *not* `$.version`; candidate fields are always written `$.field`. This keeps `where` from introducing a second, special scoping rule — the body is an ordinary `$`-closure, consistent with the rest of the language and free of shadowing surprises.
 
-Comparison operators (`==`, `!=`, `<`, `<=`, `>`, `>=`), collection operators (`contains`, `in`, `matches`), and type-extensible operators (SemVer's `^=` / `~=`, etc.) **do not return `Bool` directly**. They return a structural value (call it `Constraint[T]`) that **coerces to `Bool`** at use sites where a `Bool` is what's wanted. Same pattern as LINQ Expression Trees in C# — a lambda compiles either as a delegate or as an introspectable AST depending on context — and the EDSL pattern in Rust's Diesel, Python's SQLAlchemy core, etc.
+### Operators always produce a `Constraint`; `Bool` is a coercion
 
-Three contexts, three behaviours, same expression:
+Comparison operators (`==`, `!=`, `<`, `<=`, `>`, `>=`), collection operators (`contains`, `in`, `matches`), and the built-in semver matchers (`^=`, `~=`, …) **never return `Bool`**. They always return a `Constraint[T]` — a first-class, typed, introspectable, composable, hashable value. `Constraint[T]` *coerces* to `Bool`, but only where a `Bool` is demanded (an `if` / `while` condition, a boolean-position `&&`), and only when the constraint is **grounded** — every operand concrete. Coercing an ungrounded constraint (one still referencing the candidate `$`) is a compile error: there is no candidate to test it against.
+
+So the same expression has one type and two fates, decided by context, not by the operator:
 
 ```vixen
-// Both operands concrete — Constraint coerces to Bool immediately
-if x.version >= 1.91 ( ... )
-
-// Inside a where (...) — the closure's IR carries the structural form
-RustToolchain where (version >= 1.91 && targets contains "aarch64-apple-darwin")
-
-// As a standalone value — the structure is preserved
-let bound = SemVer.^=(1.91)        // Constraint[SemVer]
-let combined = bound && other       // structurally composed
+$.version >= 1.91            // Constraint[SemVer] — handed to `where`, indexed by the registry
+if v >= 1.91 ( ... )         // v concrete: the Constraint coerces to Bool for the condition
+let c = $.version >= 1.91    // a typed value: compose it, hash it, hand it to `where`
+let combined = c && other    // structural intersection — still a Constraint
 ```
 
-`&&`, `||`, `!` are overloaded analogously: on two `Bool`s they're plain boolean operators; on `Constraint[T]`s they're structural intersection / union / negation; on mixed (one concrete, one structural) they coerce the concrete side and compose structurally.
+This is the LINQ Expression Tree / Diesel / SQLAlchemy-core pattern, sharpened: there is no "sometimes a delegate, sometimes an AST" branch on operand concreteness — it is *always* the structural value, and `Bool` is reached only by coercion at a site that demands one. `&&`, `||`, `!` are the structural combinators on `Constraint` (intersection / union / negation); on plain `Bool`s they're ordinary boolean operators; coercion bridges a grounded `Constraint` into a `Bool` context.
 
-### Why structured rather than closure-only
+### Why structural, and why a closed algebra
 
-The orchestrator (and any consumer of `Requirement[T]`) needs to index, compose, hash, and produce error messages over constraints. An opaque closure is evaluatable against candidates but not introspectable. Structured expressions give us:
+The orchestrator (and any consumer of `Requirement[T]`) needs to index, compose, hash, and produce error messages over constraints — an opaque closure is evaluatable but not introspectable. Structural constraints give us:
 
-- Indexing — the registry of advertised abilities can answer `version >= X` queries by lookup rather than scan.
-- Canonical hashing — two equivalent requirements share a cache key naturally.
-- Specific error messages — "you required `version >= 1.91`; available: 1.89, 1.90."
-- Composition — `req_a && req_b` produces a combined structural requirement, not a closure-of-closures.
+- Indexing — the registry of advertised abilities answers `version >= X` by lookup, not scan.
+- Canonical hashing — equivalent requirements share a cache key.
+- Specific errors — "you required `version >= 1.91`; available: 1.89, 1.90."
+- Composition — `c_a && c_b` is a combined structural constraint, not a closure-of-closures.
 
-Vixen's IR is already canonical and inspectable, so any closure handed to a `where` is analyzed for the structural form. Closures the analyzer can pattern-match (any expression built from the operators above) yield a `Constraint[T]`; closures with patterns the analyzer can't recognize fall back to opaque-per-candidate evaluation — still correct, just not indexable.
+To keep *every* constraint indexable, the operator set is a **closed, entirely built-in algebra.** A `where` body is built from field projection plus the operators below; anything outside that algebra applied to the candidate is a **compile error**, not an opaque per-candidate fallback. The registry only ever sees operators the runtime defines, so it can always index. Opaque, scan-only predicates would defeat fleet routing, so we don't admit them — an escape hatch, if ever needed, would be explicitly local-filter-only, and user-defined operators are deferred entirely.
 
-### Implicit-`$.` sugar inside `where (...)`
+### Built-in operator set (closed)
 
-Inside the `( ... )` payload of a `where`, free identifiers desugar to `$.identifier`:
+The full vocabulary, built into the runtime — not a user-extension surface:
 
-```vixen
-// these two are equivalent:
-RustToolchain where (version >= 1.91 && targets contains "aarch64-apple-darwin")
-RustToolchain where ($.version >= 1.91 && $.targets contains "aarch64-apple-darwin")
-```
+- comparisons: `==`, `!=`, `<`, `<=`, `>`, `>=`
+- collections: `contains`, `in`, `matches` (regex)
+- **semver matching**, first-class: `^=` (caret), `~=` (tilde), comparator sets, wildcards, exact, with pre-release rules — the whole cargo/npm requirement vocabulary
+- boolean composition: `&&`, `||`, `!` (structural)
+- nested field projection: `$.version.major`, `$.triple.os`, `$.targets`
 
-The sugar is narrow grammatical scope. Outside the `where (...)` parens, no such resolution rule applies — `field` is just `field`.
+Semver is built in because a build system lives on it — the runtime owns caret / tilde / comparator semantics and the registry indexes them natively; it is **not** a package-declared operator. User-defined operators are deferred.
 
-**Explicit local bindings still win.** If `version` is bound in the enclosing scope, the bare identifier refers to that binding, not the candidate's field. To force the field-resolution, use `$.version`. A free identifier matching neither is a compile-time error.
-
-Similar in spirit to LINQ's query syntax (`where x.Age > 18` binds `x` from the enclosing `from`) and Rust's struct-destructuring patterns. Limited mode by position, predictable resolution rules.
-
-### Type-extensible operator set
-
-Built-in operators: `==`, `!=`, `<`, `<=`, `>`, `>=`, `contains`, `in`, `matches`. Types declare their own via namespace functions:
-
-```vixen
-namespace SemVer (
-    fn (^=)(other: SemVer) -> Constraint[SemVer] (CaretMatch other);
-    fn (~=)(other: SemVer) -> Constraint[SemVer] (TildeMatch other);
-)
-```
-
-(Function bodies are `( ... )` per the new convention; see [Function application is the single primitive](#function-application-is-the-single-primitive).)
-
-Then `version ^= 1.0` resolves to `SemVer.(^=)(1.0)`, returning a structural `Constraint[SemVer]`. Cargo's caret / tilde / inequality matchers, cfg-expression matching, JSON-path matching — all extend the constraint vocabulary without changing the language.
+Routing *by* target triple falls out of ordinary field projection plus comparison (`$.targets contains "aarch64-apple-darwin"`, `$.triple.os == "darwin"`). Cargo's **`cfg(...)` expression matching** (`cfg(unix)`, `cfg(all(target_os = "linux", target_arch = "x86_64"))`, `any`/`not`, the `[target.'cfg(...)'.dependencies]` tables) is a *different* problem and a genuinely open one — see [Build and resolution → cfg and target tables](/build-and-resolution/#cfg-and-target-table-matching-must-cover-open). It is resolution-time domain logic, not a fleet-routing constraint, so it is **not** a language-level constraint operator.
 
 ### Numeric literal rule (build-language flavour)
 
-Vixen is a build language; semver is the common case for dotted-numeric values, floats are the unusual case.
+Vixen is a build language; versions are the common case for dotted-numeric values, floats the unusual one. We take versions seriously enough that `1.2` is a *version*, never a float.
 
 - `0.13`, `1.0`, `1.0.0`, `1.0.0-rc.1` — `SemVer` literals. Two-or-three segment, optional pre-release / build metadata.
 - `1.34f` — `F64` literal. Floats require the `f` suffix.

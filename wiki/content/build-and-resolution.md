@@ -99,6 +99,18 @@ PubGrub is a generic SAT-shaped algorithm. The runtime ships it as an intrinsic.
 
 Same engine, same diagnostics, different domain rules. When `@vixen/python` or `@vixen/node` arrives, they declare their semver model and call into the same intrinsic.
 
+## cfg and target-table matching (must-cover, open)
+
+A drop-in cargo replacement **must** handle cargo's target-conditional dependencies: `[target.x86_64-unknown-linux-gnu.dependencies]` (explicit triple) and `[target.'cfg(...)'.dependencies]` with the full `cfg` mini-language — `cfg(unix)`, `cfg(target_os = "linux")`, `cfg(all(...))`, `any`, `not`, and the derived flags (`unix`, `windows`) that aren't literally a triple field. This is non-negotiable for compat; the exact mechanism is **not yet settled**.
+
+What is clear about where it sits:
+
+- **It is resolution-time domain logic in `@vixen/rust`, not a fleet-routing constraint.** You don't route executors by `cfg`; you select which deps apply for a resolved target. So it is *not* a language-level [constraint operator](/vixen-language/#constraint-expressions) and does not need to be registry-indexable. `@vixen/rust` owns cargo's `cfg` semantics the same way it owns features and `[patch]`.
+- **The cfg attribute set for a target is data the runtime can supply.** `rustc --print cfg --target <triple>` yields the concrete cfg key/values and bare flags for that target — an `exec` whose observer returns the parsed set. Given that set, evaluating a `cfg(...)` expression is ordinary boolean logic (`all`/`any`/`not`, key-equality, flag membership) expressible with the built-in operators over plain data.
+- **Explicit-triple tables** are a string match on the resolved target triple; those *do* fall out of ordinary projection + comparison.
+
+Open: how `@vixen/rust` parses the `cfg(...)` mini-language (its own small parser vs. a runtime intrinsic), how the per-target cfg set is acquired and cached (declared-identity on a Vixen executor vs. discovered on a customer host), and how cfg-conditional edges thread into the PubGrub solve so the lockfile is byte-identical to cargo's for a given target. Tracked here as a compat blocker for the cargo path.
+
 ## Bootstrap is clean
 
 The "tiny core" Vixen package that defines Vixen-package-resolution semantics ships embedded with the runtime. Resolving Vixen packages doesn't require already having resolved them — the core is just there. PubGrub is an intrinsic. No chicken-and-egg.
