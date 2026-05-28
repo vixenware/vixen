@@ -179,6 +179,51 @@ The orchestrator queries the registry by structural constraint — `MacToolchain
 
 For customer-local builds, "advertised abilities" is what the customer's own `vx-daemon` published from its own probes at startup against its own host.
 
+## Auto-detect vs opt-in
+
+The advertised set on a customer machine is **not** "everything Vixen could possibly route through here." It's the union of two disciplined sources:
+
+**Auto-detect (the happy path).** Probes detect what's natively installed on the host — `clang` via Xcode Command Line Tools, `gcc` via the system package manager, `rustc` via rustup, MSVC via vswhere, etc. — and advertise those automatically. No user action required. If both `gcc` and `clang` are installed on a Linux box, the C probe advertises both as separate `CToolchain` instances; user code can constrain on `provider` if it cares, otherwise the scheduler picks.
+
+**Opt-in (the weird stuff).** Cross-compile via `cargo-zigbuild`, cross-compile via `cargo-xwin`, any toolchain that requires Vixen to pull artifacts from the store and thread them through the sandbox/VFS — these don't auto-advertise. The user opts in explicitly via a per-package CLI command (see below).
+
+This is a hard line. Customer local daemons don't claim "I can do everything in the public store" by default — they advertise what's actually set up on the machine. The fleet is broad-by-default (Vixen ops curate it); customer machines are minimal-by-default.
+
+Vixen fleet daemons follow the opposite convention: pre-curated broad set, managed centrally by Vixen ops. A fleet Mac box advertises every macOS / iOS toolchain combination Vixen has licensed; a fleet Linux box advertises the standard cross-target set. Customer machines don't try to mirror this.
+
+## Failure paths guide the user
+
+When a request can't be satisfied, the package owning the capability produces a structured error pointing at the fix. Two categories:
+
+**1. Install the tool.** For native capabilities the system *should* have but doesn't.
+
+```
+error: no C toolchain detected
+
+Install one with:
+  macOS:   xcode-select --install
+  Debian:  apt install build-essential
+  Fedora:  dnf groupinstall "Development Tools"
+```
+
+User installs; the daemon's next probe cycle (or the manual `vx daemon refresh`) picks it up; build proceeds.
+
+**2. Enable via Vixen.** For non-native / store-fetched capabilities.
+
+```
+error: no toolchain for target aarch64-unknown-linux-gnu from host aarch64-apple-darwin
+
+To cross-compile from this Mac, enable one of:
+  vx rust enable-zigbuild   (local, pulls cargo-zigbuild from Vixen store)
+  vx connect-fleet          (route to Vixen-cloud Linux executors)
+```
+
+`vx <pkg> enable-...` is a per-package CLI namespace. Each capability probe package defines its own enable subcommands; running one fetches the necessary tooling from the Vixen store and adds the relevant probe / advertisement source to the daemon's config. After `enable`, the capability auto-advertises on subsequent builds.
+
+The package owns both the failure message and the enable UX. `@vixen/rust` decides what `vx rust enable-...` subcommands exist and what each does. `@vixen/c` may offer `enable-clang` / `enable-gcc` separately if the user wants something other than the system default.
+
+This unifies the model: **every cross-host or non-native capability is opt-in by daemon config, discovered by the package's failure path, enabled per-package**. Native installed tools auto-detect; weird stuff opts in; the failure path documents itself.
+
 ## Refresh discipline
 
 Layered cadence:
