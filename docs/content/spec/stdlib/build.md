@@ -14,45 +14,52 @@ model, but they are not part of the core language syntax.
 
 > r[eval.entry]
 >
-> A Vixen build starts with a `build.vx` file at the repository root.
-> The entry point is invoked by the `build` intrinsic, which grants the
-> `#fs` capability. The entry point receives the workspace path as a
-> `Path`, CLI arguments as `Array[String]`, and the environment as
-> `Map[String, String]`, and returns a `Tree`.
+> A Vixen package that ships a `vx`-level subcommand exports a function
+> named `main`. `vx` invokes `main` directly — there is no wrapper
+> intrinsic. `main` receives the workspace as a `Tree` (content-addressed,
+> ingested by `vx` before the call), pulls the standard CLI kwargs via the
+> spread `with { ..VixenMain }` (`args: Array[String]`,
+> `env: Map[String, String]`), and returns a `Tree`.
 >
 > ```vixen
-> fn build[T](
->   entry: Fn(Path, Array[String], Map[String, String]) #fs -> T,
-> ) -> T;
+> fn main(workspace: Tree) with { ..VixenMain } -> Tree (
+>   Tree { "target/release" => exec [stable.rustc, workspace "src/main.rs", "-o", "out/app"] }
+> )
 > ```
 >
-> The workspace is not pre-walked into a `Tree` — filesystem access is
-> lazy. Files are read on demand through the `#fs` capability, and those
-> reads are tracked by the runtime's dependency tracking machinery.
+> The workspace is a `Tree`, not a host path — Vixen build code never sees
+> disk paths. Files are obtained through `Tree` operations
+> (`workspace "src/main.rs"`), which are pure and content-addressed.
+> Reading host bytes outside an ingested tree requires a `Host` capability,
+> which `main` is never handed. The returned `Tree` carries
+> workspace-relative paths and overlays onto the customer's workspace.
 
 > r[eval.entry.cargo-compat]
 >
-> If no `build.vx` exists and a `Cargo.toml` is found, Vixen evaluates
-> as if a thin build file were present calling `std.rust.workspace`. This
-> makes `vx build` a drop-in replacement for `cargo build`.
+> `vx cargo build` invokes `@vixen/cargo::main`. If the workspace pins no
+> Vixen entry file, `vx` uses the runtime-bundled default packages (at
+> minimum `@vixen/cargo`) at the versions paired with this `vx` install;
+> if it pins one, `vx` uses the package versions that file names. This
+> makes `vx cargo build` a drop-in for `cargo build` while keeping build
+> behaviour pinnable.
 
 ## Acquire
 
 > r[exec.acquire]
 >
-> `acquire url where { digest: digest }` fetches a resource by URL and
+> `acquire url with { digest: digest }` fetches a resource by URL and
 > returns a `Blob`. The digest is written as a scheme-qualified `String`
 > such as `sha256:...` or `blake3:...`. A digest is always required —
 > the result is content-addressed and cached permanently. The digest is
 > verified; a mismatch poisons. Because acquisition is deterministic
-> (same URL + same digest = same content), `acquire` is ambient — it
-> requires no capability and can be called anywhere. Fetching without a
-> known digest is discovery and must go through `discover`, not
+> (same URL + same digest = same content), `acquire` needs no capability
+> and can be called anywhere. Fetching without a known digest is
+> discovery — it goes through the `Host` capability surface, not
 > `acquire`.
 
 > r[exec.acquire.extract]
 >
-> `acquire url where { digest: digest, extract: format }` fetches a URL
+> `acquire url with { digest: digest, extract: format }` fetches a URL
 > and extracts the archive in one cached step, returning a `Tree`.
 > `format` names the archive and compression scheme, for example
 > `"tar.gz"` or `"tar.xz"`. Extraction streams directly to the
@@ -62,7 +69,7 @@ model, but they are not part of the core language syntax.
 
 > r[exec.render]
 >
-> `render template where { bindings: value }` renders a text template
+> `render template with { bindings: value }` renders a text template
 > into a `Blob`. This is the primitive used for generated config
 > headers, pkg-config files, generated helper scripts, and similar
 > small build artifacts.
