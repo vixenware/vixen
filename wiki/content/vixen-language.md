@@ -58,7 +58,7 @@ A specific instance. When `@vixen/rust` needs to read a `Cargo.toml`, it declare
 From `core.vx` and `build.vx`:
 - Process execution under sandbox: `exec`, plus everything in the observer signature.
 - Content-addressed fetch: `acquire(url) with {digest}`, `acquire(url) with {digest, extract}`.
-- Ability request: `Type.request where { constraint clauses } -> Type` — predicate-identified value; planner resolves at exec sites. See [Executor abilities](/executor-abilities/#builds-request-abilities-at-runtime). Host probing itself is not a user-Vixen-callable intrinsic; it happens inside the daemon, reading from capability probe packages (see [Executor abilities → How abilities are advertised](/executor-abilities/#how-abilities-are-advertised)).
+- Ability request: `Type where { constraint clauses }` — predicate-identified value; planner resolves at exec sites. See [Executor abilities](/executor-abilities/#builds-request-abilities-at-runtime). Host probing itself is not a user-Vixen-callable intrinsic; it happens inside the daemon, reading from capability probe packages (see [Executor abilities → How abilities are advertised](/executor-abilities/#how-abilities-are-advertised)).
 - Template rendering: `render[T](template) with {bindings} -> Blob`.
 - Operations on `String`, `Symbol`, `Tree`, `Stream`, `Map`, `Array`, `Path`, `Blob`, `Bytes`, plus the `Toml`/`Json`/`Yaml`/`Http` namespaces.
 
@@ -92,6 +92,24 @@ The cache, the executor fleet, the closure-shipping story, the demand-warmed flo
 - No reflection on internal layout. The language exposes the canonical form; the runtime picks the in-memory representation.
 - Wire format is implicit. The language doesn't expose a "write to bytes" primitive; values flow through cache and wire transparently.
 
+## Function application is the single primitive
+
+There is one syntactic form for "do something with a value": **`F payload`** — function `F` applied to payload, juxtaposition with self-delimiting payloads (or `F(payload)` with parens). Constructors, projections, lookups, calls — all the same shape.
+
+```vixen
+import "vixen:rust"                    // import applied to a string
+Tree { foo => 42, bar => 99 }          // Tree (constructor) applied to a map-shaped payload
+exec [rustc, src, "-o", out]           // exec applied to an array-shaped payload
+workspace src/main.rs                  // workspace (a Tree, callable as Path -> Value) applied to a path
+(exec […]) app                         // the result of exec, itself a Tree, applied to a path
+```
+
+The Tree type is itself callable — `tree path` gives the value at that path. There is no separate "projection operator." Maps work the same way; arrays work the same way. Records use `.field` because field-projection is statically typed and known at compile time; that's the only case using different syntax.
+
+Self-delimiting payloads (no parens needed for juxtaposition): `(...)`, `[...]`, `{...}`, `%{...}`, `"..."`, `` `...` ``. Path literals join this list once their literal form is settled.
+
+The chain `exec [...] app` parses left-associatively as `(exec [...]) app` — first apply `exec` to the array (producing the write-set tree), then apply that tree to the path `app`. No operator precedence to think about.
+
 ## Closures ship as canonical IR
 
 A direct consequence of "values are hashable, comparable, serialisable" applied to closures. When an `exec` runs on a remote executor, its `observer: Fn(Process, Tree) -> T` ships to that executor as a value like any other.
@@ -123,17 +141,19 @@ Mechanical migration: every `where { … }` on function signatures becomes `with
 
 Modules are records. The `import` expression returns a module value, bound with `let`:
 
+```vixen
+let config = import "vixen:config"
+let { stable } = import "vixen:rust"
 ```
-let config = import("vixen:config")
-let c = import("c")
-```
+
+`import` is an ordinary function; the string identifying the target is its single payload, applied by juxtaposition (no parens needed — strings are self-delimiting). Destructuring lets pull selected exports.
 
 The string identifies the target:
 
 - **`vixen:<name>`** — stdlib or first-party package (`@vixen/...` scope).
 - **Bare name** — workspace-local sibling `.vx` file, or a package declared as a dependency in the manifest.
 
-Same shape across all three sources (stdlib, cross-package, intra-package). Dotted access on the returned record reaches the module's exports: `config.linux_executor`, `c.discover_toolchain()`.
+Same shape across all three sources (stdlib, cross-package, intra-package). Dotted access on the returned record reaches the module's exports: `config.linux_executor`, `c.discover_toolchain`.
 
 Stdlib intrinsics (`exec`, `acquire`, `Toml::parse`, …) are in scope via an implicit prelude — no explicit `import("vixen:core")` needed. Users writing build code see the intrinsic surface as ambient identifiers.
 
@@ -148,12 +168,12 @@ Used pervasively: ability requests against the executor fleet, cargo-style depen
 A `where { … }` block following a type or value expression produces a typed `Requirement[T]` value:
 
 ```vixen
-let rust = RustToolchain.request where {
+let rust = RustToolchain where {
     version >= 1.91,
     targets contains "aarch64-apple-darwin",
 }
 
-let serde = Crate.request where {
+let serde = Crate where {
     name == "serde",
     version ^= 1.0,
     features contains "derive",
@@ -240,20 +260,25 @@ The result is that build code authors don't think about effects at all. They con
 
 Each Vixen package that ships a `vx`-level subcommand exports a function named `main`. `vx`-the-CLI invokes `main` directly; there's no wrapper intrinsic.
 
-```
-fn main(workspace: Tree) with {
-  args: Array[String],
-  env: Map[String, String],
-} -> Tree
+```vixen
+fn main(workspace: Tree) with { ..VixenMain } -> Tree
+    Tree {
+        target/release/app =>
+            exec [stable.rustc, workspace src/main.rs, "-o", out/app] app
+    }
 ```
 
-The workspace is positional; `args` and `env` are keyword arguments (the `with` block). `main` always returns a `Tree`.
+The workspace is positional; the kwarg block uses the spread form `with { ..VixenMain }` to pull in the standard CLI kwargs (`args: Array[String]`, `env: Map[String, String]`) without spelling them out every time. `main` always returns a `Tree`.
+
+The body is a single expression — no extra block braces wrapping the return value. The `Tree { … }` is the function's return value.
+
+(Path-literal syntax in the example above — `src/main.rs`, `out/app`, `target/release/app` — is in flux; see [Open: path-literal syntax](#open-path-literal-syntax).)
 
 ### The returned Tree overlays onto the workspace
 
-The Tree `main` returns has **workspace-relative paths**, and `vx` merges it onto the customer's workspace — overlay semantics, not replace. `@vixen/cargo::main` returns `Tree { "./target/release/foo": <bin>, "./target/release/build/...": ..., "./Cargo.lock": ... }`; `vx` lands `./target/...` and updates `./Cargo.lock` because that's where the Tree said they go. The `./target/` convention lives in `@vixen/cargo`'s implementation, not in `vx` or the language.
+The Tree `main` returns has **workspace-relative paths**, and `vx` merges it onto the customer's workspace — overlay semantics, not replace. `@vixen/cargo`'s `main` returns a Tree like `Tree { target/release/foo => <bin>, target/release/build/... => ..., Cargo.lock => ... }`; `vx` lands `target/...` and updates `Cargo.lock` because that's where the Tree said they go. The `target/` convention lives in `@vixen/cargo`'s implementation, not in `vx` or the language.
 
-A minimal subcommand can be as small as "return `Tree { "./out/app": <bin> }`". Make, Bazel, and cargo all spent decades layering convention on top of that statement; the language reduces it to *the Tree is what the workspace should look like after the build*.
+A minimal subcommand can be as small as "return `Tree { out/app => <bin> }`". Make, Bazel, and cargo all spent decades layering convention on top of that statement; the language reduces it to *the Tree is what the workspace should look like after the build*.
 
 Mechanism of the overlay (copy vs VFS-mount vs hard-link) is open — see [Design build-output materialisation](/materialise-build-output/).
 
@@ -296,3 +321,18 @@ A consequence worth calling out for the cargo-replacement use case.
 The resolution operation is a build-graph node: inputs are `Cargo.toml` + the registry view at this moment + the resolver code's version; output is `Cargo.lock`. The fact that the output lands at the conventional on-disk path is a file-system convention, not a semantic mutation. The cache stores `(inputs → Cargo.lock)`; same inputs → same lockfile → instant. New version published → different registry view → cache miss → re-resolve.
 
 `cargo update` is just "force re-resolution against current registry state, ignore prior lockfile."
+
+## Open: path-literal syntax
+
+The literal form for paths is unsettled. What's committed:
+
+- Paths are a distinct type from strings (not the same as a string that "happens to look like a path"). Path values carry provenance the runtime uses for cache keying and implicit mounting into sandboxes.
+- Paths participate in function application like any other self-delimiting payload — `workspace some_path` is the projection, no special operator needed.
+
+What's still open:
+
+- **Whether paths need their own literal syntax at all.** The old form `@path/to/file` is loud (many `@` symbols, visible space-sensitivity in the projection-via-`/` form we briefly explored). A proposed alternative — single quotes (`'path/to/file'`) distinguishing paths from strings (`"plain string"`) — has the visual cleanness but most paths in build code (process args, command-line `-o foo`, etc.) don't actually need the path-vs-string distinction. They're just strings being passed to executables.
+- **Provenance-tracking as the actual mechanism.** What matters at the runtime level is that values which originated as `Tree` projections (or are derived from them) carry their provenance through interpolation and into `exec` arguments — so the sandbox knows what to mount. The literal syntax might or might not be the right place to encode that; the type system + interpolation rules may carry it without a distinct literal form.
+- **Coercion rules.** If we collapse path and string literal forms, the language needs explicit rules for when a value-with-path-provenance "becomes" a plain string (e.g. when concatenated with a string suffix) and when provenance survives.
+
+To be revisited as a substantive design session.
