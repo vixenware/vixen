@@ -187,16 +187,20 @@ model, but they are not part of the core language syntax.
 > ```vixen
 > fn exec[T](
 >   args: Array[ExecInput]
-> ) where {
+> ) with {
 >   env: Map[String, ExecInput] = %{},
 >   mounts: Map[Path, TreeEntry] = %{},
 >   coarse_mounts: Array[SandboxExemption] = [],
 >   writable: Array[Path] = [],
 >   create_dirs: Array[Path] = [],
->   executor: ExecutorClass = executor_class("default"),
->   observer: Fn(Process, Tree) #sandbox -> T,
+>   observer: Fn(Process, Tree) -> T,
 > } -> T
 > ```
+>
+> There is no `executor:` kwarg and no effect annotation on the observer.
+> Routing is type-driven: the runtime chooses an executor from the ability
+> values (e.g. a `RustToolchain`) that flow into `args`, by predicate
+> match — there is no stringly-typed executor selector.
 
 > r[exec.arg]
 >
@@ -243,8 +247,13 @@ model, but they are not part of the core language syntax.
 > }
 > ```
 >
-> The runtime applies these exemptions only after rechecking the
-> discovery observations attached to them on the concrete runner.
+> Both variants are **read-only**: a coarse exemption never grants write
+> access to the host filesystem. `ReadSubpath` permits reads under `root`;
+> `ExecSubpath` permits read and execute (running a discovered tool) but
+> never write. Host state is an input to a build, never a sink — nothing
+> the sandboxed process does can mutate a coarse-mounted host path. The
+> runtime applies these exemptions only after rechecking the discovery
+> observations attached to them on the concrete runner.
 
 > r[exec.arg.path]
 >
@@ -349,7 +358,7 @@ model, but they are not part of the core language syntax.
 > additional directories to create under those roots before launch.
 >
 > ```vixen
-> exec [cc, "-c", @src/hello.c, "-o", @(out/obj/hello.o)] where {
+> exec [cc, "-c", @src/hello.c, "-o", @(out/obj/hello.o)] with {
 >   mounts: %{ @src => source },
 >   writable: [@out],
 >   create_dirs: [@out/obj],
