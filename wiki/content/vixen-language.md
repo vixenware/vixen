@@ -157,55 +157,158 @@ Same shape across all three sources (stdlib, cross-package, intra-package). Dott
 
 Stdlib intrinsics (`exec`, `acquire`, `Toml::parse`, …) are in scope via an implicit prelude — no explicit `import("vixen:core")` needed. Users writing build code see the intrinsic surface as ambient identifiers.
 
+## Brackets: `( ... )` groups, `{ ... }` is structural, `[ ... ]` is positional
+
+The three bracket pairs carry distinct roles, and the distinction is load-bearing for readability.
+
+### `( ... )` — expression grouping (including function bodies)
+
+`( ... )` always means "an expression, possibly a sequence of statements with the last being the value." This includes:
+
+- **Expression grouping for precedence.** `(a + b) * c`.
+- **Function call payload.** `f(x)` is `f` applied to `x` (one positional payload).
+- **Function declaration parameters.** `fn foo(x: Int, y: Int)`.
+- **Tuples.** `(1, "a", true)` when there are multiple positional elements.
+- **Function bodies.** `fn name(params) -> T (body)`. Same `( ... )` as everywhere else — a function body really is "a grouped expression whose value is the final inner expression."
+- **Closures returning blocks.** `(x) => (let y = x + 1; y)`.
+
+Multi-statement form uses `;` as the separator; the last expression (without trailing `;`) is the value. Example with intermediate steps:
+
+```vixen
+fn build_app(workspace: Tree) -> Tree (
+    let rust = RustToolchain where (version >= 1.91);
+    let bin = exec [rust.rustc, workspace "src/main.rs", "-o", "out/app"] "app";
+    Tree { "target/release/app" => bin }
+)
+```
+
+The "function body uses parens" choice is the most visually unusual decision the language makes. It buys uniformity: `( ... )` is one thing everywhere; you never have to scan inside to know what kind of bracket you're reading.
+
+### `{ ... }` — structural values with named entries
+
+`{ ... }` always means "a value whose structure is a set of named entries." The entries' separator inside is always `,` (or newline; the two are interchangeable). Never `;` — semicolons live only in `( ... )`.
+
+Modes, distinguished by what's *inside* the braces:
+
+| Mode | Inner shape | Example |
+|---|---|---|
+| Record literal | `field: value` | `Point { x: 1, y: 2 }` |
+| Map / tree literal | `key => value` | `Tree { "k" => v }` |
+| Spread | `..other` | `with { ..VixenMain }` |
+
+Kwargs application reuses the record form: `f payload with { x: 1, y: 2 }` is `f payload` followed by `with` applied to a record. Struct update is the same — `value with { field: new_value }` applies `with` to a record of updates.
+
+The previously-considered "constraint block" mode (`where { … }` with comma-separated clauses) is gone — constraints are expressions in `( ... )`, see [Constraint expressions](#constraint-expressions).
+
+### `[ ... ]` — positional sequences and type parameters
+
+`[ ... ]` is positional:
+
+- Array literals: `[1, 2, 3]`.
+- Type parameters: `Array[String]`, `Fn[T]`.
+- exec args: `exec [rustc, src, "-o", "out"]` is `exec` applied to an array payload.
+
+### Why this matters
+
+`{ ... }` does six different things in many languages because everyone reaches for braces by default. Vixen splits the workload across three bracket pairs along a meaningful axis:
+
+- Sequencing of operations → `( ... )` (grouped expressions, blocks).
+- Naming of structural data → `{ ... }` (records, maps, kwargs).
+- Positional listing → `[ ... ]` (arrays, type params).
+
+When you see one, you know which family the contents belong to without having to scan inside. The cost is one weirdness budget item (function-body parens); the win is everywhere.
+
 ## Constraint expressions
 
-A first-class language construct for expressing *structural* requirements over typed values — the build-language equivalent of SQL's `WHERE` clause, scoped to a single type.
-
-Used pervasively: ability requests against the executor fleet, cargo-style dependency declarations, version-range constraints for any package manager, target predicates, anywhere a build queries structured values by structural predicates.
+A first-class language construct for expressing *structural* requirements over typed values — the build-language equivalent of SQL's `WHERE` clause, scoped to a single type. Used pervasively: ability requests against the executor fleet, cargo-style dependency declarations, version-range constraints for any package manager, target predicates, anywhere a build queries structured values by structural predicates.
 
 ### Shape
 
-A `where { … }` block following a type or value expression produces a typed `Requirement[T]` value:
+`T where (expression)` produces a typed `Requirement[T]` value. The expression is a closure body returning a `Constraint[T]` (or a `Bool` derived from one). The candidate is bound to `$` (the language's standard implicit-closure parameter); inside the `where (...)` parens, a free identifier `field` desugars to `$.field` (see [Implicit-`$.` sugar](#implicit-sugar-inside-where) below).
 
 ```vixen
-let rust = RustToolchain where {
-    version >= 1.91,
-    targets contains "aarch64-apple-darwin",
-}
+let rust = RustToolchain where (version >= 1.91 && targets contains "aarch64-apple-darwin")
 
-let serde = Crate where {
-    name == "serde",
-    version ^= 1.0,
-    features contains "derive",
-}
+let serde = Crate where (name == "serde" && version ^= 1.0 && features contains "derive")
 ```
 
-The `where { … }` payload is **not** a record literal. Inside, each entry is a *constraint clause* — a separate syntactic category in the same family as match-arm patterns. Clauses combine implicitly with AND. For disjunction or larger composition, requirement values combine with `&&` and `||` at the value level.
+Multi-line via the regular expression-grouping `( ... )`:
 
-### Constraint clauses are not expressions
+```vixen
+let rust = RustToolchain where (
+    version >= 1.91
+    && targets contains "aarch64-apple-darwin"
+)
+```
 
-`serde ^= 1.0` is not a freestanding expression. It's a clause valid only inside a constraint-block context (after `where`, in match arm positions, anywhere the language expects a pattern-shaped thing). This keeps `^=` and the other constraint operators from leaking into ordinary expression contexts where they'd mean nothing.
+Disjunction, negation, and any other boolean composition come for free because the body is an ordinary expression:
 
-### Structural, hashable, inspectable values
+```vixen
+let rust  = RustToolchain where (version ^= 1.91 || version ^= 1.90)
+let safe  = Crate where (!(features contains "unstable") && version >= 1.0)
+```
 
-`Requirement[T]` is a typed value the runtime can introspect. Constraints aren't opaque closures — the orchestrator can index advertised abilities by `version >= X` queries, error messages can say "you required `version >= 1.91`; available: 1.89, 1.90," and two structurally-equivalent requirements share a canonical hash and therefore a cache key.
+### Constraint operators are structured expressions
 
-The contrast worth being explicit about: a closure-shaped predicate like `(t) => t.version >= 1.91` would be evaluatable against candidates but opaque. The structural form is inspectable and indexable.
+Comparison operators (`==`, `!=`, `<`, `<=`, `>`, `>=`), collection operators (`contains`, `in`, `matches`), and type-extensible operators (SemVer's `^=` / `~=`, etc.) **do not return `Bool` directly**. They return a structural value (call it `Constraint[T]`) that **coerces to `Bool`** at use sites where a `Bool` is what's wanted. Same pattern as LINQ Expression Trees in C# — a lambda compiles either as a delegate or as an introspectable AST depending on context — and the EDSL pattern in Rust's Diesel, Python's SQLAlchemy core, etc.
+
+Three contexts, three behaviours, same expression:
+
+```vixen
+// Both operands concrete — Constraint coerces to Bool immediately
+if x.version >= 1.91 ( ... )
+
+// Inside a where (...) — the closure's IR carries the structural form
+RustToolchain where (version >= 1.91 && targets contains "aarch64-apple-darwin")
+
+// As a standalone value — the structure is preserved
+let bound = SemVer.^=(1.91)        // Constraint[SemVer]
+let combined = bound && other       // structurally composed
+```
+
+`&&`, `||`, `!` are overloaded analogously: on two `Bool`s they're plain boolean operators; on `Constraint[T]`s they're structural intersection / union / negation; on mixed (one concrete, one structural) they coerce the concrete side and compose structurally.
+
+### Why structured rather than closure-only
+
+The orchestrator (and any consumer of `Requirement[T]`) needs to index, compose, hash, and produce error messages over constraints. An opaque closure is evaluatable against candidates but not introspectable. Structured expressions give us:
+
+- Indexing — the registry of advertised abilities can answer `version >= X` queries by lookup rather than scan.
+- Canonical hashing — two equivalent requirements share a cache key naturally.
+- Specific error messages — "you required `version >= 1.91`; available: 1.89, 1.90."
+- Composition — `req_a && req_b` produces a combined structural requirement, not a closure-of-closures.
+
+Vixen's IR is already canonical and inspectable, so any closure handed to a `where` is analyzed for the structural form. Closures the analyzer can pattern-match (any expression built from the operators above) yield a `Constraint[T]`; closures with patterns the analyzer can't recognize fall back to opaque-per-candidate evaluation — still correct, just not indexable.
+
+### Implicit-`$.` sugar inside `where (...)`
+
+Inside the `( ... )` payload of a `where`, free identifiers desugar to `$.identifier`:
+
+```vixen
+// these two are equivalent:
+RustToolchain where (version >= 1.91 && targets contains "aarch64-apple-darwin")
+RustToolchain where ($.version >= 1.91 && $.targets contains "aarch64-apple-darwin")
+```
+
+The sugar is narrow grammatical scope. Outside the `where (...)` parens, no such resolution rule applies — `field` is just `field`.
+
+**Explicit local bindings still win.** If `version` is bound in the enclosing scope, the bare identifier refers to that binding, not the candidate's field. To force the field-resolution, use `$.version`. A free identifier matching neither is a compile-time error.
+
+Similar in spirit to LINQ's query syntax (`where x.Age > 18` binds `x` from the enclosing `from`) and Rust's struct-destructuring patterns. Limited mode by position, predictable resolution rules.
 
 ### Type-extensible operator set
 
-Built-in clause operators: `==`, `!=`, `<`, `<=`, `>`, `>=`, `contains`, `in`, `matches`.
-
-Types declare their own constraint constructors via namespace functions. `SemVer` ships `^=` (caret-compatible) and `~=` (tilde-compatible):
+Built-in operators: `==`, `!=`, `<`, `<=`, `>`, `>=`, `contains`, `in`, `matches`. Types declare their own via namespace functions:
 
 ```vixen
-namespace SemVer {
-    fn (^=)(other: SemVer) -> Constraint[SemVer] { CaretMatch(other) }
-    fn (~=)(other: SemVer) -> Constraint[SemVer] { TildeMatch(other) }
-}
+namespace SemVer (
+    fn (^=)(other: SemVer) -> Constraint[SemVer] (CaretMatch other);
+    fn (~=)(other: SemVer) -> Constraint[SemVer] (TildeMatch other);
+)
 ```
 
-Then `version ^= 1.0` resolves to `SemVer.(^=)(1.0)`, returning a structural `Constraint[SemVer]` the runtime understands without further machinery. Cargo's caret/tilde/inequality matchers, cfg-expression matching, JSON-path matching — all extend the constraint vocabulary without changing the language.
+(Function bodies are `( ... )` per the new convention; see [Function application is the single primitive](#function-application-is-the-single-primitive).)
+
+Then `version ^= 1.0` resolves to `SemVer.(^=)(1.0)`, returning a structural `Constraint[SemVer]`. Cargo's caret / tilde / inequality matchers, cfg-expression matching, JSON-path matching — all extend the constraint vocabulary without changing the language.
 
 ### Numeric literal rule (build-language flavour)
 
@@ -261,16 +364,16 @@ The result is that build code authors don't think about effects at all. They con
 Each Vixen package that ships a `vx`-level subcommand exports a function named `main`. `vx`-the-CLI invokes `main` directly; there's no wrapper intrinsic.
 
 ```vixen
-fn main(workspace: Tree) with { ..VixenMain } -> Tree
-    Tree {
-        "target/release/app" =>
-            exec [stable.rustc, workspace "src/main.rs", "-o", "out/app"] "app"
-    }
+fn main(workspace: Tree) with { ..VixenMain } -> Tree (
+    Tree { "target/release" => exec [stable.rustc, workspace "src/main.rs", "-o", "out/app"] }
+)
 ```
 
 The workspace is positional; the kwarg block uses the spread form `with { ..VixenMain }` to pull in the standard CLI kwargs (`args: Array[String]`, `env: Map[String, String]`) without spelling them out every time. `main` always returns a `Tree`.
 
-The body is a single expression — no extra block braces wrapping the return value. The `Tree { … }` is the function's return value.
+The body is wrapped in `( ... )` per the [bracket conventions](#brackets-----groups-----is-structural-----is-positional). A single-expression body is one expression inside the parens; intermediate steps use `;` between statements with the final expression as the value.
+
+**Path-prefix reduction.** Notice the Tree literal uses `"target/release" => exec [...]` rather than `"target/release/app" => exec [...] "app"`. Placing an exec result (a Tree) at a directory key grafts the whole subtree there — the binary that the exec wrote to `out/app` lands at `target/release/app` because the exec's write-set tree gets mounted at `target/release`. Common-case shorthand for "this directory is whatever the build wrote."
 
 Paths in the example are ordinary strings. There is no separate path-literal syntax; the path-flavor comes from the value's provenance through Tree projection, not from how the literal was written. See [Paths are strings + provenance](#paths-are-strings--provenance) below.
 

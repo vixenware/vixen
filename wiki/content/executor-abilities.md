@@ -42,21 +42,15 @@ There is **no `ExecutorClass`-style stringly-typed selector**. That was the wron
 
 ## Builds request abilities at runtime
 
-Build code actively requests abilities by applying `where { … }` directly to an ability type:
+Build code actively requests abilities by applying `where (...)` directly to an ability type. The body is a boolean expression where free identifiers desugar to fields of the ability type (see [Vixen language → Constraint expressions](/vixen-language/#constraint-expressions)):
 
 ```vixen
-let mac = MacToolchain where {
-    xcode >= 14.0,
-    arch == arch_arm64,
-}
+let mac = MacToolchain where (xcode >= 14.0 && arch == arch_arm64)
 
-let rust = RustToolchain where {
-    version >= 1.91,
-    targets contains "aarch64-apple-darwin",
-}
+let rust = RustToolchain where (version >= 1.91 && targets contains "aarch64-apple-darwin")
 ```
 
-`Type where { … }` is the single fleet-routing surface from user-Vixen — no `.request` verb, no separate intrinsic. It produces a **predicate-identified value**: a thunk whose identity is the constraint, not yet bound to a specific executor. The actual fleet routing happens lazily, when something downstream demands the value.
+`Type where (...)` is the single fleet-routing surface from user-Vixen — no `.request` verb, no separate intrinsic. It produces a **predicate-identified value**: a thunk whose identity is the constraint, not yet bound to a specific executor. The actual fleet routing happens lazily, when something downstream demands the value.
 
 This is **active request**, not declarative lockfile pinning. The lockfile records what got satisfied during evaluation, for reproducibility; it doesn't pin upfront before the build code has a chance to express policy.
 
@@ -69,8 +63,8 @@ The language ingredients are already there: `Option`, pattern matching, imports,
 Each `exec` aggregates the predicate-identified ability values flowing into it and asks the orchestrator for an executor satisfying the intersection of their constraints.
 
 ```vixen
-let mac = MacToolchain where { xcode >= 14.0, arch == arch_arm64 }
-let rust = RustToolchain where { version >= 1.91 }
+let mac = MacToolchain where (xcode >= 14.0 && arch == arch_arm64)
+let rust = RustToolchain where (version >= 1.91)
 
 let bin = exec [
     rust.rustc,
@@ -183,7 +177,7 @@ probes (
 
 …loads each package, calls each probe with a `Host` capability, and publishes the `Some(T)` results to the fleet registry over Vox. Probes that don't apply on the host (a Mac probe on Linux) just return `None` and advertise nothing — no OS-filter metadata needed.
 
-The orchestrator queries the registry by structural constraint — `MacToolchain where { xcode >= 14.0, arch == arch_arm64 }` — and receives the set of executor identities whose advertised values match. Strong typing on both sides; constraints are structural, indexable, hashable values, not opaque closures.
+The orchestrator queries the registry by structural constraint — `MacToolchain where (xcode >= 14.0 && arch == arch_arm64)` — and receives the set of executor identities whose advertised values match. Strong typing on both sides; constraints are structured expressions the runtime extracts from closure IR (LINQ Expression Trees in shape), so the registry can index by them.
 
 For customer-local builds, "advertised abilities" is what the customer's own `vx-daemon` published from its own probes at startup against its own host.
 
@@ -202,7 +196,7 @@ The build's lockfile can declare a per-ability-type max-staleness tolerance for 
 
 - **Package authors own the ability *types*.** `@vixen/mac` defines what "having a Mac toolchain" means; ships the probe.
 - **Executor operators own the *domains* their executor advertises.** A fleet operator (Vixen-the-org on its own fleet) opts each box into the ability domains it can satisfy: "this box runs `@vixen/mac` probes; it does not run `@vixen/cuda` probes." Explicit is safer than inferred.
-- **Build authors own the *requests*.** Build code says "I need `MacToolchain` matching this constraint" via `MacToolchain where { … }`. That's the build-side surface.
+- **Build authors own the *requests*.** Build code says "I need `MacToolchain` matching this constraint" via `MacToolchain where (...)`. That's the build-side surface.
 
 New ability domains ship as packages with no changes needed at the registry, the orchestrator, or existing executors.
 
