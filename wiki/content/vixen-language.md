@@ -227,31 +227,31 @@ A first-class language construct for expressing *structural* requirements over t
 
 ### Shape
 
-`T where (expression)` lifts a `Constraint[T]` into a `Requirement[T]` — a routable demand the orchestrator (or any resolver) satisfies by finding a concrete `T`. The `(expression)` is an ordinary `$`-closure body: `$` is the candidate, and you project its fields explicitly with `$.field`, exactly as `$` works everywhere else in the language (`.map($.utf8())`).
+`T where (expression)` lifts a `Constraint[T]` into a `Requirement[T]` — a routable demand the orchestrator (or any resolver) satisfies by finding a concrete `T`. Inside the `(expression)` the candidate's fields are in scope as **bare identifiers**: a free `version` desugars to the candidate's `version` field. The named type `T` establishes that field scope, so `version` is sugar for `$.version` (with `$` the candidate); an identifier that names no field of `T` resolves by ordinary scoping, leaving outer bindings and constants reachable.
 
 ```vixen
-let rust = RustToolchain where ($.version >= 1.91 && $.targets contains "aarch64-apple-darwin")
+let rust = RustToolchain where (version >= 1.91 && targets contains "aarch64-apple-darwin")
 
-let serde = Crate where ($.name == "serde" && $.version ^= 1.0 && $.features contains "derive")
+let serde = Crate where (name == "serde" && version ^= 1.0 && features contains "derive")
 ```
 
 Multi-line via the regular expression-grouping `( ... )`:
 
 ```vixen
 let rust = RustToolchain where (
-    $.version >= 1.91
-    && $.targets contains "aarch64-apple-darwin"
+    version >= 1.91
+    && targets contains "aarch64-apple-darwin"
 )
 ```
 
 Disjunction, negation, and any other boolean composition come for free because the body is an ordinary expression:
 
 ```vixen
-let rust  = RustToolchain where ($.version ^= 1.91 || $.version ^= 1.90)
-let safe  = Crate where (!($.features contains "unstable") && $.version >= 1.0)
+let rust  = RustToolchain where (version ^= 1.91 || version ^= 1.90)
+let safe  = Crate where (!(features contains "unstable") && version >= 1.0)
 ```
 
-There is **no implicit-field sugar**. A bare `version` inside `where (...)` is just the identifier `version` under ordinary scoping, *not* `$.version`; candidate fields are always written `$.field`. This keeps `where` from introducing a second, special scoping rule — the body is an ordinary `$`-closure, consistent with the rest of the language and free of shadowing surprises.
+Field scope is keyed on the named candidate type and confined to the `where` body: `arch == arch_arm64` reads `arch` as the candidate's field and `arch_arm64` as an outer constant. A detached constraint value — one built without a named candidate in scope — names the candidate explicitly with `$` (`$.version >= 1.91`), the underlying form that bare fields desugar to.
 
 ### Operators always produce a `Constraint`; `Bool` is a coercion
 
@@ -410,6 +410,14 @@ If `body` never reads the accumulator mid-flight, it's a single pass — collect
 ### No trait required
 
 `accumulate[M]` is an ordinary unbounded generic: it needs `merge(M, M) -> M` and `identity() -> M` defined for the concrete `M`, resolved at instantiation like every Vixen generic — a missing `merge` is a call-site error, the same duck-typed convention as `to_string`. Vixen has no trait / bound system (see [the FAQ](/faq/)), and accumulators deliberately don't introduce one.
+
+## Kernels — compiled pure islands
+
+Most of a build's wall-clock is intrinsics (rustc via `exec`, fetches, PubGrub) — already native. The interpreted part is the `.vx` glue *between* intrinsics: resolver loops, accumulator merges, constraint and cfg evaluation, `SemVer` comparison. When that glue is a measured bottleneck, it compiles — as **kernels**.
+
+A kernel is an *eager pure island in the lazy demand sea*: a fragment that touches no capability (`Host` / `Process` / `Tree` / `Accum`), calls no intrinsic, and forces no thunk. Finding them is cheap because the runtime already draws the line — the cache policy's `Persist` (intrinsic, native boundary) vs `InMemory` (pure, interpreted) split *is* the kernel boundary, and the capability model makes purity a type-level property. The evaluator forces a kernel's inputs, runs it to completion, lifts the result; kernels themselves never cross a boundary.
+
+Codegen is **copy-and-patch** — a precompiled stencil per op, copied and patched at runtime — not a heavy optimizing backend, so compiles are sub-millisecond. A kernel ships as canonical IR and is compiled locally wherever it lands, which is the *same* mechanism that ships `exec` observers and `pubgrub` domain closures to remote executors. Interpret by default; compile hot kernels. This is the concrete form of "performance lives in the runtime, JIT when it earns its place" — and the path that was deleted (`vx-jit`) is being rebuilt now that the settled language makes the partition type-level. Design: `docs/design/kernel-abi.md`.
 
 ## Errors are Diagnostics that poison the build
 

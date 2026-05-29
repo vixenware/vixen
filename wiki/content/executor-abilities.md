@@ -181,7 +181,7 @@ Build code touches only layer 1. The orchestrator threads layers 2 and 3 at rout
 
 Each ability type ships in a **capability probe package** — a package whose manifest declares it provides a probe for a specific ability type.
 
-`package.styx` (or frontmatter on `main.vx`; file shape TBD):
+Frontmatter at the top of the package's `.vx` file (see [[Vixen language]] frontmatter):
 ```styx
 id "@vixen/mac"
 version 1.0.0

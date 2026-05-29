@@ -1,8 +1,0 @@
-
-fn default() (
-  {
-    linux_executor: executor_class("ssh:linux-box"),
-    mac_executor: executor_class("ssh:mac-box"),
-    win_executor: executor_class("ssh:win-box"),
-  }
-)

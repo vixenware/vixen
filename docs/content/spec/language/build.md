@@ -117,12 +117,14 @@ Build entry points and runtime-backed surfaces such as `main`, `exec`,
 > survives source changes that do not affect behavior.
 >
 > `exec` cache keys are **(observer code identity, observer captures,
-> args, env, mounts, executor class)**. The executor class is the unit
-> of cache reuse — two `exec` calls with the same inputs and the same
-> executor class may share a cached result. Because the observer's code
-> identity is transitive, changing a helper function that the observer
-> calls invalidates the `exec` cache — even though the observer's own
-> AST did not change.
+> args, env, mounts)**, where the args carry the resolved ability values
+> (e.g. a concrete `RustToolchain`) that flow into them. There is no
+> "executor class" in the key: routing is type-driven, so an `exec`'s reuse
+> is determined by its content-addressed inputs — including the resolved
+> toolchain identities — not by a stringly-typed executor selector. Because
+> the observer's code identity is transitive, changing a helper function
+> that the observer calls invalidates the `exec` cache — even though the
+> observer's own AST did not change.
 
 > r[eval.memoization.pending]
 >

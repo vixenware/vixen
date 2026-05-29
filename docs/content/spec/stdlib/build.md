@@ -590,11 +590,9 @@ model, but they are not part of the core language syntax.
 > }
 > ```
 >
-> The package manifest declares what it advertises:
->
-> ```styx
-> capability { advertises MacToolchain }
-> ```
+> The file's frontmatter (`r[lang.modules.frontmatter]`) declares what it
+> advertises — `capability { advertises MacToolchain }`. There is no
+> separate `package.styx` manifest.
 
 > r[discover.daemon]
 >

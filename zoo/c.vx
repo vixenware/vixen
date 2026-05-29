@@ -1,28 +1,71 @@
+```styx
+id @vixen/c
+version 1.0.0
+capability {
+  advertises CToolchain
+}
+```
 
-// our C package
+enum Style { struct Gcc, struct Msvc }   // Gcc: gcc/clang/apple — one CLI; Msvc: its own
 
 struct CToolchain {
-  clang: ExecutorPath,
-  fingerprints: Array[String],
+  target: String,                          // triple it builds for — the constraint surface
+  style: Style,
+  version: SemVer,
+  cc: String,                              // host path to the compiler (a host fact, not store content)
+  coarse_mounts: Array[SandboxExemption],  // host roots it needs: cc, sysroot, crt objects, libc…
 }
 
-fn discover_toolchain() where { executor: Executor } #discover -> CToolchain {
-  discover(executor, (host) => {
-    match host.os {
-      "darwin" => {
-        let clang = host.which("clang");
-        CToolchain {
-          clang,
-          fingerprints: [
-            host.exec([clang, "--version"]),
-            host.exec(["xcode-select", "--print-path"]),
-            host.exec(["plutil", "-p", "/Applications/Xcode.app/Contents/Info.plist"]),
-          ],
-        }
-      },
-      _ => {
-        fail "only linux supported"
-      }
-    }
-  })
-}
+struct Out { flags: Array[ExecInput], file: Path }
+// TODO: argv is hand-built with `++`; a fluent append/builder reads nicer but is
+// awkward value-side — revisit once we settle a command-builder shape.
+
+namespace CToolchain (
+  fn link_out(self, out: Path) -> Out (
+    match self.style (
+      Style.Msvc => Out { flags: [`/Fe:${out}.exe`], file: `${out}.exe` },
+      Style.Gcc  => Out { flags: ["-o", out],        file: out },
+    )
+  )
+
+  fn object_out(self, out: Path) -> Out (
+    match self.style (
+      Style.Msvc => Out { flags: ["/c", `/Fo:${out}.obj`], file: `${out}.obj` },
+      Style.Gcc  => Out { flags: ["-c", "-o", out],        file: out },
+    )
+  )
+
+  fn executable(self, srcs: Array[ExecInput], out: Path) -> Blob (
+    let o = self.link_out(out);
+    self.invoke(srcs ++ o.flags, o.file)
+  )
+
+  fn object(self, src: ExecInput, out: Path) -> Blob (
+    let o = self.object_out(out);
+    self.invoke([src] ++ o.flags, o.file)
+  )
+
+  fn invoke(self, args: Array[ExecInput], output: Path) -> Blob (
+    let prefix = match self.style ( Style.Msvc => [self.cc, "/nologo"], Style.Gcc => [self.cc] );
+    (exec (prefix ++ args) with { coarse_mounts: self.coarse_mounts }).file(output)
+  )
+
+  // discovery — how a daemon advertises this for its host
+  fn probe(host: Host) -> Option[CToolchain] (
+    match host.which?("cc") (
+      None => None,
+      Some { value: cc } => Some(CToolchain {
+        target: `${host.arch()}-unknown-${host.os()}`,
+        style:  Style.Gcc,        // TODO: confirm via `cc --version` (clang reports Gcc-style too)
+        version: 1.0.0,           // TODO: probe `cc -dumpversion`
+        cc: cc,
+        coarse_mounts: [
+          host.exec_subpath("/usr/bin"),
+          host.read_subpath("/usr/include"),
+          host.read_subpath("/usr/lib"),
+          // TODO: crt objects, libc, gcc internal dirs — see old-zoo/exec-model-2.vx
+        ],
+      }),
+    )
+  )
+)

@@ -45,8 +45,8 @@ weight = 20
 > r[lex.keywords]
 >
 > Reserved words: `fn`, `let`, `type`, `struct`, `enum`, `newtype`,
-> `of`, `with`, `match`, `if`, `else`, `is`, `as`, `import`, `return`,
-> `fail`, `true`, `false`.
+> `of`, `with`, `where`, `match`, `if`, `else`, `is`, `as`, `import`,
+> `return`, `fail`, `true`, `false`.
 >
 > These cannot be used as binding or type names.
 
@@ -194,6 +194,17 @@ weight = 20
 > expressions are allowed inside `${ }`. Each interpolation calls
 > `.to_string()` on the interpolated value. There is no bare-identifier
 > shorthand — `${ }` is the only interpolation syntax.
+
+> r[lex.heredoc]
+>
+> A heredoc is a fenced multi-line string: an opening line of three
+> backticks with an optional tag, the content lines, and a closing line of
+> three backticks — the same fence Markdown uses. The tag (`c`, `sh`,
+> `styx`, …) is a highlighting / tooling hint only and carries no
+> semantics. Heredocs interpolate `${ ... }` exactly like single-backtick
+> strings, and leading indentation is stripped to the column of the closing
+> fence. A heredoc evaluates to a `String`. A non-interpolating raw variant
+> (for embedding literal `${ }`) is deferred — `r[lex.heredoc.raw]` TBD.
 
 ### Operator precedence
 
@@ -444,8 +455,10 @@ weight = 20
 
 > r[expr.literal.float]
 >
-> Float literals: digits with a decimal point. Default type is `F64`:
-> `3.14`, `0.5`, `1_000.0`.
+> Float literals are digits with a decimal point and a trailing `f`
+> suffix: `3.14f`, `0.5f`, `1_000.0f`. Default type is `F64`. A
+> dotted-numeric literal *without* the `f` suffix is a `SemVer`, not a
+> float (`r[lex.numeric]`).
 
 > r[expr.literal.bool]
 >
@@ -668,7 +681,7 @@ weight = 20
 > the constructor's type.
 >
 > ```vixen
-> let p = Point { x: 1.0, y: 2.0 }
+> let p = Point { x: 1.0f, y: 2.0f }
 > ```
 >
 > The same unary application model applies to non-record constructors:
@@ -689,7 +702,7 @@ weight = 20
 >
 > `Enum.Variant` accesses a variant under the enum's namespace.
 > `Shape.Circle` names both the variant-specific type and the variant's
-> constructor value. `Shape.Circle { radius: 5.0 }` produces a
+> constructor value. `Shape.Circle { radius: 5.0f }` produces a
 > `Shape.Circle`, which widens to `Shape` in checking contexts.
 
 ### Method navigation and pipe expressions
@@ -698,7 +711,7 @@ weight = 20
 >
 > Dot access never falls back to arbitrary free functions. `x.f` means
 > field access or method lookup only. Methods live in `namespace Type {
-> ... }`; extensions live in import-scoped `extend Type { ... }`.
+> ... }`.
 
 > r[expr.pipe]
 >
@@ -885,7 +898,7 @@ weight = 20
 >
 > ```vixen
 > let zero = 0 :: I64    // literal 0 as I64, no conversion
-> let pi = 3.14 :: F64   // explicit (though F64 is the default)
+> let pi = 3.14f :: F64  // 3.14f is already F64; ascription documents intent
 > ```
 >
 > Spaces around `::` are canonical formatting but not required:
@@ -925,6 +938,16 @@ weight = 20
 > bindings and declarations. Top-level bindings and declarations are the
 > module's exports. Top-level bare expressions are invalid because a
 > module has no resulting value position for them to flow into.
+
+> r[lang.modules.frontmatter]
+>
+> A `.vx` file may open with a **frontmatter** block — a fenced block
+> (three backticks, like a heredoc, conventionally tagged `styx`) that is
+> the first item in the file. It carries package metadata and capability
+> declarations in styx: `id`, `version`, dependencies, and
+> `capability { advertises T }`. There is no separate `package.styx`
+> manifest — a package that publishes, declares dependencies, or advertises
+> a capability does so in frontmatter; a leaf build script needs none.
 
 > r[lang.modules.namespace]
 >
@@ -1074,7 +1097,7 @@ weight = 20
 > r[type.enum.build]
 >
 > To build a variant value, use its struct literal form:
-> `Shape.Circle { radius: 5.0 }`. Zero-sized variants use the type name:
+> `Shape.Circle { radius: 5.0f }`. Zero-sized variants use the type name:
 > `Direction.North`.
 
 ## Generics
@@ -1425,7 +1448,7 @@ weight = 20
 > ```vixen
 > Blob("hello")
 > Blob(42)
-> Point { x: 1.0, y: 2.0 }
+> Point { x: 1.0f, y: 2.0f }
 > ```
 >
 > Named-field constructor surfaces are canonical for structs and
@@ -1873,14 +1896,17 @@ weight = 20
 >
 > `T where (predicate)` lifts a `Constraint[T]` into a `Requirement[T]` —
 > a routable demand that a resolver (the executor orchestrator, a package
-> resolver) satisfies by selecting a concrete `T`. The `(predicate)` is an
-> ordinary `$`-closure body: `$` is the candidate, and candidate fields
-> are projected explicitly with `$.field`. There is **no implicit-field
-> sugar** — a bare identifier inside the predicate is resolved by ordinary
-> scoping, never rewritten to `$.field`.
+> resolver) satisfies by selecting a concrete `T`. Inside the `(predicate)`
+> the candidate's fields are in scope as **bare identifiers**: a free
+> `version` desugars to the candidate's `version` field. The named type `T`
+> establishes that field scope, so `version` is sugar for `$.version`; an
+> identifier that names no field of `T` resolves by ordinary scoping, so
+> outer bindings and constants stay reachable. A detached constraint value
+> — built with no named candidate in scope — names the candidate
+> explicitly with `$` (`r[constraint.coerce]`).
 >
 > ```vixen
-> let rust = RustToolchain where ($.version >= 1.91 && $.targets contains "aarch64-apple-darwin")
+> let rust = RustToolchain where (version >= 1.91 && targets contains "aarch64-apple-darwin")
 > ```
 >
 > `Requirement[T]` is itself a value: constructed where policy is
