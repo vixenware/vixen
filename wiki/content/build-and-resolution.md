@@ -90,14 +90,17 @@ Implications:
 
 ## PubGrub solves both cargo and Vixen package resolution
 
-One constraint solver, two domains.
-
-PubGrub is a generic SAT-shaped algorithm. The runtime ships it as an intrinsic. The domain knowledge — "what counts as compatible," "what dep relationships mean" — is supplied by the caller:
+Both cargo and Vixen's own package resolution are backtracking-SAT — one version per package, highest compatible — so both call one shared engine: PubGrub, shipped as a generic SAT-shaped intrinsic. The domain knowledge — "what counts as compatible," "what dep relationships mean" — is supplied by the caller:
 
 - **Vixen package resolution.** A small core Vixen module distributed with the runtime knows Vixen's package semantics and calls PubGrub.
 - **Cargo crate resolution.** `@vixen/rust` knows cargo's domain model (workspaces, features, `[patch]`, target-specific deps, version selection) and calls PubGrub the same way.
 
-Same engine, same diagnostics, different domain rules. When `@vixen/python` or `@vixen/node` arrives, they declare their semver model and call into the same intrinsic.
+But PubGrub is **one primitive, not the universal resolver** — ecosystems disagree about what resolution even is, and not all of them are SAT. Resolution is per-ecosystem domain logic; the package reaches for whichever primitive fits:
+
+- **Monotone-fold** — Go's Minimum Version Selection (the selected version is the max of all required minimums, to fixpoint) and cargo's feature unification (the union of requested features) are [accumulator](/vixen-language/#accumulators) fixpoints (`merge = max` / `merge = union`), not SAT. No solver.
+- **Tree-shaped** — npm's nested `node_modules` (versions coexist per tree position) and Maven's nearest-wins mediation are plain graph / `Tree` construction. No global solve.
+
+So `@vixen/go` reaches for accumulators, `@vixen/node` for graph construction, `@vixen/rust` for PubGrub plus an accumulator (versions by SAT, features by union). Same diagnostics discipline throughout; the engine differs by ecosystem.
 
 ## cfg and target-table matching (must-cover, open)
 
