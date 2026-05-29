@@ -6,11 +6,10 @@
 //! poisoning** — clean evaluation = pass; any poison (a `fail`, a forced `💣`,
 //! a runtime error) = fail. The detonation site is the report.
 //!
-//! `#[test(poisons)]` — the inverted, error-path form (detonation = pass) — is
-//! not yet expressible: the attribute grammar has no call-style argument. It is
-//! also explicitly deferred until `?`→`Result` lands, so the surface decision
-//! can wait. The harness already routes on `Expect`, so wiring the spelling in
-//! later is a one-line discovery change.
+//! `#[test(poisons)]` inverts it: the body is *expected* to poison, so
+//! detonation = pass (the error-path form). This is a smoke harness for the
+//! dev loop; the standalone `.vx` runner (CLI + JSON/HTML reports for CI) is a
+//! separate tool.
 
 use std::fs;
 use std::path::{Path, PathBuf};
@@ -35,8 +34,7 @@ fn assert_eq[T](got: T, want: T) -> Bool (
 enum Expect {
     /// `#[test]` — must evaluate without poisoning.
     Clean,
-    /// `#[test(poisons)]` — must poison. Not yet discoverable (see module docs).
-    #[allow(dead_code)]
+    /// `#[test(poisons)]` — must poison (error-path test).
     Poisons,
 }
 
@@ -89,19 +87,33 @@ fn discover() -> Vec<LangTest> {
     tests
 }
 
-/// Classify a function by its attributes: `test` → a test case.
+/// Classify a function by its attributes: `#[test]` → clean test,
+/// `#[test(poisons)]` → error-path test.
 fn test_kind(func: &vx_parser::FnDecl) -> Option<Expect> {
     let mut is_test = false;
+    let mut poisons = false;
     if let Some(list) = func.attributes() {
         for attr in list.attributes() {
             for entry in attr.entries() {
                 if entry.key().map(|t| t.text().to_string()).as_deref() == Some("test") {
                     is_test = true;
+                    for arg in entry.args() {
+                        if arg.key().map(|t| t.text().to_string()).as_deref() == Some("poisons") {
+                            poisons = true;
+                        }
+                    }
                 }
             }
         }
     }
-    is_test.then_some(Expect::Clean)
+    if !is_test {
+        return None;
+    }
+    Some(if poisons {
+        Expect::Poisons
+    } else {
+        Expect::Clean
+    })
 }
 
 /// True if the evaluation outcome is a poison: a forced `💣` / `fail` surfaces

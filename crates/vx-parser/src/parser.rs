@@ -390,16 +390,7 @@ fn attributes(p: &mut Parser<'_>) {
         p.expect(SyntaxKind::L_BRACKET);
         if !p.at(SyntaxKind::R_BRACKET) {
             loop {
-                let entry = p.start();
-                if p.at(SyntaxKind::LOWER_IDENT) {
-                    p.bump();
-                } else {
-                    p.diagnose_at(ExpectedKind::AttributeKey);
-                }
-                if p.eat(SyntaxKind::EQ) {
-                    expr(p);
-                }
-                entry.complete(p, SyntaxKind::ATTRIBUTE_ENTRY);
+                attribute_entry(p);
                 if !p.eat(SyntaxKind::COMMA) || p.at(SyntaxKind::R_BRACKET) {
                     break;
                 }
@@ -410,6 +401,30 @@ fn attributes(p: &mut Parser<'_>) {
         attr.complete(p, SyntaxKind::ATTRIBUTE);
     }
     marker.complete(p, SyntaxKind::ATTRIBUTE_LIST);
+}
+
+// r[attr.entry] — `key`, `key = value`, or `key(nested, …)` (Rust-like meta).
+fn attribute_entry(p: &mut Parser<'_>) {
+    let entry = p.start();
+    if p.at(SyntaxKind::LOWER_IDENT) {
+        p.bump();
+    } else {
+        p.diagnose_at(ExpectedKind::AttributeKey);
+    }
+    if p.eat(SyntaxKind::EQ) {
+        expr(p);
+    } else if p.eat(SyntaxKind::L_PAREN) {
+        if !p.at(SyntaxKind::R_PAREN) {
+            loop {
+                attribute_entry(p);
+                if !p.eat(SyntaxKind::COMMA) || p.at(SyntaxKind::R_PAREN) {
+                    break;
+                }
+            }
+        }
+        p.expect(SyntaxKind::R_PAREN);
+    }
+    entry.complete(p, SyntaxKind::ATTRIBUTE_ENTRY);
 }
 
 // r[decl.fn]

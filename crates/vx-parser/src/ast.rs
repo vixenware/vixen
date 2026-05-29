@@ -752,6 +752,11 @@ impl AttributeEntry {
         child(self.syntax())
     }
 
+    /// Nested meta-arguments: `test(poisons, slow)` → entries `poisons`, `slow`.
+    pub fn args(&self) -> AstChildren<AttributeEntry> {
+        AstChildren::new(self.syntax())
+    }
+
     pub fn string_value(&self) -> Option<String> {
         let Expr::Literal(literal) = self.value_expr()? else {
             return None;
