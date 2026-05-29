@@ -222,6 +222,7 @@ fn collect_call_edges(
 ) {
     let kind = arena[expr_id].kind.clone();
     match kind {
+        ExprKind::Bomb => {}
         ExprKind::Call(call) => {
             // This Call owns its edge.
             let target = resolve_callee(arena, call.callee);
@@ -794,6 +795,7 @@ fn collect_local_projections(
 ) {
     let kind = arena[expr_id].kind.clone();
     match kind {
+        ExprKind::Bomb => {}
         ExprKind::Field(f) => {
             // Try to resolve this projection to a product.
             let mut visited = HashSet::new();

@@ -73,7 +73,7 @@ pub trait VirVisitor {
 /// Walk the children of an expression.
 pub fn walk_expr<V: VirVisitor + ?Sized>(v: &mut V, arena: &VirArena, id: ExprId) {
     match &arena[id].kind {
-        ExprKind::Literal(_) | ExprKind::Import(_) | ExprKind::Error => {}
+        ExprKind::Literal(_) | ExprKind::Import(_) | ExprKind::Bomb | ExprKind::Error => {}
         ExprKind::PathLiteral(pl) => {
             for part in &pl.parts {
                 if let StringPart::Expr(id) = part {

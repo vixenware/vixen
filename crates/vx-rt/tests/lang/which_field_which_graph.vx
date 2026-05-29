@@ -1,0 +1,30 @@
+// Group E — which field you demand *is* the graph.
+//
+// The same value is constructed; which field the consumer reads decides which
+// subgraph runs. The unread field is a bomb, so "the graph that ran" is exactly
+// "the graph that didn't detonate".
+
+struct Two { fast: U64, slow: U64 }
+
+// Demanding `fast` must skip `slow` entirely.
+#[test]
+fn demanding_fast_skips_slow() (
+    let r = Two { fast: 7, slow: 💣 };
+    assert_eq(r.fast, 7)
+)
+
+// The mirror image: demanding `slow` would skip `fast`. Here both are real and
+// we read each independently — neither read forces the other's thunk twice, and
+// nothing detonates.
+#[test]
+fn each_field_resolves_independently() (
+    let r = Two { fast: 7, slow: 11 };
+    assert_eq(r.fast + r.slow, 18)
+)
+
+// Positional analogue: the demanded tuple index selects the live branch.
+#[test]
+fn demanding_index_selects_branch() (
+    let pair = (💣, 11);
+    assert_eq(pair[1], 11)
+)

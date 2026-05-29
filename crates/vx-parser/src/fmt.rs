@@ -143,6 +143,7 @@ impl Formatter {
             SyntaxKind::UPDATE_FIELD => self.fmt_inline(node),
             SyntaxKind::IMPORT_EXPR => self.fmt_inline(node),
             SyntaxKind::FAIL_EXPR => self.fmt_fail_expr(node),
+            SyntaxKind::BOMB_EXPR => self.fmt_inline(node),
             SyntaxKind::TYPE_OP_EXPR => self.fmt_inline(node),
             SyntaxKind::RANGE_EXPR => self.fmt_inline(node),
             SyntaxKind::FALLIBLE_EXPR => self.fmt_inline(node),

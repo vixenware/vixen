@@ -118,6 +118,8 @@ impl<'a> Lexer<'a> {
             Some('#') => self.bump_one(SyntaxKind::HASH),
             Some('?') => self.bump_one(SyntaxKind::QUESTION),
             Some('/') => self.bump_one(SyntaxKind::SLASH),
+            // r[lex.bomb] — the demand-driven tripwire literal
+            Some('💣') => self.bump_one(SyntaxKind::BOMB),
             Some(_) => {
                 self.bump_char();
                 SyntaxKind::ERROR_TOKEN

@@ -1293,6 +1293,16 @@ fn application_expr(p: &mut Parser<'_>) -> CompletedMarker {
             continue;
         }
 
+        // r[expr.index] — tight `recv[selector]` is a computed selection.
+        // (Spaced `recv [arr]` is application; `recv[T](..)` is a type-arg call,
+        // both handled above.)
+        if p.at(SyntaxKind::L_BRACKET) && !p.has_significant_gap_before_current() {
+            let marker = lhs.precede(p);
+            index_selector(p);
+            lhs = marker.complete(p, SyntaxKind::INDEX_EXPR);
+            continue;
+        }
+
         if p.at(SyntaxKind::WHERE_KW) {
             let marker = lhs.precede(p);
             p.bump();
@@ -1349,8 +1359,26 @@ fn atom_expr(p: &mut Parser<'_>) -> CompletedMarker {
         | SyntaxKind::STRING
         | SyntaxKind::TRUE_KW
         | SyntaxKind::FALSE_KW => literal_expr(p),
+        // r[expr.bomb] — the demand-driven tripwire literal
+        SyntaxKind::BOMB => bomb_expr(p),
         _ => p.diagnose_and_bump(ExpectedKind::Expression),
     }
+}
+
+// r[expr.bomb]
+fn bomb_expr(p: &mut Parser<'_>) -> CompletedMarker {
+    let marker = p.start();
+    p.expect(SyntaxKind::BOMB);
+    marker.complete(p, SyntaxKind::BOMB_EXPR)
+}
+
+// r[expr.index] — the selector inside `recv[...]`.
+fn index_selector(p: &mut Parser<'_>) {
+    p.expect(SyntaxKind::L_BRACKET);
+    if !p.at(SyntaxKind::R_BRACKET) {
+        expr(p);
+    }
+    p.expect(SyntaxKind::R_BRACKET);
 }
 
 fn symbol_literal_expr(p: &mut Parser<'_>) -> CompletedMarker {
@@ -2030,6 +2058,7 @@ fn starts_expr(kind: SyntaxKind) -> bool {
             | SyntaxKind::STRING
             | SyntaxKind::TRUE_KW
             | SyntaxKind::FALSE_KW
+            | SyntaxKind::BOMB
     )
 }
 

@@ -132,6 +132,11 @@ pub enum ExprKind {
     /// A fail expression: `fail "message"` or `fail expr`.
     Fail(FailExpr),
 
+    /// The bomb literal `💣`: a bottom-typed value that detonates (poisons) the
+    /// instant it is forced. Demand-driven tripwire — `Ty::Poison`, fits any
+    /// position, never reached unless the evaluator over-forces.
+    Bomb,
+
     /// An error recovery node. Produced when the CST contains a broken or
     /// unparseable expression. Carries any child expressions that were
     /// successfully parsed, so the type checker can still process them.

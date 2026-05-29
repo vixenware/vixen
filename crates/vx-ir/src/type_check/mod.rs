@@ -150,6 +150,8 @@ impl<'a> TypeChecker<'a> {
             ExprKind::With(ref w) => special::infer_with(self, w),
             ExprKind::Fallible(ref f) => special::infer_fallible(self, f),
             ExprKind::Fail(ref f) => special::infer_fail(self, f),
+            // r[expr.bomb] — bottom type, fits any position.
+            ExprKind::Bomb => self.poison(),
             ExprKind::Range(_) => special::infer_range(self, expr_id),
             ExprKind::TypeOp(ref top) => special::infer_type_op(self, top),
             ExprKind::Import(_) => self.poison(),

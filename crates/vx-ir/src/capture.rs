@@ -78,6 +78,7 @@ fn visit_expr(
 ) {
     let kind = arena[expr_id].kind.clone();
     match kind {
+        ExprKind::Bomb => {}
         ExprKind::NameRef(nr) => {
             if let Some(DefTarget::Binding(bid)) = nr.resolved {
                 let binding_body = arena[bid].body;

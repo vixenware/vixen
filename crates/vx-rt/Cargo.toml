@@ -14,3 +14,6 @@ rustdoc-args = ["--html-in-header", "arborium-header.html"]
 vx-ir = { path = "../vx-ir" }
 thiserror = "2"
 
+[dev-dependencies]
+vx-parser = { path = "../vx-parser" }
+

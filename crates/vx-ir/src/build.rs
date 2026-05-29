@@ -1116,6 +1116,7 @@ impl VirBuilder {
             vx_parser::Expr::With(w) => self.build_with_expr(w),
             vx_parser::Expr::Fallible(f) => self.build_fallible_expr(f),
             vx_parser::Expr::Fail(f) => self.build_fail_expr(f),
+            vx_parser::Expr::Bomb(b) => self.build_bomb_expr(b),
             vx_parser::Expr::InterpolatedString(is) => self.build_interpolated_string_expr(is),
             vx_parser::Expr::PathLiteral(pl) => self.build_path_literal_expr(pl),
             vx_parser::Expr::Import(i) => self.build_import_expr(i),
@@ -2154,6 +2155,32 @@ impl VirBuilder {
             .receiver()
             .map(|r| self.build_expr(&r))
             .unwrap_or_else(|| self.error_expr(idx_span));
+
+        // A bare integer selector `recv[0]` is positional (tuple) projection.
+        // Normalize it to a `FieldExpr { Index }` so it shares all the
+        // static-resolution / demand / lowering machinery with `recv._0`.
+        if let Some(index_ast) = idx.index()
+            && let vx_parser::Expr::Literal(lit) = &index_ast
+            && let Some(tok) = lit.token()
+            && tok.kind() == SyntaxKind::INT
+            && let Ok(n) = tok.text().parse::<u32>()
+        {
+            let key_span = self.span(index_ast.syntax());
+            return self.arena.alloc_expr(Expr {
+                span: idx_span,
+                body: self.current_body(),
+                scope: self.current_scope(),
+                kind: ExprKind::Field(VirFieldExpr {
+                    receiver,
+                    field: FieldKey::Index(n),
+                    field_span: key_span,
+                }),
+                ty: None,
+            });
+        }
+
+        // General computed selection (filter, map, key lookup, …) — surface
+        // exists, lowering is the next increment.
         let index = idx
             .index()
             .map(|i| self.build_expr(&i))
@@ -2164,6 +2191,17 @@ impl VirBuilder {
             body: self.current_body(),
             scope: self.current_scope(),
             kind: ExprKind::Index(VirIndexExpr { receiver, index }),
+            ty: None,
+        })
+    }
+
+    fn build_bomb_expr(&mut self, b: &vx_parser::BombExpr) -> ExprId {
+        let span = self.span(b.syntax());
+        self.arena.alloc_expr(Expr {
+            span,
+            body: self.current_body(),
+            scope: self.current_scope(),
+            kind: ExprKind::Bomb,
             ty: None,
         })
     }

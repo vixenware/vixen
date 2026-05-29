@@ -591,7 +591,7 @@ fn build(
 }
 
 #[test]
-fn tight_brackets_do_not_parse_as_calls() {
+fn tight_brackets_parse_as_index_not_call() {
     let parse = parse(
         r#"
 fn build(items: Stream[Blob]) {
@@ -599,10 +599,17 @@ fn build(items: Stream[Blob]) {
 }
 "#,
     );
+    assert!(parse.errors().is_empty(), "tight `items[0]` should parse");
+    let kinds = parse
+        .syntax()
+        .descendants()
+        .map(|node| node.kind())
+        .collect::<Vec<_>>();
     assert!(
-        !parse.errors().is_empty(),
-        "tight brackets should not be treated as a call payload"
+        kinds.contains(&SyntaxKind::INDEX_EXPR),
+        "tight brackets are a computed selection, not a call"
     );
+    assert!(!kinds.contains(&SyntaxKind::CALL_EXPR));
 }
 
 #[test]

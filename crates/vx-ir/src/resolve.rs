@@ -138,6 +138,7 @@ fn resolve_expr(
     let scope = arena[expr_id].scope;
 
     match kind {
+        ExprKind::Bomb => {}
         ExprKind::NameRef(nr) => {
             resolve_name_ref(arena, expr_id, &nr.name, scope, ref_order, errors);
         }

@@ -408,6 +408,7 @@ impl<'a, 'ctx> VirBodyLowering<'a, 'ctx> {
             ExprKind::Prefix(pre) => self.lower_prefix(expr_id, &pre),
             ExprKind::If(if_) => self.lower_if(expr_id, &if_),
             ExprKind::Fail(fail) => self.lower_fail(expr_id, &fail),
+            ExprKind::Bomb => self.lower_bomb(expr_id),
             ExprKind::InterpolatedString(is) => self.lower_interpolated_string(expr_id, &is),
             ExprKind::Call(call) => self.lower_call(expr_id, &call),
 
@@ -666,6 +667,20 @@ impl<'a, 'ctx> VirBodyLowering<'a, 'ctx> {
             dst,
             source: self.source_for(expr_id),
             message,
+        });
+        Ok(Operand::Slot(dst))
+    }
+
+    // -----------------------------------------------------------------------
+    // Bomb (💣) — the demand-driven tripwire
+    // -----------------------------------------------------------------------
+
+    fn lower_bomb(&mut self, expr_id: ExprId) -> Result<Operand, LowerError> {
+        let dst = self.alloc_typed_temp(expr_id);
+        self.ops.push(KernelOp::AssignLazyPoison {
+            dst,
+            source: self.source_for(expr_id),
+            label: "💣".into(),
         });
         Ok(Operand::Slot(dst))
     }

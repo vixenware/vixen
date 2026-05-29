@@ -708,6 +708,7 @@ impl CapChecker<'_> {
     fn child_exprs(&self, expr_id: ExprId) -> Vec<ExprId> {
         let kind = &self.arena[expr_id].kind;
         match kind {
+            ExprKind::Bomb => vec![],
             ExprKind::Binary(bin) => vec![bin.lhs, bin.rhs],
             ExprKind::Prefix(pre) => vec![pre.operand],
             ExprKind::Field(f) => vec![f.receiver],

@@ -1,0 +1,38 @@
+// Group A — the demand-driven basis: the bomb must never be forced.
+//
+// 💣 is a bottom-typed value that detonates the instant it is forced. Dropped
+// into a position demand-driven evaluation must never reach, it is the
+// tripwire: if the evaluator over-forces, the bomb goes off and the test fails
+// loudly — and you can see it sitting in the road not taken.
+
+struct Pair { a: U64, b: U64 }
+struct Outer { a: Pair, b: U64 }
+
+// Tuple field = positional [index], not ._0. The dead sibling holds the bomb.
+#[test]
+fn unused_tuple_field_never_runs() (
+    let pair = (42, 💣);
+    assert_eq(pair[0], 42)
+)
+
+// Named struct field = declared member, .a. The undemanded field holds the bomb.
+#[test]
+fn unused_struct_field_never_runs() (
+    let s = Pair { a: 42, b: 💣 };
+    assert_eq(s.a, 42)
+)
+
+// Only the projected position is forced — every other slot is a bomb.
+#[test]
+fn chained_projection_skips_dead_siblings() (
+    let outer = ((7, 💣), (💣, 💣));
+    assert_eq(outer[0][0], 7)
+)
+
+// Deep named-field projection: only the spine to `.a.a` is demanded; every
+// off-spine field is a bomb.
+#[test]
+fn deep_named_field_projection() (
+    let s = Outer { a: Pair { a: 42, b: 💣 }, b: 💣 };
+    assert_eq(s.a.a, 42)
+)
