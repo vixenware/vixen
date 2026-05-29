@@ -12,7 +12,9 @@ else waits here until it survives more stress-testing.
 - **`.name`** — `name` is a member the value's *own type declares* (a struct
   field), statically known. `point.x`, `artifact.emit`, `proc.exit_code` (a
   field, possibly pending — `exit_code` is unavailable until exit, still a field
-  not a method).
+  not a method). **Tuple fields are positional**, so they are `[ ]`, not `.`:
+  `pair[0]`, `pair[1]` — never `._0`. (Rust's `.0` works around a type system
+  that can't index tuples; Vixen can, so positional access is just `[index]`.)
 - **`[selector]`** — a *computed selection from a container*. The left operand is
   always the container; the selector's kind decides the operation.
 
