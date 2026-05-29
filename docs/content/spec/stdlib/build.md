@@ -137,9 +137,9 @@ model, but they are not part of the core language syntax.
 >
 > `tree.file(path)` returns the `Blob` at the given relative path within
 > the tree, and **poisons** if the path does not exist or points to a
-> directory. `tree.find(path)` is the recoverable form: it returns
-> `Option[Blob]` — `None` if the path is absent (still poisons if the
-> path resolves to a directory).
+> directory. `tree.file?(path)` is the auto-derived recoverable form
+> (`r[error.option]`): `Option[Blob]`, `None` if the path is absent (still
+> poisons if the path resolves to a directory).
 
 > r[store.path]
 >
@@ -437,7 +437,7 @@ model, but they are not part of the core language syntax.
 >
 > The sandbox write-set `Tree` an observer receives is **incrementally
 > available**: an entry resolves when the process finalizes that file, not
-> when the process exits. So `tree.find("out/libC.rmeta")` can resolve
+> when the process exits. So `tree["out/libC.rmeta"]` can resolve
 > mid-execution, and a dependent exec demanding it pipelines against the
 > still-running producer. Finalization is a runtime signal (file close /
 > atomic rename); where that is unreliable, the package detects it from the
@@ -524,9 +524,10 @@ model, but they are not part of the core language syntax.
 > ```
 >
 > These operations are read-only and deterministic with respect to the
-> concrete executor instance. `host.which(name)` returns `Option[String]`
-> — `None` if the tool isn't found, since probing for presence is
-> inherently recoverable. `host.hash(path)` uses Blake3 and records the
+> concrete executor instance. `host.which(name)` poisons if the tool
+> isn't found; the probe form `host.which?(name)` returns `Option[String]`
+> (`None` if absent) and is what presence-checks use. `host.hash(path)`
+> uses Blake3 and records the
 > observed host fact. `host.exec(args)` runs a tool and returns a small
 > `HostOutput` (captured output bytes and exit code) — deliberately
 > narrower than the observer's `Process`, to keep the recorded obligation
@@ -712,9 +713,10 @@ model, but they are not part of the core language syntax.
 > r[string.parse]
 >
 > `s.parse_u64()`, `s.parse_i64()`, and `s.parse_f64()` parse strings to
-> numbers, returning `Option` — `None` on invalid input, since parsing
-> external text is a recoverable outcome to branch on. Use `.unwrap()`
-> (poisons on `None`) where a valid number is required.
+> numbers and **poison** on invalid input. The auto-derived `?` variants
+> `s.parse_u64?()`, `s.parse_i64?()`, `s.parse_f64?()` return `Option`
+> (`None` on invalid input) for parsing external text you mean to branch on
+> (`r[error.option]`).
 
 > r[string.regex]
 >

@@ -155,7 +155,9 @@ weight = 20
 >
 > Pipe: `|>` (free-function / pipeline chaining).
 >
-> Other: `?` (Option type sugar `T?`, and part of the `as?` conversion), `@`
+> Other: `?` (Option type sugar `T?`; and the fallible-variant suffix —
+> `f?` is the auto-derived `Option`-returning form of a poisoning `f`,
+> including `as?`), `@`
 > (pattern binding), `#` (attribute opener in `#[...]`),
 > `:` (named slots — type annotations and field-value pairs), `::`
 > (expression-level type ascription, distinct from `as` conversion).
@@ -1539,23 +1541,24 @@ weight = 20
 
 > r[comb.next]
 >
-> `.next()` returns the first element to resolve from a `Stream[T]` as an
-> `Option[T]` — `None` if the stream completes cleanly with no elements.
-> If multiple elements may resolve, the chosen element is whichever
-> resolves first. Use `.next()` only when that race is semantically
-> intended or when the stream is known to contain at most one element.
+> `.next()` returns the first element to resolve from a `Stream[T]` and
+> **poisons** if the stream completes cleanly with no elements; `.next?()`
+> is the auto-derived `Option[T]` form (`None` on empty), per
+> `r[error.option]`. If multiple elements may resolve, the chosen element
+> is whichever resolves first — use `.next` only when that race is
+> semantically intended or the stream holds at most one element.
 
 > r[comb.only]
 >
-> `.only()` returns the sole element of a stream as an `Option[T]` —
-> `None` if the stream is empty, the element if there is exactly one. It
-> surfaces that element **on arrival** (it does not wait for the stream to
-> end), under an author-asserted **uniqueness contract**: at most one
-> element is expected, and a second poisons. Because the result is *the*
-> element rather than "whichever raced first," it is order-independent and
-> deterministic — early and cacheable at once. (When a stream is naturally
-> keyed, `by(key).get(k)` is the checkable alternative: deterministic by
-> key lookup rather than by contract.)
+> `.only()` returns the sole element of a stream, surfaced **on arrival**
+> (it does not wait for the stream to end) under an author-asserted
+> **uniqueness contract**: at most one element is expected. It **poisons**
+> on empty or on a second element; `.only?()` is the auto-derived
+> `Option[T]` form (`None` on empty), per `r[error.option]`. Because the
+> result is *the* element rather than "whichever raced first," it is
+> order-independent and deterministic — early and cacheable at once. (When
+> a stream is naturally keyed, `by(key).get(k)` is the checkable
+> alternative: deterministic by key lookup rather than by contract.)
 
 > r[comb.determinism]
 >
@@ -1741,25 +1744,26 @@ weight = 20
 
 > r[error.option]
 >
-> There is **no `?` poison-recovery operator.** A postfix `?` that caught
-> poison and yielded `Option` was considered and rejected: it silently
-> swallows Diagnostics and hides recoverable failure from type signatures.
-> Instead, fallibility is expressed by the operation's return type:
+> A fallible function `f` **poisons** on failure — the assertive form, for
+> when failure means the build is malformed and there is nothing useful to
+> recover to; the poison propagates and callers do nothing. Its **`?`
+> variant `f?` is auto-derived** and returns `Option[T]` instead of
+> poisoning — the recoverable form, for a probe, an optional lookup, or a
+> parse of external text. So `tree.file` poisons while `tree.file?` is
+> `Option`; `parse_u64` poisons while `parse_u64?` is `Option`; `.only`
+> poisons while `.only?` is `Option`. One convention — no hand-named
+> sibling per operation.
 >
-> - An operation poisons when failure means the build is malformed — a
->   declared input is missing or invalid, with nothing useful to recover
->   to. Callers do nothing special; the poison propagates.
-> - An operation returns `Option[T]` when failure is a normal outcome to
->   branch on — a probe, an optional lookup, a parse of external text.
->   Recoverability is then visible in the signature.
+> `?` suffixes a fallible function's **name**; it is **not** a postfix on
+> an arbitrary expression. There is no blanket "catch any poison" operator
+> — that was considered and rejected because it silently swallows
+> Diagnostics and hides recoverable failure. `f?` exists only where `f` is
+> fallible, so recoverability stays visible in the signature.
 >
-> Where both uses are real, the poisoning operation is primary and an
-> `Option`-returning sibling serves recovery (e.g. `tree.file` poisons,
-> `tree.find` returns `Option`). `Option` composes with `match`,
-> `.unwrap_or`, `.map`, `.and_then`; `.unwrap()` / `.expect msg` poison on
-> `None` for the assert-it's-present path. `as?` (fallible *conversion* to
-> `Option`, see [r[type.as-fallible]](#)) is unaffected — it is
-> Option-by-design, not poison-catching.
+> `Option` composes with `match`, `.unwrap_or`, `.map`, `.and_then`;
+> `.unwrap` / `.expect msg` poison on `None` for the assert path. `as?` is
+> the same suffix applied to a conversion: `as` poisons, `as?` yields
+> `Option`.
 
 ## Streams
 
