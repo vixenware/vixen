@@ -14,7 +14,7 @@ use std::time::Duration;
 use figue as args;
 use vx_services::{
     Blake3Hash, DAEMON_SOCK, DaemonClient, EvalFunctionRequest, EvalFunctionResult, EvalOutcome,
-    EvalProgressEvent, Event, EventBody, OrchestratorClient, RunTestsRequest, RuntimeValue,
+    EvalProgressEvent, Event, EventBody, OrchestratorClient, Phase, RunTestsRequest, RuntimeValue,
     TestRunnerClient, TestSource, Verdict,
 };
 use vx_vfsd::protocol::VfsdClient;
@@ -446,23 +446,47 @@ async fn test(args: TestArgs) -> eyre::Result<()> {
 
     let (events_tx, mut events_rx) = vox::channel::<Event>();
     let reporter = tokio::spawn(async move {
+        // Compile-phase timings (ns) collected per case span, drained on finish.
+        let mut phases: std::collections::BTreeMap<u64, Vec<(Phase, u64)>> =
+            std::collections::BTreeMap::new();
         let mut failed = 0u64;
         while let Ok(Some(item)) = events_rx.recv().await {
             let event = item.get();
+            let span = event.span.0;
             match &event.body {
+                EventBody::PhaseFinished {
+                    phase, duration_ns, ..
+                } => {
+                    phases.entry(span).or_default().push((*phase, *duration_ns));
+                }
                 EventBody::CaseFinished {
                     id,
                     verdict,
                     terminal,
                     ..
-                } => match verdict {
-                    Verdict::Pass => println!("  ok    {}::{}", id.path, id.function),
-                    Verdict::Fail => {
-                        failed += 1;
-                        println!("  FAIL  {}::{}", id.path, id.function);
-                        report_outcome(terminal);
+                } => {
+                    let timings = phases.remove(&span).unwrap_or_default();
+                    match verdict {
+                        Verdict::Pass => {
+                            println!(
+                                "  ok    {}::{}  {}",
+                                id.path,
+                                id.function,
+                                fmt_phases(&timings)
+                            );
+                        }
+                        Verdict::Fail => {
+                            failed += 1;
+                            println!(
+                                "  FAIL  {}::{}  {}",
+                                id.path,
+                                id.function,
+                                fmt_phases(&timings)
+                            );
+                            report_outcome(terminal);
+                        }
                     }
-                },
+                }
                 EventBody::RunFinished {
                     passed,
                     failed: f,
@@ -485,6 +509,32 @@ async fn test(args: TestArgs) -> eyre::Result<()> {
         eyre::bail!("{failed} test(s) failed");
     }
     Ok(())
+}
+
+/// Compact one-line phase-timing breakdown, e.g.
+/// `(parse 0.4 · resolve 1.1 · check 0.3 · cap 0.0 · demand 0.1 · lower 0.2 ms)`.
+fn fmt_phases(phases: &[(Phase, u64)]) -> String {
+    if phases.is_empty() {
+        return String::new();
+    }
+    let parts: Vec<String> = phases
+        .iter()
+        .map(|(phase, ns)| {
+            let label = match phase {
+                Phase::Lex => "lex",
+                Phase::Parse => "parse",
+                Phase::NameResolve => "resolve",
+                Phase::TypeCheck => "check",
+                Phase::CapabilityCheck => "cap",
+                Phase::DemandGraph => "demand",
+                Phase::Lower => "lower",
+                Phase::Jit => "jit",
+                Phase::Evaluate => "eval",
+            };
+            format!("{label} {:.1}", *ns as f64 / 1_000_000.0)
+        })
+        .collect();
+    format!("({} ms)", parts.join(" · "))
 }
 
 /// Render a failing case's terminal outcome below its `FAIL` line.

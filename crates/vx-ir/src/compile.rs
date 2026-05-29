@@ -4,9 +4,10 @@
 //! the full VIR semantic pipeline.
 
 use std::fmt;
+use std::time::{Duration, Instant};
 
 use crate::exec_types::ExecutableProgram;
-use vx_parser::SourceId;
+use vx_parser::{AstNode, SourceId};
 use vx_types::TypeEnv;
 
 use crate::build::VirBuilder;
@@ -110,15 +111,46 @@ pub fn inject_implicit_stdlib_imports(program: &mut crate::build::VirProgram) {
 ///
 /// The returned `ExecutableProgram` has `program.entry` set to the body of
 /// `function_name` in the primary source unit.
+/// Observes compilation-pipeline phases as they complete, with timing and
+/// best-effort counts. This is the *emission seam* on the compiler side: a
+/// deeply-nested phase reports through these callbacks without the compiler
+/// knowing anything about how (or whether) it is surfaced. All methods default
+/// to no-ops, so non-observing callers pay nothing.
+pub trait CompileObserver {
+    fn parsed(&mut self, _elapsed: Duration, _cst_nodes: u64, _bytes: u64) {}
+    fn name_resolved(&mut self, _elapsed: Duration) {}
+    fn type_checked(&mut self, _elapsed: Duration) {}
+    fn capability_checked(&mut self, _elapsed: Duration) {}
+    fn demand_analyzed(&mut self, _elapsed: Duration) {}
+    fn lowered(&mut self, _elapsed: Duration, _bodies: u64, _kernel_ops: u64) {}
+}
+
+/// A `CompileObserver` that ignores everything.
+pub struct NoopObserver;
+impl CompileObserver for NoopObserver {}
+
 pub fn compile_source(
     source: &str,
     function_name: &str,
 ) -> Result<ExecutableProgram, CompileError> {
+    compile_source_observed(source, function_name, &mut NoopObserver)
+}
+
+/// Like [`compile_source`], but reports each pipeline phase to `observer` as it
+/// completes.
+pub fn compile_source_observed(
+    source: &str,
+    function_name: &str,
+    observer: &mut dyn CompileObserver,
+) -> Result<ExecutableProgram, CompileError> {
     // Parse user source — short-circuit on errors.
+    let t = Instant::now();
     let parsed = vx_parser::parse_source_file(source, SourceId(0));
     if !parsed.errors().is_empty() {
         return Err(CompileError::Parse(parsed.errors().to_vec()));
     }
+    let cst_nodes = parsed.tree().syntax().descendants().count() as u64;
+    observer.parsed(t.elapsed(), cst_nodes, source.len() as u64);
 
     // Parse stdlib sources (trusted — panic on errors).
     let mut sources: Vec<(SourceId, vx_parser::SourceFile)> = vec![(SourceId(0), parsed.tree())];
@@ -134,11 +166,11 @@ pub fn compile_source(
         sources.push((stdlib_id, stdlib_parsed.tree()));
     }
 
-    // Build VIR.
+    // Build VIR + collect types + resolve names. (Bundled under name
+    // resolution — VIR construction has no separate protocol phase.)
+    let t = Instant::now();
     let mut program = VirBuilder::build_program(&sources);
     inject_implicit_stdlib_imports(&mut program);
-
-    // Semantic passes.
     let mut types = collect_types_vir(&mut program.arena);
     let resolve_errors = resolve_names(&mut program.arena);
     if !resolve_errors.is_empty() {
@@ -147,6 +179,9 @@ pub fn compile_source(
             env: Box::new(types.env),
         });
     }
+    observer.name_resolved(t.elapsed());
+
+    let t = Instant::now();
     let tc_result = type_check_vir(&mut program.arena, &mut types);
     if !tc_result.errors.is_empty() {
         return Err(CompileError::Type {
@@ -154,6 +189,9 @@ pub fn compile_source(
             env: Box::new(types.env),
         });
     }
+    observer.type_checked(t.elapsed());
+
+    let t = Instant::now();
     let cap_result = check_capabilities_vir(&program.arena, &types, &tc_result);
     if !cap_result.errors.is_empty() {
         return Err(CompileError::Capability {
@@ -161,6 +199,7 @@ pub fn compile_source(
             env: Box::new(types.env),
         });
     }
+    observer.capability_checked(t.elapsed());
     analyze_captures(&mut program.arena);
 
     // Find entry body by name in primary source unit (first match by item order).
@@ -184,8 +223,14 @@ pub fn compile_source(
         .ok_or_else(|| CompileError::MissingEntry(function_name.to_owned()))?;
 
     // Demand analysis + lowering.
+    let t = Instant::now();
     let demand = analyze_demand_for_entry(&program, entry_body);
+    observer.demand_analyzed(t.elapsed());
+
+    let t = Instant::now();
     let program = lower_vir_program(&program, &demand).map_err(CompileError::Lowering)?;
+    let kernel_ops: u64 = program.bodies.values().map(|b| b.ops.len() as u64).sum();
+    observer.lowered(t.elapsed(), program.bodies.len() as u64, kernel_ops);
     Ok(program)
 }
 

@@ -61,6 +61,23 @@ impl OrchestratorService {
         function_name: &str,
         args: &[RuntimeValue],
     ) -> Result<EvalOutput, RuntimeEvalError> {
+        self.eval_raw_observed(
+            source,
+            function_name,
+            args,
+            &mut vx_ir::compile::NoopObserver,
+        )
+        .await
+    }
+
+    /// Like [`eval_raw`], but reports compile phases to `observer`.
+    pub async fn eval_raw_observed(
+        &self,
+        source: &str,
+        function_name: &str,
+        args: &[RuntimeValue],
+        observer: &mut (dyn vx_ir::compile::CompileObserver + Send),
+    ) -> Result<EvalOutput, RuntimeEvalError> {
         evaluate_source_text_function(
             &RuntimeEvalContext {
                 store: self.store.clone(),
@@ -72,6 +89,7 @@ impl OrchestratorService {
                 args,
             },
             None,
+            observer,
         )
         .await
     }
@@ -92,6 +110,7 @@ impl OrchestratorService {
             },
             eval_request,
             None,
+            &mut vx_ir::compile::NoopObserver,
         )
         .await
         {
@@ -135,6 +154,7 @@ impl OrchestratorService {
             },
             eval_request,
             progress,
+            &mut vx_ir::compile::NoopObserver,
         )
         .await
         {

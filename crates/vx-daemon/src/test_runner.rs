@@ -13,14 +13,16 @@
 
 use std::sync::Arc;
 use std::sync::atomic::{AtomicU64, Ordering};
-use std::time::{Instant, SystemTime, UNIX_EPOCH};
+use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
 use futures_util::StreamExt;
+use tokio::sync::mpsc::UnboundedSender;
 use vox::Tx;
 use vx_parser::{Item, SourceId, parse_source_file};
 use vx_services::{
-    EvalOutcome, Event, EventBody, ExecutorId, Expectation, HostInfo, RunSummary, RunTestsRequest,
-    RuntimeValue, SpanId, TestId, TestRunner, TestSource, TypedValue, Verdict,
+    EvalOutcome, Event, EventBody, ExecutorId, Expectation, HostInfo, Phase, PhaseDetail,
+    RunSummary, RunTestsRequest, RuntimeValue, SpanId, TestId, TestRunner, TestSource, TypedValue,
+    Verdict,
 };
 
 use crate::orchestrator::OrchestratorService;
@@ -197,58 +199,159 @@ fn local_host() -> HostInfo {
     }
 }
 
-/// Emit one event, stamped with the run-global sequence and clocks.
-async fn emit(events: &Tx<Event>, seq: &AtomicU64, start: Instant, body: EventBody) {
-    let event = Event {
-        seq: seq.fetch_add(1, Ordering::Relaxed),
-        at_ns: start.elapsed().as_nanos() as u64,
-        wall_unix_nanos: SystemTime::now()
-            .duration_since(UNIX_EPOCH)
-            .map(|d| d.as_nanos() as u64)
-            .unwrap_or(0),
-        executor: ExecutorId(0),
-        span: SpanId(0),
-        parent: None,
-        body,
-    };
-    let _ = events.send(event).await;
+/// A synchronous, cloneable event sink. Events born deep in synchronous code
+/// (compile phases) can't `.await` a vox `Tx`, so everything funnels through an
+/// unbounded channel here; a single async forwarder drains it to the wire. This
+/// is the daemon side of the emission seam: one push point, sync, shareable.
+#[derive(Clone)]
+struct EventSink {
+    tx: UnboundedSender<Event>,
+    seq: Arc<AtomicU64>,
+    start: Instant,
+}
+
+impl EventSink {
+    fn emit(&self, span: SpanId, body: EventBody) {
+        let event = Event {
+            seq: self.seq.fetch_add(1, Ordering::Relaxed),
+            at_ns: self.start.elapsed().as_nanos() as u64,
+            wall_unix_nanos: SystemTime::now()
+                .duration_since(UNIX_EPOCH)
+                .map(|d| d.as_nanos() as u64)
+                .unwrap_or(0),
+            executor: ExecutorId(0),
+            span,
+            parent: None,
+            body,
+        };
+        let _ = self.tx.send(event);
+    }
+}
+
+/// Bridges the compiler's `CompileObserver` callbacks onto the firehose, tagging
+/// every phase event with the case's span so reporters can attribute them.
+struct PhaseEmitter {
+    sink: EventSink,
+    span: SpanId,
+}
+
+impl PhaseEmitter {
+    fn finish(&self, phase: Phase, elapsed: Duration, detail: PhaseDetail) {
+        self.sink.emit(self.span, EventBody::PhaseStarted { phase });
+        self.sink.emit(
+            self.span,
+            EventBody::PhaseFinished {
+                phase,
+                duration_ns: elapsed.as_nanos() as u64,
+                detail,
+            },
+        );
+    }
+}
+
+impl vx_ir::compile::CompileObserver for PhaseEmitter {
+    fn parsed(&mut self, elapsed: Duration, cst_nodes: u64, _bytes: u64) {
+        self.finish(
+            Phase::Parse,
+            elapsed,
+            PhaseDetail::Parse {
+                cst_nodes,
+                errors: 0,
+            },
+        );
+    }
+    fn name_resolved(&mut self, elapsed: Duration) {
+        self.finish(
+            Phase::NameResolve,
+            elapsed,
+            PhaseDetail::NameResolve {
+                bindings: 0,
+                unresolved: 0,
+            },
+        );
+    }
+    fn type_checked(&mut self, elapsed: Duration) {
+        self.finish(
+            Phase::TypeCheck,
+            elapsed,
+            PhaseDetail::TypeCheck {
+                inferences: 0,
+                errors: 0,
+            },
+        );
+    }
+    fn capability_checked(&mut self, elapsed: Duration) {
+        self.finish(
+            Phase::CapabilityCheck,
+            elapsed,
+            PhaseDetail::CapabilityCheck { required: vec![] },
+        );
+    }
+    fn demand_analyzed(&mut self, elapsed: Duration) {
+        self.finish(
+            Phase::DemandGraph,
+            elapsed,
+            PhaseDetail::DemandGraph {
+                nodes: 0,
+                edges: 0,
+                lazy_fields: 0,
+                reachable_bodies: 0,
+            },
+        );
+    }
+    fn lowered(&mut self, elapsed: Duration, bodies: u64, kernel_ops: u64) {
+        self.finish(
+            Phase::Lower,
+            elapsed,
+            PhaseDetail::Lower { bodies, kernel_ops },
+        );
+    }
 }
 
 impl TestRunner for TestRunnerService {
     async fn run_tests(&self, request: RunTestsRequest, events: Tx<Event>) -> RunSummary {
         let start = Instant::now();
-        let seq = Arc::new(AtomicU64::new(0));
-        let events = Arc::new(events);
+
+        // The emission seam: synchronous code pushes onto this unbounded
+        // channel; one async forwarder drains it to the vox `Tx`.
+        let (raw_tx, mut raw_rx) = tokio::sync::mpsc::unbounded_channel::<Event>();
+        let forwarder = tokio::spawn(async move {
+            while let Some(event) = raw_rx.recv().await {
+                let _ = events.send(event).await;
+            }
+        });
+        let sink = EventSink {
+            tx: raw_tx,
+            seq: Arc::new(AtomicU64::new(0)),
+            start,
+        };
 
         let cases = discover(&request.sources);
         let discovered: Vec<TestId> = cases.iter().map(|c| c.id.clone()).collect();
 
-        emit(
-            &events,
-            &seq,
-            start,
+        sink.emit(
+            SpanId(0),
             EventBody::RunStarted {
                 discovered,
                 runner_host: local_host(),
             },
-        )
-        .await;
+        );
 
-        let verdicts: Vec<Verdict> = futures_util::stream::iter(cases)
-            .map(|case| {
-                let events = Arc::clone(&events);
-                let seq = Arc::clone(&seq);
+        let verdicts: Vec<Verdict> = futures_util::stream::iter(cases.into_iter().enumerate())
+            .map(|(index, case)| {
+                // Per-case span (1-based; 0 is the run itself) ties every phase
+                // event for this case back to it, even under interleaving.
+                let span = SpanId(index as u64 + 1);
+                let sink = sink.clone();
                 let this = self.clone();
                 async move {
-                    emit(
-                        &events,
-                        &seq,
-                        start,
+                    sink.emit(
+                        span,
                         EventBody::CaseStarted {
                             id: case.id.clone(),
                             expectation: case.expectation,
-                            // Closure capture (content-addressed source) lands
-                            // with the store-backed emission seam; omitted here.
+                            // Content-addressed source closure lands with the
+                            // store-backed seam; omitted here.
                             closure: None,
                             topology: vx_services::Topology {
                                 executors: vec![vx_services::ExecutorSpec {
@@ -257,30 +360,30 @@ impl TestRunner for TestRunnerService {
                                 }],
                             },
                         },
-                    )
-                    .await;
+                    );
 
                     let case_start = Instant::now();
+                    let mut emitter = PhaseEmitter {
+                        sink: sink.clone(),
+                        span,
+                    };
                     let result = this
                         .orchestrator
-                        .eval_raw(&case.source, &case.function, &[])
+                        .eval_raw_observed(&case.source, &case.function, &[], &mut emitter)
                         .await
                         .map(|out| out.value);
                     let outcome = outcome_of(result, &case.source);
                     let verdict = verdict_of(case.expectation, &outcome);
 
-                    emit(
-                        &events,
-                        &seq,
-                        start,
+                    sink.emit(
+                        span,
                         EventBody::CaseFinished {
                             id: case.id.clone(),
                             verdict,
                             terminal: outcome,
                             wall_ms: case_start.elapsed().as_millis() as u64,
                         },
-                    )
-                    .await;
+                    );
 
                     verdict
                 }
@@ -296,18 +399,19 @@ impl TestRunner for TestRunnerService {
         let failed = verdicts.len() as u64 - passed;
         let wall_ms = start.elapsed().as_millis() as u64;
 
-        emit(
-            &events,
-            &seq,
-            start,
+        sink.emit(
+            SpanId(0),
             EventBody::RunFinished {
                 passed,
                 failed,
                 errored: 0,
                 wall_ms,
             },
-        )
-        .await;
+        );
+
+        // Close the sink so the forwarder drains and exits before we return.
+        drop(sink);
+        let _ = forwarder.await;
 
         RunSummary {
             passed,

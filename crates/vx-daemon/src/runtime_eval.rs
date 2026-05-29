@@ -172,8 +172,12 @@ pub async fn evaluate_source_text_function(
     context: &RuntimeEvalContext,
     request: EvalRequest<'_>,
     progress: Option<Tx<EvalProgressEvent>>,
+    observer: &mut (dyn vx_ir::compile::CompileObserver + Send),
 ) -> Result<EvalOutput, RuntimeEvalError> {
-    let program = vx_ir::compile::compile_source(request.source, request.function_name)?;
+    // The observer is used only during this synchronous compile — it is dead
+    // before the first `.await` below, so the future stays `Send`.
+    let program =
+        vx_ir::compile::compile_source_observed(request.source, request.function_name, observer)?;
     let body_id = program.entry;
 
     let eval_args = request
