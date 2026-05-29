@@ -94,10 +94,10 @@ pub(crate) struct TestArgs {
     #[facet(args::named)]
     pub(crate) fresh_daemon: bool,
 
-    /// Files or directories to search for `.vx` tests. Defaults to the current
+    /// File or directory to search for `.vx` tests. Defaults to the current
     /// directory, searched recursively.
     #[facet(args::positional)]
-    pub(crate) paths: Option<Vec<String>>,
+    pub(crate) path: Option<String>,
 }
 
 #[derive(Facet, Debug)]

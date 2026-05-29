@@ -432,14 +432,12 @@ async fn eval_invocation(args: EvalInvocation) -> eyre::Result<()> {
 }
 
 async fn test(args: TestArgs) -> eyre::Result<()> {
-    let paths = args.paths.unwrap_or_else(|| vec![".".to_string()]);
+    let path = args.path.unwrap_or_else(|| ".".to_string());
     let mut sources = Vec::new();
-    for p in &paths {
-        collect_vx_sources(std::path::Path::new(p), &mut sources)?;
-    }
+    collect_vx_sources(std::path::Path::new(&path), &mut sources)?;
     sources.sort_by(|a, b| a.path.cmp(&b.path));
     if sources.is_empty() {
-        eyre::bail!("no .vx files found under {paths:?}");
+        eyre::bail!("no .vx files found under {path}");
     }
 
     let daemon = ensure_daemon_available(&args.target, args.fresh_daemon).await?;
