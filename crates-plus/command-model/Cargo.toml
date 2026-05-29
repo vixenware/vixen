@@ -1,0 +1,16 @@
+[package]
+name = "command-model"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+description = "Describe a CLI tool's argument grammar; parse an argv into structure and reduce it to a canonical, content-addressable form."
+
+[package.metadata]
+
+[package.metadata."docs.rs"]
+rustdoc-args = ["--html-in-header", "arborium-header.html"]
+
+[dependencies]
+
+[lints]
+workspace = true
