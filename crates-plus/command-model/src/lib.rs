@@ -5,22 +5,24 @@
 //!
 //! The crate is deliberately standalone: data in, data out, no dependencies.
 //!
-//! ## Status: first vertical slice
+//! ## Status
 //!
-//! This implements the `cc` compile invocation exercised by
-//! `old-zoo/libpng.vx`. The structural pillars from the CLI-grammar study —
-//! guarded productions, command-level reducers + a coupling graph, and the full
-//! effective-command closure (env, expanded response/config/lock files,
-//! discovered inputs) — are **not here yet**; see
-//! `docs/design/command-model.md`. What *is* here is real — it parses,
-//! canonicalizes, and lints a flat flag grammar, so two spellings of the same
-//! compile collapse to one identity.
+//! Covers the `cc` compile invocation `old-zoo/libpng.vx` drives, plus a slice
+//! of linking: `-l`/`-L`, the `-W` family, and `-Wl,` as a **recursive**
+//! passthrough into an `ld` grammar. Still future work (see
+//! `docs/design/command-model.md`): the structural pillars — guarded
+//! productions (mode-by-flag), command-level reducers + a coupling graph (the
+//! `-W` polarity algebra, cross-flag aliasing), the full effective-command
+//! closure (env, expanded files, discovered inputs) — and link-order semantics
+//! (object/`-l` interleaving). What *is* here is real: parse, canonicalize, and
+//! lint, recursively through passthroughs, so two spellings of the same command
+//! collapse to one identity.
 
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, BTreeSet};
 use std::fmt;
 
 /// How a flag and its value are written on the command line.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy)]
 pub enum Spelling {
     /// `-c`, `-fPIC` — the whole token is the flag; no value.
     Bare,
@@ -30,6 +32,12 @@ pub enum Spelling {
     Separated,
     /// `-std=c99` — value after `=`.
     Equals,
+    /// `-Wl,a,b` — the value is a `sep`-joined sub-command in another tool's
+    /// `grammar`; canonicalized recursively and re-joined.
+    Passthrough {
+        sep: &'static str,
+        grammar: &'static Grammar,
+    },
 }
 
 /// Identifier for a set of mutually-exclusive flags (last mention wins).
@@ -43,8 +51,13 @@ pub enum Policy {
     /// Mutually-exclusive set sharing a [`GroupId`]; the last mention wins.
     Group(GroupId),
     /// Repeatable; order is semantic (e.g. include search order); exact
-    /// duplicates are dropped.
+    /// duplicates are dropped (and linted).
     DedupOrdered,
+    /// Repeatable; order does not matter; canonical form is sorted + deduped.
+    DedupUnordered,
+    /// Repeatable; order is semantic and duplicates are kept — e.g. `-l`, where
+    /// a repeat can be load-bearing for circular archives.
+    OrderedKeepAll,
     /// `-D`/`-U`: an ordered define/undef program. Slice handles `-D` only;
     /// `-U` interleaving is future work (the study's `OrderedDefineProgram`).
     DefineProgram,
@@ -63,6 +76,10 @@ pub enum Kind {
     PathOut,
     /// Header search directory.
     Include,
+    /// Library search directory (a distinct namespace from `Include`).
+    LibSearchDir,
+    /// `-lfoo` — resolved against the search dirs to a concrete archive.
+    Lib,
     /// `NAME` or `NAME=VALUE` preprocessor define.
     Define,
 }
@@ -70,7 +87,7 @@ pub enum Kind {
 /// A single flag in a tool grammar.
 #[derive(Debug, Clone, Copy)]
 pub struct Flag {
-    /// Canonical lead spelling, e.g. `-O`, `-D`, `-I`, `-o`, `-c`.
+    /// Canonical lead spelling, e.g. `-O`, `-D`, `-I`, `-o`, `-c`, `-Wl,`.
     pub canonical: &'static str,
     /// Accepted alternate spellings that canonicalize to `canonical`.
     pub aliases: &'static [&'static str],
@@ -102,9 +119,10 @@ struct Parsed {
 impl Grammar {
     /// Match a token against the grammar. Returns
     /// `(flag_index, in_token_value, consumes_next)`. Exact (`Bare`/`Separated`)
-    /// and `lead=` (`Equals`) matches win over the longest `Attached` prefix.
+    /// and `lead=` (`Equals`) matches win over the longest prefix match
+    /// (`Attached`/`Passthrough`).
     fn match_token(&self, token: &str) -> Option<(usize, Option<String>, bool)> {
-        let mut best_attached: Option<(usize, usize)> = None;
+        let mut best_prefix: Option<(usize, usize)> = None;
         for (i, flag) in self.flags.iter().enumerate() {
             for lead in std::iter::once(flag.canonical).chain(flag.aliases.iter().copied()) {
                 match flag.spelling {
@@ -117,18 +135,18 @@ impl Grammar {
                             return Some((i, Some(value.to_string()), false));
                         }
                     }
-                    Spelling::Attached
+                    Spelling::Attached | Spelling::Passthrough { .. }
                         if token.len() > lead.len()
                             && token.starts_with(lead)
-                            && best_attached.is_none_or(|(_, l)| lead.len() > l) =>
+                            && best_prefix.is_none_or(|(_, l)| lead.len() > l) =>
                     {
-                        best_attached = Some((i, lead.len()));
+                        best_prefix = Some((i, lead.len()));
                     }
                     _ => {}
                 }
             }
         }
-        best_attached.map(|(i, lead_len)| (i, Some(token[lead_len..].to_string()), false))
+        best_prefix.map(|(i, lead_len)| (i, Some(token[lead_len..].to_string()), false))
     }
 
     fn parse(&self, args: &[String]) -> Parsed {
@@ -191,8 +209,8 @@ pub enum Lint {
         first: String,
         second: String,
     },
-    /// The same include dir was listed more than once.
-    DuplicateInclude { dir: String },
+    /// A repeatable, order-significant flag listed the same value twice.
+    Duplicate { flag: String, value: String },
     /// A `-`-leading token matched no flag in the grammar.
     UnknownFlag { token: String },
 }
@@ -215,7 +233,7 @@ impl fmt::Display for Lint {
             } => {
                 write!(f, "conflicting define `{name}`: `{first}` then `{second}`")
             }
-            Lint::DuplicateInclude { dir } => write!(f, "duplicate include dir `{dir}`"),
+            Lint::Duplicate { flag, value } => write!(f, "duplicate {flag} `{value}`"),
             Lint::UnknownFlag { token } => write!(f, "unknown flag `{token}` (not in grammar)"),
         }
     }
@@ -224,7 +242,9 @@ impl fmt::Display for Lint {
 fn emit(flag: &Flag, value: Option<&str>) -> Vec<String> {
     match flag.spelling {
         Spelling::Bare => vec![flag.canonical.to_string()],
-        Spelling::Attached => vec![format!("{}{}", flag.canonical, value.unwrap_or(""))],
+        Spelling::Attached | Spelling::Passthrough { .. } => {
+            vec![format!("{}{}", flag.canonical, value.unwrap_or(""))]
+        }
         Spelling::Separated => {
             vec![flag.canonical.to_string(), value.unwrap_or("").to_string()]
         }
@@ -237,6 +257,21 @@ fn emit_one(flag: &Flag, value: Option<&str>) -> String {
 }
 
 fn reduce_flag(flag: &Flag, occs: &[&Occurrence], lints: &mut Vec<Lint>) -> Vec<String> {
+    // A passthrough value is itself a sub-command: split, canonicalize against
+    // the sub-grammar, re-join. Items from repeated occurrences concatenate in
+    // order.
+    if let Spelling::Passthrough { sep, grammar } = flag.spelling {
+        let mut items: Vec<String> = Vec::new();
+        for o in occs {
+            if let Some(value) = &o.value {
+                items.extend(value.split(sep).map(str::to_string));
+            }
+        }
+        let (canon, sub_lints) = canonicalize_args(grammar, &items);
+        lints.extend(sub_lints);
+        return vec![format!("{}{}", flag.canonical, canon.join(sep))];
+    }
+
     match flag.policy {
         Policy::Once | Policy::Group(_) => {
             let last = occs.iter().max_by_key(|o| o.pos).expect("non-empty");
@@ -257,7 +292,10 @@ fn reduce_flag(flag: &Flag, occs: &[&Occurrence], lints: &mut Vec<Lint>) -> Vec<
             for o in occs {
                 let value = o.value.clone().unwrap_or_default();
                 if seen.contains(&value) {
-                    lints.push(Lint::DuplicateInclude { dir: value });
+                    lints.push(Lint::Duplicate {
+                        flag: flag.canonical.to_string(),
+                        value,
+                    });
                 } else {
                     out.extend(emit(flag, Some(&value)));
                     seen.push(value);
@@ -265,6 +303,17 @@ fn reduce_flag(flag: &Flag, occs: &[&Occurrence], lints: &mut Vec<Lint>) -> Vec<
             }
             out
         }
+        Policy::DedupUnordered => {
+            let set: BTreeSet<String> = occs
+                .iter()
+                .map(|o| o.value.clone().unwrap_or_default())
+                .collect();
+            set.iter().flat_map(|v| emit(flag, Some(v))).collect()
+        }
+        Policy::OrderedKeepAll => occs
+            .iter()
+            .flat_map(|o| emit(flag, o.value.as_deref()))
+            .collect(),
         Policy::DefineProgram => {
             // Slice: -D only. Last value per name wins; emit sorted by name.
             let mut map: BTreeMap<String, Option<String>> = BTreeMap::new();
@@ -287,29 +336,23 @@ fn reduce_flag(flag: &Flag, occs: &[&Occurrence], lints: &mut Vec<Lint>) -> Vec<
                 }
                 map.insert(name, value);
             }
-            let mut out = Vec::new();
-            for (name, value) in map {
-                let payload = match value {
-                    Some(v) => format!("{name}={v}"),
-                    None => name,
-                };
-                out.extend(emit(flag, Some(&payload)));
-            }
-            out
+            map.into_iter()
+                .flat_map(|(name, value)| {
+                    let payload = match value {
+                        Some(v) => format!("{name}={v}"),
+                        None => name,
+                    };
+                    emit(flag, Some(&payload))
+                })
+                .collect()
         }
         Policy::Positional => Vec::new(),
     }
 }
 
-/// Parse `argv` against `grammar` and reduce it to its canonical form.
-///
-/// `argv[0]` is the program and is preserved verbatim; the rest is
-/// canonicalized. Emission order is fixed (flags in grammar-declaration order,
-/// then positional inputs, then outputs), so two argvs that mean the same thing
-/// produce the same `args` — the property a content-addressed cache key needs.
-pub fn canonicalize(grammar: &Grammar, argv: &[String]) -> CanonicalCommand {
-    let program = argv.first().cloned().unwrap_or_default();
-    let args = argv.get(1..).unwrap_or(&[]);
+/// Canonicalize a bare argument list (no program token) against `grammar`.
+/// Used for the top-level command and, recursively, for passthrough values.
+pub fn canonicalize_args(grammar: &Grammar, args: &[String]) -> (Vec<String>, Vec<Lint>) {
     let parsed = grammar.parse(args);
     let mut lints = Vec::new();
 
@@ -341,16 +384,55 @@ pub fn canonicalize(grammar: &Grammar, argv: &[String]) -> CanonicalCommand {
         });
         out.push(token.clone());
     }
+    (out, lints)
+}
 
+/// Parse `argv` against `grammar` and reduce it to its canonical form.
+///
+/// `argv[0]` is the program, preserved verbatim; the rest is canonicalized.
+/// Emission order is fixed (flags in grammar-declaration order, then positional
+/// inputs, then outputs), so two argvs that mean the same thing produce the same
+/// `args` — the property a content-addressed cache key needs.
+pub fn canonicalize(grammar: &Grammar, argv: &[String]) -> CanonicalCommand {
+    let program = argv.first().cloned().unwrap_or_default();
+    let args = argv.get(1..).unwrap_or(&[]);
+    let (args, lints) = canonicalize_args(grammar, args);
     CanonicalCommand {
         program,
-        args: out,
+        args,
         lints,
     }
 }
 
-/// The `cc`/clang compile-invocation grammar — the slice the `libpng` build
-/// exercises. Gcc-style; MSVC and the full flag surface are future work.
+/// A minimal `ld` grammar — enough for the `-Wl,` passthroughs `libpng` emits.
+pub const LD: Grammar = Grammar {
+    flags: &[
+        Flag {
+            canonical: "--gc-sections",
+            aliases: &[],
+            spelling: Spelling::Bare,
+            policy: Policy::Once,
+            kind: Kind::Str,
+        },
+        Flag {
+            canonical: "--as-needed",
+            aliases: &[],
+            spelling: Spelling::Bare,
+            policy: Policy::Once,
+            kind: Kind::Str,
+        },
+        Flag {
+            canonical: "--version-script",
+            aliases: &[],
+            spelling: Spelling::Equals,
+            policy: Policy::Once,
+            kind: Kind::PathIn { dir: false },
+        },
+    ],
+};
+
+/// The `cc`/clang grammar — the compile invocation `libpng` drives, plus a slice
+/// of linking. Gcc-style; MSVC and the full surface are future work.
 pub const CC: Grammar = Grammar {
     flags: &[
         Flag {
@@ -362,6 +444,13 @@ pub const CC: Grammar = Grammar {
         },
         Flag {
             canonical: "-fPIC",
+            aliases: &[],
+            spelling: Spelling::Bare,
+            policy: Policy::Once,
+            kind: Kind::Str,
+        },
+        Flag {
+            canonical: "-shared",
             aliases: &[],
             spelling: Spelling::Bare,
             policy: Policy::Once,
@@ -382,6 +471,13 @@ pub const CC: Grammar = Grammar {
             kind: Kind::Str,
         },
         Flag {
+            canonical: "-W",
+            aliases: &[],
+            spelling: Spelling::Attached,
+            policy: Policy::DedupUnordered,
+            kind: Kind::Str,
+        },
+        Flag {
             canonical: "-D",
             aliases: &[],
             spelling: Spelling::Attached,
@@ -394,6 +490,30 @@ pub const CC: Grammar = Grammar {
             spelling: Spelling::Separated,
             policy: Policy::DedupOrdered,
             kind: Kind::Include,
+        },
+        Flag {
+            canonical: "-L",
+            aliases: &[],
+            spelling: Spelling::Separated,
+            policy: Policy::DedupOrdered,
+            kind: Kind::LibSearchDir,
+        },
+        Flag {
+            canonical: "-l",
+            aliases: &[],
+            spelling: Spelling::Attached,
+            policy: Policy::OrderedKeepAll,
+            kind: Kind::Lib,
+        },
+        Flag {
+            canonical: "-Wl,",
+            aliases: &[],
+            spelling: Spelling::Passthrough {
+                sep: ",",
+                grammar: &LD,
+            },
+            policy: Policy::OrderedKeepAll,
+            kind: Kind::Str,
         },
         Flag {
             canonical: "-o",
