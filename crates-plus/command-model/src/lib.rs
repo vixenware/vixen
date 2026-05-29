@@ -1,25 +1,30 @@
 //! `command-model` — describe a CLI tool's argument grammar, parse a raw argv
-//! into structure, and reduce it to a **canonical** form. That canonical form
-//! is the basis for content-addressed command caching, command linting, and
-//! structured provenance.
+//! into structure, and reduce it to a **canonical** form, then to the
+//! **effective command**: the resolved identity a content-addressed cache keys
+//! on. Also the basis for command linting and structured provenance.
 //!
 //! The crate is deliberately standalone: data in, data out, no dependencies.
 //!
 //! ## Status
 //!
-//! Covers the `cc` compile invocation `old-zoo/libpng.vx` drives, plus a slice
-//! of linking: `-l`/`-L`, the `-W` family, and `-Wl,` as a **recursive**
-//! passthrough into an `ld` grammar. Still future work (see
-//! `docs/design/command-model.md`): the structural pillars — guarded
-//! productions (mode-by-flag), command-level reducers + a coupling graph (the
-//! `-W` polarity algebra, cross-flag aliasing), the full effective-command
-//! closure (env, expanded files, discovered inputs) — and link-order semantics
-//! (object/`-l` interleaving). What *is* here is real: parse, canonicalize, and
-//! lint, recursively through passthroughs, so two spellings of the same command
-//! collapse to one identity.
+//! [`canonicalize`] folds an argv to a canonical form (cc compile + a link
+//! slice: `-l`/`-L`, `-W`, and `-Wl,` as a **recursive** passthrough into an
+//! `ld` grammar). [`effective_command`] adds the soundness pillar: the identity
+//! is canonical argv **+ the declared env the tool consumes** (explicit only —
+//! undeclared env is never read; there is no ambient inheritance) **+ the
+//! path-kind inputs** the cache must hash (argv paths, env-valued paths, and
+//! inputs bubbled up from passthroughs) **+ impurity marks**.
+//!
+//! Still future work (see `docs/design/command-model.md`): guarded productions
+//! (mode-by-flag), command-level reducers + a coupling graph (the `-W` polarity
+//! algebra, cross-flag aliasing), discovered-from-file-content inputs, the
+//! caching-hazard neutralizers, and link-order semantics.
 
 use std::collections::{BTreeMap, BTreeSet};
 use std::fmt;
+
+/// Separator for `PATH`-style env vars (slice: unix `:`; Windows `;` is TODO).
+const ENV_PATH_SEP: char = ':';
 
 /// How a flag and its value are written on the command line.
 #[derive(Debug, Clone, Copy)]
@@ -84,6 +89,14 @@ pub enum Kind {
     Define,
 }
 
+/// An environment channel a tool reads. Declared by the grammar so it becomes
+/// an *explicit*, keyed input — Vixen never inherits ambient env.
+#[derive(Debug, Clone, Copy)]
+pub struct EnvDecl {
+    pub name: &'static str,
+    pub kind: Kind,
+}
+
 /// A single flag in a tool grammar.
 #[derive(Debug, Clone, Copy)]
 pub struct Flag {
@@ -96,11 +109,13 @@ pub struct Flag {
     pub kind: Kind,
 }
 
-/// A flat tool grammar: a set of flags. Anything not matching a flag is a
-/// positional input. (The recursive, guarded-production form is future work.)
+/// A flat tool grammar: a set of flags plus the env channels the tool reads.
+/// Anything not matching a flag is a positional input. (The recursive,
+/// guarded-production form is future work.)
 #[derive(Debug, Clone, Copy)]
 pub struct Grammar {
     pub flags: &'static [Flag],
+    pub env: &'static [EnvDecl],
 }
 
 /// One parsed flag occurrence, remembering its argv position for last-wins.
@@ -183,13 +198,53 @@ impl Grammar {
     }
 }
 
-/// A command reduced to its canonical form, plus everything the canonicalizer
-/// noticed on the way.
+/// A command reduced to its canonical argv form, plus the lints found.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct CanonicalCommand {
     pub program: String,
     pub args: Vec<String>,
     pub lints: Vec<Lint>,
+}
+
+/// The resolved identity a content-addressed cache keys on.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct EffectiveCommand {
+    pub program: String,
+    /// Canonical argv (without the program token).
+    pub args: Vec<String>,
+    /// The declared env channels the tool reads that are present, sorted.
+    pub env: Vec<(String, String)>,
+    /// Path-kind inputs the cache must content-hash, deduped.
+    pub inputs: Vec<Input>,
+    /// Reasons this command cannot be soundly cached as-is.
+    pub impurities: Vec<Impurity>,
+    pub lints: Vec<Lint>,
+}
+
+/// A path the command depends on, with the role it plays.
+#[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord)]
+pub struct Input {
+    pub role: InputRole,
+    pub path: String,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
+pub enum InputRole {
+    /// A source / object / generic input file.
+    Source,
+    /// A header search directory.
+    Include,
+    /// A library search directory.
+    LibSearchDir,
+    /// A library named for resolution against the search dirs.
+    Lib,
+}
+
+/// A reason the command's result cannot be soundly cached by output equality.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum Impurity {
+    /// A `-`-leading token matched no flag, so its effect is unknown.
+    UnknownFlag { token: String },
 }
 
 /// Something the canonicalizer found worth reporting.
@@ -256,10 +311,25 @@ fn emit_one(flag: &Flag, value: Option<&str>) -> String {
     emit(flag, value).join(" ")
 }
 
-fn reduce_flag(flag: &Flag, occs: &[&Occurrence], lints: &mut Vec<Lint>) -> Vec<String> {
-    // A passthrough value is itself a sub-command: split, canonicalize against
-    // the sub-grammar, re-join. Items from repeated occurrences concatenate in
-    // order.
+/// The role a path-kind value plays as a cache input, if any.
+fn input_role(kind: Kind) -> Option<InputRole> {
+    match kind {
+        Kind::PathIn { .. } => Some(InputRole::Source),
+        Kind::Include => Some(InputRole::Include),
+        Kind::LibSearchDir => Some(InputRole::LibSearchDir),
+        Kind::Lib => Some(InputRole::Lib),
+        Kind::Str | Kind::Define | Kind::PathOut => None,
+    }
+}
+
+fn dedup_inputs(inputs: &mut Vec<Input>) {
+    let mut seen = BTreeSet::new();
+    inputs.retain(|i| seen.insert((i.role, i.path.clone())));
+}
+
+/// Collect the path-kind inputs a flag's occurrences contribute, recursing into
+/// passthrough sub-grammars so their inner paths bubble up.
+fn collect_inputs(flag: &Flag, occs: &[&Occurrence], inputs: &mut Vec<Input>) {
     if let Spelling::Passthrough { sep, grammar } = flag.spelling {
         let mut items: Vec<String> = Vec::new();
         for o in occs {
@@ -267,9 +337,34 @@ fn reduce_flag(flag: &Flag, occs: &[&Occurrence], lints: &mut Vec<Lint>) -> Vec<
                 items.extend(value.split(sep).map(str::to_string));
             }
         }
-        let (canon, sub_lints) = canonicalize_args(grammar, &items);
-        lints.extend(sub_lints);
-        return vec![format!("{}{}", flag.canonical, canon.join(sep))];
+        inputs.extend(canon_pass(grammar, &items).inputs);
+        return;
+    }
+    if let Some(role) = input_role(flag.kind) {
+        for o in occs {
+            if let Some(value) = &o.value {
+                inputs.push(Input {
+                    role,
+                    path: value.clone(),
+                });
+            }
+        }
+    }
+}
+
+fn reduce_flag(flag: &Flag, occs: &[&Occurrence], lints: &mut Vec<Lint>) -> Vec<String> {
+    // A passthrough value is itself a sub-command: split, canonicalize against
+    // the sub-grammar, re-join. Items from repeated occurrences concatenate.
+    if let Spelling::Passthrough { sep, grammar } = flag.spelling {
+        let mut items: Vec<String> = Vec::new();
+        for o in occs {
+            if let Some(value) = &o.value {
+                items.extend(value.split(sep).map(str::to_string));
+            }
+        }
+        let sub = canon_pass(grammar, &items);
+        lints.extend(sub.lints);
+        return vec![format!("{}{}", flag.canonical, sub.args.join(sep))];
     }
 
     match flag.policy {
@@ -350,11 +445,21 @@ fn reduce_flag(flag: &Flag, occs: &[&Occurrence], lints: &mut Vec<Lint>) -> Vec<
     }
 }
 
-/// Canonicalize a bare argument list (no program token) against `grammar`.
-/// Used for the top-level command and, recursively, for passthrough values.
-pub fn canonicalize_args(grammar: &Grammar, args: &[String]) -> (Vec<String>, Vec<Lint>) {
+/// The full canonicalization pass over a bare argument list: canonical argv,
+/// lints, path inputs, and impurities. The basis for both public entry points
+/// and the recursion through passthroughs.
+struct Pass {
+    args: Vec<String>,
+    lints: Vec<Lint>,
+    inputs: Vec<Input>,
+    impurities: Vec<Impurity>,
+}
+
+fn canon_pass(grammar: &Grammar, args: &[String]) -> Pass {
     let parsed = grammar.parse(args);
     let mut lints = Vec::new();
+    let mut inputs: Vec<Input> = Vec::new();
+    let mut impurities = Vec::new();
 
     let mut by_flag: BTreeMap<usize, Vec<&Occurrence>> = BTreeMap::new();
     for occ in &parsed.occurrences {
@@ -368,6 +473,7 @@ pub fn canonicalize_args(grammar: &Grammar, args: &[String]) -> (Vec<String>, Ve
             continue;
         };
         let emitted = reduce_flag(flag, occs, &mut lints);
+        collect_inputs(flag, occs, &mut inputs);
         if matches!(flag.kind, Kind::PathOut) {
             output_tokens.extend(emitted);
         } else {
@@ -376,36 +482,91 @@ pub fn canonicalize_args(grammar: &Grammar, args: &[String]) -> (Vec<String>, Ve
     }
 
     let mut out = flag_tokens;
-    out.extend(parsed.positionals.iter().cloned());
+    for p in &parsed.positionals {
+        out.push(p.clone());
+        inputs.push(Input {
+            role: InputRole::Source,
+            path: p.clone(),
+        });
+    }
     out.extend(output_tokens);
     for token in &parsed.unknown {
         lints.push(Lint::UnknownFlag {
             token: token.clone(),
         });
+        impurities.push(Impurity::UnknownFlag {
+            token: token.clone(),
+        });
         out.push(token.clone());
     }
-    (out, lints)
+
+    dedup_inputs(&mut inputs);
+    Pass {
+        args: out,
+        lints,
+        inputs,
+        impurities,
+    }
 }
 
-/// Parse `argv` against `grammar` and reduce it to its canonical form.
-///
-/// `argv[0]` is the program, preserved verbatim; the rest is canonicalized.
-/// Emission order is fixed (flags in grammar-declaration order, then positional
-/// inputs, then outputs), so two argvs that mean the same thing produce the same
-/// `args` — the property a content-addressed cache key needs.
+/// Parse `argv` against `grammar` and reduce it to its canonical argv form.
+/// `argv[0]` is the program, preserved verbatim. For the full cache identity
+/// (env + inputs + impurities), use [`effective_command`].
 pub fn canonicalize(grammar: &Grammar, argv: &[String]) -> CanonicalCommand {
     let program = argv.first().cloned().unwrap_or_default();
-    let args = argv.get(1..).unwrap_or(&[]);
-    let (args, lints) = canonicalize_args(grammar, args);
+    let pass = canon_pass(grammar, argv.get(1..).unwrap_or(&[]));
     CanonicalCommand {
         program,
-        args,
-        lints,
+        args: pass.args,
+        lints: pass.lints,
+    }
+}
+
+/// Resolve `argv` (and the explicit `env` the build provides) into the
+/// effective command — the identity a content-addressed cache keys on.
+///
+/// Only env channels the grammar declares are consulted; everything else in
+/// `env` is ignored. Vixen never inherits ambient host env, so this is the
+/// whole env surface, made explicit and keyed.
+pub fn effective_command(
+    grammar: &Grammar,
+    argv: &[String],
+    env: &BTreeMap<String, String>,
+) -> EffectiveCommand {
+    let program = argv.first().cloned().unwrap_or_default();
+    let mut pass = canon_pass(grammar, argv.get(1..).unwrap_or(&[]));
+
+    let mut consumed_env: Vec<(String, String)> = Vec::new();
+    for decl in grammar.env {
+        let Some(value) = env.get(decl.name) else {
+            continue;
+        };
+        consumed_env.push((decl.name.to_string(), value.clone()));
+        if let Some(role) = input_role(decl.kind) {
+            for part in value.split(ENV_PATH_SEP).filter(|s| !s.is_empty()) {
+                pass.inputs.push(Input {
+                    role,
+                    path: part.to_string(),
+                });
+            }
+        }
+    }
+    consumed_env.sort();
+    dedup_inputs(&mut pass.inputs);
+
+    EffectiveCommand {
+        program,
+        args: pass.args,
+        env: consumed_env,
+        inputs: pass.inputs,
+        impurities: pass.impurities,
+        lints: pass.lints,
     }
 }
 
 /// A minimal `ld` grammar — enough for the `-Wl,` passthroughs `libpng` emits.
 pub const LD: Grammar = Grammar {
+    env: &[],
     flags: &[
         Flag {
             canonical: "--gc-sections",
@@ -434,6 +595,20 @@ pub const LD: Grammar = Grammar {
 /// The `cc`/clang grammar — the compile invocation `libpng` drives, plus a slice
 /// of linking. Gcc-style; MSVC and the full surface are future work.
 pub const CC: Grammar = Grammar {
+    env: &[
+        EnvDecl {
+            name: "CPATH",
+            kind: Kind::Include,
+        },
+        EnvDecl {
+            name: "LIBRARY_PATH",
+            kind: Kind::LibSearchDir,
+        },
+        EnvDecl {
+            name: "SOURCE_DATE_EPOCH",
+            kind: Kind::Str,
+        },
+    ],
     flags: &[
         Flag {
             canonical: "-c",
