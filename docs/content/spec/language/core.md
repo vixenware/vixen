@@ -1545,6 +1545,33 @@ weight = 20
 > resolves first. Use `.next()` only when that race is semantically
 > intended or when the stream is known to contain at most one element.
 
+> r[comb.only]
+>
+> `.only()` returns the sole element of a stream as an `Option[T]` —
+> `None` if the stream is empty, the element if there is exactly one. It
+> surfaces that element **on arrival** (it does not wait for the stream to
+> end), under an author-asserted **uniqueness contract**: at most one
+> element is expected, and a second poisons. Because the result is *the*
+> element rather than "whichever raced first," it is order-independent and
+> deterministic — early and cacheable at once. (When a stream is naturally
+> keyed, `by(key).get(k)` is the checkable alternative: deterministic by
+> key lookup rather than by contract.)
+
+> r[comb.determinism]
+>
+> Combinators split by whether their result can expose stream arrival
+> order — the property that decides whether a computation observing a
+> stream stays cacheable (see [exec.observer.cacheable]):
+>
+> - **Order-erasing** (deterministic): `map`, `filter`, `filter_map`,
+>   `to_array` (sorts by the universal order), set / sorted collects, and
+>   reductions through a commutative-associative merge (an accumulator).
+>   The result is a function of the stream's *contents*, not arrival order.
+> - **Unique-select** (deterministic, available early): `.only()`
+>   (`r[comb.only]`) and keyed `by(k).get(...)`.
+> - **Order-exposing** (timing-in-value): `.next()`, racing `.find` — the
+>   result *is* the timing when more than one element could match.
+
 > r[comb.fold]
 >
 > `.fold (init, f)` reduces all elements to a single value using an

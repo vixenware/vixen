@@ -123,6 +123,10 @@ Implications:
 
 The price (observer changes = cache miss) is paid willingly. The observer should be tiny anyway — the idiomatic shape is "observer = the small function that extracts the structured value the caller cares about." Big logic belongs in the rest of the Vixen program.
 
+### Soundness needs a content-deterministic observer
+
+Caching `T` is only correct if `T` depends on the process's **content**, not its **timing**. The observer may consume the `stdout` / `stderr` streams to *schedule* when deterministic sub-results surface — build pipelining surfaces a crate's `.rmeta` the moment rustc's metadata-artifact message arrives, so dependents start before codegen finishes — but it must not let arrival order *determine* a value. That is a static check over the observer's stream combinators, the same flavour as the kernel partition: order-erasing (`map` / `filter` / `to_array`) and unique-select (`.only()`) results are content-determined and cacheable; order-exposing ones (`.next()`, a racing `.find`) are not, and make the exec non-cacheable. The sandbox write-set `Tree` is incrementally available (entries resolve at file finalization, not process exit), which is what lets pipelining surface `.rmeta` early without depending on timing.
+
 ## Which intrinsics get persisted
 
 The persistent cache stores only the results of intrinsics worth storing — the cost of writing to and reading from the cache must beat the cost of recomputing. That's a per-intrinsic decision, not a user-visible knob. See [Vixen language → Demand-driven evaluation](/vixen-language/#demand-driven-evaluation) for the user-facing framing; this section covers the runtime mechanism.

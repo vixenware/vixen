@@ -416,6 +416,35 @@ model, but they are not part of the core language syntax.
 > unsandboxed host environment; only data already captured into ordinary
 > (content-addressable) values before shipping is available to it.
 
+> r[exec.observer.cacheable]
+>
+> The cache stores the observer's `T`; for that to be sound, `T` must be a
+> deterministic function of the process's **content**, not its **timing**.
+> The observer may freely consume the process streams to *schedule* when
+> deterministic sub-results become available — this is what build
+> pipelining needs: surface a crate's `.rmeta` the instant rustc's
+> metadata-artifact message arrives, so dependents start before codegen
+> finishes. What it may not do is let arrival order *determine* a value.
+>
+> This is a static check over the observer's combinator graph
+> (`r[comb.determinism]`), the same flavour as the kernel partition: the
+> observer is cacheable iff no order-exposing combinator (`.next()`, a
+> racing `.find`) is reachable from its return value. Order-erasing and
+> unique-select (`.only()`) results are content-determined and cacheable;
+> an order-exposing result reaching the return makes the exec non-cacheable.
+
+> r[exec.tree.incremental]
+>
+> The sandbox write-set `Tree` an observer receives is **incrementally
+> available**: an entry resolves when the process finalizes that file, not
+> when the process exits. So `tree.find("out/libC.rmeta")` can resolve
+> mid-execution, and a dependent exec demanding it pipelines against the
+> still-running producer. Finalization is a runtime signal (file close /
+> atomic rename); where that is unreliable, the package detects it from the
+> process's own output — `@vixen/rust` correlates rustc's `--json`
+> artifact messages to write-set entries. The entry's *value* is the
+> deterministic file content either way; only its availability is early.
+
 > r[exec.observer.materialization]
 >
 > When the observer produces a value back to the orchestrator, any VFS
@@ -747,6 +776,17 @@ model, but they are not part of the core language syntax.
 > `Tree`, a realised `Stream`) flows out freely; the live handle never
 > escapes. Over-reach is caught at compile time, when the value you tried
 > to return or capture fails to type or serialise.
+>
+> The check is a transitive **escape check at the minting boundary** (the
+> observer call, the probe, the `accumulate` block), not a per-function
+> restriction. A capability threads freely *within* its region — passed
+> down to a subroutine and even returned back up to the same region
+> (`fn helper(p: Process) -> Process` is a legal re-borrow). What is
+> rejected is a capability — or a closure capturing one — crossing the
+> minting region's boundary. The analysis is narrow: only capability types
+> are region-bound; ordinary content-addressed values are unrestricted,
+> and there is no shared/mutable-borrow distinction — just "these few types
+> cannot escape their region."
 
 > r[cap.grant]
 >
