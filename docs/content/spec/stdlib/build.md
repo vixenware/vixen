@@ -760,29 +760,95 @@ model, but they are not part of the core language syntax.
 
 ## Resolution
 
-> r[resolve]
+> r[resolve.model]
 >
-> **Status: stub — design pending (do not treat as normative yet).**
-> Dependency resolution — cargo's PubGrub solve, and the equivalent for
-> any other ecosystem — is exposed as a runtime intrinsic, not hand-written
-> in `.vx`. The intrinsic takes the constraint inputs plus a **prior
-> solution as a preference**, so that minimal-update and `--precise`
-> semantics live in `@vixen/cargo` rather than in a runtime lockfile
-> primitive:
+> Dependency resolution is **per-ecosystem domain logic** in the language
+> package (`@vixen/rust`, `@vixen/go`, `@vixen/node`, …), not a single
+> runtime "resolver." Ecosystems disagree about what resolution even is —
+> backtracking-SAT with one version per package (cargo, Python, Dart),
+> Minimum Version Selection (Go), nested trees where versions coexist
+> (npm), nearest-wins mediation (Maven). The runtime supplies only the
+> shared, hard primitives; the package composes them:
 >
-> - An ordinary build whose committed lockfile still satisfies the
->   manifest never demands this node — the lock *is* the solution, and
->   registry drift cannot re-resolve it.
-> - When the node is forced (lock missing, manifest changed, or explicit
->   `cargo update`), the prior lock is fed in as a preference, relaxed by
->   the command: keep all pins (minimal change) / keep all but `-p X` /
->   ignore as solution and take latest compatible.
+> - **Monotone-fold resolution** — Go's MVS (select the max of all required
+>   minimums, to fixpoint) and cargo feature unification — is an
+>   accumulator fixpoint (`r[accum.fixpoint]`, `merge = max` / `merge =
+>   union`). No solver intrinsic.
+> - **Backtracking-SAT resolution** — cargo, Python, Dart — uses the
+>   `pubgrub_solve` intrinsic (`r[resolve.pubgrub]`).
+> - **Tree-shaped resolution** — npm's nesting, Maven's mediation — is
+>   plain Vixen graph / `Tree` construction. No solver intrinsic.
 >
-> The replaced `stabilize` primitive is gone: lockfile stability comes
-> from the lock being an ordinary workspace `Tree` file plus demand-gated
-> evaluation, not from a runtime witness/resolve persistence mechanism.
+> `pubgrub_solve` is one tool for the backtracking class, **not** the
+> universal resolver.
+
+> r[resolve.pubgrub]
 >
-> The exact signature, the shape of the preference input, the keyed
-> inputs, and the cache policy are **open** and tracked for a dedicated
-> design pass. See Build and resolution (wiki) for the lockfile-as-output
-> framing this rests on.
+> `pubgrub_solve[P, V]` is a generic SAT-shaped constraint solver. It knows
+> no registry and no ecosystem: it drives the PubGrub algorithm and calls
+> back into domain-supplied closures for the package-specific facts.
+>
+> ```vixen
+> fn pubgrub_solve[P, V](root: P) with {
+>   available_versions: Fn(P) -> Array[V],            // versions of P, newest first
+>   dependencies:       Fn(P, V) -> Map[P, Constraint[V]],
+>   prefer:             Fn(P, Constraint[V]) -> Option[V],   // lockfile bias; None = solver picks
+> } -> Resolution[P, V];
+> ```
+>
+> `V` must be totally ordered (`SemVer` is). `P` is the package identity
+> the domain chooses; ecosystem subtleties live in how the package defines
+> `P` and what `dependencies` returns. A dependency requirement is an
+> ordinary `Constraint[V]` (`r[constraint.model]`) — e.g. `version ^= 1.0`.
+
+> r[resolve.pubgrub.io]
+>
+> The closures perform registry I/O (`Http`) lazily as the solver explores
+> — the runtime evaluates them mid-solve, so only the part of the universe
+> the search touches is fetched, and each `Http` lookup caches on its own.
+> The *solve* caches on the **read-set it consulted**: the `(P → versions)`
+> and `(P, V → deps)` facts the closures actually returned. Re-running with
+> the same consulted facts yields the same result; a publish to a package
+> the solve *touched* invalidates it, a publish elsewhere does not — the
+> same read-set discipline as the sandbox.
+
+> r[resolve.pubgrub.conflict]
+>
+> `Resolution[P, V]` is `Solved(Map[P, V])` or `Conflict(<derivation>)`. A
+> conflict is a returned value carrying PubGrub's derivation tree, **not** a
+> poison — the domain package formats it into an ecosystem-shaped error
+> (cargo's "failed to select a version for …"). Resolution diagnostics are
+> prime UX; they are not swallowed.
+
+> r[resolve.pubgrub.prefer]
+>
+> `prefer(P, constraint)` is the lockfile bias: it returns the prior lock's
+> version for `P` when that version satisfies `constraint` and `P` is not
+> being updated, else `None` (the solver picks the highest compatible).
+> This is how `cargo update` semantics live in the package, not the
+> runtime: bare `update` makes `prefer` return `None` throughout;
+> `update -p foo` returns the locked version for every package except
+> `foo`; an ordinary re-resolution keeps every pin.
+
+> r[resolve.lockfile]
+>
+> A lockfile is an ordinary workspace `Tree` file, not a runtime
+> persistence mechanism — there is no `stabilize`. Stability comes from
+> demand-gating: an ordinary build whose committed lock satisfies the
+> manifest never forces `pubgrub_solve`, so registry drift cannot
+> re-resolve it. The solver is forced only when the lock can't serve as the
+> solution (missing, manifest changed, or explicit update); its output
+> overlays back as the new lock. The bar is functional equivalence with the
+> ecosystem's own resolver, not a byte-identical lockfile.
+
+> r[resolve.features]
+>
+> Cargo-style feature unification is **not** part of the solver. A crate's
+> effective feature set is the union of every feature its dependents
+> request — a monotone fixpoint — computed with an accumulator
+> (`r[accum.fixpoint]`, `merge = union`) running alongside the version
+> solve: activating a feature can add an optional-dependency edge, which
+> feeds the next solve iteration, until both stabilize. `P` stays
+> `crate@version`; features ride the accumulator. cfg / target-table edges
+> thread in the same way (a per-target cfg set from `rustc --print cfg`,
+> evaluated against the `cfg(...)` expression in `@vixen/rust`).
