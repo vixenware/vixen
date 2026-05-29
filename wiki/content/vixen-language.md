@@ -389,9 +389,27 @@ Within a single evaluation, the evaluator memoises every demanded thunk by its i
 
 ### Persistent cache cutoff is per-intrinsic
 
-Not every value's identity is worth materialising to disk. Pure arithmetic, value construction, string operations, equality — cheaper to recompute than to round-trip through a cache. The persistent cache writes only the results of intrinsics that did external or substantial work: `exec`, `acquire`, `Http`, `Toml/Json/Yaml::parse`, `pubgrub_solve`, `render`, and the recorded-obligation tuples from `discover`. Trivial intrinsics (`String::concat`, equality, hash, arithmetic on scalars, Tree projection) and all pure Vixen function calls stay in the per-evaluation memo table.
+Not every value's identity is worth materialising to disk. Pure arithmetic, value construction, string operations, equality — cheaper to recompute than to round-trip through a cache. The persistent cache writes only the results of intrinsics that did external or substantial work: `exec`, `acquire`, `Http`, `Toml/Json/Yaml::parse`, `pubgrub_solve`, `render`, and the recorded-obligation tuples from capability probes. Trivial intrinsics (`String::concat`, equality, hash, arithmetic on scalars, Tree projection) and all pure Vixen function calls stay in the per-evaluation memo table.
 
 The cutoff is a property of each intrinsic, decided in the runtime, not a user-visible knob. *Cacheable by the type system* (every value can in principle be cached) is not the same as *worth caching* (the lookup cost beats the recompute cost). See [Cache and trust → Which intrinsics get persisted](/cache-and-trust/#which-intrinsics-get-persisted) for the categories, the dispatch mechanism, and the treatment of pure user functions.
+
+## Accumulators
+
+A general primitive for **graph-wide reductions** — collecting contributions scattered across the demanded subgraph and merging them into one value. Feature unification is the motivating case, but it generalises: gathering every link flag, every license / origin obligation, every required system library, aggregated diagnostics — all the same shape. Accumulators plus the constraint solver are the two faces of the "proper solver" direction a demand-driven language gets to be good at.
+
+`Accum[M]` is a value you're handed (a parameter), Writer-monad-shaped: `acc.emit(x)` contributes an `M`, `acc.value()` reads the current reduction under `M`'s merge. `accumulate[M] (acc) => body` mints one, runs `body`, collects every `emit` in `body`'s demanded subgraph, and returns the merged `M`. Because the contribution set is determined by the inputs, the converged value is content-addressed and cacheable like anything else.
+
+### A computational capability, not an authority one
+
+Holding an `Accum[M]` confers an ability (you may contribute), so it sits in the object-capability model alongside `Host` / `Process` / `Tree` — threaded explicitly, region-scoped to its `accumulate` block, non-escaping. It differs on one axis only: it carries no *authority* (no host access, no sandbox state), so unlike the authority capabilities it is **user-mintable** rather than runtime-only. Constructibility tracks authority; accumulators have none, so you mint them freely.
+
+### Two flavours: single-pass and fixpoint
+
+If `body` never reads the accumulator mid-flight, it's a single pass — collect and merge once. If reading `acc.value()` feeds further `emit`s (activating a feature pulls in more feature requests), `accumulate` iterates to a **least fixpoint**. That terminates when `merge` is a bounded join-semilattice — commutative, idempotent, finite height — which feature-set union is. The laws are an unenforced contract the author guarantees, exactly like associativity; the language doesn't (and can't) check them.
+
+### No trait required
+
+`accumulate[M]` is an ordinary unbounded generic: it needs `merge(M, M) -> M` and `identity() -> M` defined for the concrete `M`, resolved at instantiation like every Vixen generic — a missing `merge` is a call-site error, the same duck-typed convention as `to_string`. Vixen has no trait / bound system (see [the FAQ](/faq/)), and accumulators deliberately don't introduce one.
 
 ## Errors are Diagnostics that poison the build
 

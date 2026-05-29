@@ -56,6 +56,16 @@ Backwards — this is the biggest *win*, not a cost. Because every value is cont
 
 Compare a Makefile / shell build: opaque subprocess soup, no record of what read what, rebuild-the-world to debug. The language makes the build *more* observable than scripts, by construction. The real cost is you must build language tooling — LSP, good diagnostics, highlighter — which is exactly what `vx-lsp`, the `margin` structured diagnostics, and `tree-sitter-vixen` are.
 
+## "No traits / interfaces? How do you abstract over types?"
+
+Deliberately none, and the language is coherent without them because it occupies the trait-shaped territory by other means:
+
+- **`Eq` / `Ord` / `Hash` / `Serialize` are universal**, not bounds — *every* value is comparable, hashable, and serialisable by construction, so the classic bounds are vacuous here.
+- **Generics are unbounded and instantiation-checked** — `accumulate[M]` needs `merge` / `identity` for the concrete `M`, resolved at the call site; a missing one is a call-site error. No `T: Bound`.
+- **Ad-hoc polymorphism is function overloading**; **`to_string`-style behaviour is a method-by-convention**; **deserialisation is structural** (the parser reads the type's shape); **heterogeneous sets are sum types + `match`**.
+
+Adding traits would duplicate capability that's already covered, reverse the "no trait bounds" generics decision, and import the coherence / orphan-rule tax — for, so far, near-zero unmet need. The bar to add them is a *stack* of real motivators; accumulators (the obvious candidate) didn't clear it. If we ever do, the Vixen-native form would be *structural* protocols (satisfied-by-shape, like everything else), not nominal traits — a deliberate future decision, not a default.
+
 ## "An interpreted language is SUPER slow — my cargo build will be much slower."
 
 Two parts.

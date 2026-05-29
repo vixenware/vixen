@@ -1855,3 +1855,62 @@ weight = 20
 > `Requirement[T]` is itself a value: constructed where policy is
 > expressed, resolved lazily when something downstream demands the
 > concrete `T`.
+
+## Accumulators
+
+> r[accum.type]
+>
+> `Accum[M]` is a handle for collecting contributions of type `M` across a
+> demanded subgraph and reducing them under `M`'s merge. It is an ordinary
+> value, threaded as a parameter; holding one confers the ability to
+> contribute to it. Unlike the authority capabilities (`Host`, `Process`,
+> the sandbox `Tree`), `Accum` carries no authority — it is a pure
+> computational handle, **user-mintable** (`r[accum.scope]`) rather than
+> runtime-only. It is region-scoped to the `accumulate` block that minted
+> it (`r[cap.region]`) and may not escape.
+
+> r[accum.merge]
+>
+> `M` must provide `identity() -> M` (the empty element) and
+> `merge(M, M) -> M` (associative) as ordinary overloads in scope. There
+> is no trait or bound: like every generic, `accumulate[M]` is checked at
+> instantiation (`r[type.generic]`), so a missing `merge` / `identity` for
+> a concrete `M` is reported at the `accumulate` call site.
+
+> r[accum.scope]
+>
+> `accumulate[M] (acc) => body` mints an `Accum[M]`, evaluates `body` with
+> it, collects every `emit` made anywhere in `body`'s demanded subgraph,
+> and returns the contributions reduced under `merge` (from `identity`).
+>
+> ```vixen
+> let feats = accumulate[FeatureSet] (acc) => walk_active_edges(graph, acc)
+> // callees thread `acc` down and call acc.emit(%{ "serde" => {"derive"} });
+> // feats : FeatureSet — the unioned result
+> ```
+
+> r[accum.ops]
+>
+> `acc.emit(contribution)` contributes a value of type `M`. `acc.value()`
+> reads the current reduction of all contributions emitted so far in the
+> enclosing `accumulate`. Contributions are unordered; the result must not
+> depend on emission order — hence `merge` is associative, and commutative
+> wherever order could vary.
+
+> r[accum.fixpoint]
+>
+> If `body` reads `acc.value()` and that reading feeds further `emit`s,
+> `accumulate` iterates to a least fixpoint: re-evaluate, collect, reduce,
+> repeat until the reduction stops changing. Termination is guaranteed
+> only when `merge` forms a **bounded join-semilattice** — commutative,
+> idempotent, and of finite height. That is an unenforced contract the
+> author guarantees (it can no more be checked than associativity can); a
+> `merge` that is not bounded-monotone may fail to converge. A `body` that
+> never mid-reads converges in a single pass.
+
+> r[accum.purity]
+>
+> An accumulator's converged value is a pure function of the inputs — the
+> contribution set is determined by them — so it is content-addressed and
+> cacheable like any value. Intermediate fixpoint iterations are not
+> persisted; only the converged result participates in caching.
