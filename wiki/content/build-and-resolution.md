@@ -102,17 +102,16 @@ But PubGrub is **one primitive, not the universal resolver** — ecosystems disa
 
 So `@vixen/go` reaches for accumulators, `@vixen/node` for graph construction, `@vixen/rust` for PubGrub plus an accumulator (versions by SAT, features by union). Same diagnostics discipline throughout; the engine differs by ecosystem.
 
-## cfg and target-table matching (must-cover, open)
+## cfg and target tables
 
-A drop-in cargo replacement **must** handle cargo's target-conditional dependencies: `[target.x86_64-unknown-linux-gnu.dependencies]` (explicit triple) and `[target.'cfg(...)'.dependencies]` with the full `cfg` mini-language — `cfg(unix)`, `cfg(target_os = "linux")`, `cfg(all(...))`, `any`, `not`, and the derived flags (`unix`, `windows`) that aren't literally a triple field. This is non-negotiable for compat; the exact mechanism is **not yet settled**.
+A drop-in cargo replacement must handle target-conditional dependencies — `[target.x86_64-unknown-linux-gnu.dependencies]` (explicit triple) and `[target.'cfg(...)'.dependencies]` with the full `cfg` mini-language (`cfg(unix)`, `cfg(target_os = "linux")`, `all`/`any`/`not`, and derived flags like `unix` that aren't literally triple fields). The shape is settled: **it needs no new runtime primitive — it is `@vixen/rust` domain logic over data the runtime already provides.**
 
-What is clear about where it sits:
+- **The cfg set per target is an `exec`.** `rustc --print cfg --target <triple>` emits the concrete atoms (`unix`, `target_os="linux"`, multi-valued `target_feature="…"`, …); the observer parses them into a `CfgSet`. Cached by `(rustc identity, triple)` like any exec. No cfg built-in.
+- **The `cfg(...)` parser and evaluator are plain Vixen.** `@vixen/rust` parses the expression into a small `CfgExpr` value and evaluates it against a `CfgSet` with the built-in operators — `contains` for atom membership, `&&` / `||` / `!` for `all` / `any` / `not`. Ordinary recursion over data; not a language-level [constraint operator](/vixen-language/#constraint-expressions) (you don't route on cfg).
+- **Explicit-triple tables** are a string match on the resolved target triple — ordinary projection plus comparison.
+- **Threading into resolution is policy, not mechanism.** Cargo's lock is target-independent: it records the union of platform deps (a Windows-only dep is locked on a Linux box). So `@vixen/rust` hands the target-conditional edges to `pubgrub_solve`'s `dependencies` closure with their conditions attached; the cfg predicate then gates which deps actually **compile** for the concrete target at build-graph time, and — per resolver version — which deps' features the [feature accumulator](/vixen-language/#accumulators) unifies (v1 includes all target edges; v2 narrows feature unification by the built target's cfg). Both are expressible with the same mechanism.
 
-- **It is resolution-time domain logic in `@vixen/rust`, not a fleet-routing constraint.** You don't route executors by `cfg`; you select which deps apply for a resolved target. So it is *not* a language-level [constraint operator](/vixen-language/#constraint-expressions) and does not need to be registry-indexable. `@vixen/rust` owns cargo's `cfg` semantics the same way it owns features and `[patch]`.
-- **The cfg attribute set for a target is data the runtime can supply.** `rustc --print cfg --target <triple>` yields the concrete cfg key/values and bare flags for that target — an `exec` whose observer returns the parsed set. Given that set, evaluating a `cfg(...)` expression is ordinary boolean logic (`all`/`any`/`not`, key-equality, flag membership) expressible with the built-in operators over plain data.
-- **Explicit-triple tables** are a string match on the resolved target triple; those *do* fall out of ordinary projection + comparison.
-
-Open: how `@vixen/rust` parses the `cfg(...)` mini-language (its own small parser vs. a runtime intrinsic), how the per-target cfg set is acquired and cached (declared-identity on a Vixen executor vs. discovered on a customer host), and how cfg-conditional edges thread into the PubGrub solve so a target resolves to the same dependency set cargo would pick — functional equivalence, not a byte-identical lockfile. Tracked here as a compat blocker for the cargo path.
+So cfg confirms the broader pattern: the runtime supplies primitives (`exec`, the built-in operators, accumulators, `pubgrub_solve`); `@vixen/rust` composes them into cargo's behavior. Functional equivalence is the bar, which gives slack on the resolver-v1/v2 long tail.
 
 ## Bootstrap is clean
 

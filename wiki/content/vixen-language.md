@@ -291,7 +291,7 @@ The full vocabulary, built into the runtime — not a user-extension surface:
 
 Semver is built in because a build system lives on it — the runtime owns caret / tilde / comparator semantics and the registry indexes them natively; it is **not** a package-declared operator. User-defined operators are deferred.
 
-Routing *by* target triple falls out of ordinary field projection plus comparison (`$.targets contains "aarch64-apple-darwin"`, `$.triple.os == "darwin"`). Cargo's **`cfg(...)` expression matching** (`cfg(unix)`, `cfg(all(target_os = "linux", target_arch = "x86_64"))`, `any`/`not`, the `[target.'cfg(...)'.dependencies]` tables) is a *different* problem and a genuinely open one — see [Build and resolution → cfg and target tables](/build-and-resolution/#cfg-and-target-table-matching-must-cover-open). It is resolution-time domain logic, not a fleet-routing constraint, so it is **not** a language-level constraint operator.
+Routing *by* target triple falls out of ordinary field projection plus comparison (`$.targets contains "aarch64-apple-darwin"`, `$.triple.os == "darwin"`). Cargo's **`cfg(...)` expression matching** (`cfg(unix)`, `cfg(all(target_os = "linux", target_arch = "x86_64"))`, `any`/`not`, the `[target.'cfg(...)'.dependencies]` tables) is a *different* problem — see [Build and resolution → cfg and target tables](/build-and-resolution/#cfg-and-target-tables). It is resolution-time domain logic in `@vixen/rust` (a `CfgSet` from `rustc --print cfg`, evaluated with built-in operators), not a fleet-routing constraint, so it is **not** a language-level constraint operator.
 
 ### Numeric literal rule (build-language flavour)
 
