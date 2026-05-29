@@ -14,3 +14,6 @@ pub use runner::*;
 
 mod store;
 pub use store::*;
+
+mod test_runner;
+pub use test_runner::*;
