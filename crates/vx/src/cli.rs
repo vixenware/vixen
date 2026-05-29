@@ -28,6 +28,9 @@ pub(crate) enum CliCommand {
     /// Lower and evaluate one strict function through the orchestrator
     Eval(EvalArgs),
 
+    /// Discover and run `.vx` tests through the daemon, streaming results
+    Test(TestArgs),
+
     /// Mount a store-backed tree into the shared Vixen mount
     Mount(MountArgs),
 
@@ -80,6 +83,21 @@ pub(crate) struct EvalArgs {
     /// Bare values are treated as strings.
     #[facet(args::positional)]
     pub(crate) args: Option<Vec<String>>,
+}
+
+#[derive(Facet, Debug)]
+pub(crate) struct TestArgs {
+    #[facet(flatten)]
+    pub(crate) target: ClientTargetArgs,
+
+    /// Stop and restart the local auto-started daemon before running tests
+    #[facet(args::named)]
+    pub(crate) fresh_daemon: bool,
+
+    /// Files or directories to search for `.vx` tests. Defaults to the current
+    /// directory, searched recursively.
+    #[facet(args::positional)]
+    pub(crate) paths: Option<Vec<String>>,
 }
 
 #[derive(Facet, Debug)]

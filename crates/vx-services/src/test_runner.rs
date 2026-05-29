@@ -283,7 +283,9 @@ pub enum EventBody {
     CaseStarted {
         id: TestId,
         expectation: Expectation,
-        closure: ClosureRef,
+        /// The content-addressed source closure, once the store-backed emission
+        /// seam captures it. `None` until then.
+        closure: Option<ClosureRef>,
         topology: Topology,
     },
     CaseFinished {
@@ -388,6 +390,14 @@ pub struct RunSummary {
     pub failed: u64,
     pub errored: u64,
     pub wall_ms: u64,
+}
+
+// SAFETY: `Event` is fully owned — it has no lifetime parameter and borrows no
+// external data — so `Ref<'a> = Self` is trivially covariant and
+// layout-identical, exactly the condition vox-types documents for owned channel
+// payloads. This lets a reporter read streamed events via `SelfRef::get`.
+unsafe impl vox_types::Reborrow for Event {
+    type Ref<'a> = Event;
 }
 
 #[vox::service]

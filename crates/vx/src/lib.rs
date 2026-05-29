@@ -13,12 +13,15 @@ use std::time::Duration;
 
 use figue as args;
 use vx_services::{
-    Blake3Hash, DAEMON_SOCK, DaemonClient, EvalFunctionRequest, EvalFunctionResult,
-    EvalProgressEvent, OrchestratorClient, RuntimeValue,
+    Blake3Hash, DAEMON_SOCK, DaemonClient, EvalFunctionRequest, EvalFunctionResult, EvalOutcome,
+    EvalProgressEvent, Event, EventBody, OrchestratorClient, RunTestsRequest, RuntimeValue,
+    TestRunnerClient, TestSource, Verdict,
 };
 use vx_vfsd::protocol::VfsdClient;
 
-use crate::cli::{Cli, CliCommand, ClientTargetArgs, EvalArgs, KillArgs, MountArgs, RunArgs};
+use crate::cli::{
+    Cli, CliCommand, ClientTargetArgs, EvalArgs, KillArgs, MountArgs, RunArgs, TestArgs,
+};
 
 const DAEMON_CONNECT_TIMEOUT: Duration = Duration::from_millis(250);
 const DAEMON_WAIT_FOR_SERVICE_TIMEOUT: Duration = Duration::from_secs(10);
@@ -71,6 +74,7 @@ async fn async_main(binary: Binary) -> eyre::Result<()> {
         CliCommand::Health(args) => health(args.target).await,
         CliCommand::Kill(args) => kill(args).await,
         CliCommand::Eval(args) => eval(args).await,
+        CliCommand::Test(args) => test(args).await,
         CliCommand::Mount(args) => mount(args).await,
         CliCommand::Daemon(args) => {
             let config =
@@ -425,6 +429,108 @@ async fn eval_invocation(args: EvalInvocation) -> eyre::Result<()> {
             std::process::exit(1);
         }
     }
+}
+
+async fn test(args: TestArgs) -> eyre::Result<()> {
+    let paths = args.paths.unwrap_or_else(|| vec![".".to_string()]);
+    let mut sources = Vec::new();
+    for p in &paths {
+        collect_vx_sources(std::path::Path::new(p), &mut sources)?;
+    }
+    sources.sort_by(|a, b| a.path.cmp(&b.path));
+    if sources.is_empty() {
+        eyre::bail!("no .vx files found under {paths:?}");
+    }
+
+    let daemon = ensure_daemon_available(&args.target, args.fresh_daemon).await?;
+    let address = daemon.address;
+    let client: TestRunnerClient = vox::connect(&address).await?;
+
+    let (events_tx, mut events_rx) = vox::channel::<Event>();
+    let reporter = tokio::spawn(async move {
+        let mut failed = 0u64;
+        while let Ok(Some(item)) = events_rx.recv().await {
+            let event = item.get();
+            match &event.body {
+                EventBody::CaseFinished {
+                    id,
+                    verdict,
+                    terminal,
+                    ..
+                } => match verdict {
+                    Verdict::Pass => println!("  ok    {}::{}", id.path, id.function),
+                    Verdict::Fail => {
+                        failed += 1;
+                        println!("  FAIL  {}::{}", id.path, id.function);
+                        report_outcome(terminal);
+                    }
+                },
+                EventBody::RunFinished {
+                    passed,
+                    failed: f,
+                    wall_ms,
+                    ..
+                } => {
+                    println!("\n{passed} passed, {f} failed in {wall_ms} ms");
+                }
+                _ => {}
+            }
+        }
+        failed
+    });
+
+    let _summary = client
+        .run_tests(RunTestsRequest { sources }, events_tx)
+        .await?;
+    let failed = reporter.await?;
+    if failed > 0 {
+        eyre::bail!("{failed} test(s) failed");
+    }
+    Ok(())
+}
+
+/// Render a failing case's terminal outcome below its `FAIL` line.
+fn report_outcome(outcome: &EvalOutcome) {
+    match outcome {
+        EvalOutcome::Clean { value } => {
+            println!(
+                "        expected a poison, but evaluated cleanly to {} : {}",
+                value.rendered, value.ty
+            );
+        }
+        EvalOutcome::Poisoned { diagnostics } | EvalOutcome::Errored { diagnostics } => {
+            let caps = vx_diagnostics::detect_terminal_capabilities();
+            match vx_diagnostics::render_to_terminal(diagnostics, caps) {
+                Ok(rendered) => eprint!("{rendered}"),
+                Err(_) => {
+                    for report in &diagnostics.reports {
+                        eprintln!("        {}", report.title);
+                    }
+                }
+            }
+        }
+    }
+}
+
+/// Recursively collect `.vx` files under `root` (or `root` itself if it is one).
+fn collect_vx_sources(root: &std::path::Path, out: &mut Vec<TestSource>) -> eyre::Result<()> {
+    if root.is_dir() {
+        let mut entries: Vec<_> = std::fs::read_dir(root)?
+            .filter_map(|e| e.ok())
+            .map(|e| e.path())
+            .collect();
+        entries.sort();
+        for entry in entries {
+            collect_vx_sources(&entry, out)?;
+        }
+    } else if root.extension().is_some_and(|ext| ext == "vx") {
+        let text = std::fs::read_to_string(root)?;
+        out.push(TestSource {
+            path: root.to_string_lossy().into_owned(),
+            text,
+        });
+    }
+    Ok(())
 }
 
 async fn mount(args: MountArgs) -> eyre::Result<()> {

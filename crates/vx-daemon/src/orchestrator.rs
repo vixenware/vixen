@@ -7,8 +7,10 @@ use vx_services::{
 use vx_vfsd::VfsdService;
 
 use crate::runtime_eval::{
-    EvalRequest, RuntimeEvalContext, evaluate_source_text_function, runtime_error_to_diagnostics,
+    EvalOutput, EvalRequest, RuntimeEvalContext, RuntimeEvalError, evaluate_source_text_function,
+    runtime_error_to_diagnostics,
 };
+use vx_services::RuntimeValue;
 
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct OrchestratorWiring {
@@ -47,6 +49,31 @@ impl OrchestratorService {
 
     pub fn wiring(&self) -> &OrchestratorWiring {
         &self.wiring
+    }
+
+    /// Evaluate through the real runtime path, returning the *raw* result so
+    /// callers (the test runner) can distinguish a poison (`FailureResult` /
+    /// `PendingResult`) from a compile error — a distinction the
+    /// `EvalStrictFunctionResult` wrapper collapses into one `Err`.
+    pub async fn eval_raw(
+        &self,
+        source: &str,
+        function_name: &str,
+        args: &[RuntimeValue],
+    ) -> Result<EvalOutput, RuntimeEvalError> {
+        evaluate_source_text_function(
+            &RuntimeEvalContext {
+                store: self.store.clone(),
+                vfsd: self.vfsd.clone(),
+            },
+            EvalRequest {
+                source,
+                function_name,
+                args,
+            },
+            None,
+        )
+        .await
     }
 
     async fn eval_strict_function_impl(

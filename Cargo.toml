@@ -73,6 +73,7 @@ figue = { version = "2.0.1" }
 
 # vox RPC framework
 vox = { version = "0.8.2", features = ["transport-tcp", "transport-local"] }
+vox-types = { version = "0.8.2" }
 
 # process management
 

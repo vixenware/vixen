@@ -18,6 +18,7 @@ fastcdc.workspace = true
 margin.workspace = true
 
 vox.workspace = true
+vox-types.workspace = true
 tokio.workspace = true
 
 [lints]

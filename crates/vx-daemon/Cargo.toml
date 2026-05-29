@@ -16,6 +16,7 @@ async-recursion = "1"
 vox = { workspace = true }
 moire = { workspace = true }
 tokio = { workspace = true }
+futures-util = { workspace = true }
 camino = { workspace = true }
 eyre = { workspace = true }
 tracing = { workspace = true }

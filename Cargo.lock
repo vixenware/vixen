@@ -3820,6 +3820,7 @@ dependencies = [
  "eyre",
  "facet",
  "facet-styx",
+ "futures-util",
  "margin",
  "moire",
  "thiserror 2.0.18",
@@ -3974,6 +3975,7 @@ dependencies = [
  "margin",
  "tokio",
  "vox",
+ "vox-types",
 ]
 
 [[package]]

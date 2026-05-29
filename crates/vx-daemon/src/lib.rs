@@ -11,6 +11,7 @@ use vox::{ConnectionAcceptor, Metadata, TransportMode};
 use vx_runner::RunnerService;
 use vx_services::{
     DAEMON_SOCK, DaemonDispatcher, OrchestratorDispatcher, RunnerDispatcher, StoreDispatcher,
+    TestRunnerDispatcher,
 };
 use vx_store::StoreService;
 use vx_vfsd::{VfsdDispatcher, VfsdService};
@@ -18,8 +19,10 @@ use vx_vfsd::{VfsdDispatcher, VfsdService};
 mod orchestrator;
 mod runtime_eval;
 mod service;
+mod test_runner;
 pub use orchestrator::{OrchestratorService, OrchestratorWiring};
 pub use service::DaemonService;
+pub use test_runner::TestRunnerService;
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum ServiceRef {
@@ -277,9 +280,13 @@ pub async fn serve(config: DaemonConfig) -> Result<()> {
     let orchestrator_service = orchestrator_wiring.map(|wiring| {
         OrchestratorService::with_runtime(wiring, orchestrator_store, vfsd_service.clone())
     });
+    // The test runner rides the same evaluation path as the orchestrator, so it
+    // is hosted exactly when the orchestrator is.
+    let test_runner_service = orchestrator_service.clone().map(TestRunnerService::new);
     let mut hosted_services = vec!["Daemon".to_owned()];
     if orchestrator_service.is_some() {
         hosted_services.push("Orchestrator".to_owned());
+        hosted_services.push("TestRunner".to_owned());
     }
     if store_service.is_some() {
         hosted_services.push("Store".to_owned());
@@ -296,6 +303,7 @@ pub async fn serve(config: DaemonConfig) -> Result<()> {
     let acceptor = DaemonAcceptor {
         service,
         orchestrator_service,
+        test_runner_service,
         store_service,
         runner_service,
         vfsd_service,
@@ -510,6 +518,7 @@ fn resolve_many_dependencies(
 struct DaemonAcceptor {
     service: DaemonService,
     orchestrator_service: Option<OrchestratorService>,
+    test_runner_service: Option<TestRunnerService>,
     store_service: Option<StoreService>,
     runner_service: Option<RunnerService>,
     vfsd_service: Option<VfsdService>,
@@ -530,6 +539,13 @@ impl ConnectionAcceptor for DaemonAcceptor {
                     return Err(vec![]);
                 };
                 connection.handle_with(OrchestratorDispatcher::new(service.clone()));
+            }
+            "TestRunner" => {
+                let Some(service) = &self.test_runner_service else {
+                    tracing::warn!("test runner service requested but not hosted");
+                    return Err(vec![]);
+                };
+                connection.handle_with(TestRunnerDispatcher::new(service.clone()));
             }
             "Store" => {
                 let Some(service) = &self.store_service else {
