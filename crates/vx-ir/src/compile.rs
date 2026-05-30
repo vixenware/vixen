@@ -289,6 +289,41 @@ fn probe() #discover -> String (
         program
     }
 
+    const SOURCE_CLI_LITERAL: &str = r#"
+fn probe() -> String (
+  let out = "x.o";
+  let cmd = @cc[ -c main.c -o $out ];
+  out
+)
+"#;
+
+    #[test]
+    fn cli_literal_builds_resolves_and_type_checks() {
+        // Phase A: the @cc[…] literal is a real IR expression whose holes ($out)
+        // resolve and type-check like any sub-expression. (The grammar check is a
+        // later phase; the literal's own type is poison for now.)
+        let mut program = semantically_analyze(SOURCE_CLI_LITERAL);
+        let mut types = collect_types_vir(&mut program.arena);
+        let resolve_errors = resolve_names(&mut program.arena);
+        assert!(
+            resolve_errors.is_empty(),
+            "the literal's holes should resolve, got {resolve_errors:?}"
+        );
+        let tc_result = type_check_vir(&mut program.arena, &mut types);
+        assert!(
+            tc_result.errors.is_empty(),
+            "the literal + holes should type-check, got {:?}",
+            tc_result.errors
+        );
+
+        // The literal lowered to a real CliLiteral node with its grammar name.
+        let found =
+            program.arena.exprs.iter().any(
+                |e| matches!(&e.kind, crate::expr::ExprKind::CliLiteral(c) if c.grammar == "cc"),
+            );
+        assert!(found, "expected a CliLiteral IR node for grammar `cc`");
+    }
+
     #[test]
     fn semantic_pipeline_resolves_discover_and_executor_class_from_stdlib() {
         let mut program = semantically_analyze(SOURCE_DISCOVER_WHICH);

@@ -383,6 +383,15 @@ fn collect_call_edges(
                 }
             }
         }
+        ExprKind::CliLiteral(cli) => {
+            for arg in &cli.args {
+                for piece in &arg.pieces {
+                    if let crate::expr::StringPart::Expr(id) = piece {
+                        collect_call_edges(arena, body_id, *id, edges);
+                    }
+                }
+            }
+        }
         ExprKind::PartialApp(pa) => {
             collect_call_edges(arena, body_id, pa.callee, edges);
             for arg in &pa.args {
@@ -925,6 +934,15 @@ fn collect_local_projections(
             for part in &is.parts {
                 if let crate::expr::StringPart::Expr(id) = part {
                     collect_local_projections(arena, body_id, *id, projected);
+                }
+            }
+        }
+        ExprKind::CliLiteral(cli) => {
+            for arg in &cli.args {
+                for piece in &arg.pieces {
+                    if let crate::expr::StringPart::Expr(id) = piece {
+                        collect_local_projections(arena, body_id, *id, projected);
+                    }
                 }
             }
         }

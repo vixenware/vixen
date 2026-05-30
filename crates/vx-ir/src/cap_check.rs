@@ -766,6 +766,15 @@ impl CapChecker<'_> {
                     crate::expr::StringPart::Text(_) => None,
                 })
                 .collect(),
+            ExprKind::CliLiteral(cli) => cli
+                .args
+                .iter()
+                .flat_map(|arg| &arg.pieces)
+                .filter_map(|p| match p {
+                    crate::expr::StringPart::Expr(id) => Some(*id),
+                    crate::expr::StringPart::Text(_) => None,
+                })
+                .collect(),
             ExprKind::PartialApp(pa) => {
                 let mut children = vec![pa.callee];
                 for arg in &pa.args {

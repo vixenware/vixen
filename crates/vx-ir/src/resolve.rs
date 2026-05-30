@@ -278,6 +278,15 @@ fn resolve_expr(
                 }
             }
         }
+        ExprKind::CliLiteral(cli) => {
+            for arg in &cli.args {
+                for piece in &arg.pieces {
+                    if let StringPart::Expr(id) = piece {
+                        resolve_expr(arena, *id, ref_order, errors);
+                    }
+                }
+            }
+        }
         ExprKind::Fail(f) => {
             if let Some(msg) = f.message {
                 resolve_expr(arena, msg, ref_order, errors);

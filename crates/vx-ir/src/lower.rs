@@ -445,6 +445,9 @@ impl<'a, 'ctx> VirBodyLowering<'a, 'ctx> {
             ExprKind::Import(_) => Err(LowerError::UnsupportedShape(
                 "import (not in executable slice)".into(),
             )),
+            ExprKind::CliLiteral(_) => Err(LowerError::UnsupportedShape(
+                "CLI literal (lowered by the new runtime, not the legacy back-end)".into(),
+            )),
             ExprKind::PathLiteral(pl) => self.lower_path_literal(&pl),
             ExprKind::Map(_) => Err(LowerError::UnsupportedShape(
                 "map (not in executable slice)".into(),

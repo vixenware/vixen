@@ -1120,9 +1120,7 @@ impl VirBuilder {
             vx_parser::Expr::InterpolatedString(is) => self.build_interpolated_string_expr(is),
             vx_parser::Expr::PathLiteral(pl) => self.build_path_literal_expr(pl),
             vx_parser::Expr::Import(i) => self.build_import_expr(i),
-            // CLI literals (`@cc[ … ]`) are lowered by the new runtime, not this
-            // legacy IR; treat as an unbuildable expr here.
-            vx_parser::Expr::CliLiteral(c) => self.error_expr(self.span(c.syntax())),
+            vx_parser::Expr::CliLiteral(c) => self.build_cli_literal_expr(c),
         }
     }
 
@@ -2399,6 +2397,66 @@ impl VirBuilder {
             kind: ExprKind::InterpolatedString(VirInterpolatedStringExpr { parts }),
             ty: None,
         })
+    }
+
+    fn build_cli_literal_expr(&mut self, c: &vx_parser::CliLiteralExpr) -> ExprId {
+        let span = self.span(c.syntax());
+        let (grammar, grammar_span) = match c.grammar() {
+            Some(tok) => (tok.text().to_string(), self.token_span(&tok)),
+            None => (String::new(), span),
+        };
+        let args = c.args().map(|arg| self.build_cli_arg(&arg)).collect();
+        self.arena.alloc_expr(Expr {
+            span,
+            body: self.current_body(),
+            scope: self.current_scope(),
+            kind: ExprKind::CliLiteral(crate::expr::CliLiteralExpr {
+                grammar,
+                grammar_span,
+                args,
+            }),
+            ty: None,
+        })
+    }
+
+    /// Lower one CLI-literal argument's pieces. Bare words and quoted strings
+    /// become text; a `$name` hole becomes a NameRef, a `${expr}` hole the
+    /// expression — both real sub-expressions that resolve + type-check.
+    fn build_cli_arg(&mut self, arg: &vx_parser::CliArg) -> crate::expr::CliArgIr {
+        let mut pieces = Vec::new();
+        for child in arg.syntax().children_with_tokens() {
+            if let Some(tok) = child.as_token() {
+                match tok.kind() {
+                    SyntaxKind::CLI_WORD | SyntaxKind::STRING => {
+                        pieces.push(StringPart::Text(tok.text().to_string()));
+                    }
+                    SyntaxKind::CLI_INTERP_VAR => {
+                        let text = tok.text();
+                        let name = text.strip_prefix('$').unwrap_or(text).to_string();
+                        let name_span = self.token_span(&tok);
+                        let nr = self.arena.alloc_expr(Expr {
+                            span: name_span,
+                            body: self.current_body(),
+                            scope: self.current_scope(),
+                            kind: ExprKind::NameRef(VirNameRefExpr {
+                                name,
+                                name_span,
+                                resolved: None,
+                            }),
+                            ty: None,
+                        });
+                        pieces.push(StringPart::Expr(nr));
+                    }
+                    _ => {}
+                }
+            } else if let Some(node) = child.as_node()
+                && node.kind() == SyntaxKind::CLI_INTERP
+                && let Some(inner) = vx_parser::CliInterp::cast(node.clone()).and_then(|h| h.expr())
+            {
+                pieces.push(StringPart::Expr(self.build_expr(&inner)));
+            }
+        }
+        crate::expr::CliArgIr { pieces }
     }
 
     fn build_path_literal_expr(&mut self, pl: &vx_parser::PathLiteralExpr) -> ExprId {

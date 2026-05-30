@@ -208,6 +208,15 @@ fn visit_expr(
                 }
             }
         }
+        ExprKind::CliLiteral(cli) => {
+            for arg in &cli.args {
+                for piece in &arg.pieces {
+                    if let crate::expr::StringPart::Expr(id) = piece {
+                        visit_expr(arena, body_id, *id, captured);
+                    }
+                }
+            }
+        }
         ExprKind::PartialApp(pa) => {
             visit_expr(arena, body_id, pa.callee, captured);
             for arg in &pa.args {

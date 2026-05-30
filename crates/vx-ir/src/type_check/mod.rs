@@ -11,6 +11,7 @@
 //! - `None`: not yet checked (never left behind after a full run).
 
 pub mod calls;
+pub mod cli;
 pub mod closures;
 pub mod collections;
 pub mod control_flow;
@@ -130,6 +131,7 @@ impl<'a> TypeChecker<'a> {
             ExprKind::Literal(ref lit) => literals::infer_literal(self, lit),
             ExprKind::PathLiteral(_) => literals::infer_path_literal(self),
             ExprKind::InterpolatedString(ref is) => literals::infer_interpolated_string(self, is),
+            ExprKind::CliLiteral(ref c) => cli::infer_cli_literal(self, expr_id, c),
             ExprKind::NameRef(ref nr) => names::infer_name_ref(self, expr_id, nr),
             ExprKind::Block(ref block) => control_flow::infer_block(self, block),
             ExprKind::If(ref if_) => control_flow::infer_if(self, if_),

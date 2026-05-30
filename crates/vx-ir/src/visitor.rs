@@ -212,6 +212,15 @@ pub fn walk_expr<V: VirVisitor + ?Sized>(v: &mut V, arena: &VirArena, id: ExprId
                 }
             }
         }
+        ExprKind::CliLiteral(cli) => {
+            for arg in &cli.args {
+                for piece in &arg.pieces {
+                    if let StringPart::Expr(id) = piece {
+                        v.visit_expr(arena, *id);
+                    }
+                }
+            }
+        }
         ExprKind::Fail(f) => {
             if let Some(msg) = f.message {
                 v.visit_expr(arena, msg);

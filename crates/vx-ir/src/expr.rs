@@ -129,6 +129,9 @@ pub enum ExprKind {
     /// An import expression: `import "path/to/file"`.
     Import(ImportExpr),
 
+    /// A CLI literal: `@cc[ -c main.c -o $out ]` — a command typed by its grammar.
+    CliLiteral(CliLiteralExpr),
+
     /// A fail expression: `fail "message"` or `fail expr`.
     Fail(FailExpr),
 
@@ -610,6 +613,25 @@ pub struct ImportExpr {
     /// The resolved source ID of the imported file.
     /// Populated during: name resolution pass. `None` before that.
     pub resolved_source: Option<vx_parser::SourceId>,
+}
+
+/// A CLI literal: `@grammar[ args… ]` — a tool command typed by its grammar.
+#[derive(Debug, Clone)]
+pub struct CliLiteralExpr {
+    /// The grammar name after `@` (e.g. `cc`).
+    pub grammar: String,
+    /// Span of the grammar-name token.
+    pub grammar_span: SourceSpan,
+    /// The command arguments, in order.
+    pub args: Vec<CliArgIr>,
+}
+
+/// One CLI-literal argument: adjacent text + interpolation pieces. A `$name` or
+/// `${expr}` hole is lowered to a [`StringPart::Expr`] (a real sub-expression
+/// that resolves and type-checks like any other).
+#[derive(Debug, Clone)]
+pub struct CliArgIr {
+    pub pieces: Vec<StringPart>,
 }
 
 /// A fail expression: `fail "message"` or `fail expr`.
