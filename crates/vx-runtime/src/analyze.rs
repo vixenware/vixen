@@ -69,7 +69,7 @@ pub fn analyze_all(source: &str) -> Result<Vec<(String, DemandGraph)>, String> {
 
 /// Run the real front-end: parse (+ stdlib) → VIR → type-collect → resolve →
 /// type-check. Returns the program and its type environment.
-fn front_end(source: &str) -> Result<(VirProgram, TypeEnv), String> {
+pub(crate) fn front_end(source: &str) -> Result<(VirProgram, TypeEnv), String> {
     let parsed = parse_source_file(source, SourceId(0));
     if !parsed.errors().is_empty() {
         return Err(format!("parse errors: {:?}", parsed.errors()));
