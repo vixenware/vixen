@@ -37,6 +37,17 @@ enum Policy {
   struct Positional,
 }
 
+// The verb a flag performs on its conceptual knob. Translation matches on
+// (role, operation): role is the noun, operation the verb — so an "add to the
+// include path" can never be mapped onto a "remove from the include path".
+enum Operation {
+  struct Set,        // assign / replace a value: -O2, -o out
+  struct Add,        // add to a collection: -I dir, -DFOO, -lfoo
+  struct Remove,     // remove from a collection: -UFOO
+  struct Enable,     // turn a knob on: -Wfoo, -frtti, -c
+  struct Disable,    // turn a knob off: -Wno-foo, -fno-rtti
+}
+
 // How the engine treats a value for mounting and caching — the *universal*,
 // domain-agnostic classification. Small and stable: it never grows with new
 // tools. What the value *means* to the tool (header dir, library, define, …) is
@@ -88,6 +99,7 @@ struct Flag {
   policy: Policy,
   kind: Kind = Kind.Text,                       // cache/IO class of the value (Text if none)
   role: String = "",                            // open domain tag: "include", "lib", "define", …
+  operation: Operation = Operation.Set,         // the verb; (role, operation) is the translation key
   value: ValueDomain = ValueDomain.Any,
   doc: String = "",
 }

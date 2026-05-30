@@ -92,6 +92,23 @@ pub enum Kind {
     InOut,
 }
 
+/// The verb a flag performs on its conceptual knob — the polarity translation
+/// must respect (you cannot map an "add to include path" onto a "remove from
+/// include path", even though both carry role `"include"`).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Operation {
+    /// Assign / replace a value (the common case): `-O2`, `-o out`.
+    Set,
+    /// Add to a collection: `-I dir`, `-DFOO`, `-lfoo`.
+    Add,
+    /// Remove from a collection: `-UFOO`.
+    Remove,
+    /// Turn a knob on: `-Wfoo`, `-frtti`, `-c`.
+    Enable,
+    /// Turn a knob off: `-Wno-foo`, `-fno-rtti`.
+    Disable,
+}
+
 /// An environment channel a tool reads. Declared by the grammar so it becomes
 /// an *explicit*, keyed input — Vixen never inherits ambient env.
 #[derive(Debug, Clone, Copy)]
@@ -141,6 +158,23 @@ pub struct Flag {
     /// Open domain tag — `"include"`, `"lib"`, `"define"`, … — engine-opaque,
     /// for explain/completion and as translate's cross-grammar key.
     pub role: &'static str,
+    /// The verb (set/add/remove/enable/disable). Translation matches on
+    /// `(role, operation)` — role is the noun, operation the verb.
+    pub operation: Operation,
+}
+
+impl Flag {
+    /// Baseline for terse `..Flag::DEFAULT` construction: a bare, set-once,
+    /// text-valued flag with no aliases and an empty role.
+    pub const DEFAULT: Flag = Flag {
+        canonical: "",
+        aliases: &[],
+        spelling: Spelling::Bare,
+        policy: Policy::Once,
+        kind: Kind::Text,
+        role: "",
+        operation: Operation::Set,
+    };
 }
 
 /// A tool grammar: the flags, the env channels the tool reads, and the
@@ -884,27 +918,22 @@ pub const LD: Grammar = Grammar {
     flags: &[
         Flag {
             canonical: "--gc-sections",
-            aliases: &[],
-            spelling: Spelling::Bare,
-            policy: Policy::Once,
-            kind: Kind::Text,
             role: "gc-sections",
+            operation: Operation::Enable,
+            ..Flag::DEFAULT
         },
         Flag {
             canonical: "--as-needed",
-            aliases: &[],
-            spelling: Spelling::Bare,
-            policy: Policy::Once,
-            kind: Kind::Text,
             role: "as-needed",
+            operation: Operation::Enable,
+            ..Flag::DEFAULT
         },
         Flag {
             canonical: "--version-script",
-            aliases: &[],
             spelling: Spelling::Suffixed { sep: '=' },
-            policy: Policy::Once,
             kind: Kind::Input { dir: false },
             role: "version-script",
+            ..Flag::DEFAULT
         },
     ],
 };
@@ -941,102 +970,94 @@ pub const CC: Grammar = Grammar {
     flags: &[
         Flag {
             canonical: "-c",
-            aliases: &[],
-            spelling: Spelling::Bare,
-            policy: Policy::Once,
-            kind: Kind::Text,
             role: "compile-only",
+            operation: Operation::Enable,
+            ..Flag::DEFAULT
         },
         Flag {
             canonical: "-fPIC",
-            aliases: &[],
-            spelling: Spelling::Bare,
-            policy: Policy::Once,
-            kind: Kind::Text,
             role: "pic",
+            operation: Operation::Enable,
+            ..Flag::DEFAULT
         },
         Flag {
             canonical: "-shared",
-            aliases: &[],
-            spelling: Spelling::Bare,
-            policy: Policy::Once,
-            kind: Kind::Text,
             role: "shared",
+            operation: Operation::Enable,
+            ..Flag::DEFAULT
         },
         Flag {
             canonical: "-O",
-            aliases: &[],
             spelling: Spelling::Attached,
             policy: Policy::Group("opt"),
-            kind: Kind::Text,
             role: "optimization",
+            ..Flag::DEFAULT
         },
         Flag {
             canonical: "-std",
-            aliases: &[],
             spelling: Spelling::Suffixed { sep: '=' },
-            policy: Policy::Once,
-            kind: Kind::Text,
             role: "std",
+            ..Flag::DEFAULT
         },
         Flag {
             canonical: "-W",
-            aliases: &[],
             spelling: Spelling::Attached,
             policy: Policy::DedupUnordered,
-            kind: Kind::Text,
             role: "warning",
+            operation: Operation::Enable,
+            ..Flag::DEFAULT
         },
         Flag {
             canonical: "-D",
-            aliases: &[],
             spelling: Spelling::Attached,
             policy: Policy::DefineProgram,
-            kind: Kind::Text,
             role: "define",
+            operation: Operation::Add,
+            ..Flag::DEFAULT
         },
         Flag {
             canonical: "-I",
-            aliases: &[],
             spelling: Spelling::Separated,
             policy: Policy::DedupOrdered,
             kind: Kind::Input { dir: true },
             role: "include",
+            operation: Operation::Add,
+            ..Flag::DEFAULT
         },
         Flag {
             canonical: "-L",
-            aliases: &[],
             spelling: Spelling::Separated,
             policy: Policy::DedupOrdered,
             kind: Kind::Input { dir: true },
             role: "lib-dir",
+            operation: Operation::Add,
+            ..Flag::DEFAULT
         },
         Flag {
             canonical: "-l",
-            aliases: &[],
             spelling: Spelling::Attached,
             policy: Policy::OrderedKeepAll,
-            kind: Kind::Text,
             role: "lib",
+            operation: Operation::Add,
+            ..Flag::DEFAULT
         },
         Flag {
             canonical: "-Wl,",
-            aliases: &[],
             spelling: Spelling::Passthrough {
                 sep: ",",
                 grammar: &LD,
             },
             policy: Policy::OrderedKeepAll,
-            kind: Kind::Text,
             role: "linker-args",
+            operation: Operation::Add,
+            ..Flag::DEFAULT
         },
         Flag {
             canonical: "-o",
-            aliases: &[],
             spelling: Spelling::Separated,
-            policy: Policy::Once,
             kind: Kind::Output { dir: false },
             role: "output",
+            ..Flag::DEFAULT
         },
     ],
 };
@@ -1072,58 +1093,56 @@ pub const CL: Grammar = Grammar {
         Flag {
             canonical: "/c",
             aliases: &["-c"],
-            spelling: Spelling::Bare,
-            policy: Policy::Once,
-            kind: Kind::Text,
             role: "compile-only",
+            operation: Operation::Enable,
+            ..Flag::DEFAULT
         },
         Flag {
             canonical: "/nologo",
             aliases: &["-nologo"],
-            spelling: Spelling::Bare,
-            policy: Policy::Once,
-            kind: Kind::Text,
             role: "nologo",
+            operation: Operation::Enable,
+            ..Flag::DEFAULT
         },
         Flag {
             canonical: "/EHsc",
             aliases: &["-EHsc"],
-            spelling: Spelling::Bare,
-            policy: Policy::Once,
-            kind: Kind::Text,
             role: "exceptions",
+            operation: Operation::Enable,
+            ..Flag::DEFAULT
         },
         Flag {
             canonical: "/O",
             aliases: &["-O"],
             spelling: Spelling::Attached,
             policy: Policy::Group("opt"),
-            kind: Kind::Text,
             role: "optimization",
+            ..Flag::DEFAULT
         },
         Flag {
             canonical: "/W",
             aliases: &["-W"],
             spelling: Spelling::Attached,
             policy: Policy::Group("warn"),
-            kind: Kind::Text,
             role: "warning",
+            operation: Operation::Enable,
+            ..Flag::DEFAULT
         },
         Flag {
             canonical: "/std",
             aliases: &["-std"],
             spelling: Spelling::Suffixed { sep: ':' },
-            policy: Policy::Once,
-            kind: Kind::Text,
             role: "std",
+            ..Flag::DEFAULT
         },
         Flag {
             canonical: "/D",
             aliases: &["-D"],
             spelling: Spelling::Attached,
             policy: Policy::DefineProgram,
-            kind: Kind::Text,
             role: "define",
+            operation: Operation::Add,
+            ..Flag::DEFAULT
         },
         Flag {
             canonical: "/I",
@@ -1132,22 +1151,23 @@ pub const CL: Grammar = Grammar {
             policy: Policy::DedupOrdered,
             kind: Kind::Input { dir: true },
             role: "include",
+            operation: Operation::Add,
         },
         Flag {
             canonical: "/Fo",
             aliases: &["-Fo"],
             spelling: Spelling::Attached,
-            policy: Policy::Once,
             kind: Kind::Output { dir: false },
             role: "output",
+            ..Flag::DEFAULT
         },
         Flag {
             canonical: "/Fe",
             aliases: &["-Fe"],
             spelling: Spelling::Attached,
-            policy: Policy::Once,
             kind: Kind::Output { dir: false },
             role: "output",
+            ..Flag::DEFAULT
         },
     ],
 };
@@ -1277,14 +1297,6 @@ pub fn explain(grammar: &Grammar, argv: &[String]) -> Explanation {
     }
 }
 
-/// A flag-by-flag correspondence between two grammars, for [`translate`]. (Real
-/// correspondences will be derived from grammar-level semantic keys; this is the
-/// explicit form.)
-pub struct Correspondence {
-    /// `(from canonical, to canonical)` flag equivalences.
-    pub flags: &'static [(&'static str, &'static str)],
-}
-
 /// A token that could not be translated to the target grammar.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Untranslatable {
@@ -1292,13 +1304,18 @@ pub struct Untranslatable {
 }
 
 /// Translate a command from one tool's grammar to another's, re-emitting each
-/// flag with the *target's* spelling — gcc `-I inc` becomes MSVC `/Iinc`, etc.
-/// Positionals pass through; anything without a correspondence is an error.
+/// flag with the *target's* spelling — gcc `-I inc` becomes MSVC `/Iinc`.
+///
+/// Flags are matched by their semantic identity, `(role, operation)`: cc `-I`
+/// (`include`, `Add`) maps to the target flag with the same role *and*
+/// operation, so an "add to include path" can never become a "remove from
+/// include path". Positionals pass through. A flag with no `(role, operation)`
+/// match in the target — a concept the target tool lacks — is returned as an
+/// `Untranslatable` (best-effort: surface the gaps, never silently drop).
 pub fn translate(
     from: &Grammar,
     argv: &[String],
     to: &Grammar,
-    corr: &Correspondence,
 ) -> Result<Vec<String>, Vec<Untranslatable>> {
     let parsed = parse_command(from, argv);
     let mut out = Vec::new();
@@ -1308,12 +1325,19 @@ pub fn translate(
             ArgRole::Flag {
                 canonical, value, ..
             } => {
-                let to_flag = corr
+                let src = from
                     .flags
                     .iter()
-                    .find(|(f, _)| *f == canonical.as_str())
-                    .and_then(|(_, t)| to.flags.iter().find(|f| f.canonical == *t));
-                match to_flag {
+                    .find(|f| f.canonical == canonical.as_str());
+                let target = src.and_then(|s| {
+                    if s.role.is_empty() {
+                        return None;
+                    }
+                    to.flags
+                        .iter()
+                        .find(|t| t.role == s.role && t.operation == s.operation)
+                });
+                match target {
                     Some(flag) => out.extend(emit(flag, value.as_deref())),
                     None => errors.push(Untranslatable {
                         token: arg.spelling.clone(),
@@ -1332,15 +1356,3 @@ pub fn translate(
         Err(errors)
     }
 }
-
-/// A first-cut gcc/clang → MSVC correspondence for the `CC` → `CL` demo.
-pub const CC_TO_CL: Correspondence = Correspondence {
-    flags: &[
-        ("-c", "/c"),
-        ("-O", "/O"),
-        ("-D", "/D"),
-        ("-I", "/I"),
-        ("-std", "/std"),
-        ("-o", "/Fo"),
-    ],
-};
