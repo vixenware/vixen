@@ -75,9 +75,9 @@ let cc = Grammar {
   ],
   env: [
     EnvDecl { name: "CPATH", kind: Kind.Input { dir: true }, role: "include",
-              doc: "additional header search directories" },
+              operation: Operation.Add, doc: "additional header search directories" },
     EnvDecl { name: "LIBRARY_PATH", kind: Kind.Input { dir: true }, role: "lib-dir",
-              doc: "additional library search directories" },
+              operation: Operation.Add, doc: "additional library search directories" },
     EnvDecl { name: "SOURCE_DATE_EPOCH", kind: Kind.Text, role: "source-date",
               doc: "fixed timestamp for reproducible builds" },
   ],

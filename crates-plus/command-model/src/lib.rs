@@ -116,6 +116,9 @@ pub struct EnvDecl {
     pub name: &'static str,
     pub kind: Kind,
     pub role: &'static str,
+    /// The verb — an env channel carries a `(role, operation)` semantic just like
+    /// a flag, so translation can move a semantic between flag and env.
+    pub operation: Operation,
 }
 
 /// How many positional arguments a schema slot consumes.
@@ -625,6 +628,17 @@ struct Pass {
     impurities: Vec<Impurity>,
 }
 
+/// The active mode for a set of present canonical flags: the non-default mode
+/// whose selector is present, else the default (selector-less) mode, else none.
+fn resolve_mode<'g>(grammar: &'g Grammar, present: &BTreeSet<&str>) -> Option<&'g str> {
+    grammar
+        .modes
+        .iter()
+        .find(|m| m.selector.is_some_and(|s| present.contains(&s)))
+        .or_else(|| grammar.modes.iter().find(|m| m.selector.is_none()))
+        .map(|m| m.name)
+}
+
 fn canon_pass(grammar: &Grammar, args: &[String]) -> Pass {
     let parsed = grammar.parse(args);
     let mut lints = Vec::new();
@@ -644,12 +658,7 @@ fn canon_pass(grammar: &Grammar, args: &[String]) -> Pass {
         .iter()
         .map(|o| grammar.flags[o.flag].canonical)
         .collect();
-    let active_mode: Option<&str> = grammar
-        .modes
-        .iter()
-        .find(|m| m.selector.is_some_and(|s| present.contains(&s)))
-        .or_else(|| grammar.modes.iter().find(|m| m.selector.is_none()))
-        .map(|m| m.name);
+    let active_mode = resolve_mode(grammar, &present);
 
     let mut flag_tokens: Vec<String> = Vec::new();
     let mut output_tokens: Vec<String> = Vec::new();
@@ -975,16 +984,19 @@ pub const CC: Grammar = Grammar {
             name: "CPATH",
             kind: Kind::Input { dir: true },
             role: "include",
+            operation: Operation::Add,
         },
         EnvDecl {
             name: "LIBRARY_PATH",
             kind: Kind::Input { dir: true },
             role: "lib-dir",
+            operation: Operation::Add,
         },
         EnvDecl {
             name: "SOURCE_DATE_EPOCH",
             kind: Kind::Text,
             role: "source-date",
+            operation: Operation::Set,
         },
     ],
     flags: &[
@@ -1113,11 +1125,13 @@ pub const CL: Grammar = Grammar {
             name: "INCLUDE",
             kind: Kind::Input { dir: true },
             role: "include",
+            operation: Operation::Add,
         },
         EnvDecl {
             name: "LIB",
             kind: Kind::Input { dir: true },
             role: "lib-dir",
+            operation: Operation::Add,
         },
     ],
     flags: &[
@@ -1330,62 +1344,182 @@ pub fn explain(grammar: &Grammar, argv: &[String]) -> Explanation {
     }
 }
 
-/// A token that could not be translated to the target grammar.
+/// A semantic the target grammar expresses through no mechanism — surfaced,
+/// never silently dropped. `token` is the source spelling, for diagnostics.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Untranslatable {
     pub token: String,
 }
 
-/// Translate a command from one tool's grammar to another's, re-emitting each
-/// flag with the *target's* spelling — gcc `-I inc` becomes MSVC `/Iinc`.
-///
-/// Flags are matched by their semantic identity, `(role, operation)`: cc `-I`
-/// (`include`, `Add`) maps to the target flag with the same role *and*
-/// operation, so an "add to include path" can never become a "remove from
-/// include path". Positionals pass through. A flag with no `(role, operation)`
-/// match in the target — a concept the target tool lacks — is returned as an
-/// `Untranslatable` (best-effort: surface the gaps, never silently drop).
-pub fn translate(
-    from: &Grammar,
-    argv: &[String],
-    to: &Grammar,
-) -> Result<Vec<String>, Vec<Untranslatable>> {
-    let parsed = parse_command(from, argv);
-    let mut out = Vec::new();
-    let mut errors = Vec::new();
+/// One item of a command's **semantic IR** — the spelling-independent meaning a
+/// command is lowered to before being re-emitted into another grammar. A
+/// `Semantic` is the `(role, operation, value)` of a flag; a `Positional` is a
+/// raw value that carries over by position. Order is preserved, so re-emission
+/// keeps the source layout.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum IrItem {
+    /// A flag's meaning, independent of how any tool spells it.
+    Semantic {
+        role: String,
+        operation: Operation,
+        value: Option<String>,
+        /// The source token, kept only for diagnostics (e.g. `Untranslatable`).
+        source_token: String,
+    },
+    /// A positional value, passed through by position.
+    Positional { value: String },
+}
+
+/// A command lowered to its semantic IR: an ordered list of meaning-bearing
+/// items, the command's active `mode` (so a mode-split target like MSVC's
+/// `/Fo`÷`/Fe` for `output` can be disambiguated), and any tokens too opaque to
+/// even lift (unrecognized flags).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct CommandIr {
+    pub items: Vec<IrItem>,
+    pub mode: Option<String>,
+    pub untranslatable: Vec<Untranslatable>,
+}
+
+/// The holistic result of emitting a [`CommandIr`] into a grammar: the target's
+/// argv **and** the env it expresses semantics through. A semantic with no
+/// target flag may still have a target env channel — `cc -L dir` becomes MSVC's
+/// `LIB=dir` — so the result is the whole `(argv, env)`, not just args. Genuine
+/// gaps land in `untranslatable`.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct TranslatedCommand {
+    pub args: Vec<String>,
+    pub env: Vec<(String, String)>,
+    pub untranslatable: Vec<Untranslatable>,
+}
+
+/// Lower a command to its semantic IR against the grammar it was written for:
+/// each recognized flag becomes a `(role, operation, value)` `Semantic`,
+/// positionals carry through by position, and the command's active mode is
+/// resolved. Unrecognized (`-`-leading) tokens cannot be lifted and are recorded
+/// in `untranslatable`.
+pub fn lift(grammar: &Grammar, argv: &[String]) -> CommandIr {
+    let parsed = parse_command(grammar, argv);
+    let present: BTreeSet<&str> = parsed
+        .args
+        .iter()
+        .filter_map(|a| match &a.role {
+            ArgRole::Flag { canonical, .. } => Some(canonical.as_str()),
+            _ => None,
+        })
+        .collect();
+    let mode = resolve_mode(grammar, &present).map(str::to_string);
+
+    let mut items = Vec::new();
+    let mut untranslatable = Vec::new();
     for arg in &parsed.args {
         match &arg.role {
             ArgRole::Flag {
-                canonical, value, ..
+                canonical,
+                value,
+                role,
+                ..
             } => {
-                let src = from
+                let operation = grammar
                     .flags
                     .iter()
-                    .find(|f| f.canonical == canonical.as_str());
-                let target = src.and_then(|s| {
-                    if s.role.is_empty() {
-                        return None;
-                    }
-                    to.flags
-                        .iter()
-                        .find(|t| t.role == s.role && t.operation == s.operation)
+                    .find(|f| f.canonical == canonical.as_str())
+                    .map(|f| f.operation)
+                    .unwrap_or(Operation::Set);
+                items.push(IrItem::Semantic {
+                    role: role.clone(),
+                    operation,
+                    value: value.clone(),
+                    source_token: arg.spelling.clone(),
                 });
-                match target {
-                    Some(flag) => out.extend(emit(flag, value.as_deref())),
-                    None => errors.push(Untranslatable {
-                        token: arg.spelling.clone(),
-                    }),
-                }
             }
-            ArgRole::Positional { value, .. } => out.push(value.clone()),
-            ArgRole::Unknown => errors.push(Untranslatable {
+            ArgRole::Positional { value, .. } => {
+                items.push(IrItem::Positional {
+                    value: value.clone(),
+                });
+            }
+            ArgRole::Unknown => untranslatable.push(Untranslatable {
                 token: arg.spelling.clone(),
             }),
         }
     }
-    if errors.is_empty() {
-        Ok(out)
-    } else {
-        Err(errors)
+    CommandIr {
+        items,
+        mode,
+        untranslatable,
     }
+}
+
+/// Emit a semantic IR into a target grammar **holistically**: each semantic is
+/// realized through whichever of the target's mechanisms expresses it — a flag
+/// (matched by `(role, operation)` and legal in the command's mode), or, failing
+/// that, an env channel (`cc -L dir` → MSVC `LIB=dir`). Positionals carry
+/// through by position. A semantic the target expresses through neither is
+/// surfaced in `untranslatable`.
+pub fn emit_into(ir: &CommandIr, to: &Grammar) -> TranslatedCommand {
+    let mode = ir.mode.as_deref();
+    let mut args = Vec::new();
+    let mut env_acc: BTreeMap<&str, Vec<String>> = BTreeMap::new();
+    let mut untranslatable = ir.untranslatable.clone();
+
+    for item in &ir.items {
+        match item {
+            IrItem::Semantic {
+                role,
+                operation,
+                value,
+                source_token,
+            } => {
+                let mut emitted = false;
+                if !role.is_empty() {
+                    // Prefer a flag legal in this mode; else an env channel.
+                    if let Some(flag) = to.flags.iter().find(|t| {
+                        t.role == role.as_str()
+                            && t.operation == *operation
+                            && (t.modes.is_empty() || mode.is_some_and(|m| t.modes.contains(&m)))
+                    }) {
+                        args.extend(emit(flag, value.as_deref()));
+                        emitted = true;
+                    } else if let Some(channel) = to
+                        .env
+                        .iter()
+                        .find(|e| e.role == role.as_str() && e.operation == *operation)
+                    {
+                        env_acc
+                            .entry(channel.name)
+                            .or_default()
+                            .push(value.clone().unwrap_or_default());
+                        emitted = true;
+                    }
+                }
+                if !emitted {
+                    untranslatable.push(Untranslatable {
+                        token: source_token.clone(),
+                    });
+                }
+            }
+            IrItem::Positional { value } => args.push(value.clone()),
+        }
+    }
+
+    let sep = ENV_PATH_SEP.to_string();
+    let env = env_acc
+        .into_iter()
+        .map(|(name, vals)| (name.to_string(), vals.join(&sep)))
+        .collect();
+    TranslatedCommand {
+        args,
+        env,
+        untranslatable,
+    }
+}
+
+/// Translate a command from one tool's grammar to another's by lowering it to
+/// the semantic IR ([`lift`]) and re-emitting it holistically ([`emit_into`]).
+/// Spelling, mechanism (flag vs env), and mode-split targets are all resolved by
+/// the target grammar: `gcc -I inc` becomes `/Iinc`, `gcc -L dir` becomes the
+/// `LIB` env channel, `gcc -o` in compile mode becomes `/Fo` (not `/Fe`). Gaps
+/// the target cannot express land in [`TranslatedCommand::untranslatable`].
+pub fn translate(from: &Grammar, argv: &[String], to: &Grammar) -> TranslatedCommand {
+    emit_into(&lift(from, argv), to)
 }

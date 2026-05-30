@@ -13,9 +13,9 @@ version 0.1.0
 // for cross-package references anyway.
 //
 // Still to add (the computational layer): richer guards (constraint predicates
-// over accumulated parse state, beyond `mode_selectors` / `link_only`) and
-// reducers (the `-W` set/unset/promote/demote algebra, alias collapse). Those
-// reuse the constraint-expression algebra; this file is the declarative core.
+// over accumulated parse state, beyond the per-flag `modes` cut) and reducers
+// (the `-W` set/unset/promote/demote algebra, alias collapse). Those reuse the
+// constraint-expression algebra; this file is the declarative core.
 
 // How a flag and its value are written on the command line.
 enum Spelling {
@@ -83,11 +83,14 @@ struct Positional {
   doc: String = "",
 }
 
-// An environment channel the tool reads — explicit, never ambient.
+// An environment channel the tool reads — explicit, never ambient. It carries a
+// (role, operation) semantic just like a flag, so translation can move a meaning
+// between flag and env (cc's -L becomes MSVC's LIB).
 struct EnvDecl {
   name: String,
   kind: Kind,
   role: String = "",
+  operation: Operation = Operation.Set,
   doc: String = "",
 }
 

@@ -39,24 +39,60 @@ fn explain_describes_flags_and_positionals() {
 #[test]
 fn translate_gcc_to_msvc() {
     // A gcc compile, re-emitted in the MSVC dialect, mechanically — note
-    // `-I inc` (separated) becomes `/Iinc` (glued), the target's spelling.
+    // `-I inc` (separated) becomes `/Iinc` (glued), the target's spelling, and
+    // `-o` in *compile* mode (because `-c` is present) becomes `/Fo`, not `/Fe`.
     let out = translate(
         &CC,
         &argv(&["cc", "-c", "-O2", "-DFOO", "-I", "inc", "x.c", "-o", "x.o"]),
         &CL,
-    )
-    .expect("fully translatable");
-    assert_eq!(out, argv(&["/c", "/O2", "/DFOO", "/Iinc", "x.c", "/Fox.o"]));
+    );
+    assert!(
+        out.untranslatable.is_empty(),
+        "fully translatable; got {:?}",
+        out.untranslatable
+    );
+    assert_eq!(
+        out.args,
+        argv(&["/c", "/O2", "/DFOO", "/Iinc", "x.c", "/Fox.o"])
+    );
+    assert!(out.env.is_empty(), "nothing went to env; got {:?}", out.env);
+}
+
+#[test]
+fn translate_mode_splits_output_flag() {
+    // The same `-o`, but in *link* mode (no `-c`), must reach the other side of
+    // MSVC's output split: `/Fe`, not `/Fo`. Same role + operation, different
+    // mode — only the mode disambiguates.
+    let out = translate(&CC, &argv(&["cc", "x.o", "-o", "app"]), &CL);
+    assert_eq!(out.args, argv(&["x.o", "/Feapp"]));
+}
+
+#[test]
+fn translate_moves_a_flag_to_an_env_channel() {
+    // The holistic payoff: MSVC has no library-search *flag* in this grammar,
+    // but it has the `LIB` env channel (same role + operation). So `-L libs`
+    // can't become a flag — it becomes `LIB=libs`. argv and env, together.
+    let out = translate(
+        &CC,
+        &argv(&["cc", "-c", "-L", "libs", "x.c", "-o", "x.o"]),
+        &CL,
+    );
+    assert!(
+        out.untranslatable.is_empty(),
+        "everything lands somewhere; got {:?}",
+        out.untranslatable
+    );
+    assert_eq!(out.args, argv(&["/c", "x.c", "/Fox.o"]));
+    assert_eq!(out.env, vec![("LIB".to_string(), "libs".to_string())]);
 }
 
 #[test]
 fn translate_reports_untranslatable_flags() {
-    // -shared has no MSVC correspondence in this table.
-    let err = translate(&CC, &argv(&["cc", "-shared", "x.o", "-o", "lib"]), &CL)
-        .expect_err("should fail on -shared");
+    // -shared has no MSVC correspondence — no flag and no env channel.
+    let out = translate(&CC, &argv(&["cc", "-shared", "x.o", "-o", "lib"]), &CL);
     assert!(
-        err.iter().any(|u| u.token == "-shared"),
+        out.untranslatable.iter().any(|u| u.token == "-shared"),
         "the untranslatable flag is named; got {:?}",
-        err
+        out.untranslatable
     );
 }
