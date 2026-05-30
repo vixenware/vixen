@@ -20,7 +20,7 @@ use std::collections::HashMap;
 use vx_ir::build::{VirBuilder, VirProgram};
 use vx_ir::compile::inject_implicit_stdlib_imports;
 use vx_ir::expr::{ArrayElement, ExprKind, FieldKey, LitKind};
-use vx_ir::ids::{BindingId, ExprId, PatternId, StmtId};
+use vx_ir::ids::{BindingId, BodyId, ExprId, PatternId, StmtId};
 use vx_ir::item::ItemKind;
 use vx_ir::pattern::PatternKind;
 use vx_ir::resolve::resolve_names;
@@ -41,6 +41,35 @@ const BOUNDARY_CALLS: &[&str] = &["exec", "acquire", "http", "Http", "discover",
 /// Errors only if the source doesn't parse or the entry isn't found; unhandled
 /// expression shapes degrade to `Unresolved`.
 pub fn analyze_source(source: &str, entry: &str) -> Result<DemandGraph, String> {
+    let (program, env) = front_end(source)?;
+    let body_id =
+        find_entry(&program, entry).ok_or_else(|| format!("entry function `{entry}` not found"))?;
+    Ok(build_graph(&program, &env, body_id))
+}
+
+/// Analyze **every** top-level function in `source` — `(name, graph)` per fn, in
+/// declaration order. The playground uses this to let you click through a file.
+pub fn analyze_all(source: &str) -> Result<Vec<(String, DemandGraph)>, String> {
+    let (program, env) = front_end(source)?;
+    let primary = *program
+        .source_units
+        .first()
+        .ok_or("program has no source unit")?;
+    let out = program.arena[primary]
+        .items
+        .iter()
+        .copied()
+        .filter_map(|id| match &program.arena[id].kind {
+            ItemKind::Function(f) => Some((f.name.clone(), build_graph(&program, &env, f.body))),
+            _ => None,
+        })
+        .collect();
+    Ok(out)
+}
+
+/// Run the real front-end: parse (+ stdlib) → VIR → type-collect → resolve →
+/// type-check. Returns the program and its type environment.
+fn front_end(source: &str) -> Result<(VirProgram, TypeEnv), String> {
     let parsed = parse_source_file(source, SourceId(0));
     if !parsed.errors().is_empty() {
         return Err(format!("parse errors: {:?}", parsed.errors()));
@@ -50,18 +79,17 @@ pub fn analyze_source(source: &str, entry: &str) -> Result<DemandGraph, String> 
         let id = SourceId(i as u32 + 1);
         sources.push((id, parse_source_file(stdlib.text, id).tree()));
     }
-
     let mut program = VirBuilder::build_program(&sources);
     inject_implicit_stdlib_imports(&mut program);
     let mut types = collect_types_vir(&mut program.arena);
     let _ = resolve_names(&mut program.arena);
     let _ = type_check_vir(&mut program.arena, &mut types);
+    Ok((program, types.env))
+}
 
-    let primary = *program
-        .source_units
-        .first()
-        .ok_or("program has no source unit")?;
-    let body_id = program.arena[primary]
+fn find_entry(program: &VirProgram, entry: &str) -> Option<BodyId> {
+    let primary = *program.source_units.first()?;
+    program.arena[primary]
         .items
         .iter()
         .copied()
@@ -69,18 +97,19 @@ pub fn analyze_source(source: &str, entry: &str) -> Result<DemandGraph, String> 
             ItemKind::Function(f) if f.name == entry => Some(f.body),
             _ => None,
         })
-        .ok_or_else(|| format!("entry function `{entry}` not found"))?;
+}
 
+/// Turn one body inside out into a demand graph.
+fn build_graph(program: &VirProgram, env: &TypeEnv, body_id: BodyId) -> DemandGraph {
     let params: Vec<PatternId> = program.arena[body_id]
         .params
         .iter()
         .map(|p| p.pattern)
         .collect();
     let root_expr = program.arena[body_id].root_expr;
-
     let mut b = Builder {
-        program: &program,
-        env: &types.env,
+        program,
+        env,
         nodes: Vec::new(),
         memo: HashMap::new(),
         bindings: HashMap::new(),
@@ -90,10 +119,10 @@ pub fn analyze_source(source: &str, entry: &str) -> Result<DemandGraph, String> 
         b.bind_param(pat);
     }
     let root = b.walk(root_expr);
-    Ok(DemandGraph {
+    DemandGraph {
         nodes: b.nodes,
         root,
-    })
+    }
 }
 
 struct Builder<'a> {

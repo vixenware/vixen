@@ -1,0 +1,90 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8" />
+<title>vixen demand graphs</title>
+<script src="https://unpkg.com/cytoscape@3.30.2/dist/cytoscape.min.js"></script>
+<style>
+  body { margin: 0; font: 14px ui-monospace, monospace; background: #11141a; color: #cdd3de; }
+  header { padding: 10px 16px; border-bottom: 1px solid #2a2f3a; display: flex; gap: 14px; align-items: center; }
+  select { background: #1b1f29; color: #e7ecf3; border: 1px solid #2a2f3a; padding: 4px 8px; font: inherit; }
+  #cy { width: 100vw; height: calc(100vh - 104px); }
+  .legend { padding: 6px 16px; display: flex; gap: 14px; flex-wrap: wrap; border-bottom: 1px solid #2a2f3a; }
+  .legend span { display: inline-flex; align-items: center; gap: 5px; }
+  .dot { width: 11px; height: 11px; border-radius: 3px; display: inline-block; }
+</style>
+</head>
+<body>
+<header>
+  <b>vixen — the inside-out turn</b>
+  <select id="picker"></select>
+  <span>dim = unreached by demand (the road not taken)</span>
+</header>
+<div class="legend" id="legend"></div>
+<div id="cy"></div>
+<script>
+const GRAPHS = [{"title":"demand_basis :: unused_tuple_field_never_runs","root":5,"nodes":[{"id":0,"label":"42","kind":"Const","ty":"U64","reached":true,"inputs":[]},{"id":1,"label":"💣","kind":"Bomb","ty":"<poison>","reached":false,"inputs":[]},{"id":2,"label":"(…)","kind":"LazyData","ty":"(U64, <poison>)","reached":true,"inputs":[0,1]},{"id":3,"label":"[0]","kind":"Project","ty":"U64","reached":true,"inputs":[2]},{"id":4,"label":"42","kind":"Const","ty":"U64","reached":true,"inputs":[]},{"id":5,"label":"assert_eq()","kind":"Kernel","ty":"<poison>","reached":true,"inputs":[3,4]}]},{"title":"demand_basis :: unused_struct_field_never_runs","root":5,"nodes":[{"id":0,"label":"42","kind":"Const","ty":"U64","reached":true,"inputs":[]},{"id":1,"label":"💣","kind":"Bomb","ty":"<poison>","reached":false,"inputs":[]},{"id":2,"label":"Pair","kind":"LazyData","ty":"Pair","reached":true,"inputs":[0,1]},{"id":3,"label":".a","kind":"Project","ty":"U64","reached":true,"inputs":[2]},{"id":4,"label":"42","kind":"Const","ty":"U64","reached":true,"inputs":[]},{"id":5,"label":"assert_eq()","kind":"Kernel","ty":"<poison>","reached":true,"inputs":[3,4]}]},{"title":"demand_basis :: chained_projection_skips_dead_siblings","root":10,"nodes":[{"id":0,"label":"7","kind":"Const","ty":"U64","reached":true,"inputs":[]},{"id":1,"label":"💣","kind":"Bomb","ty":"<poison>","reached":false,"inputs":[]},{"id":2,"label":"(…)","kind":"LazyData","ty":"(U64, <poison>)","reached":true,"inputs":[0,1]},{"id":3,"label":"💣","kind":"Bomb","ty":"<poison>","reached":false,"inputs":[]},{"id":4,"label":"💣","kind":"Bomb","ty":"<poison>","reached":false,"inputs":[]},{"id":5,"label":"(…)","kind":"LazyData","ty":"(<poison>, <poison>)","reached":false,"inputs":[3,4]},{"id":6,"label":"(…)","kind":"LazyData","ty":"((U64, <poison>), (<poison>, <poison>))","reached":true,"inputs":[2,5]},{"id":7,"label":"[0]","kind":"Project","ty":"(U64, <poison>)","reached":true,"inputs":[6]},{"id":8,"label":"[0]","kind":"Project","ty":"U64","reached":true,"inputs":[7]},{"id":9,"label":"7","kind":"Const","ty":"U64","reached":true,"inputs":[]},{"id":10,"label":"assert_eq()","kind":"Kernel","ty":"<poison>","reached":true,"inputs":[8,9]}]},{"title":"demand_basis :: deep_named_field_projection","root":8,"nodes":[{"id":0,"label":"42","kind":"Const","ty":"U64","reached":true,"inputs":[]},{"id":1,"label":"💣","kind":"Bomb","ty":"<poison>","reached":false,"inputs":[]},{"id":2,"label":"Pair","kind":"LazyData","ty":"Pair","reached":true,"inputs":[0,1]},{"id":3,"label":"💣","kind":"Bomb","ty":"<poison>","reached":false,"inputs":[]},{"id":4,"label":"Outer","kind":"LazyData","ty":"Outer","reached":true,"inputs":[2,3]},{"id":5,"label":".a","kind":"Project","ty":"Pair","reached":true,"inputs":[4]},{"id":6,"label":".a","kind":"Project","ty":"U64","reached":true,"inputs":[5]},{"id":7,"label":"42","kind":"Const","ty":"U64","reached":true,"inputs":[]},{"id":8,"label":"assert_eq()","kind":"Kernel","ty":"<poison>","reached":true,"inputs":[6,7]}]},{"title":"which_field_which_graph :: demanding_fast_skips_slow","root":5,"nodes":[{"id":0,"label":"7","kind":"Const","ty":"U64","reached":true,"inputs":[]},{"id":1,"label":"💣","kind":"Bomb","ty":"<poison>","reached":false,"inputs":[]},{"id":2,"label":"Two","kind":"LazyData","ty":"Two","reached":true,"inputs":[0,1]},{"id":3,"label":".fast","kind":"Project","ty":"U64","reached":true,"inputs":[2]},{"id":4,"label":"7","kind":"Const","ty":"U64","reached":true,"inputs":[]},{"id":5,"label":"assert_eq()","kind":"Kernel","ty":"<poison>","reached":true,"inputs":[3,4]}]},{"title":"which_field_which_graph :: each_field_resolves_independently","root":7,"nodes":[{"id":0,"label":"7","kind":"Const","ty":"U64","reached":true,"inputs":[]},{"id":1,"label":"11","kind":"Const","ty":"U64","reached":true,"inputs":[]},{"id":2,"label":"Two","kind":"LazyData","ty":"Two","reached":true,"inputs":[0,1]},{"id":3,"label":".fast","kind":"Project","ty":"U64","reached":true,"inputs":[2]},{"id":4,"label":".slow","kind":"Project","ty":"U64","reached":true,"inputs":[2]},{"id":5,"label":"Add","kind":"Kernel","ty":"U64","reached":true,"inputs":[3,4]},{"id":6,"label":"18","kind":"Const","ty":"U64","reached":true,"inputs":[]},{"id":7,"label":"assert_eq()","kind":"Kernel","ty":"<poison>","reached":true,"inputs":[5,6]}]},{"title":"which_field_which_graph :: demanding_index_selects_branch","root":5,"nodes":[{"id":0,"label":"💣","kind":"Bomb","ty":"<poison>","reached":false,"inputs":[]},{"id":1,"label":"11","kind":"Const","ty":"U64","reached":true,"inputs":[]},{"id":2,"label":"(…)","kind":"LazyData","ty":"(<poison>, U64)","reached":true,"inputs":[0,1]},{"id":3,"label":"[1]","kind":"Project","ty":"U64","reached":true,"inputs":[2]},{"id":4,"label":"11","kind":"Const","ty":"U64","reached":true,"inputs":[]},{"id":5,"label":"assert_eq()","kind":"Kernel","ty":"<poison>","reached":true,"inputs":[3,4]}]},{"title":"poisons :: explicit_fail_detonates","root":1,"nodes":[{"id":0,"label":"\"boom\"","kind":"Const","ty":"String","reached":true,"inputs":[]},{"id":1,"label":"fail","kind":"Fail","ty":"<poison>","reached":true,"inputs":[0]}]},{"title":"poisons :: forcing_a_bomb_detonates","root":3,"nodes":[{"id":0,"label":"42","kind":"Const","ty":"U64","reached":false,"inputs":[]},{"id":1,"label":"💣","kind":"Bomb","ty":"<poison>","reached":true,"inputs":[]},{"id":2,"label":"(…)","kind":"LazyData","ty":"(U64, <poison>)","reached":true,"inputs":[0,1]},{"id":3,"label":"[1]","kind":"Project","ty":"<poison>","reached":true,"inputs":[2]}]},{"title":"poisons :: false_assertion_detonates","root":2,"nodes":[{"id":0,"label":"1","kind":"Const","ty":"U64","reached":true,"inputs":[]},{"id":1,"label":"2","kind":"Const","ty":"U64","reached":true,"inputs":[]},{"id":2,"label":"assert_eq()","kind":"Kernel","ty":"<poison>","reached":true,"inputs":[0,1]}]}];
+const COLORS = {
+  Const:"#9e9e9e", Param:"#42a5f5", Kernel:"#66bb6a", LazyData:"#ab47bc",
+  Project:"#ffa726", Boundary:"#ef5350", Bomb:"#161616", Fail:"#b71c1c", Unresolved:"#fdd835"
+};
+const LEGEND = { Kernel:"eager / JIT", LazyData:"lifted structure", Project:"selects a slot",
+  Boundary:"effect", Bomb:"forcing poisons", Fail:"explicit fail", Const:"literal", Param:"input", Unresolved:"frontier" };
+
+const legend = document.getElementById("legend");
+for (const [k, desc] of Object.entries(LEGEND)) {
+  const s = document.createElement("span");
+  s.innerHTML = `<span class="dot" style="background:${COLORS[k]}"></span>${k} — ${desc}`;
+  legend.appendChild(s);
+}
+
+const picker = document.getElementById("picker");
+GRAPHS.forEach((g, i) => {
+  const o = document.createElement("option");
+  o.value = i; o.textContent = g.title;
+  picker.appendChild(o);
+});
+
+const STYLE = [
+  { selector: "node", style: {
+    "background-color": (e) => COLORS[e.data("kind")] || "#888",
+    "label": "data(label)", "color": "#e7ecf3", "font-size": 11,
+    "text-wrap": "wrap", "text-valign": "center", "text-halign": "center",
+    "text-outline-color": "#11141a", "text-outline-width": 2,
+    "width": 72, "height": 72, "shape": "round-rectangle",
+    "opacity": (e) => e.data("reached") ? 1.0 : 0.22,
+    "border-width": (e) => (e.data("kind") === "Bomb" || e.data("kind") === "Fail") ? 2 : 0,
+    "border-style": "dashed", "border-color": "#ef5350"
+  } },
+  { selector: "edge", style: {
+    "width": 2, "line-color": "#3a4150", "target-arrow-color": "#3a4150",
+    "target-arrow-shape": "triangle", "curve-style": "bezier"
+  } },
+];
+
+let cy = null;
+function render(i) {
+  const g = GRAPHS[i];
+  const elements = [];
+  for (const n of g.nodes) {
+    const ty = n.ty && n.ty !== "?" ? ` : ${n.ty}` : "";
+    elements.push({ data: { id: String(n.id), label: `${n.label}${ty}\n#${n.id} ${n.kind}`, kind: n.kind, reached: n.reached } });
+  }
+  for (const n of g.nodes) {
+    for (const dep of n.inputs) {
+      elements.push({ data: { source: String(n.id), target: String(dep) } });
+    }
+  }
+  if (cy) cy.destroy();
+  cy = cytoscape({
+    container: document.getElementById("cy"),
+    elements, style: STYLE,
+    layout: { name: "breadthfirst", directed: true, roots: "#" + g.root, padding: 30, spacingFactor: 1.3 },
+  });
+}
+
+picker.addEventListener("change", () => render(Number(picker.value)));
+render(0);
+</script>
+</body>
+</html>
