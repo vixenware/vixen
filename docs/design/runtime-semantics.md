@@ -337,8 +337,12 @@ Not all inputs cache the same way; the *kind of mount* decides:
 
 Open consequence: the L1 key looks like `(command signature +
 fingerprinted-input fingerprints)` — the *stable* part — under which results
-carry their read-set; the volatile tree hash should **not** churn the key. Exact
-key/slot structure is TBD (§10).
+carry their read-set; the volatile tree hash should **not** churn the key. But
+"don't store the volatile coarse key" does **not** mean "no lookup": there must
+still be a **coarse→fine lookup** — from a command and its declared inputs to the
+candidate prior results and their recorded read-sets — plus the store that holds
+those results. Where and how that index lives, and how it's kept from growing
+without bound, is its own design problem (§10). Exact key/slot structure is TBD.
 
 ### Push, don't only pull
 
@@ -379,15 +383,25 @@ mounted fine.** Two different reasons an input ends up coarse: **chosen** (stabl
 + fingerprinted — an optimization) or **forced** (the platform can't intercept
 reads — a real limitation, below). Don't conflate them.
 
-**Platform feasibility — the thing to fork on:**
-- **macOS** — read interception for this purpose: believed **not** available.
-- **Linux** — believed **possible** (candidate mechanisms exist; cf. the
-  `landlock-exec` crate in-tree). Needs a feasibility pass.
-- **Windows** — believed **not** available.
+**Platform feasibility — the fork:**
+- **Linux** — a virtual filesystem works. **Confident.**
+- **macOS** — a virtual filesystem works. **Confident.**
+- **Windows** — no easy VFS. The **Projected File System** gives
+  *notify-on-first-read* (files materialize on first access). That is coarser
+  than full interception and the materialization is eager-on-touch rather than
+  fully lazy, but it does yield the *set of files read* — so it is likely **good
+  enough for the read-set (L2)**, just not for fully lazy transfer. Full VFS
+  (WinFSP, Dokany, …) means either a Windows kernel driver (significant
+  engineering) or a paid license (not affordable now) — parked as a future
+  option.
+
+So Windows hints that **read-set capture and lazy transfer can decouple**: you
+might get the read-set (L2) without full lazy materialization. The clean
+Linux/Mac case gives both from the same VFS interception.
 
 **Open questions for the fork:** exact interception mechanism per platform; what
-the runtime does on platforms/mounts without read-set capture (L1-only? refuse?);
-how lazy materialization degrades to eager where VFS isn't available; the
+the runtime does on mounts without read-set capture (L1-only? refuse?); how lazy
+materialization degrades to eager where full VFS isn't available; the
 relationship between the VFS, the store, and the executor.
 
 ---
@@ -470,9 +484,12 @@ pending by default; eager only inside kernels.
 5. **Demand-graph granularity.** What a node/edge/annotation is; coalescing pure
    regions; where strands split exactly.
 6. **`demand.rs` fate** — gated on whether the type-level partition holds.
-7. **Spec work to land:** the `r[eval.demand]` redraft (§2); the L1/L2 split as
-   spec text (§6); a real `Tree` section (§4); fixing the read-set-as-key rot
-   (§6).
+7. **Spec work — landed and remaining.** *Landed:* the `r[eval.demand]` redraft;
+   `r[eval.readset]` (read-set is rerun-validity, never the key); the corrected
+   pubgrub wording. *Remaining:* `r[eval.forcing.boundary]` overstates the
+   boundary ("inputs fully resolved before shipped," "output fully materialized")
+   and must be revised once **remote handles** are specified; a real `Tree`
+   spec section (§4); the full L1/L2 storage/lookup mechanism (§6).
 8. **The type-level partition itself** — is "touches an intrinsic" the right
    criterion, given pure intrinsics (`parse`) only need to be a boundary for
    *caching policy*, not correctness? (Amos: not yet convinced.)

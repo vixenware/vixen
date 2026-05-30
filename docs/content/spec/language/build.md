@@ -19,9 +19,17 @@ Build entry points and runtime-backed surfaces such as `main`, `exec`,
 
 > r[eval.demand]
 >
-> Vixen uses demand-driven dataflow evaluation. The runtime calls `build`
-> and needs its return value — that's the demand. Everything flows backward
-> from there. There is no separate planning phase.
+> Vixen uses demand-driven dataflow evaluation. The runtime calls the entry
+> point and needs its return value — that is the root demand; all evaluation
+> flows backward from there. Constructing the program's dataflow/demand graph
+> from analyzed source is ordinary compilation and is expected. What is absent
+> is a separate *build-planning* phase in the Buck/Bazel sense: the set of
+> boundary actions (`exec`, `acquire`, …) is **not** enumerated ahead of
+> evaluation. Which boundaries run, and with what inputs, is discovered
+> dynamically as demand reaches them — because those inputs depend on values
+> only evaluation produces (`discover` results, file contents, resolved
+> capabilities). The graph of *pure dataflow* may be analyzed statically; the
+> graph of *effects* is demand-discovered.
 
 ### Concurrency
 
@@ -114,7 +122,10 @@ Build entry points and runtime-backed surfaces such as `main`, `exec`,
 > Because all values are hashable and comparable, any function call can
 > be memoized. This is what makes incremental builds work — and because
 > code identity is stable across comment/formatting edits, the cache
-> survives source changes that do not affect behavior.
+> survives source changes that do not affect behavior. In every case the key
+> is computed **before** the call runs, from inputs the runtime already holds;
+> it never includes a call's outputs, nor which of its inputs the call turns
+> out to read (see `r[eval.readset]`).
 >
 > `exec` cache keys are **(observer code identity, observer captures,
 > args, env, mounts)**, where the args carry the resolved ability values
@@ -132,3 +143,18 @@ Build entry points and runtime-backed surfaces such as `main`, `exec`,
 > are not hashable for cache-key purposes and do not participate in
 > memo table lookup. A function call is memoized only once all its
 > arguments have resolved.
+
+> r[eval.readset]
+>
+> A command's **read-set** — the inputs it actually consults — is *discovered
+> by running it* and recorded as provenance. Because the cache key
+> (`r[eval.memoization]`) must be computable *before* the command runs, the
+> read-set is **never part of the key**: keying on it would require running the
+> command to decide whether to run it. Instead the read-set governs **rerun
+> avoidance** — when a change to *declared* inputs produces a key miss, a prior
+> result whose recorded read-set is byte-for-byte unchanged under the new
+> inputs remains valid and may be reused without re-execution. This is sound
+> only when the command is a deterministic function of the bytes it reads;
+> non-determinism is flagged separately (impurity) and forfeits the reuse. The
+> storage and lookup that map a command and its declared inputs to candidate
+> prior results and their read-sets are not yet specified.

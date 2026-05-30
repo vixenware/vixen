@@ -846,11 +846,13 @@ model, but they are not part of the core language syntax.
 > The closures perform registry I/O (`Http`) lazily as the solver explores
 > — the runtime evaluates them mid-solve, so only the part of the universe
 > the search touches is fetched, and each `Http` lookup caches on its own.
-> The *solve* caches on the **read-set it consulted**: the `(P → versions)`
-> and `(P, V → deps)` facts the closures actually returned. Re-running with
-> the same consulted facts yields the same result; a publish to a package
-> the solve *touched* invalidates it, a publish elsewhere does not — the
-> same read-set discipline as the sandbox.
+> The *solve*'s reuse is governed by the **read-set it consulted**: the
+> `(P → versions)` and `(P, V → deps)` facts the closures actually returned.
+> That read-set is *discovered by running* the solve, so — like the sandbox
+> read-set (`r[eval.readset]`) — it is a **rerun-validity** mechanism, not a
+> cache key: a prior solve is reused when every consulted fact is unchanged.
+> A publish to a package the solve *touched* invalidates it; a publish
+> elsewhere does not.
 
 > r[resolve.pubgrub.conflict]
 >
