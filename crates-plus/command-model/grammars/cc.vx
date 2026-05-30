@@ -1,0 +1,74 @@
+```styx
+id @vixen/grammar-cc
+version 0.1.0
+```
+
+// The cc/clang grammar, authored in Vixen against @vixen/command-grammar — the
+// same grammar the Rust engine hand-codes as the `CC` const, but here it's data,
+// with docs and value-domains that the LSP and `explain` surface. `-Wl,` points
+// at `ld` by name; both are exported and the engine resolves the reference.
+
+let { Grammar, Flag, Spelling, Policy, Kind, ValueDomain, Positional, EnvDecl, Arity } =
+  import "vixen:command-grammar"
+
+let ld = Grammar {
+  name: "ld",
+  flags: [
+    Flag { canonical: "--gc-sections", spelling: Spelling.Bare, policy: Policy.Once,
+           kind: Kind.Str, doc: "remove unused sections" },
+    Flag { canonical: "--as-needed", spelling: Spelling.Bare, policy: Policy.Once,
+           kind: Kind.Str, doc: "only link libraries that resolve a symbol" },
+    Flag { canonical: "--version-script", spelling: Spelling.Suffixed { sep: "=" },
+           policy: Policy.Once, kind: Kind.PathIn { dir: false },
+           value: ValueDomain.Path { dir: false },
+           doc: "restrict exported symbols using a version script" },
+  ],
+}
+
+let cc = Grammar {
+  name: "cc",
+  mode_selectors: ["-c"],
+  link_only: ["-l", "-shared", "-Wl,"],
+  flags: [
+    Flag { canonical: "-c", spelling: Spelling.Bare, policy: Policy.Once, kind: Kind.Str,
+           doc: "compile only; do not link" },
+    Flag { canonical: "-fPIC", spelling: Spelling.Bare, policy: Policy.Once, kind: Kind.Str,
+           doc: "emit position-independent code" },
+    Flag { canonical: "-shared", spelling: Spelling.Bare, policy: Policy.Once, kind: Kind.Str,
+           doc: "produce a shared library" },
+    Flag { canonical: "-O", spelling: Spelling.Attached, policy: Policy.Group { name: "opt" },
+           kind: Kind.Str, value: ValueDomain.OneOf { values: ["0", "1", "2", "3", "s"] },
+           doc: "optimization level" },
+    Flag { canonical: "-std", spelling: Spelling.Suffixed { sep: "=" }, policy: Policy.Once,
+           kind: Kind.Str, value: ValueDomain.OneOf { values: ["c99", "c11", "c17", "c23"] },
+           doc: "C language standard" },
+    Flag { canonical: "-W", spelling: Spelling.Attached, policy: Policy.DedupUnordered,
+           kind: Kind.Str, doc: "enable a warning group, e.g. -Wall" },
+    Flag { canonical: "-D", spelling: Spelling.Attached, policy: Policy.DefineProgram,
+           kind: Kind.Define, doc: "define a preprocessor macro (NAME or NAME=VALUE)" },
+    Flag { canonical: "-I", spelling: Spelling.Separated, policy: Policy.DedupOrdered,
+           kind: Kind.Include, value: ValueDomain.Path { dir: true },
+           doc: "add a header search directory (search order is significant)" },
+    Flag { canonical: "-L", spelling: Spelling.Separated, policy: Policy.DedupOrdered,
+           kind: Kind.LibSearchDir, value: ValueDomain.Path { dir: true },
+           doc: "add a library search directory" },
+    Flag { canonical: "-l", spelling: Spelling.Attached, policy: Policy.OrderedKeepAll,
+           kind: Kind.Lib, value: ValueDomain.LibName,
+           doc: "link against a library (order and repeats are significant)" },
+    Flag { canonical: "-Wl,", spelling: Spelling.Passthrough { sep: ",", grammar: "ld" },
+           policy: Policy.OrderedKeepAll, kind: Kind.Str,
+           doc: "pass comma-separated options through to the linker" },
+    Flag { canonical: "-o", spelling: Spelling.Separated, policy: Policy.Once,
+           kind: Kind.PathOut, value: ValueDomain.Path { dir: false },
+           doc: "write output to this file" },
+  ],
+  env: [
+    EnvDecl { name: "CPATH", kind: Kind.Include, doc: "additional header search directories" },
+    EnvDecl { name: "LIBRARY_PATH", kind: Kind.LibSearchDir, doc: "additional library search directories" },
+    EnvDecl { name: "SOURCE_DATE_EPOCH", kind: Kind.Str, doc: "fixed timestamp for reproducible builds" },
+  ],
+  positionals: [
+    Positional { name: "input", kind: Kind.PathIn { dir: false }, arity: Arity.Variadic,
+                 doc: "a source (.c) or object (.o) file to compile or link" },
+  ],
+}

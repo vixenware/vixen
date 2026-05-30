@@ -1,0 +1,100 @@
+```styx
+id @vixen/command-grammar
+version 0.1.0
+```
+
+// Types for describing a CLI tool's argument grammar, authored in Vixen.
+//
+// The `command-model` engine lowers a `Grammar` value (constructed with these
+// types) into its in-memory form, then parses, canonicalizes, lints, completes,
+// explains, and translates commands against it. Grammars ship as packages; a
+// grammar references a sub-grammar (e.g. the linker behind `-Wl,`) *by name*,
+// because Vixen forbids recursive types — and by-name resolution is what we want
+// for cross-package references anyway.
+//
+// Still to add (the computational layer): richer guards (constraint predicates
+// over accumulated parse state, beyond `mode_selectors` / `link_only`) and
+// reducers (the `-W` set/unset/promote/demote algebra, alias collapse). Those
+// reuse the constraint-expression algebra; this file is the declarative core.
+
+// How a flag and its value are written on the command line.
+enum Spelling {
+  struct Bare,                                          // -c, -fPIC
+  struct Attached,                                      // -O2, -DFOO, -lm; MSVC /Foout.obj
+  struct Separated,                                     // -o out, -I dir
+  struct Suffixed { sep: String },                      // -std=c99, /std:c++20
+  struct Passthrough { sep: String, grammar: String },  // -Wl,a,b -> sub-grammar (by name)
+}
+
+// How repeated occurrences of a flag collapse during canonicalization.
+enum Policy {
+  struct Once,                                  // last wins; >1 distinct value lints
+  struct Group { name: String },                // mutually-exclusive set; last wins
+  struct DedupOrdered,                          // -I: dedup, but order is semantic
+  struct DedupUnordered,                        // -W: sort + dedup
+  struct OrderedKeepAll,                        // -l: order semantic, repeats kept
+  struct DefineProgram,                         // -D/-U: ordered define/undef program
+  struct Positional,
+}
+
+// What a value slot *is* — drives sandbox mounting and cache-key treatment.
+enum Kind {
+  struct Str,                                   // literal text, never mounted
+  struct PathIn { dir: Bool },                  // input file/dir; mounted + hashed
+  struct PathOut,                               // the writable output target
+  struct Include,                               // header search directory
+  struct LibSearchDir,                          // library search directory
+  struct Lib,                                   // -lfoo, resolved against search dirs
+  struct Define,                                // NAME or NAME=VALUE
+}
+
+// The value space of a flag — for completion and validation.
+enum ValueDomain {
+  struct Any,
+  struct OneOf { values: Array[String] },       // a fixed set, e.g. -std, -O level
+  struct Path { dir: Bool },
+  struct LibName,
+  struct Triple,
+}
+
+enum Arity {
+  struct One,
+  struct Optional,
+  struct Variadic,                              // greedily takes the rest
+}
+
+// A positional-argument slot: what a positional at this point *means*.
+struct Positional {
+  name: String,
+  kind: Kind,
+  arity: Arity,
+  doc: String = "",
+}
+
+// An environment channel the tool reads — explicit, never ambient.
+struct EnvDecl {
+  name: String,
+  kind: Kind,
+  doc: String = "",
+}
+
+struct Flag {
+  canonical: String,
+  aliases: Array[String] = [],
+  spelling: Spelling,
+  policy: Policy,
+  kind: Kind,
+  value: ValueDomain = ValueDomain.Any,
+  doc: String = "",
+}
+
+// A complete tool grammar.
+struct Grammar {
+  name: String,
+  flags: Array[Flag],
+  env: Array[EnvDecl] = [],
+  positionals: Array[Positional] = [],
+  // Mode-by-flag guards (the first cut of guarded productions).
+  mode_selectors: Array[String] = [],           // flags that leave the default mode
+  link_only: Array[String] = [],                // flags legal only in the default mode
+}
