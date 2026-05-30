@@ -1,0 +1,20 @@
+[package]
+name = "vx-runtime"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+
+[package.metadata]
+
+[package.metadata."docs.rs"]
+rustdoc-args = ["--html-in-header", "arborium-header.html"]
+
+# The demand-driven Vixen runtime: the lazy demand sea + eager pure kernel
+# islands. Replaces the eager evaluator (vx-daemon runtime_eval) and vx-rt.
+# See docs/design/runtime-rebuild-plan.md. Phase 0 = the value model + demand
+# graph types (this crate is deliberately dependency-light at this stage).
+
+[dependencies]
+
+[dev-dependencies]

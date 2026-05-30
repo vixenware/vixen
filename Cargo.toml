@@ -13,6 +13,7 @@ members = [
 
   ## eval crates
   "crates/vx-rt",
+  "crates/vx-runtime",
 
   ## runtime support
   "crates/vx-http",
