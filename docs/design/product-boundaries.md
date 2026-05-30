@@ -16,6 +16,12 @@ GitHub auth (login), **organizations** (tenancy), **billing** (Stripe). Identity
 tenancy + money. It is **not** an execution model. It **services both** of the
 products below — which is *why* the code looks conflated.
 
+> **Identity is Vixen's own, not GitHub's** — to settle in a separate session.
+> GitHub auth / OIDC are *sign-up options*, not the foundation: Vixen competes
+> with GitHub, so login is **not necessarily** via GitHub, and a **Vixen
+> organization is not necessarily a GitHub organization**. This needs fixing
+> sooner rather than later; recorded here, designed elsewhere.
+
 ### 2. CCC (cargo-cloud-cache) — async **cache warming**
 
 A service that asynchronously precomputes / **warms a build cache** for Cargo.

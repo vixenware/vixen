@@ -32,23 +32,38 @@ runner"; routing is type-driven with "no stringly-typed executor selector."
 What the spec does **not** say, and this note records:
 
 - runners are **long-lived daemons**, not per-build spawns;
-- they **detect what their host has installed**, continuously;
-- they **advertise** those capabilities to a **control plane**;
-- the **`vx` CLI connects to the control plane** and that is where **placement**
-  (which runner each `exec` lands on) is decided.
+- there is **always a local daemon** on your own machine — it is the
+  **orchestrator** (it makes placement decisions) and the **filesystem watcher**
+  (it notices when files used by past builds change);
+- executor daemons **detect what their host has installed**, continuously, and
+  **advertise** those capabilities to a **control plane** — a registry/directory,
+  authenticated;
+- your local daemon **queries** that registry (and the LAN) for available
+  executors and **places** each `exec` itself: the control plane advertises, your
+  daemon decides.
 
-This also supersedes the old `discover` intrinsic (§5).
+This also supersedes the old `discover` intrinsic (§6).
 
 ---
 
-## 1. Runners are daemons
+## 1. Daemons: one orchestrator (always local) + executors
 
-A **VxDaemon** runs on each host/machine in the fleet. It *is* the executor that
-`exec` ships payloads to (`r[exec.signature]`): it owns the sandbox + VFS, runs
-the process, evaluates the observer locally, rechecks host obligations on the
-concrete runner, and returns only the observer's produced values. It is
-**long-lived** — it persists across builds, which is what makes the next two
-sections possible.
+A **VxDaemon** is long-lived — it persists across builds, which is what makes
+continuous capability detection (§2) and read-set watching possible. The same
+program plays two roles:
+
+- **Your local daemon — the orchestrator.** There is *always* a daemon on your own
+  machine. It drives the build: it makes **placement** decisions (which executor
+  each `exec` lands on) and it **watches your filesystem** so it knows when files
+  consumed by previous builds have changed (read-set invalidation —
+  [`runtime-semantics.md`](runtime-semantics.md) §6–7). There is **no daemon-less
+  / "embedded" mode**; the orchestrator is always your local daemon.
+- **Executor daemons.** A daemon on any host can *be an executor* — the thing
+  `exec` ships payloads to (`r[exec.signature]`): it owns the sandbox + VFS, runs
+  the process, evaluates the observer locally, rechecks host obligations, and
+  returns only the observer's produced values. Your own machine's daemon can be an
+  executor too; remote ones reach your orchestrator via the LAN or the cloud
+  registry (§3).
 
 ## 2. Capabilities are detected continuously, host-side
 
@@ -67,26 +82,31 @@ Detection is **standing**, not one-shot. A daemon may:
 Mechanism is open. The invariant is that an advertised capability stays current
 with the host — because that currency is load-bearing for cache correctness (§5).
 
-## 3. Advertisement to a control plane
+## 3. Advertisement to a control plane (a registry)
 
-Each daemon **advertises its detected capabilities to a control plane** — the
-fleet-wide registry of *what can run where*. The control plane holds the live set
-of `(runner, advertised capabilities)`.
+An executor daemon **advertises its detected capabilities to a control plane** — a
+**registry/directory** of *what can run where*, holding the live set of
+`(executor, advertised capabilities)`. Advertising to a cloud control plane
+requires **authentication** (§7). The control plane is a *directory*, not a
+decision-maker: it answers "what executors exist and what can they do"; your local
+orchestrator (§1) does the deciding.
 
-## 4. The CLI connects; placement is a predicate match
+## 4. Placement is the orchestrator's predicate match
 
-The **`vx` CLI connects to the control plane** to submit a build and to decide
-**placement**. A build expresses requirements as `Requirement[T]`
+The `vx` CLI talks to **your local daemon** (the orchestrator, §1), which **places**
+each `exec`. A build expresses requirements as `Requirement[T]`
 (`r[constraint.requirement]`), e.g.:
 
 ```vixen
 RustToolchain where (version >= 1.91 && targets contains "aarch64-apple-darwin")
 ```
 
-Placement is **matching that predicate against advertised capabilities** to select
-a runner. This is exactly `r[eval.memoization]`'s "type-driven routing, no
-stringly-typed executor selector," made operational: the ability value's predicate
-picks the runner; nobody names an "executor class" by string.
+The orchestrator gathers candidate executors — from the LAN and from the cloud
+control-plane registry (§3) — and **matches that predicate against their advertised
+capabilities** to select one. This is exactly `r[eval.memoization]`'s "type-driven
+routing, no stringly-typed executor selector," made operational: the ability
+value's predicate picks the executor; nobody names an "executor class" by string.
+**The control plane supplies the candidates; the orchestrator makes the choice.**
 
 ## 5. Two toolchain flavors
 
@@ -130,36 +150,36 @@ the daemon's continuous capability detection, not as a build-graph operation.
 handled separately, as a build-output-overlaid-as-input plus overrides; see
 [`runtime-semantics.md`](runtime-semantics.md).)
 
-## 7. Deployment: cloud, local, embedded
+## 7. Deployment: local always, cloud optional
 
-The control plane is a **role** — *"hold the live `(runner, capabilities)` registry
-and place `exec` by predicate"* — **not a single hosted service**. That role runs
-in one of three places, and **the vox RPC protocol between daemons and the CLI is
-identical in all three**:
+The orchestrator is **always your local daemon** (§1). What varies is **where it
+sources executors**:
 
-- **Embedded** — no separate process. The `vx` CLI holds a configured (or
-  LAN-discovered) set of daemon endpoints, asks each for its capabilities, and
-  places `exec` itself. The simplest case — a few machines at home; the
-  control-plane role lives *inside the CLI*.
-- **Local** — a self-hosted control-plane process on a LAN. Daemons advertise to
-  it; the CLI queries it. Persistent registry, multi-user, dynamic fleet — no
-  cloud.
-- **Cloud** — app.vixen.rs. Managed, org-scoped, billed, fleet-over-internet. The
-  commercial offering — and **one deployment of this component, not its only
-  home.**
+- **Local-only** — your daemon places across executors it reaches on the **LAN**
+  (including your own machine). No cloud.
+- **Cloud-connected** — your daemon *also* queries a **cloud control plane**: a
+  registry where remote executor daemons have **advertised** their capabilities
+  (authenticated). Your daemon still orchestrates; the cloud just widens the pool.
 
-**Invariant** across all three: daemon advertises capabilities → registry →
-predicate placement. **Variable**: who hosts the registry, and **identity** —
-which is therefore a *pluggable layer*:
+There is **no third "embedded / no-daemon" mode** — the local daemon is always
+present (it is also the filesystem watcher). And even cloud-connected, **the
+decisions are yours**: the cloud control plane is a directory of executors + auth,
+not an orchestrator.
 
-- **Cloud identity** — GitHub auth + organizations + billing (app.vixen.rs).
-- **Local identity** — LAN trust: configured endpoints + keys, a shared cluster
-  token, or SSH-like mutual-key trust. **No GitHub required.**
+**Vixen build must be fully usable with no commercial cloud.** The cloud is the
+managed *registry* deployment; local-only is first-class.
 
-Principle: **Vixen build is fully usable without the commercial cloud.** GitHub /
-orgs / billing is a *cloud binding*, not a protocol requirement — the vox services
-must not bake it in. (Open-core / self-hostable; the cloud is the managed
-deployment.)
+### Identity is not (necessarily) GitHub — a real issue, to settle elsewhere
+
+Authenticating to a cloud control plane needs an identity. **GitHub auth is one
+option, not the foundation.** We want easy sign-up via GitHub or other **OIDC** —
+but Vixen has a *real identity question of its own*, precisely because Vixen is
+going **up against GitHub**. Just as a **Vixen organization is not necessarily a
+GitHub organization**, **login is not necessarily through GitHub**. This needs
+settling **sooner rather than later — but not in this session**: recorded here, to
+be designed in a separate session with another agent. (See
+[`product-boundaries.md`](product-boundaries.md): identity/orgs are app.vixen.rs's
+shared layer, and they are *Vixen's*, not GitHub's.)
 
 ## 8. Open questions
 
@@ -167,13 +187,12 @@ deployment.)
   on advertisement freshness.
 - **Registry protocol** — vox RPC (confirmed). Open: the shape of the
   `(runner, capabilities)` registry and its update/subscription model, defined
-  **once and deployment-agnostic** so embedded/local/cloud all speak it.
-- **Local discovery** — how the CLI and daemons find each other with no cloud
-  endpoint: configured addresses, LAN discovery (mDNS / DNS-SD), or a local
-  control-plane endpoint.
-- **Identity abstraction** — the pluggable seam between the protocol and the
-  identity binding (GitHub/orgs vs LAN trust); what the protocol must carry so both
-  fit without the protocol knowing which is in use.
+  **once and deployment-agnostic** so local and cloud both speak it.
+- **LAN discovery** — how your orchestrator finds LAN executors with no cloud
+  endpoint: configured addresses, LAN discovery (mDNS / DNS-SD), etc.
+- **Identity abstraction (protocol level)** — what credential the protocol carries
+  so cloud auth and LAN trust both fit without the protocol knowing which is in use
+  (the *broader* identity question is §7, to be settled separately).
 - **Staleness / trust** — how stale an advertisement may be before a build refuses
   it; recheck-on-runner is the correctness backstop, but placement uses
   possibly-stale advertised data.
