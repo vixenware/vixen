@@ -4001,6 +4001,10 @@ dependencies = [
 [[package]]
 name = "vx-runtime"
 version = "0.1.0"
+dependencies = [
+ "facet",
+ "facet-json",
+]
 
 [[package]]
 name = "vx-services"

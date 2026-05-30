@@ -7,8 +7,8 @@
 //! too; only a genuinely Turing-complete reducer would ever need the evaluator.
 
 use command_model::{
-    Arity, EnvDecl, Flag, Grammar, GrammarSet, Kind, Mode, Operation, Policy, Positional, Spelling,
-    ValueDomain,
+    Arity, Compat, EnvDecl, Flag, Grammar, GrammarSet, Kind, Mode, Operation, Policy, Positional,
+    Spelling, ValueDomain,
 };
 use std::fmt;
 use vx_parser::{
@@ -80,6 +80,16 @@ fn lower_grammar(lit: &StructLiteralExpr) -> Result<Grammar> {
         env: struct_array(lit, "env", lower_env)?,
         positionals: struct_array(lit, "positionals", lower_positional)?,
         modes: struct_array(lit, "modes", lower_mode)?,
+        compat: struct_array(lit, "compat", lower_compat)?,
+    })
+}
+
+fn lower_compat(lit: &StructLiteralExpr) -> Result<Compat> {
+    Ok(Compat {
+        flag: req_string(lit, "flag")?,
+        ignored: opt_bool(lit, "ignored")?,
+        classes: opt_string_matrix(lit, "classes")?,
+        default_value: opt_string(lit, "default_value")?,
     })
 }
 
@@ -310,6 +320,25 @@ fn opt_string_array(lit: &StructLiteralExpr, name: &str) -> Result<Vec<String>> 
         Some(e) => as_exprs(&e)?.iter().map(as_string).collect(),
         None => Ok(Vec::new()),
     }
+}
+
+fn opt_bool(lit: &StructLiteralExpr, name: &str) -> Result<bool> {
+    match field(lit, name) {
+        Some(e) => as_bool(&e),
+        None => Ok(false),
+    }
+}
+
+/// An optional `Array[Array[String]]` field (empty if absent) — e.g. compat
+/// value-equivalence classes.
+fn opt_string_matrix(lit: &StructLiteralExpr, name: &str) -> Result<Vec<Vec<String>>> {
+    let Some(e) = field(lit, name) else {
+        return Ok(Vec::new());
+    };
+    as_exprs(&e)?
+        .iter()
+        .map(|row| as_exprs(row)?.iter().map(as_string).collect())
+        .collect()
 }
 
 /// Lower an optional field through `f` (a variant lowerer), or `None` if absent.

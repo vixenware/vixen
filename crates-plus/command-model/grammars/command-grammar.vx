@@ -116,6 +116,18 @@ struct Mode {
   selector: String = "",                        // empty = the default mode
 }
 
+// A cache-compatibility rule: how a flag's value collapses when deriving the
+// content-addressed cache identity (the Tier-1, closed-vocabulary equivalence
+// layer). Plain canonicalization is unaffected; only the effective-command
+// identity normalizes, so commands that differ only in tool-equivalent ways
+// share one cache key.
+struct Compat {
+  flag: String,                                  // canonical lead this applies to
+  ignored: Bool = false,                         // never affects the cache identity (e.g. -Ccodegen-units)
+  classes: Array[Array[String]] = [],            // value equivalence classes -> the first element
+  default_value: String = "",                    // post-class value == this -> dropped (= absent); "" = none
+}
+
 // A complete tool grammar.
 struct Grammar {
   name: String,
@@ -123,4 +135,5 @@ struct Grammar {
   env: Array[EnvDecl] = [],
   positionals: Array[Positional] = [],
   modes: Array[Mode] = [],                       // empty = a single unnamed mode
+  compat: Array[Compat] = [],                    // cache-identity equivalence rules
 }
