@@ -6,7 +6,7 @@
 
 use command_grammar_vx::load_str;
 
-const CC_VX: &str = include_str!("../../command-model/grammars/cc.vx");
+const CC_VX: &str = include_str!("../../../packages/@vixen/grammar-cc/main.vx");
 
 fn argv(parts: &[&str]) -> Vec<String> {
     parts.iter().map(|s| s.to_string()).collect()

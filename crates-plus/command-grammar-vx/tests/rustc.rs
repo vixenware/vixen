@@ -5,7 +5,7 @@
 use command_grammar_vx::load_str;
 use std::collections::BTreeMap;
 
-const RUSTC_VX: &str = include_str!("../../command-model/grammars/rustc.vx");
+const RUSTC_VX: &str = include_str!("../../../packages/@vixen/grammar-rustc/main.vx");
 
 fn argv(parts: &[&str]) -> Vec<String> {
     parts.iter().map(|s| s.to_string()).collect()

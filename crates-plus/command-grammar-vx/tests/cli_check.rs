@@ -8,7 +8,7 @@ use command_grammar_vx::{load_str, parse};
 use command_model::{Kind, ValueDomain};
 use vx_parser::{AstNode, CliLiteralExpr};
 
-const CC_VX: &str = include_str!("../../command-model/grammars/cc.vx");
+const CC_VX: &str = include_str!("../../../packages/@vixen/grammar-cc/main.vx");
 
 /// Parse a single CLI literal out of a `let` binding.
 fn literal(src: &str) -> (vx_parser::Parsed<vx_parser::SourceFile>, CliLiteralExpr) {

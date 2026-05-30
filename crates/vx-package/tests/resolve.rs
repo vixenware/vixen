@@ -2,7 +2,7 @@
 
 use vx_package::{Manifest, PackageResolver, ResolveError, parse_manifest};
 
-const CC_MAIN: &str = include_str!("../../../crates-plus/command-model/grammars/cc.vx");
+const CC_MAIN: &str = include_str!("../../../packages/@vixen/grammar-cc/main.vx");
 
 #[test]
 fn manifest_parses_from_grammar_frontmatter() {
