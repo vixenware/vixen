@@ -95,12 +95,19 @@ getting fused with its neighbours.
 - **impurity mark** — a flag that a command is *not* a deterministic function of
   the bytes it reads (`__DATE__`, `-march=native`, mtimes). Breaks L2 soundness.
 
-**Sandbox**
+**Sandbox / mounts**
 - **sandbox** — isolation *and* the instrument that measures the read-set. No
   command runs outside one.
-- **fine-grained (VFS) mount** — reads are intercepted ⇒ lazy transfer **and**
-  read-set capture both possible.
-- **coarse mount** — reads not intercepted ⇒ L1 only, no read-set.
+- **fingerprint** — a cheap, reliable identity for an input that is expensive to
+  walk but rarely changes (e.g. a C toolchain, known by version). Stands in for
+  hashing every file.
+- **tracked / fine-grained (VFS) mount** — for *volatile* inputs (a workspace).
+  Reads are intercepted ⇒ lazy transfer **and** read-set capture both possible ⇒
+  L2 available.
+- **fingerprinted / coarse mount** — for *large, stable, fingerprinted* inputs (a
+  toolchain). Deliberately *not* read-tracked (walking/tracking is expensive and
+  unnecessary; same version ⇒ same bytes). The fingerprint goes in the L1 key; no
+  read-set.
 
 **Tooling**
 - **demand graph** — the analyzed dataflow graph; the runtime's substrate, the
@@ -314,6 +321,33 @@ command-model already tracks. Three pieces snap together: build.md's coarse key
 (L1), command-model's signature + impurity (L2 candidate + determinism escape),
 the firehose's provenance (read-set recording).
 
+### Mount kind drives the strategy
+
+Not all inputs cache the same way; the *kind of mount* decides:
+
+- **Fingerprinted (coarse) inputs** — large, stable, cheaply identified (a C
+  toolchain by version). The **fingerprint goes in the L1 key**; no walk, no
+  read-set. Read-tracking here is expensive *and* pointless: same version ⇒ same
+  bytes.
+- **Tracked (fine) inputs** — volatile (a workspace). The full tree hash changes
+  on almost every edit, so **storing it as an L1 key is near-useless** — you
+  accumulate a flood of single-use keys that never hit again. Reuse comes from
+  **L2 read-set validation**, not from the volatile coarse hash. A tracked input
+  contributes to *rerun avoidance* (read-set), not to a stored key.
+
+Open consequence: the L1 key looks like `(command signature +
+fingerprinted-input fingerprints)` — the *stable* part — under which results
+carry their read-set; the volatile tree hash should **not** churn the key. Exact
+key/slot structure is TBD (§10).
+
+### Push, don't only pull
+
+On a rerun, the orchestrator already knows the read-set and which of its files
+changed (it holds the new hashes). So it can **push the changed read-set files to
+the executor preemptively**, instead of waiting for the executor to pull them on
+demand. Pull is the default; push is the latency optimization for the
+known-changed set.
+
 ### Charter rot to fix
 
 [`stdlib/build.md:849`](../content/spec/stdlib/build.md) — "the solve **caches on
@@ -334,12 +368,16 @@ states the read-set governs *invalidation/rerun and never the key*; pubgrub's
   fine-grained VFS mount.** The same VFS does double duty: **lazy materialization**
   (serve bytes as opened) **and** **read-set capture** (record what's opened) —
   they are the same interception.
-- **Coarse mounts cannot be tracked.** Coarse-mounted inputs get **L1 only**: any
-  change to the declared input invalidates, no read-set refinement available.
+- **Coarse mounts are a deliberate mode, not (only) a fallback.** Their primary
+  use is large, stable, **fingerprinted** inputs (a C toolchain: rarely changes,
+  known by version) where read-tracking is both expensive and unnecessary — the
+  fingerprint *is* the identity, contributed to the L1 key, with no read-set.
 
 So there is a coupling worth stating plainly: **L2 (and lazy transfer) are
-available exactly where fine-grained VFS mounting is available.** Where it is not,
-you fall back to L1-only / eager semantics.
+available exactly where fine-grained VFS mounting is available *and* the input is
+mounted fine.** Two different reasons an input ends up coarse: **chosen** (stable
++ fingerprinted — an optimization) or **forced** (the platform can't intercept
+reads — a real limitation, below). Don't conflate them.
 
 **Platform feasibility — the thing to fork on:**
 - **macOS** — read interception for this purpose: believed **not** available.
@@ -422,8 +460,11 @@ pending by default; eager only inside kernels.
    remote-handle case (forcing isn't clean materialization) is unsettled.
 2. **Remote-handle model.** What crosses as a handle vs materializes; how parts
    resolve independently; how forcing a handle streams.
-3. **Caching mechanics.** L2 candidate retention; how non-determinism is handled
-   end-to-end via impurity marks; interaction with the store.
+3. **Caching mechanics.** L1 key/slot structure that avoids churn on volatile
+   inputs (a stable `(signature + fingerprints)` slot carrying read-sets, *not*
+   the volatile tree hash); L2 candidate retention; preemptive push of changed
+   read-set files; how non-determinism is handled end-to-end via impurity marks;
+   interaction with the store.
 4. **Sandbox platform feasibility (the fork).** Per-platform interception; L1-only
    fallback; lazy→eager degradation.
 5. **Demand-graph granularity.** What a node/edge/annotation is; coalescing pure
