@@ -37,15 +37,16 @@ enum Policy {
   struct Positional,
 }
 
-// What a value slot *is* — drives sandbox mounting and cache-key treatment.
+// How the engine treats a value for mounting and caching — the *universal*,
+// domain-agnostic classification. Small and stable: it never grows with new
+// tools. What the value *means* to the tool (header dir, library, define, …) is
+// the open `role` string the grammar supplies, which the engine never
+// interprets — that's where domain knowledge lives, not here.
 enum Kind {
-  struct Str,                                   // literal text, never mounted
-  struct PathIn { dir: Bool },                  // input file/dir; mounted + hashed
-  struct PathOut,                               // the writable output target
-  struct Include,                               // header search directory
-  struct LibSearchDir,                          // library search directory
-  struct Lib,                                   // -lfoo, resolved against search dirs
-  struct Define,                                // NAME or NAME=VALUE
+  struct Text,                                  // literal; hashed as text, never mounted
+  struct Input { dir: Bool },                   // input file/dir; mounted read-only + hashed
+  struct Output { dir: Bool },                  // the writable output target; not an input hash
+  struct InOut,                                 // read and rewritten in place (e.g. an ar archive)
 }
 
 // The value space of a flag — for completion and validation.
@@ -66,7 +67,8 @@ enum Arity {
 // A positional-argument slot: what a positional at this point *means*.
 struct Positional {
   name: String,
-  kind: Kind,
+  kind: Kind,                                   // universal cache/IO class
+  role: String = "",                            // open domain tag, e.g. "source", "archive"
   arity: Arity,
   doc: String = "",
 }
@@ -75,6 +77,7 @@ struct Positional {
 struct EnvDecl {
   name: String,
   kind: Kind,
+  role: String = "",
   doc: String = "",
 }
 
@@ -83,7 +86,8 @@ struct Flag {
   aliases: Array[String] = [],
   spelling: Spelling,
   policy: Policy,
-  kind: Kind,
+  kind: Kind = Kind.Text,                       // cache/IO class of the value (Text if none)
+  role: String = "",                            // open domain tag: "include", "lib", "define", …
   value: ValueDomain = ValueDomain.Any,
   doc: String = "",
 }

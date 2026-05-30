@@ -12,6 +12,12 @@ the lowering bridge lands.
 
 ## Notes
 
+- **`Kind` is universal; `role` is domain.** `Kind` is the small, stable cache/IO
+  classification the *engine* owns (`Text` / `Input { dir }` / `Output { dir }` /
+  `InOut`) — it never grows with new tools. What a value *means* (`"include"`,
+  `"lib"`, `"define"`) is the open `role` string the *grammar* supplies; the
+  engine never interprets it. New tool concepts are new role strings, never
+  engine changes. `role` also doubles as the cross-grammar key for `translate`.
 - **Sub-grammars are referenced by name** (`Passthrough { grammar: "ld" }`),
   not by value: Vixen forbids recursive types, and by-name resolution is what we
   want for cross-package references anyway. The engine resolves names at load.
