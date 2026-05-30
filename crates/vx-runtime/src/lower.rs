@@ -33,6 +33,14 @@ pub struct NotLowerable(pub String);
 /// (parameters bound to the region's [`NodeKind::Param`] nodes, in
 /// first-encountered order). `Err` means the region isn't scalar-lowerable yet.
 pub fn lower_root(g: &DemandGraph) -> Result<Kernel, NotLowerable> {
+    lower_root_params(g).map(|(kernel, _)| kernel)
+}
+
+/// Like [`lower_root`], but also returns the region's parameter **names** in slot
+/// order: slot `i` is fed by the param named `names[i]`. The evaluator uses this to
+/// bind a call's arguments to the kernel's parameter slots (a name maps to the
+/// callee's declaration position).
+pub fn lower_root_params(g: &DemandGraph) -> Result<(Kernel, Vec<String>), NotLowerable> {
     let mut lo = Lowerer {
         g,
         params: Vec::new(),
@@ -48,11 +56,19 @@ pub fn lower_root(g: &DemandGraph) -> Result<Kernel, NotLowerable> {
     // Phase 2: emit the body, then return the root value.
     let root_slot = lo.emit_value(g.root)?;
     lo.close(Term::Return(root_slot));
-    Ok(Kernel {
-        n_slots: lo.n_slots,
-        n_params: lo.params.len() as u32,
-        blocks: lo.blocks,
-    })
+    let names = lo
+        .params
+        .iter()
+        .map(|n| lo.g.nodes[n.0 as usize].label.clone())
+        .collect();
+    Ok((
+        Kernel {
+            n_slots: lo.n_slots,
+            n_params: lo.params.len() as u32,
+            blocks: lo.blocks,
+        },
+        names,
+    ))
 }
 
 struct Lowerer<'g> {

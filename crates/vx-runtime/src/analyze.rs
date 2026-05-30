@@ -109,7 +109,7 @@ fn find_entry(program: &VirProgram, entry: &str) -> Option<BodyId> {
 }
 
 /// Turn one body inside out into a demand graph.
-fn build_graph(program: &VirProgram, env: &TypeEnv, body_id: BodyId) -> DemandGraph {
+pub(crate) fn build_graph(program: &VirProgram, env: &TypeEnv, body_id: BodyId) -> DemandGraph {
     let params: Vec<PatternId> = program.arena[body_id]
         .params
         .iter()

@@ -13,17 +13,22 @@
 //! are resolved to their function bodies, so `assert_eq` actually executes.
 //! Unhandled forms poison honestly rather than silently mis-evaluating.
 
-use std::cell::RefCell;
+use std::cell::{Cell, RefCell};
 use std::collections::HashMap;
 use std::rc::Rc;
 
 use vx_ir::build::VirProgram;
 use vx_ir::expr::{ArrayElement, BinOp, ExprKind, FieldKey, LitKind, StringPart};
-use vx_ir::ids::{BindingId, ExprId};
+use vx_ir::ids::{BindingId, BodyId, ExprId, PatternId};
 use vx_ir::item::ItemKind;
 use vx_ir::pattern::PatternKind;
 use vx_ir::scope::DefTarget;
 use vx_ir::stmt::StmtKind;
+use vx_types::{TypeEnv, TypeId};
+
+use crate::analyze::build_graph;
+use crate::kernel;
+use crate::lower::lower_root_params;
 
 /// `assert`/`assert_eq` are themselves Vixen — prepended so the `.vx` tests
 /// resolve them (same prelude the old harnesses use).
@@ -75,8 +80,24 @@ enum ThunkState {
     Done(Result<Value, Poison>),
 }
 
+/// A function body that lowers to a kernel, with what's needed to run a call:
+/// the kernel, its parameter names in slot order (matched to the callee's
+/// arguments by name), and whether to read the returned word as `Bool` (vs `U64`).
+#[derive(Clone)]
+struct KernelFn {
+    kernel: kernel::Kernel,
+    param_names: Vec<String>,
+    returns_bool: bool,
+}
+
 struct Evaluator<'a> {
     program: &'a VirProgram,
+    env: &'a TypeEnv,
+    /// Per-body dispatch plan: `Some` = run the call as a kernel (the JIT/interp
+    /// path), `None` = tree-walk. Decided once per body (lower + soundness gates).
+    kernel_cache: RefCell<HashMap<BodyId, Option<KernelFn>>>,
+    /// How many calls ran as kernels — observability; a test asserts it fires.
+    dispatches: Cell<u64>,
 }
 
 impl Evaluator<'_> {
@@ -267,6 +288,47 @@ impl Evaluator<'_> {
         }
     }
 
+    /// Try to run a call as a kernel — the JIT/interpreter path on the real eval
+    /// run. `None` ⇒ not dispatchable; the caller tree-walks. `Some` ⇒ the call's
+    /// result (or poison), provably equal to tree-walking (see the soundness gates
+    /// in [`build_kernel_fn`]).
+    fn try_kernel(&self, body: BodyId, arg_thunks: &[Thunk]) -> Option<Result<Value, Poison>> {
+        // Decide + lower once per body; clone the plan out so the cache borrow is
+        // not held across argument forcing (which can recurse into other calls).
+        let kfn = {
+            let mut cache = self.kernel_cache.borrow_mut();
+            cache
+                .entry(body)
+                .or_insert_with(|| build_kernel_fn(self.program, self.env, body))
+                .clone()
+        }?;
+
+        // Force each kernel param's argument — found by name in the callee's
+        // parameter list — to a scalar word. Params the kernel doesn't use are
+        // left unforced (laziness preserved); a non-scalar argument ⇒ fall back.
+        let params = &self.program.arena[body].params;
+        let mut words = vec![0u64; kfn.param_names.len()];
+        for (slot, name) in kfn.param_names.iter().enumerate() {
+            let decl = params
+                .iter()
+                .position(|p| param_name(self.program, p.pattern).as_deref() == Some(name))?;
+            match self.force(arg_thunks.get(decl)?) {
+                Ok(v) => words[slot] = scalar_word(&v)?,
+                Err(p) => return Some(Err(p)), // a used param poisons ⇒ propagate
+            }
+        }
+
+        self.dispatches.set(self.dispatches.get() + 1);
+        Some(match run_kernel(&kfn.kernel, &words) {
+            Ok(w) => Ok(if kfn.returns_bool {
+                Value::Bool(w != 0)
+            } else {
+                Value::U64(w)
+            }),
+            Err(p) => Err(Poison(p.0)),
+        })
+    }
+
     fn call(
         &self,
         callee: ExprId,
@@ -287,6 +349,10 @@ impl Evaluator<'_> {
         };
         // Bind params to argument thunks (captured in the *caller's* env — lazy).
         let arg_thunks: Vec<Thunk> = args.map(|a| self.thunk(a, env)).collect();
+        // Kernels on the real path: a scalar function body runs as compiled code.
+        if let Some(result) = self.try_kernel(body, &arg_thunks) {
+            return result;
+        }
         let params = &prog.arena[body].params;
         let mut callee_env = Env::new();
         for (param, th) in params.iter().zip(arg_thunks) {
@@ -391,12 +457,118 @@ fn kind_name(_k: &ExprKind) -> &'static str {
     "<unhandled>"
 }
 
+/// Decide whether `body` can run as a kernel, and lower it if so (`None` ⇒
+/// tree-walk). Three soundness gates make kernel dispatch outcome-identical to the
+/// tree-walker (the fourth — scalar arguments — is checked per call in
+/// [`Evaluator::try_kernel`], where a non-scalar argument falls back):
+///
+/// - **lowers**: the body lowers to a kernel — the lowering only emits scalar-safe word ops; non-scalar constants and ops like `++` are already `NotLowerable`.
+/// - **scalar result**: the result type is concretely `U64`/`Bool`, so the returned word wraps back to the right `Value`.
+/// - **strict params**: every kernel param is read in the entry block (used unconditionally), so forcing its argument eagerly can't detonate a path the lazy walker would skip.
+fn build_kernel_fn(program: &VirProgram, env: &TypeEnv, body: BodyId) -> Option<KernelFn> {
+    let graph = build_graph(program, env, body);
+    let (k, param_names) = lower_root_params(&graph).ok()?;
+    let root_ty = program.arena[program.arena[body].root_expr].ty?;
+    let returns_bool = matches!(scalar_kind(env, root_ty)?, ScalarKind::Bool);
+    if !all_params_read_in_entry(&k) {
+        return None;
+    }
+    Some(KernelFn {
+        kernel: k,
+        param_names,
+        returns_bool,
+    })
+}
+
+/// A parameter pattern's bound name (`None` for non-binding patterns like `_`).
+fn param_name(program: &VirProgram, pat: PatternId) -> Option<String> {
+    match &program.arena[pat].kind {
+        PatternKind::Binding(pb) => Some(pb.name.clone()),
+        _ => None,
+    }
+}
+
+/// A scalar value as an ABI word: `U64` is itself, `Bool` is `0`/`1`. Anything
+/// else (string, compound) is not a kernel value.
+fn scalar_word(v: &Value) -> Option<u64> {
+    match v {
+        Value::U64(n) => Some(*n),
+        Value::Bool(b) => Some(*b as u64),
+        _ => None,
+    }
+}
+
+enum ScalarKind {
+    U64,
+    Bool,
+}
+
+/// The scalar kind of a type, by its rendered name (`None` if not `U64`/`Bool`).
+fn scalar_kind(env: &TypeEnv, ty: TypeId) -> Option<ScalarKind> {
+    match format!("{}", env.get_ty(ty).display_with_env(env)).as_str() {
+        "U64" => Some(ScalarKind::U64),
+        "Bool" => Some(ScalarKind::Bool),
+        _ => None,
+    }
+}
+
+/// Whether every kernel parameter (slots `0..n_params`) is read in the entry
+/// block — i.e. used unconditionally, before any branch (the laziness gate).
+fn all_params_read_in_entry(k: &kernel::Kernel) -> bool {
+    use kernel::{OpKind, Term};
+    if k.n_params == 0 {
+        return true;
+    }
+    let entry = &k.blocks[0];
+    let mut read = std::collections::HashSet::new();
+    for op in &entry.ops {
+        match op.kind {
+            OpKind::Const => {}
+            OpKind::Copy | OpKind::Not => {
+                read.insert(op.a);
+            }
+            OpKind::Fail => {}
+            _ => {
+                read.insert(op.a);
+                read.insert(op.b);
+            }
+        }
+    }
+    match entry.term {
+        Term::Return(s) => {
+            read.insert(s);
+        }
+        Term::BranchIf { cond, .. } => {
+            read.insert(cond);
+        }
+        Term::Jump(_) => {}
+    }
+    (0..k.n_params).all(|p| read.contains(&p))
+}
+
+/// Run a kernel, preferring the native JIT and falling back to the interpreter
+/// (and on non-native targets, the interpreter is the only path).
+fn run_kernel(k: &kernel::Kernel, args: &[u64]) -> Result<u64, kernel::Poison> {
+    #[cfg(all(target_os = "macos", target_arch = "aarch64"))]
+    if let Some(r) = crate::jit::jit_run(k, args) {
+        return r;
+    }
+    kernel::run(k, args)
+}
+
 /// Evaluate function `entry` in `source` through the demand-driven engine, with
 /// the assert prelude prepended. `Err` is a setup failure (parse / not found);
 /// `Ok(Outcome)` is the evaluation result (clean or poisoned).
 pub fn run(source: &str, entry: &str) -> Result<Outcome, String> {
+    run_with_dispatches(source, entry).map(|(outcome, _)| outcome)
+}
+
+/// As [`run`], but also reports how many calls ran as kernels (the JIT/interpreter
+/// path) rather than tree-walking — the observable proof that the kernel path is
+/// on the real evaluation run.
+pub fn run_with_dispatches(source: &str, entry: &str) -> Result<(Outcome, u64), String> {
     let full = format!("{PRELUDE}\n{source}");
-    let (program, _types) = crate::analyze::front_end(&full)?;
+    let (program, env) = crate::analyze::front_end(&full)?;
     let primary = *program.source_units.first().ok_or("no source unit")?;
     let body = program.arena[primary]
         .items
@@ -408,11 +580,17 @@ pub fn run(source: &str, entry: &str) -> Result<Outcome, String> {
         })
         .ok_or_else(|| format!("function `{entry}` not found"))?;
     let root = program.arena[body].root_expr;
-    let ev = Evaluator { program: &program };
-    Ok(match ev.eval(root, &Env::new()) {
+    let ev = Evaluator {
+        program: &program,
+        env: &env,
+        kernel_cache: RefCell::new(HashMap::new()),
+        dispatches: Cell::new(0),
+    };
+    let outcome = match ev.eval(root, &Env::new()) {
         Ok(v) => Outcome::Clean(v),
         Err(p) => Outcome::Poisoned(p.0),
-    })
+    };
+    Ok((outcome, ev.dispatches.get()))
 }
 
 #[cfg(test)]
@@ -469,5 +647,94 @@ mod tests {
         ] {
             poisons(POISONS, f);
         }
+    }
+
+    // ---- kernel dispatch on the real eval path (rebuild-plan step: wire-in) ----
+
+    #[test]
+    fn asserts_dispatch_to_the_kernel() {
+        // The prelude's `assert_eq` is a scalar `if`-kernel; the demand_basis tests
+        // call it with U64 args, so it runs as compiled code on the real path — a
+        // dispatch fires, and the bomb in the dead field still never detonates.
+        let (outcome, dispatches) =
+            run_with_dispatches(DEMAND_BASIS, "unused_tuple_field_never_runs").unwrap();
+        assert!(
+            matches!(outcome, Outcome::Clean(_)),
+            "expected clean: {outcome:?}"
+        );
+        assert!(dispatches >= 1, "assert_eq should dispatch to the kernel");
+    }
+
+    #[test]
+    fn scalar_function_dispatches_and_computes() {
+        let src = "fn add(a: U64, b: U64) -> U64 ( a + b ) fn main() -> U64 ( add(40, 2) )";
+        let (outcome, dispatches) = run_with_dispatches(src, "main").unwrap();
+        assert!(
+            matches!(outcome, Outcome::Clean(Value::U64(42))),
+            "got {outcome:?}"
+        );
+        assert!(dispatches >= 1, "add should dispatch to the kernel");
+    }
+
+    #[test]
+    fn bool_returning_kernel_wraps_as_bool() {
+        // `returns_bool` must read the returned word as Bool, not U64.
+        let src = "fn lt(a: U64, b: U64) -> Bool ( a < b ) fn main() -> Bool ( lt(3, 5) )";
+        assert!(matches!(
+            run(src, "main"),
+            Ok(Outcome::Clean(Value::Bool(true)))
+        ));
+    }
+
+    #[test]
+    fn unused_param_stays_lazy_through_dispatch() {
+        // `first` ignores `b`, so `b` is not a kernel param: the dispatch forces
+        // only `a`, leaving the bomb in `b`'s argument unforced. Clean, and a
+        // dispatch still fires.
+        let src = "fn first(a: U64, b: U64) -> U64 ( a ) fn main() -> U64 ( first(7, 💣) )";
+        let (outcome, dispatches) = run_with_dispatches(src, "main").unwrap();
+        assert!(
+            matches!(outcome, Outcome::Clean(Value::U64(7))),
+            "got {outcome:?}"
+        );
+        assert!(
+            dispatches >= 1,
+            "first should dispatch (the bomb stays unforced)"
+        );
+    }
+
+    #[test]
+    fn conditionally_used_param_declines_dispatch() {
+        // `a`/`b` are read only inside their branches, not the entry block: the
+        // laziness gate must decline the kernel so the lazy walker takes the live
+        // branch and never forces the bomb in the dead one.
+        let src = "fn pick(c: Bool, a: U64, b: U64) -> U64 ( if c ( a ) else ( b ) ) \
+                   fn main() -> U64 ( pick(true, 7, 💣) )";
+        let (outcome, dispatches) = run_with_dispatches(src, "main").unwrap();
+        assert!(
+            matches!(outcome, Outcome::Clean(Value::U64(7))),
+            "got {outcome:?}"
+        );
+        assert_eq!(
+            dispatches, 0,
+            "the gate should decline; the walker handles it"
+        );
+    }
+
+    #[test]
+    fn non_scalar_args_fall_back_to_tree_walk() {
+        // `a == b` on strings would mis-lower to a word compare — but the non-scalar
+        // argument trips the call-site gate, so it falls back to the tree-walker's
+        // real string equality. No dispatch.
+        let src = r#"fn eq(a: String, b: String) -> Bool ( a == b ) fn main() -> Bool ( eq("hi", "hi") )"#;
+        let (outcome, dispatches) = run_with_dispatches(src, "main").unwrap();
+        assert!(
+            matches!(outcome, Outcome::Clean(Value::Bool(true))),
+            "got {outcome:?}"
+        );
+        assert_eq!(
+            dispatches, 0,
+            "string args must fall back, not run the word kernel"
+        );
     }
 }
