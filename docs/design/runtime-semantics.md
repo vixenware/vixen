@@ -83,7 +83,7 @@ getting fused with its neighbours.
   exit, observer fields, each resolving at its own time.
 
 **Caching**
-- **L1 cache key** — coarse, computed *before* running, from declared inputs by
+- **L1 cache key** — broad, computed *before* running, from declared inputs by
   identity. Governs *lookup*.
 - **read-set** — the specific files (path + content hash) a command actually
   consulted. Recorded *after* running. Provenance.
@@ -101,13 +101,15 @@ getting fused with its neighbours.
 - **fingerprint** — a cheap, reliable identity for an input that is expensive to
   walk but rarely changes (e.g. a C toolchain, known by version). Stands in for
   hashing every file.
-- **tracked / fine-grained (VFS) mount** — for *volatile* inputs (a workspace).
-  Reads are intercepted ⇒ lazy transfer **and** read-set capture both possible ⇒
-  L2 available.
-- **fingerprinted / coarse mount** — for *large, stable, fingerprinted* inputs (a
-  toolchain). Deliberately *not* read-tracked (walking/tracking is expensive and
-  unnecessary; same version ⇒ same bytes). The fingerprint goes in the L1 key; no
-  read-set.
+- **tracked mount** — the spec's `mounts` (`r[exec.arg]`): fine-grained VFS
+  content (`Tree`/`Blob`). Reads are intercepted ⇒ lazy transfer **and** read-set
+  capture both possible ⇒ L2 available. The common case (a workspace).
+- **fingerprinted mount** — the spec's `coarse_mounts` (`r[exec.coarse-mounts]`):
+  a **host-backed sandbox exemption**, *not* content-addressed and *outside* the
+  VFS, so its reads cannot be tracked. Its identity is a **fingerprint** — the
+  probe/discovery observations attached to it (`host.which`, `host.hash`,
+  version), rechecked on the runner. Fingerprint → L1 key; no read-set. The system
+  C toolchain is the canonical case.
 
 **Tooling**
 - **demand graph** — the analyzed dataflow graph; the runtime's substrate, the
@@ -256,16 +258,61 @@ section; it does not have an adequate one today.
 
 ## 5. `exec`
 
-- Not one-input-one-output. Not a fixed number of outputs. The output tree is
-  **identity-pending** (see §4) — not statically analyzable.
-- Consumes input trees **by identity** (the L1 key is formed up front), and
-  **materializes them lazily** (only files opened are transferred).
-- Produces an **identity-pending output tree** plus a **bundle of
-  independently-resolving handles**.
-- The observer/verifier closure runs **on the executor** as a shipped kernel
-  (`i[impl.exec.shipped-closures]`, `i[impl.exec.shared-evaluator]`), projecting
-  the process's streams/write-set into a value whose fields are independently
-  timed.
+The right frame (the demand-first reframe): don't model `exec` by *what crosses a
+host* — model it by **what it demands, and when**. Demand is what forces; locality
+is incidental. `exec`'s demand is **two-phase**, and the two phases *are* the two
+cache levels (§6).
+
+**① Upfront demand** — forced *before dispatch*, because it is what addresses the
+cache:
+- **argv** — fully resolved (the command identity; canonical via command-model).
+- **env** — fully resolved.
+- **observer** — code identity + resolved captures (it is a shipped kernel).
+- **fingerprinted mounts** (`coarse_mounts`) — their fingerprint (rechecked probe
+  observations); identity only.
+- **tracked mounts** (`mounts`) — addressed by identity, but **not** contents.
+
+*Forcing here* resolves the argv/env/capture dataflow and pins mount identities.
+**No file bytes move yet.** → This set **is the L1 key**. Check the cache; hit ⇒
+done, never dispatch.
+
+**② Progressive demand** — discovered *during execution*; the remote tells us what
+it needs:
+- **tracked-mount file contents** — demanded per-read as the command opens each
+  file.
+
+*Forcing here* transfers that file's bytes to the executor (pull, or push if
+predicted). Each read is recorded. → This set **is the L2 read-set**.
+
+**③ Produced** — *not* demands; outputs that resolve over time, forced **only by
+the requester peer** (the peer that issued the `exec`, transitively up to the root
+demand), and only for the parts it actually demands:
+- **exit code** — at completion.
+- **stdout / stderr** — incremental streams.
+- **output tree** — identity discovered as it is written; materialized into the
+  store.
+- **observer's value** — fields resolve progressively (`rmeta` early, `rlib`
+  late). The observer runs **on the executor** as a shipped kernel
+  (`i[impl.exec.shipped-closures]`, `i[impl.exec.shared-evaluator]`); its fields
+  cross back only as the requester forces them.
+
+So an `exec` is **inert except for demand from both peers**: the executor pulls
+*inputs* (the reads, ②), the requester pulls *outputs* (③). Neither side pushes —
+push is only the predictive optimization on the input side.
+
+**The template generalizes.** Every intrinsic is a triple `(upfront, progressive,
+produced)`, and **"synchronous" just means "no progressive phase"**:
+- `parse` — upfront: the whole input; progressive: none; produced: the AST (sync).
+- `Http` — upfront: the request; progressive: none; produced: the response.
+- `pubgrub_solve` — upfront: solver + domain-closure identity; progressive: the
+  consulted `(P→versions)`/`(P,V→deps)` facts (its read-set); produced: the
+  resolution.
+
+That lines up with the async criterion (§2): external/non-deterministic ⟺ it
+discovers demands as it runs ⟺ it has a progressive phase.
+
+**Open seam:** exactly how a *tracked* mount enters the L1 key vs. the read-set
+(the don't-churn-the-volatile-key question, §6) — left to the storage design.
 
 ---
 
@@ -280,8 +327,8 @@ execute to compute the key that decides whether to execute — circular). And:
 
 `(command signature, env, mount tree hashes)` — declared inputs by identity. The
 mounts are the *whole declared input* (e.g. the entire workspace), by content
-hash: coarse, possibly over-broad, but knowable up front. Exact hit ⇒ reuse the
-output, never execute. **This is `r[eval.memoization]` / build.md:119, and it is
+hash: broad, possibly over-approximate, but knowable up front. Exact hit ⇒ reuse
+the output, never execute. **This is `r[eval.memoization]` / build.md:119, and it is
 correct as written.**
 
 ### L2 — read-set validity (rerun avoidance, *after* an L1 miss)
@@ -303,7 +350,7 @@ discipline, generalized.
 
 You frequently **cannot pre-declare the minimal input** — what a command reads is
 decided at runtime (include search paths, `__has_include`, response files). So you
-*must* mount coarsely ⇒ the L1 key is *forced* coarse ⇒ which would over-rerun on
+*must* mount broadly ⇒ the L1 key is *forced* broad ⇒ which would over-rerun on
 any workspace change ⇒ so the read-set (L2) is *required* to recover precision.
 The dynamism of reads forces the split. (This is command-model's
 "discovered-from-content inputs.")
@@ -317,7 +364,7 @@ The dynamism of reads forces the split. (This is command-model's
 
 Non-determinism breaks the theorem; that is exactly what command-model's
 **impurity marks** exist to flag. So the property that makes L2 sound is the one
-command-model already tracks. Three pieces snap together: build.md's coarse key
+command-model already tracks. Three pieces snap together: build.md's broad key
 (L1), command-model's signature + impurity (L2 candidate + determinism escape),
 the firehose's provenance (read-set recording).
 
@@ -325,22 +372,26 @@ the firehose's provenance (read-set recording).
 
 Not all inputs cache the same way; the *kind of mount* decides:
 
-- **Fingerprinted (coarse) inputs** — large, stable, cheaply identified (a C
-  toolchain by version). The **fingerprint goes in the L1 key**; no walk, no
-  read-set. Read-tracking here is expensive *and* pointless: same version ⇒ same
-  bytes.
-- **Tracked (fine) inputs** — volatile (a workspace). The full tree hash changes
-  on almost every edit, so **storing it as an L1 key is near-useless** — you
-  accumulate a flood of single-use keys that never hit again. Reuse comes from
-  **L2 read-set validation**, not from the volatile coarse hash. A tracked input
-  contributes to *rerun avoidance* (read-set), not to a stored key.
+- **Fingerprinted inputs** (`coarse_mounts`) — host-backed exemptions, identified
+  by rechecked probe observations; not content-addressed, not trackable (outside
+  the VFS). The **fingerprint goes in the L1 key**; no read-set. Read-tracking is
+  impossible here and unnecessary (same probe ⇒ same facts). Their reuse is
+  validated by *rechecking the probe observations* on the runner — the
+  fingerprinted-mount analogue of the read-set.
+- **Tracked inputs** (`mounts`) — content in the VFS; commonly volatile (a
+  workspace). The full tree hash changes on almost every edit, so **storing it as
+  an L1 key is near-useless** — a flood of single-use keys that never hit again.
+  Reuse comes from **L2 read-set validation**, not from the volatile whole-tree
+  hash. A tracked input contributes to *rerun avoidance* (read-set), not to a
+  stored key.
 
 Open consequence: the L1 key looks like `(command signature +
 fingerprinted-input fingerprints)` — the *stable* part — under which results
 carry their read-set; the volatile tree hash should **not** churn the key. But
-"don't store the volatile coarse key" does **not** mean "no lookup": there must
-still be a **coarse→fine lookup** — from a command and its declared inputs to the
-candidate prior results and their recorded read-sets — plus the store that holds
+"don't store the volatile whole-tree key" does **not** mean "no lookup": there
+must still be a **declared-inputs→read-set lookup** — from a command and its
+declared inputs to the candidate prior results and their recorded read-sets —
+plus the store that holds
 those results. Where and how that index lives, and how it's kept from growing
 without bound, is its own design problem (§10). Exact key/slot structure is TBD.
 
@@ -372,16 +423,18 @@ states the read-set governs *invalidation/rerun and never the key*; pubgrub's
   fine-grained VFS mount.** The same VFS does double duty: **lazy materialization**
   (serve bytes as opened) **and** **read-set capture** (record what's opened) —
   they are the same interception.
-- **Coarse mounts are a deliberate mode, not (only) a fallback.** Their primary
-  use is large, stable, **fingerprinted** inputs (a C toolchain: rarely changes,
-  known by version) where read-tracking is both expensive and unnecessary — the
-  fingerprint *is* the identity, contributed to the L1 key, with no read-set.
+- **Fingerprinted mounts (`coarse_mounts`) are a deliberate mode, not a
+  fallback.** They are host-backed exemptions (a discovered system toolchain),
+  *outside* the VFS, so their reads are inherently untrackable — and that's fine,
+  because the identity is the rechecked **fingerprint** (probe observations), not
+  tracked content. Fingerprint → L1 key; no read-set.
 
 So there is a coupling worth stating plainly: **L2 (and lazy transfer) are
-available exactly where fine-grained VFS mounting is available *and* the input is
-mounted fine.** Two different reasons an input ends up coarse: **chosen** (stable
-+ fingerprinted — an optimization) or **forced** (the platform can't intercept
-reads — a real limitation, below). Don't conflate them.
+available exactly where the input is a tracked (VFS) mount on a platform that can
+intercept reads.** Two different reasons read-set capture is unavailable:
+**fingerprinted by design** (a host-backed `coarse_mount` — never tracked, by
+construction) or **forced** (a tracked mount on a platform that can't intercept —
+a real limitation, below). Don't conflate them.
 
 **Platform feasibility — the fork:**
 - **Linux** — a virtual filesystem works. **Confident.**
