@@ -85,7 +85,7 @@ pub struct Block {
 /// How a block ends. Branches are the *only* way control flow happens — there is
 /// no eager `select`, so a dead branch (and any bomb that lowered into it) is
 /// never run.
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, Copy)]
 pub enum Term {
     /// Kernel result = `slots[_]`.
     Return(Slot),

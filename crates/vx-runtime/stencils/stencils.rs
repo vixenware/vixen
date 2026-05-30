@@ -27,8 +27,13 @@
 pub struct Ctx {
     /// The kernel's slot array (params pre-filled); scalars unboxed into it.
     pub slots: *mut u64,
-    /// The immediate stream: each op's operand slot indices, then `Const`'s value.
+    /// The immediate cursor: each op's operand slot indices, then `Const`'s value.
+    /// Advances as straight-line ops consume it; reset to a block's prog at a
+    /// branch (a kernel with control flow has one prog region per block).
     pub prog: *const u64,
+    /// Base of the immediate stream, so a terminator can reset `prog` to a target
+    /// block's region (`prog_base + offset`) before branching to it.
+    pub prog_base: *const u64,
     /// 0 = ok, 1 = poison (`fail`, divide/remainder by zero).
     pub status: u64,
     /// The returned word, written by `vx_stencil_return`.
@@ -37,6 +42,8 @@ pub struct Ctx {
 
 extern "C" {
     fn vx_cont(cx: *mut Ctx);
+    fn vx_cont_then(cx: *mut Ctx);
+    fn vx_cont_else(cx: *mut Ctx);
 }
 
 /// Tail-call the continuation (the patched `vx_cont` BRANCH26 hole).
@@ -163,6 +170,43 @@ pub unsafe extern "C" fn vx_stencil_rem(cx: *mut Ctx) {
 #[no_mangle]
 pub unsafe extern "C" fn vx_stencil_fail(cx: *mut Ctx) {
     (*cx).status = 1;
+}
+
+/// Unconditional jump — prog `[target_off]`. Reset the cursor to the target
+/// block's prog region (`prog_base + target_off`), then continue to its code
+/// (the patched `vx_cont` BRANCH26).
+#[no_mangle]
+pub unsafe extern "C" fn vx_stencil_jump(cx: *mut Ctx) {
+    let c = &mut *cx;
+    let target_off = *c.prog as usize;
+    c.prog = c.prog_base.add(target_off);
+    cont!(cx);
+}
+
+/// Conditional branch — prog `[cond, then_off, else_off]`. If `slots[cond] != 0`
+/// reset the cursor to the `then` block's prog and continue to its code
+/// (`vx_cont_then`), else to the `else` block's (`vx_cont_else`). The test is
+/// internal (a local branch, no relocation); only the two continuations are
+/// patched. Short-circuit: only the taken block runs.
+#[no_mangle]
+pub unsafe extern "C" fn vx_stencil_branch(cx: *mut Ctx) {
+    let c = &mut *cx;
+    let cond = *c.prog as usize;
+    let then_off = *c.prog.add(1) as usize;
+    let else_off = *c.prog.add(2) as usize;
+    if *c.slots.add(cond) != 0 {
+        c.prog = c.prog_base.add(then_off);
+        #[cfg(tailcall)]
+        become vx_cont_then(cx);
+        #[cfg(not(tailcall))]
+        vx_cont_then(cx);
+    } else {
+        c.prog = c.prog_base.add(else_off);
+        #[cfg(tailcall)]
+        become vx_cont_else(cx);
+        #[cfg(not(tailcall))]
+        vx_cont_else(cx);
+    }
 }
 
 /// `return slots[a]` — prog `[a]`. The terminator: write the result word and
