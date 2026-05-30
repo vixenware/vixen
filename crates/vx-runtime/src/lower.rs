@@ -29,18 +29,19 @@ use crate::kernel::{Block, Kernel, Op, OpKind, Slot, Term, Word};
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct NotLowerable(pub String);
 
-/// Lower the maximal pure scalar region anchored at the demand root to one kernel
-/// (parameters bound to the region's [`NodeKind::Param`] nodes, in
-/// first-encountered order). `Err` means the region isn't scalar-lowerable yet.
+/// Lower the maximal pure scalar region anchored at the demand root to one kernel.
+/// `Err` means the region isn't scalar-lowerable yet.
 pub fn lower_root(g: &DemandGraph) -> Result<Kernel, NotLowerable> {
-    lower_root_params(g).map(|(kernel, _)| kernel)
+    lower_node(g, g.root).map(|(kernel, _)| kernel)
 }
 
-/// Like [`lower_root`], but also returns the region's parameter **names** in slot
-/// order: slot `i` is fed by the param named `names[i]`. The evaluator uses this to
-/// bind a call's arguments to the kernel's parameter slots (a name maps to the
-/// callee's declaration position).
-pub fn lower_root_params(g: &DemandGraph) -> Result<(Kernel, Vec<String>), NotLowerable> {
+/// Lower the maximal pure scalar region anchored at **any** node (not just the
+/// demand root) to a kernel, also returning the region's parameter **nodes** in
+/// slot order: slot `i` reads the value of `params[i]`. The evaluator maps each
+/// parameter node back to the binding it came from to supply the argument — so a
+/// scalar *sub-expression* of a body can run as a kernel, its free variables fed
+/// from the environment.
+pub fn lower_node(g: &DemandGraph, root: NodeId) -> Result<(Kernel, Vec<NodeId>), NotLowerable> {
     let mut lo = Lowerer {
         g,
         params: Vec::new(),
@@ -51,23 +52,18 @@ pub fn lower_root_params(g: &DemandGraph) -> Result<(Kernel, Vec<String>), NotLo
     // Phase 1: discover the parameter nodes (region inputs) and give them the
     // first slots — the kernel ABI binds args to slots `0..n_params`.
     let mut seen = HashSet::new();
-    lo.collect_params(g.root, &mut seen)?;
+    lo.collect_params(root, &mut seen)?;
     lo.n_slots = lo.params.len() as u32;
-    // Phase 2: emit the body, then return the root value.
-    let root_slot = lo.emit_value(g.root)?;
+    // Phase 2: emit the region, then return its root value.
+    let root_slot = lo.emit_value(root)?;
     lo.close(Term::Return(root_slot));
-    let names = lo
-        .params
-        .iter()
-        .map(|n| lo.g.nodes[n.0 as usize].label.clone())
-        .collect();
     Ok((
         Kernel {
             n_slots: lo.n_slots,
             n_params: lo.params.len() as u32,
             blocks: lo.blocks,
         },
-        names,
+        lo.params,
     ))
 }
 

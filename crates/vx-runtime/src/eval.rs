@@ -19,16 +19,17 @@ use std::rc::Rc;
 
 use vx_ir::build::VirProgram;
 use vx_ir::expr::{ArrayElement, BinOp, ExprKind, FieldKey, LitKind, StringPart};
-use vx_ir::ids::{BindingId, BodyId, ExprId, PatternId};
+use vx_ir::ids::{BindingId, BodyId, ExprId};
 use vx_ir::item::ItemKind;
 use vx_ir::pattern::PatternKind;
 use vx_ir::scope::DefTarget;
 use vx_ir::stmt::StmtKind;
 use vx_types::{TypeEnv, TypeId};
 
-use crate::analyze::build_graph;
+use crate::analyze::build_graph_indexed;
+use crate::graph::{DemandGraph, NodeId};
 use crate::kernel;
-use crate::lower::lower_root_params;
+use crate::lower::lower_node;
 
 /// `assert`/`assert_eq` are themselves Vixen — prepended so the `.vx` tests
 /// resolve them (same prelude the old harnesses use).
@@ -75,28 +76,49 @@ pub struct Thunk(Rc<RefCell<ThunkState>>);
 
 #[derive(Debug)]
 enum ThunkState {
-    Unforced { expr: ExprId, env: Env },
+    /// The captured `body` travels with the thunk so that forcing it re-enters the
+    /// right body's demand graph for sub-expression dispatch.
+    Unforced {
+        expr: ExprId,
+        env: Env,
+        body: BodyId,
+    },
     Forcing,
     Done(Result<Value, Poison>),
 }
 
-/// A function body that lowers to a kernel, with what's needed to run a call:
-/// the kernel, its parameter names in slot order (matched to the callee's
-/// arguments by name), and whether to read the returned word as `Bool` (vs `U64`).
+/// A scalar (sub-)expression that lowers to a kernel, with what's needed to run
+/// it: the kernel, the bindings feeding its parameter slots (in order — a slot
+/// reads the forced value of `param_bindings[i]`), and whether to read the
+/// returned word as `Bool` (vs `U64`).
 #[derive(Clone)]
-struct KernelFn {
+struct DispatchPlan {
     kernel: kernel::Kernel,
-    param_names: Vec<String>,
+    param_bindings: Vec<BindingId>,
     returns_bool: bool,
+}
+
+/// One body's demand graph plus the indices that map an evaluated expression to
+/// its node, and a parameter node back to the binding it came from.
+struct BodyGraph {
+    graph: DemandGraph,
+    exprmap: HashMap<ExprId, NodeId>,
+    bindmap: HashMap<NodeId, BindingId>,
 }
 
 struct Evaluator<'a> {
     program: &'a VirProgram,
     env: &'a TypeEnv,
-    /// Per-body dispatch plan: `Some` = run the call as a kernel (the JIT/interp
-    /// path), `None` = tree-walk. Decided once per body (lower + soundness gates).
-    kernel_cache: RefCell<HashMap<BodyId, Option<KernelFn>>>,
-    /// How many calls ran as kernels — observability; a test asserts it fires.
+    /// The body whose expressions are currently being evaluated — set when
+    /// entering a body (a call) or forcing a thunk, so sub-expression dispatch
+    /// uses the right graph. Saved/restored, not threaded through `eval`.
+    current_body: Cell<BodyId>,
+    /// Per-body demand graph + indices, built once on first dispatch in that body.
+    body_graphs: RefCell<HashMap<BodyId, BodyGraph>>,
+    /// Per-expression dispatch decision: `Some` = run as a kernel, `None` =
+    /// tree-walk. Decided once per expression (lower + soundness gates).
+    plan_cache: RefCell<HashMap<ExprId, Option<DispatchPlan>>>,
+    /// How many (sub-)expressions ran as kernels — observability; tests assert it.
     dispatches: Cell<u64>,
 }
 
@@ -105,10 +127,13 @@ impl Evaluator<'_> {
         Thunk(Rc::new(RefCell::new(ThunkState::Unforced {
             expr,
             env: env.clone(),
+            body: self.current_body.get(),
         })))
     }
 
-    /// Force a thunk to a value (memoised; detects cycles).
+    /// Force a thunk to a value (memoised; detects cycles). The thunk's captured
+    /// body is made current for the duration, then restored — so forcing a value
+    /// built in another body dispatches against *that* body's graph.
     fn force(&self, t: &Thunk) -> Result<Value, Poison> {
         // Extract the work without holding the borrow across the recursive eval.
         let work = {
@@ -120,21 +145,28 @@ impl Evaluator<'_> {
                         "circular dependency (a value demands itself)".into(),
                     ));
                 }
-                ThunkState::Unforced { expr, env } => {
-                    let (expr, env) = (*expr, env.clone());
+                ThunkState::Unforced { expr, env, body } => {
+                    let work = (*expr, env.clone(), *body);
                     *st = ThunkState::Forcing;
-                    (expr, env)
+                    work
                 }
             }
         };
+        let prev = self.current_body.replace(work.2);
         let result = self.eval(work.0, &work.1);
+        self.current_body.set(prev);
         *t.0.borrow_mut() = ThunkState::Done(result.clone());
         result
     }
 
     /// Evaluate an expression to a value. Compound construction is lazy (fields
-    /// become thunks); only demanded positions are forced.
+    /// become thunks); only demanded positions are forced. Scalar *compute*
+    /// sub-expressions (`+`, `<`, `if`, …) run as kernels when they lower; the
+    /// match below is the fallback for everything else.
     fn eval(&self, e: ExprId, env: &Env) -> Result<Value, Poison> {
+        if let Some(result) = self.dispatch_scalar(e, env) {
+            return result;
+        }
         let prog = self.program;
         match &prog.arena[e].kind {
             // 💣 — poisons the instant it is evaluated (i.e. forced).
@@ -288,44 +320,96 @@ impl Evaluator<'_> {
         }
     }
 
-    /// Try to run a call as a kernel — the JIT/interpreter path on the real eval
-    /// run. `None` ⇒ not dispatchable; the caller tree-walks. `Some` ⇒ the call's
-    /// result (or poison), provably equal to tree-walking (see the soundness gates
-    /// in [`build_kernel_fn`]).
-    fn try_kernel(&self, body: BodyId, arg_thunks: &[Thunk]) -> Option<Result<Value, Poison>> {
-        // Decide + lower once per body; clone the plan out so the cache borrow is
-        // not held across argument forcing (which can recurse into other calls).
-        let kfn = {
-            let mut cache = self.kernel_cache.borrow_mut();
+    /// Try to run expression `e` (in `env`) as a kernel — the JIT/interpreter path
+    /// on the real eval run. `None` ⇒ not dispatchable; `eval` tree-walks. `Some` ⇒
+    /// the value (or poison), provably equal to tree-walking (the gates are in
+    /// [`build_plan`]). Only scalar *compute* expressions are candidates; the
+    /// kernel folds projections into constants, so an arithmetic expression over
+    /// struct/tuple fields runs as one kernel rather than a walk.
+    fn dispatch_scalar(&self, e: ExprId, env: &Env) -> Option<Result<Value, Poison>> {
+        if !matches!(
+            self.program.arena[e].kind,
+            ExprKind::Binary(_) | ExprKind::Prefix(_) | ExprKind::If(_)
+        ) {
+            return None;
+        }
+        let body = self.current_body.get();
+        // Decide + lower once per expression; clone the plan out so the cache
+        // borrow is not held across argument forcing (which recurses into eval).
+        let plan = {
+            let mut cache = self.plan_cache.borrow_mut();
             cache
-                .entry(body)
-                .or_insert_with(|| build_kernel_fn(self.program, self.env, body))
+                .entry(e)
+                .or_insert_with(|| self.build_plan(e, body))
                 .clone()
         }?;
 
-        // Force each kernel param's argument — found by name in the callee's
-        // parameter list — to a scalar word. Params the kernel doesn't use are
-        // left unforced (laziness preserved); a non-scalar argument ⇒ fall back.
-        let params = &self.program.arena[body].params;
-        let mut words = vec![0u64; kfn.param_names.len()];
-        for (slot, name) in kfn.param_names.iter().enumerate() {
-            let decl = params
-                .iter()
-                .position(|p| param_name(self.program, p.pattern).as_deref() == Some(name))?;
-            match self.force(arg_thunks.get(decl)?) {
+        // Force each parameter's binding to a scalar word. A non-scalar value (a
+        // string, a compound) ⇒ fall back to the tree-walker, which handles it
+        // correctly; a poison while forcing a used parameter ⇒ propagate.
+        let mut words = vec![0u64; plan.param_bindings.len()];
+        for (slot, binding) in plan.param_bindings.iter().enumerate() {
+            match self.force(env.get(binding)?) {
                 Ok(v) => words[slot] = scalar_word(&v)?,
-                Err(p) => return Some(Err(p)), // a used param poisons ⇒ propagate
+                Err(p) => return Some(Err(p)),
             }
         }
 
         self.dispatches.set(self.dispatches.get() + 1);
-        Some(match run_kernel(&kfn.kernel, &words) {
-            Ok(w) => Ok(if kfn.returns_bool {
+        Some(match run_kernel(&plan.kernel, &words) {
+            Ok(w) => Ok(if plan.returns_bool {
                 Value::Bool(w != 0)
             } else {
                 Value::U64(w)
             }),
             Err(p) => Err(Poison(p.0)),
+        })
+    }
+
+    /// Build this body's demand graph (with indices) on first use, caching it.
+    fn ensure_body_graph(&self, body: BodyId) {
+        if !self.body_graphs.borrow().contains_key(&body) {
+            let (graph, exprmap, bindmap) = build_graph_indexed(self.program, self.env, body);
+            self.body_graphs.borrow_mut().insert(
+                body,
+                BodyGraph {
+                    graph,
+                    exprmap,
+                    bindmap,
+                },
+            );
+        }
+    }
+
+    /// Decide whether expression `e` (in `body`) can run as a kernel, lowering it
+    /// and resolving its parameters to bindings if so. The soundness gates that
+    /// make dispatch outcome-identical to the tree-walker:
+    ///
+    /// - **scalar result**: `e`'s type is concretely `U64`/`Bool`, so the returned word wraps back to the right `Value`.
+    /// - **lowers**: the region anchored at `e` lowers (only scalar-safe word ops; non-scalar constants and ops like `++` are already `NotLowerable`).
+    /// - **strict params**: every kernel parameter is read in the entry block — used unconditionally — so forcing its binding eagerly can't detonate a path the lazy walker would skip.
+    ///
+    /// The fourth — scalar arguments — is checked per evaluation in
+    /// [`dispatch_scalar`], where a non-scalar binding falls back.
+    fn build_plan(&self, e: ExprId, body: BodyId) -> Option<DispatchPlan> {
+        let ety = self.program.arena[e].ty?;
+        let returns_bool = matches!(scalar_kind(self.env, ety)?, ScalarKind::Bool);
+        self.ensure_body_graph(body);
+        let graphs = self.body_graphs.borrow();
+        let bg = graphs.get(&body)?;
+        let node = *bg.exprmap.get(&e)?;
+        let (kernel, param_nodes) = lower_node(&bg.graph, node).ok()?;
+        if !all_params_read_in_entry(&kernel) {
+            return None;
+        }
+        let param_bindings: Vec<BindingId> = param_nodes
+            .iter()
+            .map(|n| bg.bindmap.get(n).copied())
+            .collect::<Option<_>>()?;
+        Some(DispatchPlan {
+            kernel,
+            param_bindings,
+            returns_bool,
         })
     }
 
@@ -347,12 +431,13 @@ impl Evaluator<'_> {
             },
             _ => return Err(Poison("indirect calls not yet supported".into())),
         };
-        // Bind params to argument thunks (captured in the *caller's* env — lazy).
+        // Bind params to argument thunks (captured in the *caller's* env + body —
+        // lazy). The callee body becomes current while its expressions evaluate;
+        // forcing an argument later restores the caller's body (the thunk carries
+        // it). The callee body's own scalar regions dispatch to kernels — so a
+        // scalar function body still runs as compiled code, now via sub-expression
+        // dispatch rather than a special call path.
         let arg_thunks: Vec<Thunk> = args.map(|a| self.thunk(a, env)).collect();
-        // Kernels on the real path: a scalar function body runs as compiled code.
-        if let Some(result) = self.try_kernel(body, &arg_thunks) {
-            return result;
-        }
         let params = &prog.arena[body].params;
         let mut callee_env = Env::new();
         for (param, th) in params.iter().zip(arg_thunks) {
@@ -360,7 +445,10 @@ impl Evaluator<'_> {
                 callee_env.insert(pb.binding, th);
             }
         }
-        self.eval(prog.arena[body].root_expr, &callee_env)
+        let prev = self.current_body.replace(body);
+        let result = self.eval(prog.arena[body].root_expr, &callee_env);
+        self.current_body.set(prev);
+        result
     }
 
     fn project_index(&self, container: &Value, idx: usize) -> Result<Value, Poison> {
@@ -455,37 +543,6 @@ impl Evaluator<'_> {
 
 fn kind_name(_k: &ExprKind) -> &'static str {
     "<unhandled>"
-}
-
-/// Decide whether `body` can run as a kernel, and lower it if so (`None` ⇒
-/// tree-walk). Three soundness gates make kernel dispatch outcome-identical to the
-/// tree-walker (the fourth — scalar arguments — is checked per call in
-/// [`Evaluator::try_kernel`], where a non-scalar argument falls back):
-///
-/// - **lowers**: the body lowers to a kernel — the lowering only emits scalar-safe word ops; non-scalar constants and ops like `++` are already `NotLowerable`.
-/// - **scalar result**: the result type is concretely `U64`/`Bool`, so the returned word wraps back to the right `Value`.
-/// - **strict params**: every kernel param is read in the entry block (used unconditionally), so forcing its argument eagerly can't detonate a path the lazy walker would skip.
-fn build_kernel_fn(program: &VirProgram, env: &TypeEnv, body: BodyId) -> Option<KernelFn> {
-    let graph = build_graph(program, env, body);
-    let (k, param_names) = lower_root_params(&graph).ok()?;
-    let root_ty = program.arena[program.arena[body].root_expr].ty?;
-    let returns_bool = matches!(scalar_kind(env, root_ty)?, ScalarKind::Bool);
-    if !all_params_read_in_entry(&k) {
-        return None;
-    }
-    Some(KernelFn {
-        kernel: k,
-        param_names,
-        returns_bool,
-    })
-}
-
-/// A parameter pattern's bound name (`None` for non-binding patterns like `_`).
-fn param_name(program: &VirProgram, pat: PatternId) -> Option<String> {
-    match &program.arena[pat].kind {
-        PatternKind::Binding(pb) => Some(pb.name.clone()),
-        _ => None,
-    }
 }
 
 /// A scalar value as an ABI word: `U64` is itself, `Bool` is `0`/`1`. Anything
@@ -583,7 +640,9 @@ pub fn run_with_dispatches(source: &str, entry: &str) -> Result<(Outcome, u64), 
     let ev = Evaluator {
         program: &program,
         env: &env,
-        kernel_cache: RefCell::new(HashMap::new()),
+        current_body: Cell::new(body),
+        body_graphs: RefCell::new(HashMap::new()),
+        plan_cache: RefCell::new(HashMap::new()),
         dispatches: Cell::new(0),
     };
     let outcome = match ev.eval(root, &Env::new()) {
@@ -688,19 +747,49 @@ mod tests {
 
     #[test]
     fn unused_param_stays_lazy_through_dispatch() {
-        // `first` ignores `b`, so `b` is not a kernel param: the dispatch forces
-        // only `a`, leaving the bomb in `b`'s argument unforced. Clean, and a
-        // dispatch still fires.
-        let src = "fn first(a: U64, b: U64) -> U64 ( a ) fn main() -> U64 ( first(7, 💣) )";
+        // `a + a` ignores `b`, so `b` is not a kernel param: the dispatch forces
+        // only `a`, leaving the bomb in `b`'s argument unforced. Clean, dispatched.
+        let src = "fn f(a: U64, b: U64) -> U64 ( a + a ) fn main() -> U64 ( f(7, 💣) )";
         let (outcome, dispatches) = run_with_dispatches(src, "main").unwrap();
         assert!(
-            matches!(outcome, Outcome::Clean(Value::U64(7))),
+            matches!(outcome, Outcome::Clean(Value::U64(14))),
             "got {outcome:?}"
         );
         assert!(
             dispatches >= 1,
-            "first should dispatch (the bomb stays unforced)"
+            "the `a + a` kernel should dispatch (bomb unforced)"
         );
+    }
+
+    #[test]
+    fn sub_expression_dispatches_not_just_whole_bodies() {
+        // `each_field_resolves_independently` is `assert_eq(r.fast + r.slow, 18)`.
+        // Two kernels fire: the `r.fast + r.slow` arithmetic SUB-EXPRESSION (the
+        // struct projections fold into constants inside one kernel), and the
+        // assert_eq comparison — neither is a whole function body of the caller.
+        let (outcome, dispatches) =
+            run_with_dispatches(WHICH_FIELD, "each_field_resolves_independently").unwrap();
+        assert!(
+            matches!(outcome, Outcome::Clean(_)),
+            "expected clean: {outcome:?}"
+        );
+        assert!(
+            dispatches >= 2,
+            "the sub-expression and the assert should both dispatch, got {dispatches}"
+        );
+    }
+
+    #[test]
+    fn block_tail_sub_expression_dispatches_with_a_param() {
+        // The tail `x * x + 1` is a scalar sub-expression that lowers to a kernel
+        // with `x` as a parameter, fed from the binding.
+        let src = "fn sq1(x: U64) -> U64 ( x * x + 1 ) fn main() -> U64 ( sq1(6) )";
+        let (outcome, dispatches) = run_with_dispatches(src, "main").unwrap();
+        assert!(
+            matches!(outcome, Outcome::Clean(Value::U64(37))),
+            "got {outcome:?}"
+        );
+        assert!(dispatches >= 1, "x*x+1 should dispatch");
     }
 
     #[test]

@@ -110,6 +110,22 @@ fn find_entry(program: &VirProgram, entry: &str) -> Option<BodyId> {
 
 /// Turn one body inside out into a demand graph.
 pub(crate) fn build_graph(program: &VirProgram, env: &TypeEnv, body_id: BodyId) -> DemandGraph {
+    build_graph_indexed(program, env, body_id).0
+}
+
+/// Like [`build_graph`], but also returns two indices the evaluator needs to
+/// dispatch scalar *sub-expressions* to kernels: the expression→node map (which
+/// graph node a given `ExprId` produced) and, for every `Param` node, the binding
+/// it came from (so a kernel parameter maps back to the environment).
+pub(crate) fn build_graph_indexed(
+    program: &VirProgram,
+    env: &TypeEnv,
+    body_id: BodyId,
+) -> (
+    DemandGraph,
+    HashMap<ExprId, NodeId>,
+    HashMap<NodeId, BindingId>,
+) {
     let params: Vec<PatternId> = program.arena[body_id]
         .params
         .iter()
@@ -128,10 +144,19 @@ pub(crate) fn build_graph(program: &VirProgram, env: &TypeEnv, body_id: BodyId) 
         b.bind_param(pat);
     }
     let root = b.walk(root_expr);
-    DemandGraph {
+    // Invert the binding map for `Param` nodes only (a kernel's parameters are
+    // always `Param` nodes; let-bindings link to their value node instead).
+    let mut param_bindings = HashMap::new();
+    for (&binding, &node) in &b.bindings {
+        if matches!(b.nodes[node.0 as usize].kind, NodeKind::Param) {
+            param_bindings.insert(node, binding);
+        }
+    }
+    let graph = DemandGraph {
         nodes: b.nodes,
         root,
-    }
+    };
+    (graph, b.memo, param_bindings)
 }
 
 struct Builder<'a> {
