@@ -140,7 +140,7 @@ because their inputs depend on values only evaluation produces.
 > actions (`exec`, `acquire`, …) is **not** enumerated ahead of evaluation. Which
 > boundaries run, and with what inputs, is discovered dynamically as demand
 > reaches them — because those inputs depend on values only evaluation produces
-> (`discover` results, file contents, resolved capabilities). The graph of *pure
+> (earlier `exec` outputs, file contents, resolved capabilities). The graph of *pure
 > dataflow* may be analyzed statically; the graph of *effects* is
 > demand-discovered.
 
@@ -181,10 +181,12 @@ The user cannot spawn threads. The only source of parallelism is the demand grap
 > **async ⟺ the result is not a pure function of its Vixen-value inputs** — it
 > observes or affects the external world (network, processes, host state).
 
-Worked: `http` async, `exec` async, host-ops in a `discover` closure async,
-`acquire` async (likely). `parse` **sync** (pure function of bytes),
+Worked: `http` async, `exec` async, host-ops (capability detection — `host.which`,
+`host.hash`) async, `acquire` async. `parse` **sync** (pure function of bytes),
 `pubgrub_solve` **sync** (pure function of constraints). A criterion classifies a
-*new* intrinsic without editing a list.
+*new* intrinsic without editing a list. (Note: there is no `discover` intrinsic —
+host facts come from the control plane, see
+[`runners-and-control-plane.md`](runners-and-control-plane.md).)
 
 ### Two orthogonal axes (previously fused as "intrinsic")
 
@@ -301,15 +303,26 @@ So an `exec` is **inert except for demand from both peers**: the executor pulls
 push is only the predictive optimization on the input side.
 
 **The template generalizes.** Every intrinsic is a triple `(upfront, progressive,
-produced)`, and **"synchronous" just means "no progressive phase"**:
-- `parse` — upfront: the whole input; progressive: none; produced: the AST (sync).
-- `Http` — upfront: the request; progressive: none; produced: the response.
+produced)`:
+- `parse` — upfront: the whole input; progressive: none; produced: the AST.
+- `Http` — upfront: the request; progressive: none; produced: the response
+  (identity-pending — depends on the server).
+- `acquire` — upfront: the coordinate (+ the pinned hash if a lock supplies one);
+  progressive: none; produced: a content-addressed tree, **identity-known if
+  pinned, identity-pending if coordinate-only** (fetch, then learn the hash). The
+  lock's whole job is to pin this identity — see *build outputs as inputs* (§6).
 - `pubgrub_solve` — upfront: solver + domain-closure identity; progressive: the
   consulted `(P→versions)`/`(P,V→deps)` facts (its read-set); produced: the
   resolution.
 
-That lines up with the async criterion (§2): external/non-deterministic ⟺ it
-discovers demands as it runs ⟺ it has a progressive phase.
+**Async has two independent manifestations** — this *corrects* the §2 framing.
+External/non-determinism shows up as a **progressive input phase** (②: `exec`
+reads, `pubgrub` facts) and/or an **identity-pending output** (③: `exec` output
+tree, `acquire`-by-coordinate, `Http`). An intrinsic can have one without the
+other: `exec` has both; `acquire`/`Http` have only ③; `parse` has neither. So
+**"synchronous" = neither** — deterministic, no progressive inputs, identity-known
+output. ("No progressive phase" alone was too narrow — it missed the output-side
+manifestation.)
 
 **Open seam:** exactly how a *tracked* mount enters the L1 key vs. the read-set
 (the don't-churn-the-volatile-key question, §6) — left to the storage design.
@@ -412,6 +425,31 @@ both describe the read-set as if it *keys* the cache. Fix: introduce the
 **key vs read-set** vocabulary; `r[eval.memoization]` stays the L1 key; a new rule
 states the read-set governs *invalidation/rerun and never the key*; pubgrub's
 `(P→versions, P,V→deps)` facts are an L2 read-set, not a key.
+
+### Build outputs as inputs; overrides
+
+Some build outputs are written back **onto the workspace on disk**, so on the next
+run they re-enter as **overlaid inputs**. The canonical case is a **lock file**: a
+resolution build produces it (output), it lands in the workspace tree, and the
+next build reads it (input) — its pins override the manifest's open version
+ranges. The lock is simultaneously a produced output and an overlaid input.
+
+This is what lets `acquire` be cheap: the lock **pins** `acquire`'s output
+identity (§5), flipping it from identity-pending (fetch to learn the hash) to
+identity-known (the hash is right there) — the precondition for offline/cached
+builds.
+
+User-facing commands that "change the lock" are just **builds with an override**.
+`cargo update` = evaluate the entry point with an override that says *ignore the
+lock's data* (wholesale, or for one package); the resolver re-resolves ignoring
+the pins, producing a new lock → new overlaid input next time. **Overrides
+parameterize the demand graph** (mask/replace specific inputs); the same entry
+point under different overrides is how distinct user commands map onto one build.
+
+This is the **second** thing the old `discover` was reaching for (manifest vs
+lock) — resolved here as output-overlaid-as-input + overrides, not discovery. (The
+*first* thing — host/toolchain facts — is resolved by the control plane:
+[`runners-and-control-plane.md`](runners-and-control-plane.md).)
 
 ---
 

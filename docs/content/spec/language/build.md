@@ -27,7 +27,7 @@ Build entry points and runtime-backed surfaces such as `main`, `exec`,
 > boundary actions (`exec`, `acquire`, …) is **not** enumerated ahead of
 > evaluation. Which boundaries run, and with what inputs, is discovered
 > dynamically as demand reaches them — because those inputs depend on values
-> only evaluation produces (`discover` results, file contents, resolved
+> only evaluation produces (earlier `exec` outputs, file contents, resolved
 > capabilities). The graph of *pure dataflow* may be analyzed statically; the
 > graph of *effects* is demand-discovered.
 
