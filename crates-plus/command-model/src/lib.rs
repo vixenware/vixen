@@ -15,6 +15,10 @@
 //! path-kind inputs** the cache must hash (argv paths, env-valued paths, and
 //! inputs bubbled up from passthroughs) **+ impurity marks**.
 //!
+//! An `MSVC`/`cl.exe` grammar additionally exercises the `/`-lead spellings:
+//! DualLead (`/c` ≡ `-c`), ColonAttached (`/std:c++20`), and GluedNoDelim
+//! (`/Foout.obj`).
+//!
 //! Still future work (see `docs/design/command-model.md`): guarded productions
 //! (mode-by-flag), command-level reducers + a coupling graph (the `-W` polarity
 //! algebra, cross-flag aliasing), discovered-from-file-content inputs, the
@@ -35,8 +39,8 @@ pub enum Spelling {
     Attached,
     /// `-o out`, `-I dir` — value is the following argv token.
     Separated,
-    /// `-std=c99` — value after `=`.
-    Equals,
+    /// `-std=c99`, `/std:c++20` — value after a separator char (`=` or `:`).
+    Suffixed { sep: char },
     /// `-Wl,a,b` — the value is a `sep`-joined sub-command in another tool's
     /// `grammar`; canonicalized recursively and re-joined.
     Passthrough {
@@ -134,7 +138,7 @@ struct Parsed {
 impl Grammar {
     /// Match a token against the grammar. Returns
     /// `(flag_index, in_token_value, consumes_next)`. Exact (`Bare`/`Separated`)
-    /// and `lead=` (`Equals`) matches win over the longest prefix match
+    /// and `lead<sep>` (`Suffixed`) matches win over the longest prefix match
     /// (`Attached`/`Passthrough`).
     fn match_token(&self, token: &str) -> Option<(usize, Option<String>, bool)> {
         let mut best_prefix: Option<(usize, usize)> = None;
@@ -143,9 +147,9 @@ impl Grammar {
                 match flag.spelling {
                     Spelling::Bare if token == lead => return Some((i, None, false)),
                     Spelling::Separated if token == lead => return Some((i, None, true)),
-                    Spelling::Equals => {
+                    Spelling::Suffixed { sep } => {
                         if let Some(value) =
-                            token.strip_prefix(lead).and_then(|r| r.strip_prefix('='))
+                            token.strip_prefix(lead).and_then(|r| r.strip_prefix(sep))
                         {
                             return Some((i, Some(value.to_string()), false));
                         }
@@ -303,7 +307,9 @@ fn emit(flag: &Flag, value: Option<&str>) -> Vec<String> {
         Spelling::Separated => {
             vec![flag.canonical.to_string(), value.unwrap_or("").to_string()]
         }
-        Spelling::Equals => vec![format!("{}={}", flag.canonical, value.unwrap_or(""))],
+        Spelling::Suffixed { sep } => {
+            vec![format!("{}{}{}", flag.canonical, sep, value.unwrap_or(""))]
+        }
     }
 }
 
@@ -585,7 +591,7 @@ pub const LD: Grammar = Grammar {
         Flag {
             canonical: "--version-script",
             aliases: &[],
-            spelling: Spelling::Equals,
+            spelling: Spelling::Suffixed { sep: '=' },
             policy: Policy::Once,
             kind: Kind::PathIn { dir: false },
         },
@@ -641,7 +647,7 @@ pub const CC: Grammar = Grammar {
         Flag {
             canonical: "-std",
             aliases: &[],
-            spelling: Spelling::Equals,
+            spelling: Spelling::Suffixed { sep: '=' },
             policy: Policy::Once,
             kind: Kind::Str,
         },
@@ -694,6 +700,96 @@ pub const CC: Grammar = Grammar {
             canonical: "-o",
             aliases: &[],
             spelling: Spelling::Separated,
+            policy: Policy::Once,
+            kind: Kind::PathOut,
+        },
+    ],
+};
+
+/// The `cl.exe`/clang-cl grammar — proves the MSVC spellings: DualLead
+/// (`/c` ≡ `-c`, via aliases), ColonAttached (`/std:c++20`, a
+/// `Suffixed { sep: ':' }`), and GluedNoDelim (`/Foout.obj`, `/Iinc`, which fall
+/// out of longest-prefix matching). Slice; `/link` mode-switching awaits guarded
+/// productions.
+pub const CL: Grammar = Grammar {
+    env: &[
+        EnvDecl {
+            name: "INCLUDE",
+            kind: Kind::Include,
+        },
+        EnvDecl {
+            name: "LIB",
+            kind: Kind::LibSearchDir,
+        },
+    ],
+    flags: &[
+        Flag {
+            canonical: "/c",
+            aliases: &["-c"],
+            spelling: Spelling::Bare,
+            policy: Policy::Once,
+            kind: Kind::Str,
+        },
+        Flag {
+            canonical: "/nologo",
+            aliases: &["-nologo"],
+            spelling: Spelling::Bare,
+            policy: Policy::Once,
+            kind: Kind::Str,
+        },
+        Flag {
+            canonical: "/EHsc",
+            aliases: &["-EHsc"],
+            spelling: Spelling::Bare,
+            policy: Policy::Once,
+            kind: Kind::Str,
+        },
+        Flag {
+            canonical: "/O",
+            aliases: &["-O"],
+            spelling: Spelling::Attached,
+            policy: Policy::Group("opt"),
+            kind: Kind::Str,
+        },
+        Flag {
+            canonical: "/W",
+            aliases: &["-W"],
+            spelling: Spelling::Attached,
+            policy: Policy::Group("warn"),
+            kind: Kind::Str,
+        },
+        Flag {
+            canonical: "/std",
+            aliases: &["-std"],
+            spelling: Spelling::Suffixed { sep: ':' },
+            policy: Policy::Once,
+            kind: Kind::Str,
+        },
+        Flag {
+            canonical: "/D",
+            aliases: &["-D"],
+            spelling: Spelling::Attached,
+            policy: Policy::DefineProgram,
+            kind: Kind::Define,
+        },
+        Flag {
+            canonical: "/I",
+            aliases: &["-I"],
+            spelling: Spelling::Attached,
+            policy: Policy::DedupOrdered,
+            kind: Kind::Include,
+        },
+        Flag {
+            canonical: "/Fo",
+            aliases: &["-Fo"],
+            spelling: Spelling::Attached,
+            policy: Policy::Once,
+            kind: Kind::PathOut,
+        },
+        Flag {
+            canonical: "/Fe",
+            aliases: &["-Fe"],
+            spelling: Spelling::Attached,
             policy: Policy::Once,
             kind: Kind::PathOut,
         },
