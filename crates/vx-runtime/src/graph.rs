@@ -118,15 +118,46 @@ impl DemandGraph {
             let node = &self.nodes[i];
             match node.kind {
                 NodeKind::LazyData => {} // structural: fields demanded only via Project
-                NodeKind::Project { index } => {
-                    let container = node.inputs[0];
-                    stack.push(container);
-                    stack.push(self.nodes[container.0 as usize].inputs[index as usize]);
+                NodeKind::Project { .. } => {
+                    // Demand the container (for the display chain) AND the actual
+                    // projected value — forwarding through any intermediate
+                    // projections to the underlying constructor's slot. A naive
+                    // `container.inputs[index]` is wrong when the container is
+                    // itself a projection (e.g. `s.a.a`).
+                    stack.push(node.inputs[0]);
+                    if let Some(v) = self.resolved_value(NodeId(i as u32)) {
+                        stack.push(v);
+                    }
                 }
                 _ => stack.extend(node.inputs.iter().copied()),
             }
         }
         reached
+    }
+
+    /// Statically forward a node to the value it produces, folding projections
+    /// through **known constructors** (case-of-known-constructor): `(_, b)[1]` is
+    /// `b`, `Pair { a, .. }.a` is `a`, and these compose through nesting. Returns
+    /// `None` only if the chain bottoms out on something it can't fold (a dynamic
+    /// container — a kernel/boundary result whose shape isn't statically known).
+    fn resolved_value(&self, n: NodeId) -> Option<NodeId> {
+        let node = &self.nodes[n.0 as usize];
+        match node.kind {
+            NodeKind::Project { index } => {
+                let raw_container = node.inputs[0];
+                let container = self.resolved_value(raw_container).unwrap_or(raw_container);
+                let cnode = &self.nodes[container.0 as usize];
+                match cnode.kind {
+                    NodeKind::LazyData => {
+                        let slot = *cnode.inputs.get(index as usize)?;
+                        Some(self.resolved_value(slot).unwrap_or(slot))
+                    }
+                    // Can't fold into a non-constructor; the value is the container.
+                    _ => Some(container),
+                }
+            }
+            _ => Some(n),
+        }
     }
 }
 

@@ -394,6 +394,28 @@ mod tests {
     }
 
     #[test]
+    fn nested_projection_reaches_the_leaf_not_the_bombs() {
+        // The real demand_basis `deep_named_field_projection` shape:
+        // Outer { a: Pair { a: 42, b: 💣 }, b: 💣 }; s.a.a  — demands the inner 42.
+        // Catches the nested-projection bug: a naive container.inputs[index] would
+        // leave the demanded 42 dark.
+        let src = "struct Pair { a: U64, b: U64 } struct Outer { a: Pair, b: U64 } \
+                   fn d() -> U64 ( let s = Outer { a: Pair { a: 42, b: 💣 }, b: 💣 }; s.a.a )";
+        let g = analyze_source(src, "d").unwrap();
+        bombs_unreached(&g);
+        let reached = g.demand_reachable();
+        let leaf_reached = g
+            .nodes
+            .iter()
+            .enumerate()
+            .any(|(i, n)| n.kind == NodeKind::Const && n.label == "42" && reached[i]);
+        assert!(
+            leaf_reached,
+            "the demanded inner 42 (s.a.a) must be reached"
+        );
+    }
+
+    #[test]
     fn call_args_are_walked() {
         // assert_eq(pair[0], 42): the call must reach into its args.
         let g = analyze_source("fn d() -> Bool ( let pair = (7, 💣); pair[0] == 7 )", "d").unwrap();
