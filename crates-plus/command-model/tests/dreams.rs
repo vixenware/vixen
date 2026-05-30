@@ -1,7 +1,7 @@
 //! The dream-bigger consumers on the structured model: "explain this command"
 //! and cross-dialect translation (gcc → MSVC).
 
-use command_model::{CC, CL, explain, translate};
+use command_model::{examples, explain, translate};
 
 fn argv(parts: &[&str]) -> Vec<String> {
     parts.iter().map(|s| s.to_string()).collect()
@@ -9,7 +9,10 @@ fn argv(parts: &[&str]) -> Vec<String> {
 
 #[test]
 fn explain_describes_flags_and_positionals() {
-    let ex = explain(&CC, &argv(&["cc", "-c", "-I", "src", "x.c", "-o", "out.o"]));
+    let ex = explain(
+        examples().get("cc").unwrap(),
+        &argv(&["cc", "-c", "-I", "src", "x.c", "-o", "out.o"]),
+    );
     let summary = |sp: &str| {
         ex.items
             .iter()
@@ -42,9 +45,9 @@ fn translate_gcc_to_msvc() {
     // `-I inc` (separated) becomes `/Iinc` (glued), the target's spelling, and
     // `-o` in *compile* mode (because `-c` is present) becomes `/Fo`, not `/Fe`.
     let out = translate(
-        &CC,
+        examples().get("cc").unwrap(),
         &argv(&["cc", "-c", "-O2", "-DFOO", "-I", "inc", "x.c", "-o", "x.o"]),
-        &CL,
+        examples().get("cl").unwrap(),
     );
     assert!(
         out.untranslatable.is_empty(),
@@ -63,7 +66,11 @@ fn translate_mode_splits_output_flag() {
     // The same `-o`, but in *link* mode (no `-c`), must reach the other side of
     // MSVC's output split: `/Fe`, not `/Fo`. Same role + operation, different
     // mode — only the mode disambiguates.
-    let out = translate(&CC, &argv(&["cc", "x.o", "-o", "app"]), &CL);
+    let out = translate(
+        examples().get("cc").unwrap(),
+        &argv(&["cc", "x.o", "-o", "app"]),
+        examples().get("cl").unwrap(),
+    );
     assert_eq!(out.args, argv(&["x.o", "/Feapp"]));
 }
 
@@ -73,9 +80,9 @@ fn translate_moves_a_flag_to_an_env_channel() {
     // but it has the `LIB` env channel (same role + operation). So `-L libs`
     // can't become a flag — it becomes `LIB=libs`. argv and env, together.
     let out = translate(
-        &CC,
+        examples().get("cc").unwrap(),
         &argv(&["cc", "-c", "-L", "libs", "x.c", "-o", "x.o"]),
-        &CL,
+        examples().get("cl").unwrap(),
     );
     assert!(
         out.untranslatable.is_empty(),
@@ -89,7 +96,11 @@ fn translate_moves_a_flag_to_an_env_channel() {
 #[test]
 fn translate_reports_untranslatable_flags() {
     // -shared has no MSVC correspondence — no flag and no env channel.
-    let out = translate(&CC, &argv(&["cc", "-shared", "x.o", "-o", "lib"]), &CL);
+    let out = translate(
+        examples().get("cc").unwrap(),
+        &argv(&["cc", "-shared", "x.o", "-o", "lib"]),
+        examples().get("cl").unwrap(),
+    );
     assert!(
         out.untranslatable.iter().any(|u| u.token == "-shared"),
         "the untranslatable flag is named; got {:?}",

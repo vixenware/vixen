@@ -1,7 +1,7 @@
 //! "Why did it rebuild?" — diffing two effective commands pinpoints exactly
 //! what changed in the cache identity.
 
-use command_model::{CC, Change, diff, effective_command};
+use command_model::{Change, diff, examples};
 use std::collections::BTreeMap;
 
 fn argv(parts: &[&str]) -> Vec<String> {
@@ -18,8 +18,8 @@ fn env(pairs: &[(&str, &str)]) -> BTreeMap<String, String> {
 #[test]
 fn identical_commands_have_no_diff() {
     let cmd = argv(&["cc", "-c", "-O2", "-I", "src", "x.c", "-o", "x.o"]);
-    let a = effective_command(&CC, &cmd, &BTreeMap::new());
-    let b = effective_command(&CC, &cmd, &BTreeMap::new());
+    let a = examples().effective_command("cc", &cmd, &BTreeMap::new());
+    let b = examples().effective_command("cc", &cmd, &BTreeMap::new());
     assert!(
         diff(&a, &b).is_empty(),
         "same command -> one cache key -> no diff"
@@ -28,13 +28,13 @@ fn identical_commands_have_no_diff() {
 
 #[test]
 fn diff_pinpoints_the_one_added_flag() {
-    let a = effective_command(
-        &CC,
+    let a = examples().effective_command(
+        "cc",
         &argv(&["cc", "-c", "-O2", "-I", "src", "x.c", "-o", "x.o"]),
         &BTreeMap::new(),
     );
-    let b = effective_command(
-        &CC,
+    let b = examples().effective_command(
+        "cc",
         &argv(&["cc", "-c", "-O2", "-I", "src", "-DFOO", "x.c", "-o", "x.o"]),
         &BTreeMap::new(),
     );
@@ -47,13 +47,13 @@ fn diff_pinpoints_the_one_added_flag() {
 
 #[test]
 fn diff_catches_an_input_that_moved_in_via_env() {
-    let a = effective_command(
-        &CC,
+    let a = examples().effective_command(
+        "cc",
         &argv(&["cc", "-c", "x.c", "-o", "x.o"]),
         &BTreeMap::new(),
     );
-    let b = effective_command(
-        &CC,
+    let b = examples().effective_command(
+        "cc",
         &argv(&["cc", "-c", "x.c", "-o", "x.o"]),
         &env(&[("CPATH", "vendor")]),
     );

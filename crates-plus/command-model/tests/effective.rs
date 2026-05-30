@@ -2,7 +2,7 @@
 //! the cache must hash (argv paths, env paths, bubbled-up passthrough paths),
 //! and impurity marks.
 
-use command_model::{CC, Impurity, Input, effective_command};
+use command_model::{Impurity, Input, examples};
 use std::collections::BTreeMap;
 
 fn argv(parts: &[&str]) -> Vec<String> {
@@ -30,8 +30,8 @@ fn declared_env_enters_identity_ambient_does_not() {
         ("HOME", "/home/amos"),
         ("RANDOM_THING", "x"),
     ]);
-    let ec = effective_command(
-        &CC,
+    let ec = examples().effective_command(
+        "cc",
         &argv(&["cc", "-c", "-I", "src", "src/x.c", "-o", "x.o"]),
         &e,
     );
@@ -55,8 +55,8 @@ fn declared_env_enters_identity_ambient_does_not() {
 fn passthrough_path_inputs_bubble_up() {
     // --version-script names a file inside the -Wl, passthrough; it must surface
     // as an input of the outer command.
-    let ec = effective_command(
-        &CC,
+    let ec = examples().effective_command(
+        "cc",
         &argv(&[
             "cc",
             "-shared",
@@ -73,8 +73,8 @@ fn passthrough_path_inputs_bubble_up() {
 
 #[test]
 fn unknown_flag_marks_impure() {
-    let ec = effective_command(
-        &CC,
+    let ec = examples().effective_command(
+        "cc",
         &argv(&["cc", "-c", "--frobnicate", "src/x.c", "-o", "x.o"]),
         &BTreeMap::new(),
     );
@@ -91,8 +91,8 @@ fn unknown_flag_marks_impure() {
 fn inputs_are_deduped() {
     // The same dir reached via -I and via CPATH collapses to one input.
     let e = env(&[("CPATH", "shared")]);
-    let ec = effective_command(
-        &CC,
+    let ec = examples().effective_command(
+        "cc",
         &argv(&["cc", "-c", "-I", "shared", "src/x.c", "-o", "x.o"]),
         &e,
     );

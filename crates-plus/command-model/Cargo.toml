@@ -11,6 +11,12 @@ description = "Describe a CLI tool's argument grammar; parse an argv into struct
 rustdoc-args = ["--html-in-header", "arborium-header.html"]
 
 [dependencies]
+# Grammars load as data — facet only, no evaluator. The crate stays standalone.
+facet = { workspace = true }
+facet-json = { workspace = true }
+
+[dev-dependencies]
+facet-json = { workspace = true }
 
 [lints]
 workspace = true

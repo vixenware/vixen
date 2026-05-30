@@ -1,7 +1,7 @@
 //! Integration tests against the `cc` flags `old-zoo/libpng.vx` actually emits.
 //! These exercise the canonicalizer the way a real build would drive it.
 
-use command_model::{CC, Lint, canonicalize};
+use command_model::{Lint, examples};
 
 fn argv(parts: &[&str]) -> Vec<String> {
     parts.iter().map(|s| s.to_string()).collect()
@@ -27,7 +27,7 @@ fn messy_compile_canonicalizes_and_lints() {
         "out/png.o",
         "src/png.c",
     ]);
-    let c = canonicalize(&CC, &input);
+    let c = examples().canonicalize("cc", &input);
 
     assert_eq!(c.program, "cc");
     assert_eq!(
@@ -68,14 +68,14 @@ fn messy_compile_canonicalizes_and_lints() {
 fn permutations_share_one_cache_key() {
     // The whole point: two spellings of the same compile produce the same
     // canonical args, so they hit one cache entry.
-    let a = canonicalize(
-        &CC,
+    let a = examples().canonicalize(
+        "cc",
         &argv(&[
             "cc", "-c", "-O2", "-DFOO", "-I", "inc", "src/x.c", "-o", "x.o",
         ]),
     );
-    let b = canonicalize(
-        &CC,
+    let b = examples().canonicalize(
+        "cc",
         &argv(&[
             "cc", "-DFOO", "-I", "inc", "-O2", "src/x.c", "-c", "-o", "x.o",
         ]),
@@ -96,8 +96,8 @@ fn permutations_share_one_cache_key() {
 
 #[test]
 fn conflicting_define_is_flagged() {
-    let c = canonicalize(
-        &CC,
+    let c = examples().canonicalize(
+        "cc",
         &argv(&["cc", "-c", "-DLEVEL=1", "-DLEVEL=2", "src/x.c", "-o", "x.o"]),
     );
     assert!(

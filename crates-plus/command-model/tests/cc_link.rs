@@ -1,7 +1,7 @@
 //! Link-side coverage: the `-Wl,` recursive passthrough into the `ld` grammar,
 //! `-l` (order-significant, no dedup), and `-L` (dedup, order kept).
 
-use command_model::{CC, Lint, canonicalize};
+use command_model::{Lint, examples};
 
 fn argv(parts: &[&str]) -> Vec<String> {
     parts.iter().map(|s| s.to_string()).collect()
@@ -11,8 +11,8 @@ fn argv(parts: &[&str]) -> Vec<String> {
 fn wl_passthrough_canonicalizes_recursively() {
     // The value of -Wl, is itself an ld command; reordering the ld flags inside
     // the passthrough must yield the same canonical form.
-    let a = canonicalize(
-        &CC,
+    let a = examples().canonicalize(
+        "cc",
         &argv(&[
             "cc",
             "-shared",
@@ -22,8 +22,8 @@ fn wl_passthrough_canonicalizes_recursively() {
             "x.o",
         ]),
     );
-    let b = canonicalize(
-        &CC,
+    let b = examples().canonicalize(
+        "cc",
         &argv(&[
             "cc",
             "-shared",
@@ -50,8 +50,8 @@ fn wl_passthrough_canonicalizes_recursively() {
 #[test]
 fn repeated_wl_occurrences_merge() {
     // Two -Wl, flags fold into one canonical passthrough.
-    let c = canonicalize(
-        &CC,
+    let c = examples().canonicalize(
+        "cc",
         &argv(&[
             "cc",
             "-shared",
@@ -71,8 +71,8 @@ fn repeated_wl_occurrences_merge() {
 
 #[test]
 fn libs_keep_order_but_search_dirs_dedup() {
-    let c = canonicalize(
-        &CC,
+    let c = examples().canonicalize(
+        "cc",
         &argv(&[
             "cc", "-L", "a", "-lm", "-L", "b", "-lpng", "-L", "a", "-lm", "-o", "app", "x.o",
         ]),
@@ -110,8 +110,8 @@ fn libs_keep_order_but_search_dirs_dedup() {
 
 #[test]
 fn warning_family_dedups_and_sorts() {
-    let c = canonicalize(
-        &CC,
+    let c = examples().canonicalize(
+        "cc",
         &argv(&[
             "cc", "-c", "-Wall", "-Wextra", "-Wall", "src/x.c", "-o", "x.o",
         ]),

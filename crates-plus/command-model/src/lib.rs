@@ -3,13 +3,17 @@
 //! **effective command**: the resolved identity a content-addressed cache keys
 //! on. Also the basis for command linting and structured provenance.
 //!
-//! The crate is deliberately standalone: data in, data out, no dependencies.
+//! The crate is deliberately standalone: data in, data out. Grammars load as
+//! **facet data** (no evaluator dependency) and the engine works through a
+//! [`GrammarSet`] — a package of named grammars that reference one another by
+//! name (cc's `-Wl,` resolves the `ld` grammar in the same set).
 //!
 //! ## Status
 //!
-//! [`canonicalize`] folds an argv to a canonical form (cc compile + a link
-//! slice: `-l`/`-L`, `-W`, and `-Wl,` as a **recursive** passthrough into an
-//! `ld` grammar). [`effective_command`] adds the soundness pillar: the identity
+//! [`GrammarSet::canonicalize`] folds an argv to a canonical form (cc compile +
+//! a link slice: `-l`/`-L`, `-W`, and `-Wl,` as a **recursive** passthrough into
+//! an `ld` grammar). [`GrammarSet::effective_command`] adds the soundness pillar:
+//! the identity
 //! is canonical argv **+ the declared env the tool consumes** (explicit only —
 //! undeclared env is never read; there is no ambient inheritance) **+ the
 //! path-kind inputs** the cache must hash (argv paths, env-valued paths, and
@@ -25,6 +29,7 @@
 //! algebra, cross-flag aliasing), discovered-from-file-content inputs, the
 //! caching-hazard neutralizers, and link-order semantics.
 
+use facet::Facet;
 use std::collections::{BTreeMap, BTreeSet};
 use std::fmt;
 
@@ -32,7 +37,8 @@ use std::fmt;
 const ENV_PATH_SEP: char = ':';
 
 /// How a flag and its value are written on the command line.
-#[derive(Debug, Clone, Copy)]
+#[derive(Debug, Clone, PartialEq, Eq, Facet)]
+#[repr(u8)]
 pub enum Spelling {
     /// `-c`, `-fPIC` — the whole token is the flag; no value.
     Bare,
@@ -40,26 +46,22 @@ pub enum Spelling {
     Attached,
     /// `-o out`, `-I dir` — value is the following argv token.
     Separated,
-    /// `-std=c99`, `/std:c++20` — value after a separator char (`=` or `:`).
-    Suffixed { sep: char },
+    /// `-std=c99`, `/std:c++20` — value after a separator (`=` or `:`).
+    Suffixed { sep: String },
     /// `-Wl,a,b` — the value is a `sep`-joined sub-command in another tool's
-    /// `grammar`; canonicalized recursively and re-joined.
-    Passthrough {
-        sep: &'static str,
-        grammar: &'static Grammar,
-    },
+    /// grammar, referenced **by name** (resolved within the [`GrammarSet`]);
+    /// canonicalized recursively and re-joined.
+    Passthrough { sep: String, grammar: String },
 }
 
-/// Identifier for a set of mutually-exclusive flags (last mention wins).
-pub type GroupId = &'static str;
-
 /// How repeated occurrences of a flag collapse during canonicalization.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, Facet)]
+#[repr(u8)]
 pub enum Policy {
     /// At most one meaningful occurrence; a later one overrides (and lints).
     Once,
-    /// Mutually-exclusive set sharing a [`GroupId`]; the last mention wins.
-    Group(GroupId),
+    /// Mutually-exclusive set sharing a group `name`; the last mention wins.
+    Group { name: String },
     /// Repeatable; order is semantic (e.g. include search order); exact
     /// duplicates are dropped (and linted).
     DedupOrdered,
@@ -80,7 +82,8 @@ pub enum Policy {
 /// tools. What the value *means* to the tool (header dir, library, define, …) is
 /// the open `role` string the grammar supplies, which the engine never
 /// interprets — that's where domain knowledge lives.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Facet)]
+#[repr(u8)]
 pub enum Kind {
     /// Literal text — hashed as text, never mounted.
     Text,
@@ -95,7 +98,8 @@ pub enum Kind {
 /// The verb a flag performs on its conceptual knob — the polarity translation
 /// must respect (you cannot map an "add to include path" onto a "remove from
 /// include path", even though both carry role `"include"`).
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Facet)]
+#[repr(u8)]
 pub enum Operation {
     /// Assign / replace a value (the common case): `-O2`, `-o out`.
     Set,
@@ -109,20 +113,37 @@ pub enum Operation {
     Disable,
 }
 
+/// The value space of a flag — for completion and validation. The engine does
+/// not consume it yet; it is carried so an authored grammar round-trips whole.
+#[derive(Debug, Clone, PartialEq, Eq, Facet)]
+#[repr(u8)]
+pub enum ValueDomain {
+    /// Anything.
+    Any,
+    /// A fixed set, e.g. `-std`, `-O` level.
+    OneOf { values: Vec<String> },
+    /// A filesystem path.
+    Path { dir: bool },
+    /// An open named value space, e.g. `"lib"`, `"triple"`.
+    Named { domain: String },
+}
+
 /// An environment channel a tool reads. Declared by the grammar so it becomes
 /// an *explicit*, keyed input — Vixen never inherits ambient env.
-#[derive(Debug, Clone, Copy)]
+#[derive(Debug, Clone, PartialEq, Eq, Facet)]
 pub struct EnvDecl {
-    pub name: &'static str,
+    pub name: String,
     pub kind: Kind,
-    pub role: &'static str,
+    pub role: String,
     /// The verb — an env channel carries a `(role, operation)` semantic just like
     /// a flag, so translation can move a semantic between flag and env.
     pub operation: Operation,
+    pub doc: String,
 }
 
 /// How many positional arguments a schema slot consumes.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Facet)]
+#[repr(u8)]
 pub enum Arity {
     /// Exactly one.
     One,
@@ -136,79 +157,149 @@ pub enum Arity {
 /// name (for docs/explain), its [`Kind`] (the role it plays — input, output,
 /// archive, …), how many it consumes, and its documentation. The ordered list
 /// of these is a grammar's positional schema.
-#[derive(Debug, Clone, Copy)]
+#[derive(Debug, Clone, PartialEq, Eq, Facet)]
 pub struct Positional {
-    pub name: &'static str,
+    pub name: String,
     /// Universal cache/IO class.
     pub kind: Kind,
     /// Open domain tag, e.g. `"source"`, `"archive"`.
-    pub role: &'static str,
+    pub role: String,
     pub arity: Arity,
-    pub doc: &'static str,
+    pub doc: String,
 }
 
 /// A single flag in a tool grammar.
-#[derive(Debug, Clone, Copy)]
+#[derive(Debug, Clone, PartialEq, Eq, Facet)]
 pub struct Flag {
     /// Canonical lead spelling, e.g. `-O`, `-D`, `-I`, `-o`, `-c`, `-Wl,`.
-    pub canonical: &'static str,
+    pub canonical: String,
     /// Accepted alternate spellings that canonicalize to `canonical`.
-    pub aliases: &'static [&'static str],
+    pub aliases: Vec<String>,
     pub spelling: Spelling,
     pub policy: Policy,
     /// Universal cache/IO class of the value.
     pub kind: Kind,
     /// Open domain tag — `"include"`, `"lib"`, `"define"`, … — engine-opaque,
     /// for explain/completion and as translate's cross-grammar key.
-    pub role: &'static str,
+    pub role: String,
     /// The verb (set/add/remove/enable/disable). Translation matches on
     /// `(role, operation, mode)` — role is the noun, operation the verb.
     pub operation: Operation,
     /// The modes this flag is legal in (by name); empty = all modes. Part of the
     /// `(role, operation, mode)` translation key.
-    pub modes: &'static [&'static str],
+    pub modes: Vec<String>,
+    /// The value space (completion/validation); engine-opaque for now.
+    pub value: ValueDomain,
+    pub doc: String,
 }
 
 impl Flag {
     /// Baseline for terse `..Flag::DEFAULT` construction: a bare, set-once,
     /// text-valued flag with no aliases and an empty role.
     pub const DEFAULT: Flag = Flag {
-        canonical: "",
-        aliases: &[],
+        canonical: String::new(),
+        aliases: Vec::new(),
         spelling: Spelling::Bare,
         policy: Policy::Once,
         kind: Kind::Text,
-        role: "",
+        role: String::new(),
         operation: Operation::Set,
-        modes: &[],
+        modes: Vec::new(),
+        value: ValueDomain::Any,
+        doc: String::new(),
     };
 }
 
-/// A mode a command can be in. The default mode has no `selector`; a non-default
-/// mode is entered when its `selector` flag is present. Mode names are a
-/// grammar's own vocabulary — a C grammar may call its default mode `"link"`;
-/// the model itself knows nothing domain-specific.
-#[derive(Debug, Clone, Copy)]
+/// A mode a command can be in. The default mode has an empty `selector`; a
+/// non-default mode is entered when its `selector` flag is present. Mode names
+/// are a grammar's own vocabulary — a C grammar may call its default mode
+/// `"link"`; the model itself knows nothing domain-specific.
+#[derive(Debug, Clone, PartialEq, Eq, Facet)]
 pub struct Mode {
-    pub name: &'static str,
-    pub selector: Option<&'static str>,
+    pub name: String,
+    /// Empty = the default mode; otherwise the flag whose presence selects it.
+    pub selector: String,
 }
 
-/// A tool grammar: flags, env channels, the positional schema, and modes.
-/// Anything not matching a flag is a positional input. (Richer guarded
+/// A tool grammar: a name, flags, env channels, the positional schema, and
+/// modes. Anything not matching a flag is a positional input. (Richer guarded
 /// productions — arbitrary predicates over parse state — remain future.)
-#[derive(Debug, Clone, Copy)]
+#[derive(Debug, Clone, PartialEq, Eq, Facet)]
 pub struct Grammar {
-    pub flags: &'static [Flag],
-    pub env: &'static [EnvDecl],
-    /// The command's modes. The default mode has no selector; a non-default mode
-    /// is entered by its selector flag. A flag is legal only in the modes it
-    /// lists (all, if it lists none). Empty modes = a single unnamed mode.
-    pub modes: &'static [Mode],
+    /// The grammar's name, used for cross-grammar references (passthrough) and
+    /// to look it up within a [`GrammarSet`].
+    pub name: String,
+    pub flags: Vec<Flag>,
+    pub env: Vec<EnvDecl>,
     /// The positional-argument schema: an ordered sequence of slots giving each
     /// positional its meaning (name, role, arity, doc). Resolved against the
     /// actual positionals by [`parse_command`].
-    pub positionals: &'static [Positional],
+    pub positionals: Vec<Positional>,
+    /// The command's modes. The default mode has an empty selector; a non-default
+    /// mode is entered by its selector flag. A flag is legal only in the modes it
+    /// lists (all, if it lists none). Empty modes = a single unnamed mode.
+    pub modes: Vec<Mode>,
+}
+
+/// A package of named grammars that can reference one another by name — e.g.
+/// cc's `-Wl,` passthrough resolves the `ld` grammar in the same set. This is
+/// the unit a `.vx` grammar module lowers to, and the handle the engine's
+/// set-aware operations ([`GrammarSet::canonicalize`],
+/// [`GrammarSet::effective_command`]) work through.
+#[derive(Debug, Clone, PartialEq, Eq, Facet)]
+pub struct GrammarSet {
+    pub grammars: Vec<Grammar>,
+}
+
+impl GrammarSet {
+    /// Look up a grammar by name.
+    pub fn get(&self, name: &str) -> Option<&Grammar> {
+        self.grammars.iter().find(|g| g.name == name)
+    }
+
+    fn expect(&self, name: &str) -> &Grammar {
+        self.get(name)
+            .unwrap_or_else(|| panic!("no grammar named {name:?} in the set"))
+    }
+
+    /// Canonicalize a command against the named grammar, resolving passthroughs
+    /// within this set: parse `argv`, fold each flag by its policy, and emit the
+    /// canonical argv. `argv[0]` is the program, preserved verbatim.
+    pub fn canonicalize(&self, grammar: &str, argv: &[String]) -> CanonicalCommand {
+        let g = self.expect(grammar);
+        let program = argv.first().cloned().unwrap_or_default();
+        let pass = canon_pass(self, g, argv.get(1..).unwrap_or(&[]));
+        CanonicalCommand {
+            program,
+            args: pass.args,
+            lints: pass.lints,
+        }
+    }
+
+    /// Reduce a command to its [`EffectiveCommand`] — the content-addressed cache
+    /// identity — against the named grammar, resolving passthroughs within this
+    /// set. `env` is the ambient environment; only declared channels enter.
+    pub fn effective_command(
+        &self,
+        grammar: &str,
+        argv: &[String],
+        env: &BTreeMap<String, String>,
+    ) -> EffectiveCommand {
+        let g = self.expect(grammar);
+        let program = argv.first().cloned().unwrap_or_default();
+        let mut pass = canon_pass(self, g, argv.get(1..).unwrap_or(&[]));
+        let (env_pairs, env_inputs) = collect_env(g, env);
+        pass.inputs.extend(env_inputs);
+        dedup_inputs(&mut pass.inputs);
+        EffectiveCommand {
+            program,
+            args: pass.args,
+            env: env_pairs,
+            inputs: pass.inputs,
+            impurities: pass.impurities,
+            lints: pass.lints,
+        }
+    }
 }
 
 /// One parsed flag occurrence, remembering its argv position for last-wins.
@@ -232,13 +323,16 @@ impl Grammar {
     fn match_token(&self, token: &str) -> Option<(usize, Option<String>, bool)> {
         let mut best_prefix: Option<(usize, usize)> = None;
         for (i, flag) in self.flags.iter().enumerate() {
-            for lead in std::iter::once(flag.canonical).chain(flag.aliases.iter().copied()) {
-                match flag.spelling {
+            for lead in std::iter::once(flag.canonical.as_str())
+                .chain(flag.aliases.iter().map(String::as_str))
+            {
+                match &flag.spelling {
                     Spelling::Bare if token == lead => return Some((i, None, false)),
                     Spelling::Separated if token == lead => return Some((i, None, true)),
                     Spelling::Suffixed { sep } => {
-                        if let Some(value) =
-                            token.strip_prefix(lead).and_then(|r| r.strip_prefix(sep))
+                        if let Some(value) = token
+                            .strip_prefix(lead)
+                            .and_then(|r| r.strip_prefix(sep.as_str()))
                         {
                             return Some((i, Some(value.to_string()), false));
                         }
@@ -444,13 +538,13 @@ impl fmt::Display for Lint {
 }
 
 fn emit(flag: &Flag, value: Option<&str>) -> Vec<String> {
-    match flag.spelling {
-        Spelling::Bare => vec![flag.canonical.to_string()],
+    match &flag.spelling {
+        Spelling::Bare => vec![flag.canonical.clone()],
         Spelling::Attached | Spelling::Passthrough { .. } => {
             vec![format!("{}{}", flag.canonical, value.unwrap_or(""))]
         }
         Spelling::Separated => {
-            vec![flag.canonical.to_string(), value.unwrap_or("").to_string()]
+            vec![flag.canonical.clone(), value.unwrap_or("").to_string()]
         }
         Spelling::Suffixed { sep } => {
             vec![format!("{}{}{}", flag.canonical, sep, value.unwrap_or(""))]
@@ -502,22 +596,24 @@ fn resolve_positionals(schema: &[Positional], count: usize) -> Vec<Option<&Posit
 /// Collect the inputs a flag's occurrences contribute, recursing into passthrough
 /// sub-grammars so their inner paths bubble up. The input's role is the flag's
 /// open domain tag.
-fn collect_inputs(flag: &Flag, occs: &[&Occurrence], inputs: &mut Vec<Input>) {
-    if let Spelling::Passthrough { sep, grammar } = flag.spelling {
-        let mut items: Vec<String> = Vec::new();
-        for o in occs {
-            if let Some(value) = &o.value {
-                items.extend(value.split(sep).map(str::to_string));
+fn collect_inputs(set: &GrammarSet, flag: &Flag, occs: &[&Occurrence], inputs: &mut Vec<Input>) {
+    if let Spelling::Passthrough { sep, grammar } = &flag.spelling {
+        if let Some(sub) = set.get(grammar) {
+            let mut items: Vec<String> = Vec::new();
+            for o in occs {
+                if let Some(value) = &o.value {
+                    items.extend(value.split(sep.as_str()).map(str::to_string));
+                }
             }
+            inputs.extend(canon_pass(set, sub, &items).inputs);
         }
-        inputs.extend(canon_pass(grammar, &items).inputs);
         return;
     }
     if is_input(flag.kind) {
         for o in occs {
             if let Some(value) = &o.value {
                 inputs.push(Input {
-                    role: flag.role.to_string(),
+                    role: flag.role.clone(),
                     path: value.clone(),
                 });
             }
@@ -525,28 +621,40 @@ fn collect_inputs(flag: &Flag, occs: &[&Occurrence], inputs: &mut Vec<Input>) {
     }
 }
 
-fn reduce_flag(flag: &Flag, occs: &[&Occurrence], lints: &mut Vec<Lint>) -> Vec<String> {
+fn reduce_flag(
+    set: &GrammarSet,
+    flag: &Flag,
+    occs: &[&Occurrence],
+    lints: &mut Vec<Lint>,
+) -> Vec<String> {
     // A passthrough value is itself a sub-command: split, canonicalize against
-    // the sub-grammar, re-join. Items from repeated occurrences concatenate.
-    if let Spelling::Passthrough { sep, grammar } = flag.spelling {
+    // the named sub-grammar, re-join. Items from repeated occurrences
+    // concatenate. An unresolved sub-grammar leaves the items opaque.
+    if let Spelling::Passthrough { sep, grammar } = &flag.spelling {
         let mut items: Vec<String> = Vec::new();
         for o in occs {
             if let Some(value) = &o.value {
-                items.extend(value.split(sep).map(str::to_string));
+                items.extend(value.split(sep.as_str()).map(str::to_string));
             }
         }
-        let sub = canon_pass(grammar, &items);
-        lints.extend(sub.lints);
-        return vec![format!("{}{}", flag.canonical, sub.args.join(sep))];
+        let joined = match set.get(grammar) {
+            Some(sub) => {
+                let pass = canon_pass(set, sub, &items);
+                lints.extend(pass.lints);
+                pass.args.join(sep)
+            }
+            None => items.join(sep),
+        };
+        return vec![format!("{}{}", flag.canonical, joined)];
     }
 
-    match flag.policy {
-        Policy::Once | Policy::Group(_) => {
+    match &flag.policy {
+        Policy::Once | Policy::Group { .. } => {
             let last = occs.iter().max_by_key(|o| o.pos).expect("non-empty");
             for o in occs {
                 if o.pos != last.pos && o.value != last.value {
                     lints.push(Lint::Overridden {
-                        flag: flag.canonical.to_string(),
+                        flag: flag.canonical.clone(),
                         dropped: emit_one(flag, o.value.as_deref()),
                         kept: emit_one(flag, last.value.as_deref()),
                     });
@@ -561,7 +669,7 @@ fn reduce_flag(flag: &Flag, occs: &[&Occurrence], lints: &mut Vec<Lint>) -> Vec<
                 let value = o.value.clone().unwrap_or_default();
                 if seen.contains(&value) {
                     lints.push(Lint::Duplicate {
-                        flag: flag.canonical.to_string(),
+                        flag: flag.canonical.clone(),
                         value,
                     });
                 } else {
@@ -634,12 +742,12 @@ fn resolve_mode<'g>(grammar: &'g Grammar, present: &BTreeSet<&str>) -> Option<&'
     grammar
         .modes
         .iter()
-        .find(|m| m.selector.is_some_and(|s| present.contains(&s)))
-        .or_else(|| grammar.modes.iter().find(|m| m.selector.is_none()))
-        .map(|m| m.name)
+        .find(|m| !m.selector.is_empty() && present.contains(m.selector.as_str()))
+        .or_else(|| grammar.modes.iter().find(|m| m.selector.is_empty()))
+        .map(|m| m.name.as_str())
 }
 
-fn canon_pass(grammar: &Grammar, args: &[String]) -> Pass {
+fn canon_pass(set: &GrammarSet, grammar: &Grammar, args: &[String]) -> Pass {
     let parsed = grammar.parse(args);
     let mut lints = Vec::new();
     let mut inputs: Vec<Input> = Vec::new();
@@ -656,7 +764,7 @@ fn canon_pass(grammar: &Grammar, args: &[String]) -> Pass {
     let present: BTreeSet<&str> = parsed
         .occurrences
         .iter()
-        .map(|o| grammar.flags[o.flag].canonical)
+        .map(|o| grammar.flags[o.flag].canonical.as_str())
         .collect();
     let active_mode = resolve_mode(grammar, &present);
 
@@ -666,18 +774,18 @@ fn canon_pass(grammar: &Grammar, args: &[String]) -> Pass {
         let Some(occs) = by_flag.get(&idx) else {
             continue;
         };
-        let emitted = reduce_flag(flag, occs, &mut lints);
-        collect_inputs(flag, occs, &mut inputs);
+        let emitted = reduce_flag(set, flag, occs, &mut lints);
+        collect_inputs(set, flag, occs, &mut inputs);
         if let Some(mode) = active_mode
             && !flag.modes.is_empty()
-            && !flag.modes.contains(&mode)
+            && !flag.modes.iter().any(|m| m == mode)
         {
             lints.push(Lint::IllegalInMode {
-                flag: flag.canonical.to_string(),
+                flag: flag.canonical.clone(),
                 mode: mode.to_string(),
             });
             impurities.push(Impurity::IllegalInMode {
-                flag: flag.canonical.to_string(),
+                flag: flag.canonical.clone(),
                 mode: mode.to_string(),
             });
         }
@@ -689,14 +797,14 @@ fn canon_pass(grammar: &Grammar, args: &[String]) -> Pass {
     }
 
     let mut out = flag_tokens;
-    let slots = resolve_positionals(grammar.positionals, parsed.positionals.len());
+    let slots = resolve_positionals(&grammar.positionals, parsed.positionals.len());
     for (p, slot) in parsed.positionals.iter().zip(&slots) {
         out.push(p.clone());
         if let Some(slot) = slot
             && is_input(slot.kind)
         {
             inputs.push(Input {
-                role: slot.role.to_string(),
+                role: slot.role.clone(),
                 path: p.clone(),
             });
         }
@@ -754,8 +862,8 @@ fn assign_positionals(schema: &[Positional], positionals: &[(usize, String)], ou
 /// Parse `argv` into the fully role-tagged [`ParsedCommand`]: every flag
 /// resolved to its canonical name + value + kind, every positional resolved
 /// against the grammar's schema to its meaning, every token carrying its span.
-/// This is the structured view; [`canonicalize`] / [`effective_command`] reduce
-/// it to a cache identity.
+/// This is the structured view; [`GrammarSet::canonicalize`] /
+/// [`GrammarSet::effective_command`] reduce it to a cache identity.
 pub fn parse_command(grammar: &Grammar, argv: &[String]) -> ParsedCommand {
     let program = argv.first().cloned().unwrap_or_default();
     let args = argv.get(1..).unwrap_or(&[]);
@@ -797,63 +905,36 @@ pub fn parse_command(grammar: &Grammar, argv: &[String]) -> ParsedCommand {
         i += 1;
     }
 
-    assign_positionals(grammar.positionals, &positionals, &mut out);
+    assign_positionals(&grammar.positionals, &positionals, &mut out);
     ParsedCommand { program, args: out }
 }
 
-/// Parse `argv` against `grammar` and reduce it to its canonical argv form.
-/// `argv[0]` is the program, preserved verbatim. For the full cache identity
-/// (env + inputs + impurities), use [`effective_command`].
-pub fn canonicalize(grammar: &Grammar, argv: &[String]) -> CanonicalCommand {
-    let program = argv.first().cloned().unwrap_or_default();
-    let pass = canon_pass(grammar, argv.get(1..).unwrap_or(&[]));
-    CanonicalCommand {
-        program,
-        args: pass.args,
-        lints: pass.lints,
-    }
-}
-
-/// Resolve `argv` (and the explicit `env` the build provides) into the
-/// effective command — the identity a content-addressed cache keys on.
-///
-/// Only env channels the grammar declares are consulted; everything else in
-/// `env` is ignored. Vixen never inherits ambient host env, so this is the
-/// whole env surface, made explicit and keyed.
-pub fn effective_command(
+/// Collect the declared env channels present in `env`: the sorted `(name,
+/// value)` pairs that enter the identity, and the path inputs those channels
+/// contribute. Only channels the grammar declares are consulted; everything
+/// else is ignored (Vixen never inherits ambient host env).
+fn collect_env(
     grammar: &Grammar,
-    argv: &[String],
     env: &BTreeMap<String, String>,
-) -> EffectiveCommand {
-    let program = argv.first().cloned().unwrap_or_default();
-    let mut pass = canon_pass(grammar, argv.get(1..).unwrap_or(&[]));
-
-    let mut consumed_env: Vec<(String, String)> = Vec::new();
-    for decl in grammar.env {
-        let Some(value) = env.get(decl.name) else {
+) -> (Vec<(String, String)>, Vec<Input>) {
+    let mut pairs: Vec<(String, String)> = Vec::new();
+    let mut inputs: Vec<Input> = Vec::new();
+    for decl in &grammar.env {
+        let Some(value) = env.get(&decl.name) else {
             continue;
         };
-        consumed_env.push((decl.name.to_string(), value.clone()));
+        pairs.push((decl.name.clone(), value.clone()));
         if is_input(decl.kind) {
             for part in value.split(ENV_PATH_SEP).filter(|s| !s.is_empty()) {
-                pass.inputs.push(Input {
-                    role: decl.role.to_string(),
+                inputs.push(Input {
+                    role: decl.role.clone(),
                     path: part.to_string(),
                 });
             }
         }
     }
-    consumed_env.sort();
-    dedup_inputs(&mut pass.inputs);
-
-    EffectiveCommand {
-        program,
-        args: pass.args,
-        env: consumed_env,
-        inputs: pass.inputs,
-        impurities: pass.impurities,
-        lints: pass.lints,
-    }
+    pairs.sort();
+    (pairs, inputs)
 }
 
 /// Diff two effective commands — the structured "why did it rebuild?": exactly
@@ -926,331 +1007,362 @@ pub fn diff(a: &EffectiveCommand, b: &EffectiveCommand) -> Vec<Change> {
 }
 
 /// A minimal `ld` grammar — enough for the `-Wl,` passthroughs `libpng` emits.
-pub const LD: Grammar = Grammar {
-    modes: &[],
-    positionals: &[Positional {
-        name: "object",
-        kind: Kind::Input { dir: false },
-        role: "object",
-        arity: Arity::Variadic,
-        doc: "an object file to link",
-    }],
-    env: &[],
-    flags: &[
-        Flag {
-            canonical: "--gc-sections",
-            role: "gc-sections",
-            operation: Operation::Enable,
-            ..Flag::DEFAULT
-        },
-        Flag {
-            canonical: "--as-needed",
-            role: "as-needed",
-            operation: Operation::Enable,
-            ..Flag::DEFAULT
-        },
-        Flag {
-            canonical: "--version-script",
-            spelling: Spelling::Suffixed { sep: '=' },
+fn ld() -> Grammar {
+    Grammar {
+        name: "ld".into(),
+        modes: vec![],
+        positionals: vec![Positional {
+            name: "object".into(),
             kind: Kind::Input { dir: false },
-            role: "version-script",
-            ..Flag::DEFAULT
-        },
-    ],
-};
+            role: "object".into(),
+            arity: Arity::Variadic,
+            doc: "an object file to link".into(),
+        }],
+        env: vec![],
+        flags: vec![
+            Flag {
+                canonical: "--gc-sections".into(),
+                role: "gc-sections".into(),
+                operation: Operation::Enable,
+                ..Flag::DEFAULT
+            },
+            Flag {
+                canonical: "--as-needed".into(),
+                role: "as-needed".into(),
+                operation: Operation::Enable,
+                ..Flag::DEFAULT
+            },
+            Flag {
+                canonical: "--version-script".into(),
+                spelling: Spelling::Suffixed { sep: "=".into() },
+                kind: Kind::Input { dir: false },
+                role: "version-script".into(),
+                ..Flag::DEFAULT
+            },
+        ],
+    }
+}
 
 /// The `cc`/clang grammar — the compile invocation `libpng` drives, plus a slice
 /// of linking. Gcc-style; MSVC and the full surface are future work.
-pub const CC: Grammar = Grammar {
-    modes: &[
-        Mode {
-            name: "link",
-            selector: None,
-        },
-        Mode {
-            name: "compile",
-            selector: Some("-c"),
-        },
-    ],
-    positionals: &[Positional {
-        name: "input",
-        kind: Kind::Input { dir: false },
-        role: "source",
-        arity: Arity::Variadic,
-        doc: "a source (.c) or object (.o) file to compile or link",
-    }],
-    env: &[
-        EnvDecl {
-            name: "CPATH",
-            kind: Kind::Input { dir: true },
-            role: "include",
-            operation: Operation::Add,
-        },
-        EnvDecl {
-            name: "LIBRARY_PATH",
-            kind: Kind::Input { dir: true },
-            role: "lib-dir",
-            operation: Operation::Add,
-        },
-        EnvDecl {
-            name: "SOURCE_DATE_EPOCH",
-            kind: Kind::Text,
-            role: "source-date",
-            operation: Operation::Set,
-        },
-    ],
-    flags: &[
-        Flag {
-            canonical: "-c",
-            role: "compile-only",
-            operation: Operation::Enable,
-            ..Flag::DEFAULT
-        },
-        Flag {
-            canonical: "-fPIC",
-            role: "pic",
-            operation: Operation::Enable,
-            ..Flag::DEFAULT
-        },
-        Flag {
-            canonical: "-shared",
-            role: "shared",
-            operation: Operation::Enable,
-            modes: &["link"],
-            ..Flag::DEFAULT
-        },
-        Flag {
-            canonical: "-O",
-            spelling: Spelling::Attached,
-            policy: Policy::Group("opt"),
-            role: "optimization",
-            ..Flag::DEFAULT
-        },
-        Flag {
-            canonical: "-std",
-            spelling: Spelling::Suffixed { sep: '=' },
-            role: "std",
-            ..Flag::DEFAULT
-        },
-        Flag {
-            canonical: "-W",
-            spelling: Spelling::Attached,
-            policy: Policy::DedupUnordered,
-            role: "warning",
-            operation: Operation::Enable,
-            ..Flag::DEFAULT
-        },
-        Flag {
-            canonical: "-D",
-            spelling: Spelling::Attached,
-            policy: Policy::KeyedLastWins,
-            role: "define",
-            operation: Operation::Add,
-            ..Flag::DEFAULT
-        },
-        Flag {
-            canonical: "-I",
-            spelling: Spelling::Separated,
-            policy: Policy::DedupOrdered,
-            kind: Kind::Input { dir: true },
-            role: "include",
-            operation: Operation::Add,
-            ..Flag::DEFAULT
-        },
-        Flag {
-            canonical: "-L",
-            spelling: Spelling::Separated,
-            policy: Policy::DedupOrdered,
-            kind: Kind::Input { dir: true },
-            role: "lib-dir",
-            operation: Operation::Add,
-            ..Flag::DEFAULT
-        },
-        Flag {
-            canonical: "-l",
-            spelling: Spelling::Attached,
-            policy: Policy::OrderedKeepAll,
-            role: "lib",
-            operation: Operation::Add,
-            modes: &["link"],
-            ..Flag::DEFAULT
-        },
-        Flag {
-            canonical: "-Wl,",
-            spelling: Spelling::Passthrough {
-                sep: ",",
-                grammar: &LD,
+fn cc() -> Grammar {
+    Grammar {
+        name: "cc".into(),
+        modes: vec![
+            Mode {
+                name: "link".into(),
+                selector: String::new(),
             },
-            policy: Policy::OrderedKeepAll,
-            role: "linker-args",
-            operation: Operation::Add,
-            modes: &["link"],
-            ..Flag::DEFAULT
-        },
-        Flag {
-            canonical: "-o",
-            spelling: Spelling::Separated,
-            kind: Kind::Output { dir: false },
-            role: "output",
-            ..Flag::DEFAULT
-        },
-    ],
-};
+            Mode {
+                name: "compile".into(),
+                selector: "-c".into(),
+            },
+        ],
+        positionals: vec![Positional {
+            name: "input".into(),
+            kind: Kind::Input { dir: false },
+            role: "source".into(),
+            arity: Arity::Variadic,
+            doc: "a source (.c) or object (.o) file to compile or link".into(),
+        }],
+        env: vec![
+            EnvDecl {
+                name: "CPATH".into(),
+                kind: Kind::Input { dir: true },
+                role: "include".into(),
+                operation: Operation::Add,
+                doc: String::new(),
+            },
+            EnvDecl {
+                name: "LIBRARY_PATH".into(),
+                kind: Kind::Input { dir: true },
+                role: "lib-dir".into(),
+                operation: Operation::Add,
+                doc: String::new(),
+            },
+            EnvDecl {
+                name: "SOURCE_DATE_EPOCH".into(),
+                kind: Kind::Text,
+                role: "source-date".into(),
+                operation: Operation::Set,
+                doc: String::new(),
+            },
+        ],
+        flags: vec![
+            Flag {
+                canonical: "-c".into(),
+                role: "compile-only".into(),
+                operation: Operation::Enable,
+                ..Flag::DEFAULT
+            },
+            Flag {
+                canonical: "-fPIC".into(),
+                role: "pic".into(),
+                operation: Operation::Enable,
+                ..Flag::DEFAULT
+            },
+            Flag {
+                canonical: "-shared".into(),
+                role: "shared".into(),
+                operation: Operation::Enable,
+                modes: vec!["link".into()],
+                ..Flag::DEFAULT
+            },
+            Flag {
+                canonical: "-O".into(),
+                spelling: Spelling::Attached,
+                policy: Policy::Group { name: "opt".into() },
+                role: "optimization".into(),
+                ..Flag::DEFAULT
+            },
+            Flag {
+                canonical: "-std".into(),
+                spelling: Spelling::Suffixed { sep: "=".into() },
+                role: "std".into(),
+                ..Flag::DEFAULT
+            },
+            Flag {
+                canonical: "-W".into(),
+                spelling: Spelling::Attached,
+                policy: Policy::DedupUnordered,
+                role: "warning".into(),
+                operation: Operation::Enable,
+                ..Flag::DEFAULT
+            },
+            Flag {
+                canonical: "-D".into(),
+                spelling: Spelling::Attached,
+                policy: Policy::KeyedLastWins,
+                role: "define".into(),
+                operation: Operation::Add,
+                ..Flag::DEFAULT
+            },
+            Flag {
+                canonical: "-I".into(),
+                spelling: Spelling::Separated,
+                policy: Policy::DedupOrdered,
+                kind: Kind::Input { dir: true },
+                role: "include".into(),
+                operation: Operation::Add,
+                ..Flag::DEFAULT
+            },
+            Flag {
+                canonical: "-L".into(),
+                spelling: Spelling::Separated,
+                policy: Policy::DedupOrdered,
+                kind: Kind::Input { dir: true },
+                role: "lib-dir".into(),
+                operation: Operation::Add,
+                ..Flag::DEFAULT
+            },
+            Flag {
+                canonical: "-l".into(),
+                spelling: Spelling::Attached,
+                policy: Policy::OrderedKeepAll,
+                role: "lib".into(),
+                operation: Operation::Add,
+                modes: vec!["link".into()],
+                value: ValueDomain::Named {
+                    domain: "lib".into(),
+                },
+                ..Flag::DEFAULT
+            },
+            Flag {
+                canonical: "-Wl,".into(),
+                spelling: Spelling::Passthrough {
+                    sep: ",".into(),
+                    grammar: "ld".into(),
+                },
+                policy: Policy::OrderedKeepAll,
+                role: "linker-args".into(),
+                operation: Operation::Add,
+                modes: vec!["link".into()],
+                ..Flag::DEFAULT
+            },
+            Flag {
+                canonical: "-o".into(),
+                spelling: Spelling::Separated,
+                kind: Kind::Output { dir: false },
+                role: "output".into(),
+                ..Flag::DEFAULT
+            },
+        ],
+    }
+}
 
 /// The `cl.exe`/clang-cl grammar — proves the MSVC spellings: DualLead
 /// (`/c` ≡ `-c`, via aliases), ColonAttached (`/std:c++20`, a
-/// `Suffixed { sep: ':' }`), and GluedNoDelim (`/Foout.obj`, `/Iinc`, which fall
-/// out of longest-prefix matching). Slice; `/link` mode-switching awaits guarded
-/// productions.
-pub const CL: Grammar = Grammar {
-    modes: &[
-        Mode {
-            name: "link",
-            selector: None,
-        },
-        Mode {
-            name: "compile",
-            selector: Some("/c"),
-        },
-    ],
-    positionals: &[Positional {
-        name: "input",
-        kind: Kind::Input { dir: false },
-        role: "source",
-        arity: Arity::Variadic,
-        doc: "a source or object file to compile or link",
-    }],
-    env: &[
-        EnvDecl {
-            name: "INCLUDE",
-            kind: Kind::Input { dir: true },
-            role: "include",
-            operation: Operation::Add,
-        },
-        EnvDecl {
-            name: "LIB",
-            kind: Kind::Input { dir: true },
-            role: "lib-dir",
-            operation: Operation::Add,
-        },
-    ],
-    flags: &[
-        Flag {
-            canonical: "/c",
-            aliases: &["-c"],
-            role: "compile-only",
-            operation: Operation::Enable,
-            ..Flag::DEFAULT
-        },
-        Flag {
-            canonical: "/nologo",
-            aliases: &["-nologo"],
-            role: "nologo",
-            operation: Operation::Enable,
-            ..Flag::DEFAULT
-        },
-        Flag {
-            canonical: "/EHsc",
-            aliases: &["-EHsc"],
-            role: "exceptions",
-            operation: Operation::Enable,
-            ..Flag::DEFAULT
-        },
-        Flag {
-            canonical: "/O",
-            aliases: &["-O"],
-            spelling: Spelling::Attached,
-            policy: Policy::Group("opt"),
-            role: "optimization",
-            ..Flag::DEFAULT
-        },
-        Flag {
-            canonical: "/W",
-            aliases: &["-W"],
-            spelling: Spelling::Attached,
-            policy: Policy::Group("warn"),
-            role: "warning",
-            operation: Operation::Enable,
-            ..Flag::DEFAULT
-        },
-        Flag {
-            canonical: "/std",
-            aliases: &["-std"],
-            spelling: Spelling::Suffixed { sep: ':' },
-            role: "std",
-            ..Flag::DEFAULT
-        },
-        Flag {
-            canonical: "/D",
-            aliases: &["-D"],
-            spelling: Spelling::Attached,
-            policy: Policy::KeyedLastWins,
-            role: "define",
-            operation: Operation::Add,
-            ..Flag::DEFAULT
-        },
-        Flag {
-            canonical: "/I",
-            aliases: &["-I"],
-            spelling: Spelling::Attached,
-            policy: Policy::DedupOrdered,
-            kind: Kind::Input { dir: true },
-            role: "include",
-            operation: Operation::Add,
-            modes: &[],
-        },
-        Flag {
-            canonical: "/Fo",
-            aliases: &["-Fo"],
-            spelling: Spelling::Attached,
-            kind: Kind::Output { dir: false },
-            role: "output",
-            modes: &["compile"],
-            ..Flag::DEFAULT
-        },
-        Flag {
-            canonical: "/Fe",
-            aliases: &["-Fe"],
-            spelling: Spelling::Attached,
-            kind: Kind::Output { dir: false },
-            role: "output",
-            modes: &["link"],
-            ..Flag::DEFAULT
-        },
-    ],
-};
+/// `Suffixed { sep: ":" }`), and GluedNoDelim (`/Foout.obj`, `/Iinc`, which fall
+/// out of longest-prefix matching).
+fn cl() -> Grammar {
+    Grammar {
+        name: "cl".into(),
+        modes: vec![
+            Mode {
+                name: "link".into(),
+                selector: String::new(),
+            },
+            Mode {
+                name: "compile".into(),
+                selector: "/c".into(),
+            },
+        ],
+        positionals: vec![Positional {
+            name: "input".into(),
+            kind: Kind::Input { dir: false },
+            role: "source".into(),
+            arity: Arity::Variadic,
+            doc: "a source or object file to compile or link".into(),
+        }],
+        env: vec![
+            EnvDecl {
+                name: "INCLUDE".into(),
+                kind: Kind::Input { dir: true },
+                role: "include".into(),
+                operation: Operation::Add,
+                doc: String::new(),
+            },
+            EnvDecl {
+                name: "LIB".into(),
+                kind: Kind::Input { dir: true },
+                role: "lib-dir".into(),
+                operation: Operation::Add,
+                doc: String::new(),
+            },
+        ],
+        flags: vec![
+            Flag {
+                canonical: "/c".into(),
+                aliases: vec!["-c".into()],
+                role: "compile-only".into(),
+                operation: Operation::Enable,
+                ..Flag::DEFAULT
+            },
+            Flag {
+                canonical: "/nologo".into(),
+                aliases: vec!["-nologo".into()],
+                role: "nologo".into(),
+                operation: Operation::Enable,
+                ..Flag::DEFAULT
+            },
+            Flag {
+                canonical: "/EHsc".into(),
+                aliases: vec!["-EHsc".into()],
+                role: "exceptions".into(),
+                operation: Operation::Enable,
+                ..Flag::DEFAULT
+            },
+            Flag {
+                canonical: "/O".into(),
+                aliases: vec!["-O".into()],
+                spelling: Spelling::Attached,
+                policy: Policy::Group { name: "opt".into() },
+                role: "optimization".into(),
+                ..Flag::DEFAULT
+            },
+            Flag {
+                canonical: "/W".into(),
+                aliases: vec!["-W".into()],
+                spelling: Spelling::Attached,
+                policy: Policy::Group {
+                    name: "warn".into(),
+                },
+                role: "warning".into(),
+                operation: Operation::Enable,
+                ..Flag::DEFAULT
+            },
+            Flag {
+                canonical: "/std".into(),
+                aliases: vec!["-std".into()],
+                spelling: Spelling::Suffixed { sep: ":".into() },
+                role: "std".into(),
+                ..Flag::DEFAULT
+            },
+            Flag {
+                canonical: "/D".into(),
+                aliases: vec!["-D".into()],
+                spelling: Spelling::Attached,
+                policy: Policy::KeyedLastWins,
+                role: "define".into(),
+                operation: Operation::Add,
+                ..Flag::DEFAULT
+            },
+            Flag {
+                canonical: "/I".into(),
+                aliases: vec!["-I".into()],
+                spelling: Spelling::Attached,
+                policy: Policy::DedupOrdered,
+                kind: Kind::Input { dir: true },
+                role: "include".into(),
+                operation: Operation::Add,
+                ..Flag::DEFAULT
+            },
+            Flag {
+                canonical: "/Fo".into(),
+                aliases: vec!["-Fo".into()],
+                spelling: Spelling::Attached,
+                kind: Kind::Output { dir: false },
+                role: "output".into(),
+                modes: vec!["compile".into()],
+                ..Flag::DEFAULT
+            },
+            Flag {
+                canonical: "/Fe".into(),
+                aliases: vec!["-Fe".into()],
+                spelling: Spelling::Attached,
+                kind: Kind::Output { dir: false },
+                role: "output".into(),
+                modes: vec!["link".into()],
+                ..Flag::DEFAULT
+            },
+        ],
+    }
+}
 
 /// A tiny `ar` grammar — its point is positional *meaning*: the operation, then
 /// the archive, then the members. Shows fixed-then-variadic positional
 /// resolution, where each positional knows the distinct role it plays.
-pub const AR: Grammar = Grammar {
-    modes: &[],
-    flags: &[],
-    env: &[],
-    positionals: &[
-        Positional {
-            name: "operation",
-            kind: Kind::Text,
-            role: "operation",
-            arity: Arity::One,
-            doc: "the operation + modifiers, e.g. `rcs`",
-        },
-        Positional {
-            name: "archive",
-            kind: Kind::InOut,
-            role: "archive",
-            arity: Arity::One,
-            doc: "the .a archive to create or update",
-        },
-        Positional {
-            name: "member",
-            kind: Kind::Input { dir: false },
-            role: "object",
-            arity: Arity::Variadic,
-            doc: "an object file to add to the archive",
-        },
-    ],
-};
+fn ar() -> Grammar {
+    Grammar {
+        name: "ar".into(),
+        modes: vec![],
+        flags: vec![],
+        env: vec![],
+        positionals: vec![
+            Positional {
+                name: "operation".into(),
+                kind: Kind::Text,
+                role: "operation".into(),
+                arity: Arity::One,
+                doc: "the operation + modifiers, e.g. `rcs`".into(),
+            },
+            Positional {
+                name: "archive".into(),
+                kind: Kind::InOut,
+                role: "archive".into(),
+                arity: Arity::One,
+                doc: "the .a archive to create or update".into(),
+            },
+            Positional {
+                name: "member".into(),
+                kind: Kind::Input { dir: false },
+                role: "object".into(),
+                arity: Arity::Variadic,
+                doc: "an object file to add to the archive".into(),
+            },
+        ],
+    }
+}
+
+/// The worked example grammars as one [`GrammarSet`] — `cc` (with its `-Wl,`
+/// passthrough into `ld`), `ld`, `cl`, and `ar`. These stand in for grammars
+/// that will eventually load from `.vx` packages; they are the engine's
+/// reference fixtures.
+pub fn examples() -> GrammarSet {
+    GrammarSet {
+        grammars: vec![cc(), ld(), cl(), ar()],
+    }
+}
 
 /// A human-readable breakdown of a command — one item per token, each explaining
 /// what it is and the part it plays. The basis for "explain this command" and
@@ -1323,7 +1435,7 @@ pub fn explain(grammar: &Grammar, argv: &[String]) -> Explanation {
                         .positionals
                         .iter()
                         .find(|p| p.name == name.as_str())
-                        .map(|p| p.doc)
+                        .map(|p| p.doc.as_str())
                         .unwrap_or("");
                     format!("{value}: {name} — {doc} ({})", describe_io(*kind))
                 }
@@ -1476,7 +1588,8 @@ pub fn emit_into(ir: &CommandIr, to: &Grammar) -> TranslatedCommand {
                     if let Some(flag) = to.flags.iter().find(|t| {
                         t.role == role.as_str()
                             && t.operation == *operation
-                            && (t.modes.is_empty() || mode.is_some_and(|m| t.modes.contains(&m)))
+                            && (t.modes.is_empty()
+                                || mode.is_some_and(|m| t.modes.iter().any(|x| x == m)))
                     }) {
                         args.extend(emit(flag, value.as_deref()));
                         emitted = true;
@@ -1486,7 +1599,7 @@ pub fn emit_into(ir: &CommandIr, to: &Grammar) -> TranslatedCommand {
                         .find(|e| e.role == role.as_str() && e.operation == *operation)
                     {
                         env_acc
-                            .entry(channel.name)
+                            .entry(channel.name.as_str())
                             .or_default()
                             .push(value.clone().unwrap_or_default());
                         emitted = true;

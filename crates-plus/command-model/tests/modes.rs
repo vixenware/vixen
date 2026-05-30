@@ -1,7 +1,7 @@
 //! Guarded productions, first cut: the legal flag set depends on accumulated
 //! mode state. A link-only flag after a mode selector (`-c`) is an impurity.
 
-use command_model::{CC, Impurity, canonicalize, effective_command};
+use command_model::{Impurity, examples};
 use std::collections::BTreeMap;
 
 fn argv(parts: &[&str]) -> Vec<String> {
@@ -11,8 +11,8 @@ fn argv(parts: &[&str]) -> Vec<String> {
 #[test]
 fn link_flag_in_compile_mode_is_impure() {
     // -c selects compile mode; -l (link-only) is then illegal.
-    let ec = effective_command(
-        &CC,
+    let ec = examples().effective_command(
+        "cc",
         &argv(&["cc", "-c", "-lm", "src/x.c", "-o", "x.o"]),
         &BTreeMap::new(),
     );
@@ -28,8 +28,8 @@ fn link_flag_in_compile_mode_is_impure() {
 #[test]
 fn link_flags_in_link_mode_are_fine() {
     // No selector -> default (link) mode; -shared and -Wl, are legal.
-    let ec = effective_command(
-        &CC,
+    let ec = examples().effective_command(
+        "cc",
         &argv(&[
             "cc",
             "-shared",
@@ -51,8 +51,8 @@ fn link_flags_in_link_mode_are_fine() {
 #[test]
 fn compile_mode_flag_set_is_clean() {
     // An ordinary compile (no link flags) stays clean.
-    let c = canonicalize(
-        &CC,
+    let c = examples().canonicalize(
+        "cc",
         &argv(&["cc", "-c", "-O2", "-I", "src", "src/x.c", "-o", "x.o"]),
     );
     assert!(

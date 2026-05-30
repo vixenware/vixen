@@ -1,7 +1,7 @@
 //! The role-tagged structured parse: every token knows the part it plays, and
 //! every positional is resolved against the grammar's schema to its *meaning*.
 
-use command_model::{AR, ArgRole, CC, Kind, ParsedCommand, Span, parse_command};
+use command_model::{ArgRole, Kind, ParsedCommand, Span, examples, parse_command};
 
 fn argv(parts: &[&str]) -> Vec<String> {
     parts.iter().map(|s| s.to_string()).collect()
@@ -20,7 +20,7 @@ fn positionals(pc: &ParsedCommand) -> Vec<(String, String)> {
 #[test]
 fn cc_positionals_resolve_to_input() {
     let pc = parse_command(
-        &CC,
+        examples().get("cc").unwrap(),
         &argv(&["cc", "-c", "src/a.c", "-O2", "b.o", "-o", "out.o"]),
     );
     assert_eq!(
@@ -35,7 +35,10 @@ fn cc_positionals_resolve_to_input() {
 
 #[test]
 fn ar_positionals_know_operation_archive_members() {
-    let pc = parse_command(&AR, &argv(&["ar", "rcs", "libfoo.a", "a.o", "b.o"]));
+    let pc = parse_command(
+        examples().get("ar").unwrap(),
+        &argv(&["ar", "rcs", "libfoo.a", "a.o", "b.o"]),
+    );
     assert_eq!(
         positionals(&pc),
         vec![
@@ -62,7 +65,10 @@ fn ar_positionals_know_operation_archive_members() {
 
 #[test]
 fn flags_are_role_tagged_with_spans() {
-    let pc = parse_command(&CC, &argv(&["cc", "-I", "inc", "a.c", "-o", "out.o"]));
+    let pc = parse_command(
+        examples().get("cc").unwrap(),
+        &argv(&["cc", "-I", "inc", "a.c", "-o", "out.o"]),
+    );
 
     // -I consumes the following token, so its span covers both indices.
     let inc = pc
