@@ -1,35 +1,44 @@
 //! The inside-out turn, for real: typed VIR → [`DemandGraph`].
 //!
-//! This runs the **real** front-end (parse → VIR → type-collect → resolve →
+//! Runs the **real** front-end (parse → VIR → type-collect → resolve →
 //! type-check) and walks a body's expression tree, classifying each node
 //! (`runtime-semantics.md` §2). It is a **snapshot** — there is no static analysis
 //! in a JIT'd language (imports resolve, packages download mid-run, `exec` outputs
 //! have runtime shape), so this is one frame of a moving picture, honest about it.
 //!
-//! It is **partial by design**: expression kinds it does not yet handle become
-//! [`NodeKind::Unresolved`] nodes (the dynamic/unhandled frontier) rather than
-//! faking or crashing. Confirmed-shape kinds (literals, the bomb, tuples, binary
-//! ops, index/field projection, `if`, blocks, name refs) are handled fully —
-//! enough to turn `(42, 💣)[0]` and arithmetic inside out from real source. Arrays,
-//! struct literals, calls, etc. are the next increment.
+//! **Partial by design:** kinds it doesn't model yet become [`NodeKind::Unresolved`]
+//! nodes — the honest frontier, never faked. Handled today: literals, the bomb,
+//! tuples/arrays/structs/records (lazy data), binary ops & calls (kernels /
+//! boundaries), index & field projection (with real positional *and* named-field
+//! slot resolution), `if` (control flow stays in-kernel), blocks with **`let`
+//! bindings linked to their value subgraphs**, and parameters. So
+//! `let pair = (42, 💣); pair[0]` and `Pair { a: 42, b: 💣 }.a` turn inside out
+//! correctly from real source — the bomb stays unreached for the right reason.
 
 use std::collections::HashMap;
 
 use vx_ir::build::{VirBuilder, VirProgram};
 use vx_ir::compile::inject_implicit_stdlib_imports;
-use vx_ir::expr::{ExprKind, FieldKey, LitKind};
-use vx_ir::ids::ExprId;
+use vx_ir::expr::{ArrayElement, ExprKind, FieldKey, LitKind};
+use vx_ir::ids::{BindingId, ExprId, PatternId, StmtId};
 use vx_ir::item::ItemKind;
+use vx_ir::pattern::PatternKind;
 use vx_ir::resolve::resolve_names;
+use vx_ir::scope::DefTarget;
+use vx_ir::stmt::StmtKind;
 use vx_ir::type_check::type_check_vir;
 use vx_ir::type_collect::collect_types_vir;
 use vx_parser::{SourceId, parse_source_file};
 
 use crate::graph::{DemandGraph, Node, NodeId, NodeKind, Span};
 
-/// Turn `entry`'s body, in `source`, inside out into a demand graph — through the
-/// real front-end. Returns an error only if the source doesn't parse or the entry
-/// function isn't found; unhandled expression shapes degrade to `Unresolved`.
+/// Intrinsic/boundary call names — effectful or non-deterministic, so the kernel
+/// partition cuts here (a call to one of these is a `Boundary`, not a `Kernel`).
+const BOUNDARY_CALLS: &[&str] = &["exec", "acquire", "http", "Http", "discover", "fetch"];
+
+/// Turn `entry`'s body, in `source`, inside out — through the real front-end.
+/// Errors only if the source doesn't parse or the entry isn't found; unhandled
+/// expression shapes degrade to `Unresolved`.
 pub fn analyze_source(source: &str, entry: &str) -> Result<DemandGraph, String> {
     let parsed = parse_source_file(source, SourceId(0));
     if !parsed.errors().is_empty() {
@@ -38,8 +47,7 @@ pub fn analyze_source(source: &str, entry: &str) -> Result<DemandGraph, String> 
     let mut sources = vec![(SourceId(0), parsed.tree())];
     for (i, stdlib) in vx_stdlib::stdlib_sources().iter().enumerate() {
         let id = SourceId(i as u32 + 1);
-        let p = parse_source_file(stdlib.text, id);
-        sources.push((id, p.tree()));
+        sources.push((id, parse_source_file(stdlib.text, id).tree()));
     }
 
     let mut program = VirBuilder::build_program(&sources);
@@ -61,13 +69,24 @@ pub fn analyze_source(source: &str, entry: &str) -> Result<DemandGraph, String> 
             _ => None,
         })
         .ok_or_else(|| format!("entry function `{entry}` not found"))?;
+
+    let params: Vec<PatternId> = program.arena[body_id]
+        .params
+        .iter()
+        .map(|p| p.pattern)
+        .collect();
     let root_expr = program.arena[body_id].root_expr;
 
     let mut b = Builder {
         program: &program,
         nodes: Vec::new(),
         memo: HashMap::new(),
+        bindings: HashMap::new(),
+        field_names: HashMap::new(),
     };
+    for pat in params {
+        b.bind_param(pat);
+    }
     let root = b.walk(root_expr);
     Ok(DemandGraph {
         nodes: b.nodes,
@@ -79,46 +98,64 @@ struct Builder<'a> {
     program: &'a VirProgram,
     nodes: Vec<Node>,
     memo: HashMap<ExprId, NodeId>,
+    /// Local binding → the node of its value (the link that makes `pair[0]` reach
+    /// the construction). Flat (shadowing not modelled yet).
+    bindings: HashMap<BindingId, NodeId>,
+    /// For a lazy-data node built from a named struct/record: its field names in
+    /// slot order, so a named projection (`.a`) can resolve to the right slot.
+    field_names: HashMap<NodeId, Vec<String>>,
 }
 
 impl Builder<'_> {
-    fn emit(
-        &mut self,
-        kind: NodeKind,
-        label: String,
-        ty: String,
-        span: Span,
-        inputs: Vec<NodeId>,
-    ) -> NodeId {
+    fn emit(&mut self, kind: NodeKind, label: String, span: Span, inputs: Vec<NodeId>) -> NodeId {
         let id = NodeId(self.nodes.len() as u32);
         self.nodes.push(Node {
             id,
             kind,
             span: Some(span),
             label,
-            ty,
+            ty: "?".to_string(),
             inputs,
         });
         id
+    }
+
+    /// Bind a parameter pattern to a fresh `Param` node, so name refs to it link.
+    fn bind_param(&mut self, pat: PatternId) {
+        let prog = self.program;
+        let p = &prog.arena[pat];
+        if let PatternKind::Binding(pb) = &p.kind {
+            let (name, binding) = (pb.name.clone(), pb.binding);
+            let span = to_span(p.span.range);
+            let node = self.emit(NodeKind::Param, name, span, vec![]);
+            self.bindings.insert(binding, node);
+        }
+    }
+
+    /// Process a statement for its bindings: `let x = e` walks `e` and binds `x`.
+    fn bind_stmt(&mut self, s: StmtId) {
+        let prog = self.program;
+        if let StmtKind::Let(let_stmt) = &prog.arena[s].kind {
+            let (pat, init) = (let_stmt.pattern, let_stmt.init);
+            let node = self.walk(init);
+            if let PatternKind::Binding(pb) = &prog.arena[pat].kind {
+                self.bindings.insert(pb.binding, node);
+            }
+        }
     }
 
     fn walk(&mut self, e: ExprId) -> NodeId {
         if let Some(&n) = self.memo.get(&e) {
             return n;
         }
-        // Copy the shared `&VirProgram` ref so the borrow is tied to its lifetime,
-        // not to `&self` — lets us recurse (`&mut self`) while reading the expr.
+        // Copy the shared `&VirProgram` ref so the borrow ties to its lifetime, not
+        // to `&self` — lets us recurse (`&mut self`) while reading the expr.
         let prog = self.program;
         let expr = &prog.arena[e];
-        let r = expr.span.range;
-        let span = Span {
-            start: r.start().into(),
-            end: r.end().into(),
-        };
-        let ty = "?".to_string();
+        let span = to_span(expr.span.range);
 
         let id = match &expr.kind {
-            ExprKind::Bomb => self.emit(NodeKind::Bomb, "💣".into(), "⊥".into(), span, vec![]),
+            ExprKind::Bomb => self.emit(NodeKind::Bomb, "💣".into(), span, vec![]),
 
             ExprKind::Literal(lit) => {
                 let label = match &lit.value {
@@ -126,25 +163,75 @@ impl Builder<'_> {
                     LitKind::String { raw } => format!("{raw:?}"),
                     LitKind::Bool(b) => b.to_string(),
                 };
-                self.emit(NodeKind::Const, label, ty, span, vec![])
+                self.emit(NodeKind::Const, label, span, vec![])
             }
 
-            // Tuple construction: lazy data — fields referenced, not forced.
+            // Lazy data — fields referenced, not forced.
             ExprKind::Tuple(t) => {
-                let elems: Vec<ExprId> = t.elements.clone();
+                let elems = t.elements.clone();
                 let inputs = elems.into_iter().map(|x| self.walk(x)).collect();
-                self.emit(NodeKind::LazyData, "(…)".into(), ty, span, inputs)
+                self.emit(NodeKind::LazyData, "(…)".into(), span, inputs)
+            }
+            ExprKind::Array(a) => {
+                let exprs: Vec<ExprId> = a
+                    .elements
+                    .iter()
+                    .map(|el| match el {
+                        ArrayElement::Expr(x) | ArrayElement::Spread(x) => *x,
+                    })
+                    .collect();
+                let inputs = exprs.into_iter().map(|x| self.walk(x)).collect();
+                self.emit(NodeKind::LazyData, "[…]".into(), span, inputs)
+            }
+            ExprKind::StructLiteral(s) => {
+                let label = s.name.clone();
+                let pairs: Vec<(String, ExprId)> =
+                    s.fields.iter().map(|f| (f.name.clone(), f.value)).collect();
+                self.lazy_record(label, pairs, span)
+            }
+            ExprKind::Record(r) => {
+                let pairs: Vec<(String, ExprId)> =
+                    r.fields.iter().map(|f| (f.name.clone(), f.value)).collect();
+                self.lazy_record("{…}".into(), pairs, span)
             }
 
-            // Binary op: eager straight-line compute → a kernel.
+            // Eager straight-line compute → a kernel.
             ExprKind::Binary(bx) => {
                 let (lhs, rhs, op) = (bx.lhs, bx.rhs, format!("{:?}", bx.op));
                 let l = self.walk(lhs);
                 let rr = self.walk(rhs);
-                self.emit(NodeKind::Kernel, op, ty, span, vec![l, rr])
+                self.emit(NodeKind::Kernel, op, span, vec![l, rr])
+            }
+            ExprKind::Prefix(px) => {
+                let operand = self.walk(px.operand);
+                self.emit(
+                    NodeKind::Kernel,
+                    format!("{:?}", px.op),
+                    span,
+                    vec![operand],
+                )
             }
 
-            // Indexing: projection. A literal-int index selects that slot.
+            // A call: kernel (pure) or boundary (intrinsic/effect). Args are inputs;
+            // walking them is how `assert_eq(pair[0], 42)` reaches `pair[0]`.
+            ExprKind::Call(c) => {
+                let callee = c.callee;
+                let args: Vec<ExprId> = c.args.iter().map(|a| a.expr).collect();
+                let callee_name = match &prog.arena[callee].kind {
+                    ExprKind::NameRef(n) => n.name.clone(),
+                    _ => "call".to_string(),
+                };
+                let inputs = args.into_iter().map(|x| self.walk(x)).collect();
+                let kind = if BOUNDARY_CALLS.contains(&callee_name.as_str()) {
+                    NodeKind::Boundary
+                } else {
+                    NodeKind::Kernel
+                };
+                self.emit(kind, format!("{callee_name}()"), span, inputs)
+            }
+
+            // Projection — selects a slot. Positional from FieldKey; named resolved
+            // against the container's recorded field names.
             ExprKind::Index(ix) => {
                 let (recv, idx_expr) = (ix.receiver, ix.index);
                 let index = self.literal_int(idx_expr).unwrap_or(0);
@@ -152,62 +239,81 @@ impl Builder<'_> {
                 self.emit(
                     NodeKind::Project { index },
                     format!("[{index}]"),
-                    ty,
                     span,
                     vec![container],
                 )
             }
-
-            // Field access: projection. A positional field (`pair[0]` lowers to
-            // `.0`) selects that slot exactly; a named field needs the struct
-            // layout to map name→slot (next increment — index 0 placeholder).
             ExprKind::Field(fx) => {
                 let recv = fx.receiver;
+                let container = self.walk(recv);
                 let (index, label) = match &fx.field {
                     FieldKey::Index(i) => (*i, format!("[{i}]")),
-                    FieldKey::Name(name) => (0, format!(".{name}")),
+                    FieldKey::Name(name) => {
+                        let idx = self
+                            .field_names
+                            .get(&container)
+                            .and_then(|ns| ns.iter().position(|n| n == name))
+                            .unwrap_or(0) as u32;
+                        (idx, format!(".{name}"))
+                    }
                 };
-                let container = self.walk(recv);
-                self.emit(
-                    NodeKind::Project { index },
-                    label,
-                    ty,
-                    span,
-                    vec![container],
-                )
+                self.emit(NodeKind::Project { index }, label, span, vec![container])
             }
 
-            // Control flow is kernel-internal (short-circuit). Both branches are
-            // drawn in the static snapshot — at runtime only one is taken.
+            // Control flow is kernel-internal (short-circuit). Both branches drawn
+            // in the static snapshot; at runtime only one is taken.
             ExprKind::If(ifx) => {
                 let (c, t, e2) = (ifx.condition, ifx.then_branch, ifx.else_branch);
                 let mut inputs = vec![self.walk(c), self.walk(t)];
                 if let Some(eb) = e2 {
                     inputs.push(self.walk(eb));
                 }
-                self.emit(NodeKind::Kernel, "if".into(), ty, span, inputs)
+                self.emit(NodeKind::Kernel, "if".into(), span, inputs)
             }
 
-            // A block's value is its tail; statement bindings are not yet linked
-            // (let-resolution is the next increment).
-            ExprKind::Block(bl) => match bl.tail {
-                Some(tail) => return self.walk(tail),
-                None => self.emit(NodeKind::Unresolved, "{block}".into(), ty, span, vec![]),
-            },
+            // A block: bind its `let`s (linking names to value subgraphs), value is
+            // the tail.
+            ExprKind::Block(bl) => {
+                let stmts = bl.stmts.clone();
+                let tail = bl.tail;
+                for s in stmts {
+                    self.bind_stmt(s);
+                }
+                match tail {
+                    Some(t) => return self.walk(t),
+                    None => self.emit(NodeKind::Unresolved, "{block}".into(), span, vec![]),
+                }
+            }
 
-            // Names are leaves until binding-resolution lands (next increment).
-            ExprKind::NameRef(n) => self.emit(NodeKind::Param, n.name.clone(), ty, span, vec![]),
+            // A name: link to its bound value's node, else a leaf.
+            ExprKind::NameRef(n) => {
+                if let Some(DefTarget::Binding(bid)) = n.resolved
+                    && let Some(&node) = self.bindings.get(&bid)
+                {
+                    return node;
+                }
+                self.emit(NodeKind::Param, n.name.clone(), span, vec![])
+            }
 
-            // Honest frontier: everything else this snapshot doesn't model yet.
+            // Honest frontier: everything this snapshot doesn't model yet.
             other => self.emit(
                 NodeKind::Unresolved,
-                expr_kind_name(other).to_string(),
-                ty,
+                expr_kind_name(other).into(),
                 span,
                 vec![],
             ),
         };
         self.memo.insert(e, id);
+        id
+    }
+
+    /// Emit a lazy-data node for a named record/struct and remember its field
+    /// names (so `.field` projections resolve to the right slot).
+    fn lazy_record(&mut self, label: String, fields: Vec<(String, ExprId)>, span: Span) -> NodeId {
+        let names: Vec<String> = fields.iter().map(|(n, _)| n.clone()).collect();
+        let inputs = fields.into_iter().map(|(_, v)| self.walk(v)).collect();
+        let id = self.emit(NodeKind::LazyData, label, span, inputs);
+        self.field_names.insert(id, names);
         id
     }
 
@@ -223,16 +329,23 @@ impl Builder<'_> {
     }
 }
 
+fn to_span(range: vx_parser::TextRange) -> Span {
+    Span {
+        start: range.start().into(),
+        end: range.end().into(),
+    }
+}
+
 fn expr_kind_name(k: &ExprKind) -> &'static str {
     match k {
-        ExprKind::Array(_) => "[array]",
-        ExprKind::StructLiteral(_) => "{struct}",
-        ExprKind::Record(_) => "{record}",
         ExprKind::Map(_) => "%{map}",
-        ExprKind::Call(_) => "call",
         ExprKind::Where(_) => "where",
         ExprKind::Match(_) => "match",
         ExprKind::Closure(_) => "closure",
+        ExprKind::With(_) => "with",
+        ExprKind::TypeOp(_) => "typeop",
+        ExprKind::Fallible(_) => "?",
+        ExprKind::InterpolatedString(_) => "`…`",
         _ => "?",
     }
 }
@@ -242,40 +355,48 @@ mod tests {
     use super::*;
     use crate::graph::NodeKind;
 
-    #[test]
-    fn turns_a_bomb_tuple_projection_inside_out_from_real_source() {
-        // Direct expression body — no let-binding needed. Real front-end, real VIR.
-        let g = analyze_source("fn demo() -> U64 ( (42, 💣)[0] )", "demo").expect("demo analyses");
-
-        // The bomb must be present as a Bomb node, and unreached by demand.
-        let has_bomb = g.nodes.iter().any(|n| n.kind == NodeKind::Bomb);
-        assert!(has_bomb, "expected a Bomb node, got: {:?}", g.nodes);
-
+    /// Every `Bomb` node in `g` must be unreached by demand.
+    fn bombs_unreached(g: &DemandGraph) {
         let reached = g.demand_reachable();
+        let bombs = g.nodes.iter().filter(|n| n.kind == NodeKind::Bomb).count();
+        assert!(bombs >= 1, "expected at least one bomb, got: {:?}", g.nodes);
         for (i, n) in g.nodes.iter().enumerate() {
             if n.kind == NodeKind::Bomb {
-                assert!(
-                    !reached[i],
-                    "the bomb must be unreached by demand (it's pair[0])"
-                );
+                assert!(!reached[i], "bomb #{i} must be unreached by demand");
             }
         }
     }
 
     #[test]
+    fn direct_tuple_projection() {
+        bombs_unreached(&analyze_source("fn d() -> U64 ( (42, 💣)[0] )", "d").unwrap());
+    }
+
+    #[test]
     fn positional_index_selects_the_right_slot() {
-        // `(💣, 11)[1]` — the bomb is in slot 0; demanding [1] must NOT reach it.
-        // This is what the FieldKey::Index extraction buys: a hardcoded index 0
-        // would wrongly detonate here.
-        let g = analyze_source("fn demo() -> U64 ( (💣, 11)[1] )", "demo").expect("analyses");
-        let reached = g.demand_reachable();
-        for (i, n) in g.nodes.iter().enumerate() {
-            if n.kind == NodeKind::Bomb {
-                assert!(
-                    !reached[i],
-                    "the bomb in slot 0 must be unreached when demanding [1]"
-                );
-            }
-        }
+        // bomb in slot 0; demanding [1] must not reach it.
+        bombs_unreached(&analyze_source("fn d() -> U64 ( (💣, 11)[1] )", "d").unwrap());
+    }
+
+    #[test]
+    fn let_binding_links_to_its_value() {
+        // The canonical demand_basis shape: a let-bound tuple, then projection.
+        // Only works because NameRef resolves through the binding to the tuple.
+        let g = analyze_source("fn d() -> U64 ( let pair = (42, 💣); pair[0] )", "d").unwrap();
+        bombs_unreached(&g);
+    }
+
+    #[test]
+    fn named_struct_field_resolves_to_the_right_slot() {
+        // Pair { a: 42, b: 💣 }.a — `.a` must resolve to slot 0, leaving b's bomb dark.
+        let src = "struct Pair { a: U64, b: U64 } fn d() -> U64 ( Pair { a: 42, b: 💣 }.a )";
+        bombs_unreached(&analyze_source(src, "d").unwrap());
+    }
+
+    #[test]
+    fn call_args_are_walked() {
+        // assert_eq(pair[0], 42): the call must reach into its args.
+        let g = analyze_source("fn d() -> Bool ( let pair = (7, 💣); pair[0] == 7 )", "d").unwrap();
+        bombs_unreached(&g);
     }
 }

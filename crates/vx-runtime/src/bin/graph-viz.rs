@@ -69,9 +69,12 @@ fn main() {
             }
         }
     } else {
-        let src = "fn demo() -> U64 ( (42, 💣)[0] )";
+        let src = "fn demo() -> U64 ( let pair = (42, 💣); pair[0] )";
         let g = analyze_source(src, "demo").expect("sample analyses");
-        (g, "demo() = (42, 💣)[0]  ·  real analysis".to_string())
+        (
+            g,
+            "demo() = { let pair = (42, 💣); pair[0] }  ·  real analysis".to_string(),
+        )
     };
     let nodes = view_nodes(&g);
     let json = facet_json::to_string(&nodes).expect("view nodes serialise");
