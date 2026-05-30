@@ -102,6 +102,29 @@ pub struct EnvDecl {
     pub kind: Kind,
 }
 
+/// How many positional arguments a schema slot consumes.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Arity {
+    /// Exactly one.
+    One,
+    /// Zero or one.
+    Optional,
+    /// Any number (greedily takes the rest).
+    Variadic,
+}
+
+/// A positional-argument slot — what a positional at this point *means*: its
+/// name (for docs/explain), its [`Kind`] (the role it plays — input, output,
+/// archive, …), how many it consumes, and its documentation. The ordered list
+/// of these is a grammar's positional schema.
+#[derive(Debug, Clone, Copy)]
+pub struct Positional {
+    pub name: &'static str,
+    pub kind: Kind,
+    pub arity: Arity,
+    pub doc: &'static str,
+}
+
 /// A single flag in a tool grammar.
 #[derive(Debug, Clone, Copy)]
 pub struct Flag {
@@ -130,6 +153,10 @@ pub struct Grammar {
     /// Canonical flag names legal only in the default (link) mode; using one
     /// after a `mode_selector` is present is an impurity (e.g. `-l` with `-c`).
     pub link_only: &'static [&'static str],
+    /// The positional-argument schema: an ordered sequence of slots giving each
+    /// positional its meaning (name, role, arity, doc). Resolved against the
+    /// actual positionals by [`parse_command`].
+    pub positionals: &'static [Positional],
 }
 
 /// One parsed flag occurrence, remembering its argv position for last-wins.
@@ -218,6 +245,51 @@ pub struct CanonicalCommand {
     pub program: String,
     pub args: Vec<String>,
     pub lints: Vec<Lint>,
+}
+
+/// A range of argv token indices (inclusive), relative to the args after the
+/// program. For diagnostics and tooling.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct Span {
+    pub start: usize,
+    pub end: usize,
+}
+
+/// The fully role-tagged parse of a command: every token resolved to the part
+/// it plays. The structured view behind completion, hover-docs, validation, and
+/// "explain this command".
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ParsedCommand {
+    pub program: String,
+    pub args: Vec<Arg>,
+}
+
+/// One token of a [`ParsedCommand`], with its span and resolved role.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Arg {
+    pub span: Span,
+    /// The token as written.
+    pub spelling: String,
+    pub role: ArgRole,
+}
+
+/// What part a token plays in the command.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum ArgRole {
+    /// A recognized flag, with its canonical name, value, and role-kind.
+    Flag {
+        canonical: String,
+        value: Option<String>,
+        kind: Kind,
+    },
+    /// A positional resolved against the grammar's schema — it knows its meaning.
+    Positional {
+        name: String,
+        kind: Kind,
+        value: String,
+    },
+    /// A `-`-leading token that matched no flag.
+    Unknown,
 }
 
 /// The resolved identity a content-addressed cache keys on.
@@ -552,6 +624,85 @@ fn canon_pass(grammar: &Grammar, args: &[String]) -> Pass {
     }
 }
 
+/// Assign parsed positionals to the grammar's schema slots, in order, tagging
+/// each with its meaning. Leftover positionals (no slot) stay `Unknown`.
+fn assign_positionals(schema: &[Positional], positionals: &[(usize, String)], out: &mut [Arg]) {
+    let mut p = 0;
+    for slot in schema {
+        match slot.arity {
+            Arity::One | Arity::Optional => {
+                if let Some((idx, value)) = positionals.get(p) {
+                    out[*idx].role = ArgRole::Positional {
+                        name: slot.name.to_string(),
+                        kind: slot.kind,
+                        value: value.clone(),
+                    };
+                    p += 1;
+                }
+            }
+            Arity::Variadic => {
+                while let Some((idx, value)) = positionals.get(p) {
+                    out[*idx].role = ArgRole::Positional {
+                        name: slot.name.to_string(),
+                        kind: slot.kind,
+                        value: value.clone(),
+                    };
+                    p += 1;
+                }
+            }
+        }
+    }
+}
+
+/// Parse `argv` into the fully role-tagged [`ParsedCommand`]: every flag
+/// resolved to its canonical name + value + kind, every positional resolved
+/// against the grammar's schema to its meaning, every token carrying its span.
+/// This is the structured view; [`canonicalize`] / [`effective_command`] reduce
+/// it to a cache identity.
+pub fn parse_command(grammar: &Grammar, argv: &[String]) -> ParsedCommand {
+    let program = argv.first().cloned().unwrap_or_default();
+    let args = argv.get(1..).unwrap_or(&[]);
+
+    let mut out: Vec<Arg> = Vec::new();
+    // (index into `out`, value) for each positional, assigned to schema slots
+    // after the walk.
+    let mut positionals: Vec<(usize, String)> = Vec::new();
+
+    let mut i = 0;
+    while i < args.len() {
+        let start = i;
+        let token = &args[i];
+        let role = if let Some((flag_idx, in_value, consumes_next)) = grammar.match_token(token) {
+            let flag = &grammar.flags[flag_idx];
+            let value = if consumes_next {
+                i += 1;
+                args.get(i).cloned()
+            } else {
+                in_value
+            };
+            ArgRole::Flag {
+                canonical: flag.canonical.to_string(),
+                value,
+                kind: flag.kind,
+            }
+        } else if token.starts_with('-') && token != "-" {
+            ArgRole::Unknown
+        } else {
+            positionals.push((out.len(), token.clone()));
+            ArgRole::Unknown
+        };
+        out.push(Arg {
+            span: Span { start, end: i },
+            spelling: token.clone(),
+            role,
+        });
+        i += 1;
+    }
+
+    assign_positionals(grammar.positionals, &positionals, &mut out);
+    ParsedCommand { program, args: out }
+}
+
 /// Parse `argv` against `grammar` and reduce it to its canonical argv form.
 /// `argv[0]` is the program, preserved verbatim. For the full cache identity
 /// (env + inputs + impurities), use [`effective_command`].
@@ -611,6 +762,12 @@ pub fn effective_command(
 pub const LD: Grammar = Grammar {
     mode_selectors: &[],
     link_only: &[],
+    positionals: &[Positional {
+        name: "object",
+        kind: Kind::PathIn { dir: false },
+        arity: Arity::Variadic,
+        doc: "an object file to link",
+    }],
     env: &[],
     flags: &[
         Flag {
@@ -642,6 +799,12 @@ pub const LD: Grammar = Grammar {
 pub const CC: Grammar = Grammar {
     mode_selectors: &["-c"],
     link_only: &["-l", "-shared", "-Wl,"],
+    positionals: &[Positional {
+        name: "input",
+        kind: Kind::PathIn { dir: false },
+        arity: Arity::Variadic,
+        doc: "a source (.c) or object (.o) file to compile or link",
+    }],
     env: &[
         EnvDecl {
             name: "CPATH",
@@ -755,6 +918,12 @@ pub const CC: Grammar = Grammar {
 pub const CL: Grammar = Grammar {
     mode_selectors: &[],
     link_only: &[],
+    positionals: &[Positional {
+        name: "input",
+        kind: Kind::PathIn { dir: false },
+        arity: Arity::Variadic,
+        doc: "a source or object file to compile or link",
+    }],
     env: &[
         EnvDecl {
             name: "INCLUDE",
@@ -835,6 +1004,36 @@ pub const CL: Grammar = Grammar {
             spelling: Spelling::Attached,
             policy: Policy::Once,
             kind: Kind::PathOut,
+        },
+    ],
+};
+
+/// A tiny `ar` grammar — its point is positional *meaning*: the operation, then
+/// the archive, then the members. Shows fixed-then-variadic positional
+/// resolution, where each positional knows the distinct role it plays.
+pub const AR: Grammar = Grammar {
+    mode_selectors: &[],
+    link_only: &[],
+    flags: &[],
+    env: &[],
+    positionals: &[
+        Positional {
+            name: "operation",
+            kind: Kind::Str,
+            arity: Arity::One,
+            doc: "the operation + modifiers, e.g. `rcs`",
+        },
+        Positional {
+            name: "archive",
+            kind: Kind::PathOut,
+            arity: Arity::One,
+            doc: "the .a archive to create or update",
+        },
+        Positional {
+            name: "member",
+            kind: Kind::PathIn { dir: false },
+            arity: Arity::Variadic,
+            doc: "an object file to add to the archive",
         },
     ],
 };
