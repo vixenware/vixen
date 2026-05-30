@@ -38,32 +38,37 @@ What the spec does **not** say, and this note records:
 - executor daemons **detect what their host has installed**, continuously, and
   **advertise** those capabilities to a **control plane** — a registry/directory,
   authenticated;
-- your local daemon **queries** that registry (and the LAN) for available
-  executors and **places** each `exec` itself: the control plane advertises, your
-  daemon decides.
+- an **orchestrator** — your local daemon (interactive), or a **cloud orchestrator**
+  (detached / CI builds: close your laptop, it keeps going) — **queries** that
+  registry (and the LAN) for executors and **places** each `exec`: the control
+  plane advertises, the orchestrator decides.
 
 This also supersedes the old `discover` intrinsic (§6).
 
 ---
 
-## 1. Daemons: one orchestrator (always local) + executors
+## 1. Three separable roles: local daemon, orchestrator, executors
 
 A **VxDaemon** is long-lived — it persists across builds, which is what makes
-continuous capability detection (§2) and read-set watching possible. The same
-program plays two roles:
+continuous capability detection (§2) and read-set watching possible. Three roles,
+deliberately kept separate:
 
-- **Your local daemon — the orchestrator.** There is *always* a daemon on your own
-  machine. It drives the build: it makes **placement** decisions (which executor
-  each `exec` lands on) and it **watches your filesystem** so it knows when files
-  consumed by previous builds have changed (read-set invalidation —
-  [`runtime-semantics.md`](runtime-semantics.md) §6–7). There is **no daemon-less
-  / "embedded" mode**; the orchestrator is always your local daemon.
+- **Your local daemon — always present.** There is *always* a daemon on your own
+  machine: it **watches your filesystem** (read-set invalidation —
+  [`runtime-semantics.md`](runtime-semantics.md) §6–7), holds your local cache, and
+  can act as a local **executor**. There is **no daemon-less / "embedded" mode.**
+- **The orchestrator** — drives a build: walks the demand graph, **places** each
+  `exec`, makes the decisions. It *usually* runs **on your local daemon**
+  (interactive builds — you're watching, it's responsive, it can die with your
+  session). But it can also run **in the cloud**, for **detached / CI-replacement**
+  builds you want to *fire and forget* — start a build, close your laptop, it keeps
+  going. So the orchestrator's *location* is a use-case choice (local interactive
+  vs cloud detached), **not** fixed.
 - **Executor daemons.** A daemon on any host can *be an executor* — the thing
   `exec` ships payloads to (`r[exec.signature]`): it owns the sandbox + VFS, runs
   the process, evaluates the observer locally, rechecks host obligations, and
-  returns only the observer's produced values. Your own machine's daemon can be an
-  executor too; remote ones reach your orchestrator via the LAN or the cloud
-  registry (§3).
+  returns only the observer's produced values. Local (your machine, the LAN) or
+  remote (advertised to the cloud registry, §3).
 
 ## 2. Capabilities are detected continuously, host-side
 
@@ -93,7 +98,8 @@ orchestrator (§1) does the deciding.
 
 ## 4. Placement is the orchestrator's predicate match
 
-The `vx` CLI talks to **your local daemon** (the orchestrator, §1), which **places**
+The `vx` CLI submits the build to **the orchestrator** (§1) — your local daemon for
+interactive builds, or a cloud orchestrator for detached ones — which **places**
 each `exec`. A build expresses requirements as `Requirement[T]`
 (`r[constraint.requirement]`), e.g.:
 
@@ -150,24 +156,30 @@ the daemon's continuous capability detection, not as a build-graph operation.
 handled separately, as a build-output-overlaid-as-input plus overrides; see
 [`runtime-semantics.md`](runtime-semantics.md).)
 
-## 7. Deployment: local always, cloud optional
+## 7. Deployment: two independent axes
 
-The orchestrator is **always your local daemon** (§1). What varies is **where it
-sources executors**:
+The local daemon is **always present** (§1). Two things vary *independently*:
 
-- **Local-only** — your daemon places across executors it reaches on the **LAN**
-  (including your own machine). No cloud.
-- **Cloud-connected** — your daemon *also* queries a **cloud control plane**: a
-  registry where remote executor daemons have **advertised** their capabilities
-  (authenticated). Your daemon still orchestrates; the cloud just widens the pool.
+**Where the orchestrator runs:**
+- **Local** — your daemon drives the build. Interactive dev: responsive, dies with
+  your session (fine — you're there).
+- **Cloud** — the build is driven in the cloud, so it survives you **closing your
+  laptop**: fire-and-forget, the **CI-replacement** case (a higher product tier).
+  Your local daemon still exists (watcher, local executor, the submitter).
 
-There is **no third "embedded / no-daemon" mode** — the local daemon is always
-present (it is also the filesystem watcher). And even cloud-connected, **the
-decisions are yours**: the cloud control plane is a directory of executors + auth,
-not an orchestrator.
+**Where executors come from:**
+- **LAN** — executors the orchestrator reaches on the local network (incl. your own
+  machine).
+- **Cloud registry** — remote executor daemons that **advertised** to the cloud
+  control plane (authenticated). The registry is a directory + auth, **not** an
+  orchestrator (§3); whichever orchestrator — local or cloud — does the deciding.
 
-**Vixen build must be fully usable with no commercial cloud.** The cloud is the
-managed *registry* deployment; local-only is first-class.
+They compose: a local orchestrator can use LAN + cloud executors; a cloud
+orchestrator is the natural fit when the executors are cloud anyway.
+
+**Vixen build must be fully usable with no commercial cloud** — local orchestrator
++ LAN executors is first-class; cloud (orchestrator and/or registry) is the managed
+offering, not a requirement.
 
 ### Identity is not (necessarily) GitHub — a real issue, to settle elsewhere
 
