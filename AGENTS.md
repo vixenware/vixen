@@ -30,9 +30,12 @@ they are the thing being deleted.
    pure *kernel islands*. There is **no synchronous tree-walking interpreter**. If
    you find yourself writing `fn eval(expr) -> Value` that matches and recurses,
    stop — that is the failure mode being removed.
-2. **Pending is a property of *any* value, carrying a resolver — never a `String`,
-   never a not-implemented sentinel.** `Resolved(payload) | Pending(resolver)`.
-   Inside the orchestrator you never hold a bare scalar (`r[eval.forcing]`).
+2. **A value is a *reference to a node*; "resolved" is a node's memo state, not a
+   value variant — and never a `String`.** A pending value is just a node not yet
+   evaluated. No bare scalar escapes the orchestrator (`r[eval.forcing]`).
+   `Pending(String)` is the canonical mistake. Lazy *data* (struct/tuple fields)
+   becomes graph nodes; lazy *control flow* (`if`/`match`) stays inside eager
+   kernels. See `runtime-semantics.md` §2.
 3. **No flat instruction set the evaluator matches op-by-op.** The runtime consumes
    a **demand graph**. (The old `KernelOp` is being removed.)
 4. **`💣` detonates when *forced*, not when constructed.** It is a demand tripwire.

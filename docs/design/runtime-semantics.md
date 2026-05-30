@@ -201,9 +201,94 @@ host facts come from the control plane, see
 (cached because expensive, not because non-deterministic). The partition rides on
 the **async** axis alone; caching is the separate (still-open) axis.
 
+### Values are node references (the inside-out turn)
+
+A value is **not** "resolved or pending" — it is a **reference to a node** in the
+dataflow graph. "Resolved" is not a property of a value; it is a per-**node**
+runtime fact: does the node have a memoised output yet. A constant is a trivial
+(pre-evaluated) node; a struct is a node whose slots reference its field nodes;
+`💣` is a node *referenced but never evaluated*. The graph is the same at analysis
+time and at runtime — runtime just adds the memo table.
+
+This **supersedes** the `Resolved | Pending(resolver)` value model (the first
+`vx-runtime` Phase 0 cut, §3): "pending" was smuggling node identity into the
+value. The value *is* the node reference; whether its node has run is separate.
+
+**Cost caveat (load-bearing):** done naively, a node-reference-per-everything is
+expensive — allocation, indirection, a memo lookup per access. The representation
+must keep cheap things cheap: a scalar that is plainly, unconditionally needed
+should live in a kernel's registers, **not** a heap node with memo overhead. Which
+positions deserve to be nodes (deferred / shared / independently-demanded) vs
+inlined into a kernel is exactly the analysis below — and getting it wrong is where
+this design gets slow.
+
+### Lazy control flow vs lazy data — what a kernel is
+
+The distinction that lets a kernel be **eager** without detonating bombs:
+
+- **Lazy control flow is free in an eager kernel.** `if c ( x ) else ( 💣 )`
+  short-circuits — eager evaluation computes `c`, takes the live branch, never
+  touches the dead one. So `if` / `match` stay **inside** kernels, JIT'd, eager;
+  the bomb in a dead branch is safe because eager `if` doesn't evaluate it.
+- **Lazy *data* is what a kernel cannot do.** `{ a: 42, b: 💣 }` would eagerly
+  evaluate both fields. So **lazy-data construction lifts out into graph nodes**: a
+  struct/tuple/array literal whose fields are independently demandable becomes a
+  node referencing its field-nodes. `demand_basis.vx` is *entirely* about lazy
+  data (fields), never control flow — the bomb has been telling us which is hard.
+
+**The kernel boundary, then:** a kernel is eager straight-line compute
+**including** control flow, excluding **boundaries** (intrinsics / `exec`) and
+**lazy-data construction**. You cut at boundaries and at independently-demandable
+data positions — *not* at every value or every branch. The laziness lives in the
+graph (data); the kernel is eager. Consequence: **the JIT only ever compiles eager
+code** (the easy copy-and-patch kind). The kernel is eager; the *system* is lazy
+because lazy data is in the graph, not the kernel. No "lazy JIT" is needed.
+
+### What is actually novel — an assembly of three precedented things
+
+"Demand-driven" kept sounding like it might be *just* lazy evaluation. It is more
+than that — but reassuringly every ingredient is precedented, so we inherit the
+vocabulary:
+
+1. **Lazy evaluation with eager islands chosen by demand/strictness analysis —
+   GHC.** Lazy by default; strictness analysis finds definitely-needed positions
+   and compiles them strict/unboxed, leaving the rest as thunks. Vixen's
+   "lazy-data lifts to nodes, eager compute stays in kernels" is **GHC demand
+   analysis turned inside out** (which fields to thunk vs inline). The old
+   `demand.rs` `lazy_fields` was reaching for exactly this — bolted to the wrong
+   (eager-everything) evaluator.
+2. **A memoised demand-driven dependency graph — build systems** (Bazel, Shake,
+   Adapton) and **Jane Street's `incremental`.** Demand pulls; nodes memoise;
+   content-addressed.
+3. **Copy-and-patch JIT** (Xu & Kjølstad, 2021) — fast codegen of small
+   straight-line code. Vixen's kernels.
+
+**The novel part is the *combination*, which nobody seems to have built:** a
+*fine-grained lazy-data* dynamic dataflow graph **+** *memoised / content-addressed*
+demand evaluation **+** *copy-and-patch-JIT'd* straight-line pure interiors. GHC has
+laziness-with-eager-islands but AOT, over a thunk heap, not a dynamic memoised build
+graph. `incremental` / build systems have the memoised graph but coarse and
+interpreted. Vixen is all three at once — an **assembly of proven parts**, not a
+research gamble. When we describe the language, we point at these three and say *we
+are assembling them.*
+
+### Consequence: the playground moves up
+
+Because the program is **turned inside out** into a graph, the most useful thing to
+look at is *the turn itself*: what became a kernel, what became a node referenced by
+other values, where the boundaries fell. The **playground** (§8) is therefore
+promoted from "nice observability" to "how you see and verify the inside-out
+transformation" — bump it up the rebuild plan.
+
 ---
 
 ## 3. Values, pending, remote handles
+
+> **Superseded in part by §2 (the node-reference model).** "Pending is a structured
+> resolver" below was the right *correction to `Pending(String)`* but the wrong
+> *final shape*: a value is a **node reference**, and "pending" is a node's memo
+> state, not a value variant. Read §2's node-reference model as the current
+> direction; the remote-handle / two-axis material here still stands.
 
 `Pending(String)` annihilated structure that the model genuinely needs:
 

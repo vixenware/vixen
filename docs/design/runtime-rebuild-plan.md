@@ -52,21 +52,34 @@ per `i[impl.exec.shared-evaluator]`.
 
 ## Phases
 
-### Phase 0 — The spine: value model + demand-graph type
+### Phase 0 — The spine: the node-reference value model + demand-graph type
 
-Stand up `vx-runtime` with **just the types**, no engine:
+Stand up `vx-runtime` with **just the types**, no engine. **Note:** the value
+model is the **node-reference** model (`runtime-semantics.md` §2), *not* the
+`Resolved | Pending(resolver)` enum — that first cut (committed `value.rs`) is
+superseded. The corrections that surfaced after it: (a) a value is a **reference
+to a node**, and "resolved" is a per-*node* memo fact, not a value variant; (b)
+the payload was wrong (name-keyed `Arc<[(Symbol,Value)]>` is not the JIT-shareable
+canonical layout, and there were no enums/maps/blobs/capability values); (c)
+pending is *pervasive* — there is no "kernels see resolved values" guarantee.
 
-- **Value** — `Resolved(payload) | Pending(resolver)`. `resolver ∈ { LocalKernel,
-  Boundary, Stream }` (and the two pending axes: identity-pending vs
-  materialization-pending). `payload` uses the kernel-ABI canonical layout (shared
-  payload + runtime envelope) and **can represent** scalars, pairs, structs,
-  closures, trees — collapsing the `EvalValue`/`RuntimeValue` split.
-- **DemandGraph** — a facet-serializable DAG: nodes (computation/value + type +
-  `kernel | boundary` + reachable-from-root), edges (data deps).
+- **Value = `NodeRef`.** A node is a constant, a kernel call, a boundary, or a
+  lazy-data constructor. Layout-driven, positional, *never name-keyed*; names live
+  in the type. Lazy *data* positions become nodes; lazy *control flow* stays inside
+  eager kernels (short-circuit). Kernel-visible payloads get an ABI layout
+  (scalars, struct, **enum = tag+payload**, string, array, map, blob, tree,
+  closure); **capability values** (`Host`/`Process`/`Accum`/`Requirement`) are
+  sea-only, no ABI layout. **Cost matters:** plainly-needed scalars must not pay
+  per-node memo overhead — keep cheap things in registers.
+- **Node memo** — the per-node runtime state (evaluated? value?), separate from the
+  value/graph.
+- **DemandGraph** — facet-serializable: nodes (kind + type + reachable-from-root),
+  edges (data deps). The inspectable artifact the playground renders.
 
-*Deliverable:* the types + (de)serialization; round-trip tests; hand-built small
-graphs. *Incentive locked:* `Pending(String)` is unrepresentable; no bare scalar
-escapes. **Highest-leverage phase — everything conforms to these types.**
+*Deliverable:* the types + (de)serialization; round-trip tests. *Incentive
+locked:* `Pending(String)` unrepresentable; no bare scalar escapes; bomb is a
+referenced-but-unevaluated node. **Highest-leverage phase — get the node model and
+the layout-driven payload right; everything conforms to it.**
 
 ### Phase 1 — VIR → DemandGraph (the partition)
 
@@ -118,12 +131,20 @@ them (preserve the data; drop the fake harness).
 *Deliverable:* **one** engine. The lang suite runs on the real engine — green where
 the engine is correct, honestly red where it isn't yet.
 
+### Phase 1.5 — The playground (promoted)
+
+The program is **turned inside out** into a graph (`runtime-semantics.md` §2), so
+the most useful thing to look at is *the turn itself*: what became a kernel, what
+became a referenced node, where the boundaries fell. Once Phase 1 emits a
+`DemandGraph`, stand up the playground (code ↔ graph; LLM-readable visual artifact)
+**early** — it is not just observability, it is how we *see and verify* the
+partition is correct. Promoted from Phase 6 to right after the graph exists.
+
 ### Phase 6+ — Performance & completeness (incremental, per `kernel-abi.md`)
 
 Copy-and-patch JIT (tiering: interpret → compile hot kernels); struct/enum layout
 descriptors; unify kernel shipping with `exec` observers / `pubgrub` closures; the
-L1/L2 cache **storage** (the `ccc` seam); the demand-graph **playground** (code ↔
-graph, LLM-readable visual artifact) and the firehose `DemandGraph`/`Jit` events,
+L1/L2 cache **storage** (the `ccc` seam); the firehose `DemandGraph`/`Jit` events,
 which become *real* (no longer fabricated) once the graph and JIT exist.
 
 ---
