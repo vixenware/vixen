@@ -68,9 +68,9 @@ pub enum Policy {
     /// Repeatable; order is semantic and duplicates are kept — e.g. `-l`, where
     /// a repeat can be load-bearing for circular archives.
     OrderedKeepAll,
-    /// `-D`/`-U`: an ordered define/undef program. Slice handles `-D` only;
-    /// `-U` interleaving is future work (the study's `OrderedDefineProgram`).
-    DefineProgram,
+    /// Keyed values (`key` or `key=value`): dedup by key, last value per key
+    /// wins, emitted sorted (e.g. preprocessor defines).
+    KeyedLastWins,
     /// Positional input: never reordered, never deduped.
     Positional,
 }
@@ -159,8 +159,11 @@ pub struct Flag {
     /// for explain/completion and as translate's cross-grammar key.
     pub role: &'static str,
     /// The verb (set/add/remove/enable/disable). Translation matches on
-    /// `(role, operation)` — role is the noun, operation the verb.
+    /// `(role, operation, mode)` — role is the noun, operation the verb.
     pub operation: Operation,
+    /// The modes this flag is legal in (by name); empty = all modes. Part of the
+    /// `(role, operation, mode)` translation key.
+    pub modes: &'static [&'static str],
 }
 
 impl Flag {
@@ -174,25 +177,31 @@ impl Flag {
         kind: Kind::Text,
         role: "",
         operation: Operation::Set,
+        modes: &[],
     };
 }
 
-/// A tool grammar: the flags, the env channels the tool reads, and the
-/// mode-by-flag guards. Anything not matching a flag is a positional input.
-/// (Full guarded productions — arbitrary predicates over parse state — remain
-/// future; this carries the mode-by-flag first cut.)
+/// A mode a command can be in. The default mode has no `selector`; a non-default
+/// mode is entered when its `selector` flag is present. Mode names are a
+/// grammar's own vocabulary — a C grammar may call its default mode `"link"`;
+/// the model itself knows nothing domain-specific.
+#[derive(Debug, Clone, Copy)]
+pub struct Mode {
+    pub name: &'static str,
+    pub selector: Option<&'static str>,
+}
+
+/// A tool grammar: flags, env channels, the positional schema, and modes.
+/// Anything not matching a flag is a positional input. (Richer guarded
+/// productions — arbitrary predicates over parse state — remain future.)
 #[derive(Debug, Clone, Copy)]
 pub struct Grammar {
     pub flags: &'static [Flag],
     pub env: &'static [EnvDecl],
-    /// Flags that switch the command out of the default (link) mode — e.g.
-    /// `-c` (compile-only), `-E` (preprocess). The legal flag set then depends
-    /// on accumulated parse state: the mode-by-flag first cut of guarded
-    /// productions.
-    pub mode_selectors: &'static [&'static str],
-    /// Canonical flag names legal only in the default (link) mode; using one
-    /// after a `mode_selector` is present is an impurity (e.g. `-l` with `-c`).
-    pub link_only: &'static [&'static str],
+    /// The command's modes. The default mode has no selector; a non-default mode
+    /// is entered by its selector flag. A flag is legal only in the modes it
+    /// lists (all, if it lists none). Empty modes = a single unnamed mode.
+    pub modes: &'static [Mode],
     /// The positional-argument schema: an ordered sequence of slots giving each
     /// positional its meaning (name, role, arity, doc). Resolved against the
     /// actual positionals by [`parse_command`].
@@ -360,8 +369,8 @@ pub struct Input {
 pub enum Impurity {
     /// A `-`-leading token matched no flag, so its effect is unknown.
     UnknownFlag { token: String },
-    /// A flag legal only in the default mode was used after a mode selector.
-    IllegalInMode { flag: String, selector: String },
+    /// A flag was used in a mode it is not legal in.
+    IllegalInMode { flag: String, mode: String },
 }
 
 /// One difference between two [`EffectiveCommand`]s — the structured answer to
@@ -392,11 +401,11 @@ pub enum Lint {
         dropped: String,
         kept: String,
     },
-    /// The same define was given twice, identically.
-    DuplicateDefine { name: String },
-    /// The same define name was given two different values.
-    ConflictingDefine {
-        name: String,
+    /// The same key was given twice, identically (e.g. a duplicate define).
+    DuplicateKey { key: String },
+    /// The same key was given two different values.
+    ConflictingKey {
+        key: String,
         first: String,
         second: String,
     },
@@ -404,8 +413,8 @@ pub enum Lint {
     Duplicate { flag: String, value: String },
     /// A `-`-leading token matched no flag in the grammar.
     UnknownFlag { token: String },
-    /// A flag legal only in the default mode was used after a mode selector.
-    IllegalInMode { flag: String, selector: String },
+    /// A flag was used in a mode it is not legal in.
+    IllegalInMode { flag: String, mode: String },
 }
 
 impl fmt::Display for Lint {
@@ -418,18 +427,14 @@ impl fmt::Display for Lint {
             } => {
                 write!(f, "{flag}: `{dropped}` overridden by `{kept}`")
             }
-            Lint::DuplicateDefine { name } => write!(f, "duplicate define `{name}`"),
-            Lint::ConflictingDefine {
-                name,
-                first,
-                second,
-            } => {
-                write!(f, "conflicting define `{name}`: `{first}` then `{second}`")
+            Lint::DuplicateKey { key } => write!(f, "duplicate `{key}`"),
+            Lint::ConflictingKey { key, first, second } => {
+                write!(f, "conflicting `{key}`: `{first}` then `{second}`")
             }
             Lint::Duplicate { flag, value } => write!(f, "duplicate {flag} `{value}`"),
             Lint::UnknownFlag { token } => write!(f, "unknown flag `{token}` (not in grammar)"),
-            Lint::IllegalInMode { flag, selector } => {
-                write!(f, "{flag} is illegal after {selector} (wrong mode)")
+            Lint::IllegalInMode { flag, mode } => {
+                write!(f, "{flag} is not legal in mode `{mode}`")
             }
         }
     }
@@ -574,27 +579,27 @@ fn reduce_flag(flag: &Flag, occs: &[&Occurrence], lints: &mut Vec<Lint>) -> Vec<
             .iter()
             .flat_map(|o| emit(flag, o.value.as_deref()))
             .collect(),
-        Policy::DefineProgram => {
-            // Slice: -D only. Last value per name wins; emit sorted by name.
+        Policy::KeyedLastWins => {
+            // Keyed values; last value per key wins; emit sorted by key.
             let mut map: BTreeMap<String, Option<String>> = BTreeMap::new();
             for o in occs {
                 let raw = o.value.clone().unwrap_or_default();
-                let (name, value) = match raw.split_once('=') {
-                    Some((n, v)) => (n.to_string(), Some(v.to_string())),
+                let (key, value) = match raw.split_once('=') {
+                    Some((k, v)) => (k.to_string(), Some(v.to_string())),
                     None => (raw, None),
                 };
-                match map.get(&name) {
+                match map.get(&key) {
                     Some(prev) if *prev == value => {
-                        lints.push(Lint::DuplicateDefine { name: name.clone() })
+                        lints.push(Lint::DuplicateKey { key: key.clone() })
                     }
-                    Some(prev) => lints.push(Lint::ConflictingDefine {
-                        name: name.clone(),
+                    Some(prev) => lints.push(Lint::ConflictingKey {
+                        key: key.clone(),
                         first: prev.clone().unwrap_or_default(),
                         second: value.clone().unwrap_or_default(),
                     }),
                     None => {}
                 }
-                map.insert(name, value);
+                map.insert(key, value);
             }
             map.into_iter()
                 .flat_map(|(name, value)| {
@@ -631,13 +636,20 @@ fn canon_pass(grammar: &Grammar, args: &[String]) -> Pass {
         by_flag.entry(occ.flag).or_default().push(occ);
     }
 
-    // Mode-by-flag guard: a mode selector (e.g. `-c`) makes link-only flags
-    // illegal. The active selector is the first one present.
-    let active_selector = parsed
+    // Mode guard: the active mode is the non-default mode whose selector flag is
+    // present, else the default (selector-less) mode. A flag that lists modes is
+    // legal only in those; using it elsewhere is an impurity.
+    let present: BTreeSet<&str> = parsed
         .occurrences
         .iter()
         .map(|o| grammar.flags[o.flag].canonical)
-        .find(|c| grammar.mode_selectors.contains(c));
+        .collect();
+    let active_mode: Option<&str> = grammar
+        .modes
+        .iter()
+        .find(|m| m.selector.is_some_and(|s| present.contains(&s)))
+        .or_else(|| grammar.modes.iter().find(|m| m.selector.is_none()))
+        .map(|m| m.name);
 
     let mut flag_tokens: Vec<String> = Vec::new();
     let mut output_tokens: Vec<String> = Vec::new();
@@ -647,16 +659,17 @@ fn canon_pass(grammar: &Grammar, args: &[String]) -> Pass {
         };
         let emitted = reduce_flag(flag, occs, &mut lints);
         collect_inputs(flag, occs, &mut inputs);
-        if let Some(selector) = active_selector
-            && grammar.link_only.contains(&flag.canonical)
+        if let Some(mode) = active_mode
+            && !flag.modes.is_empty()
+            && !flag.modes.contains(&mode)
         {
             lints.push(Lint::IllegalInMode {
                 flag: flag.canonical.to_string(),
-                selector: selector.to_string(),
+                mode: mode.to_string(),
             });
             impurities.push(Impurity::IllegalInMode {
                 flag: flag.canonical.to_string(),
-                selector: selector.to_string(),
+                mode: mode.to_string(),
             });
         }
         if matches!(flag.kind, Kind::Output { .. }) {
@@ -905,8 +918,7 @@ pub fn diff(a: &EffectiveCommand, b: &EffectiveCommand) -> Vec<Change> {
 
 /// A minimal `ld` grammar — enough for the `-Wl,` passthroughs `libpng` emits.
 pub const LD: Grammar = Grammar {
-    mode_selectors: &[],
-    link_only: &[],
+    modes: &[],
     positionals: &[Positional {
         name: "object",
         kind: Kind::Input { dir: false },
@@ -941,8 +953,16 @@ pub const LD: Grammar = Grammar {
 /// The `cc`/clang grammar — the compile invocation `libpng` drives, plus a slice
 /// of linking. Gcc-style; MSVC and the full surface are future work.
 pub const CC: Grammar = Grammar {
-    mode_selectors: &["-c"],
-    link_only: &["-l", "-shared", "-Wl,"],
+    modes: &[
+        Mode {
+            name: "link",
+            selector: None,
+        },
+        Mode {
+            name: "compile",
+            selector: Some("-c"),
+        },
+    ],
     positionals: &[Positional {
         name: "input",
         kind: Kind::Input { dir: false },
@@ -984,6 +1004,7 @@ pub const CC: Grammar = Grammar {
             canonical: "-shared",
             role: "shared",
             operation: Operation::Enable,
+            modes: &["link"],
             ..Flag::DEFAULT
         },
         Flag {
@@ -1010,7 +1031,7 @@ pub const CC: Grammar = Grammar {
         Flag {
             canonical: "-D",
             spelling: Spelling::Attached,
-            policy: Policy::DefineProgram,
+            policy: Policy::KeyedLastWins,
             role: "define",
             operation: Operation::Add,
             ..Flag::DEFAULT
@@ -1039,6 +1060,7 @@ pub const CC: Grammar = Grammar {
             policy: Policy::OrderedKeepAll,
             role: "lib",
             operation: Operation::Add,
+            modes: &["link"],
             ..Flag::DEFAULT
         },
         Flag {
@@ -1050,6 +1072,7 @@ pub const CC: Grammar = Grammar {
             policy: Policy::OrderedKeepAll,
             role: "linker-args",
             operation: Operation::Add,
+            modes: &["link"],
             ..Flag::DEFAULT
         },
         Flag {
@@ -1068,8 +1091,16 @@ pub const CC: Grammar = Grammar {
 /// out of longest-prefix matching). Slice; `/link` mode-switching awaits guarded
 /// productions.
 pub const CL: Grammar = Grammar {
-    mode_selectors: &[],
-    link_only: &[],
+    modes: &[
+        Mode {
+            name: "link",
+            selector: None,
+        },
+        Mode {
+            name: "compile",
+            selector: Some("/c"),
+        },
+    ],
     positionals: &[Positional {
         name: "input",
         kind: Kind::Input { dir: false },
@@ -1139,7 +1170,7 @@ pub const CL: Grammar = Grammar {
             canonical: "/D",
             aliases: &["-D"],
             spelling: Spelling::Attached,
-            policy: Policy::DefineProgram,
+            policy: Policy::KeyedLastWins,
             role: "define",
             operation: Operation::Add,
             ..Flag::DEFAULT
@@ -1152,6 +1183,7 @@ pub const CL: Grammar = Grammar {
             kind: Kind::Input { dir: true },
             role: "include",
             operation: Operation::Add,
+            modes: &[],
         },
         Flag {
             canonical: "/Fo",
@@ -1159,6 +1191,7 @@ pub const CL: Grammar = Grammar {
             spelling: Spelling::Attached,
             kind: Kind::Output { dir: false },
             role: "output",
+            modes: &["compile"],
             ..Flag::DEFAULT
         },
         Flag {
@@ -1167,6 +1200,7 @@ pub const CL: Grammar = Grammar {
             spelling: Spelling::Attached,
             kind: Kind::Output { dir: false },
             role: "output",
+            modes: &["link"],
             ..Flag::DEFAULT
         },
     ],
@@ -1176,8 +1210,7 @@ pub const CL: Grammar = Grammar {
 /// the archive, then the members. Shows fixed-then-variadic positional
 /// resolution, where each positional knows the distinct role it plays.
 pub const AR: Grammar = Grammar {
-    mode_selectors: &[],
-    link_only: &[],
+    modes: &[],
     flags: &[],
     env: &[],
     positionals: &[

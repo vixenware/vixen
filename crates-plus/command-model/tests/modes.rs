@@ -19,7 +19,7 @@ fn link_flag_in_compile_mode_is_impure() {
     assert!(
         ec.impurities
             .iter()
-            .any(|i| matches!(i, Impurity::IllegalInMode { flag, selector } if flag == "-l" && selector == "-c")),
+            .any(|i| matches!(i, Impurity::IllegalInMode { flag, mode } if flag == "-l" && mode == "compile")),
         "a link flag in compile mode must mark the command impure; got {:?}",
         ec.impurities
     );

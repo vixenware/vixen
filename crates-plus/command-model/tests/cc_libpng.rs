@@ -58,7 +58,7 @@ fn messy_compile_canonicalizes_and_lints() {
     assert!(
         c.lints
             .iter()
-            .any(|l| matches!(l, Lint::DuplicateDefine { name } if name == "NEON")),
+            .any(|l| matches!(l, Lint::DuplicateKey { key } if key == "NEON")),
         "must flag the duplicate define; got {:?}",
         c.lints
     );
@@ -103,7 +103,7 @@ fn conflicting_define_is_flagged() {
     assert!(
         c.lints
             .iter()
-            .any(|l| matches!(l, Lint::ConflictingDefine { name, .. } if name == "LEVEL")),
+            .any(|l| matches!(l, Lint::ConflictingKey { key, .. } if key == "LEVEL")),
         "conflicting define values must be flagged; got {:?}",
         c.lints
     );

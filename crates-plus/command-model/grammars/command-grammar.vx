@@ -33,7 +33,7 @@ enum Policy {
   struct DedupOrdered,                          // -I: dedup, but order is semantic
   struct DedupUnordered,                        // -W: sort + dedup
   struct OrderedKeepAll,                        // -l: order semantic, repeats kept
-  struct DefineProgram,                         // -D/-U: ordered define/undef program
+  struct KeyedLastWins,                         // key or key=value: dedup by key, last wins (e.g. defines)
   struct Positional,
 }
 
@@ -65,8 +65,7 @@ enum ValueDomain {
   struct Any,
   struct OneOf { values: Array[String] },       // a fixed set, e.g. -std, -O level
   struct Path { dir: Bool },
-  struct LibName,
-  struct Triple,
+  struct Named { domain: String },              // an open named value space, e.g. "lib", "triple"
 }
 
 enum Arity {
@@ -99,9 +98,19 @@ struct Flag {
   policy: Policy,
   kind: Kind = Kind.Text,                       // cache/IO class of the value (Text if none)
   role: String = "",                            // open domain tag: "include", "lib", "define", …
-  operation: Operation = Operation.Set,         // the verb; (role, operation) is the translation key
+  operation: Operation = Operation.Set,         // the verb; (role, operation, mode) is the translation key
+  modes: Array[String] = [],                    // mode names this flag is legal in; empty = all
   value: ValueDomain = ValueDomain.Any,
   doc: String = "",
+}
+
+// A mode a command can be in. The default mode has an empty selector; a
+// non-default mode is entered when its selector flag is present. Mode names are
+// the grammar's own vocabulary — "link" is just what a C grammar calls its
+// default mode; the model knows nothing domain-specific.
+struct Mode {
+  name: String,
+  selector: String = "",                        // empty = the default mode
 }
 
 // A complete tool grammar.
@@ -110,7 +119,5 @@ struct Grammar {
   flags: Array[Flag],
   env: Array[EnvDecl] = [],
   positionals: Array[Positional] = [],
-  // Mode-by-flag guards (the first cut of guarded productions).
-  mode_selectors: Array[String] = [],           // flags that leave the default mode
-  link_only: Array[String] = [],                // flags legal only in the default mode
+  modes: Array[Mode] = [],                       // empty = a single unnamed mode
 }

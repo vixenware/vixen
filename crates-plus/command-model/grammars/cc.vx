@@ -7,12 +7,12 @@ version 0.1.0
 //
 // Six orthogonal facts per flag: spelling (how it's written), policy (how
 // repeats collapse), kind (universal cache/IO class), role (open domain tag the
-// engine never interprets), operation (the verb — set/add/remove/enable/
-// disable), value (value space for completion). role + operation is the
-// translation key: cc `-I` (include, Add) maps to cl `/I` (include, Add), and an
-// "add include" can never become a "remove include".
+// engine never interprets), operation (the verb), value (value space). A flag is
+// legal only in the modes it lists (empty = all); (role, operation, mode) is the
+// translation key. Note "link"/"compile" are *this grammar's* mode names — the
+// model itself has no domain concepts.
 
-let { Grammar, Flag, Spelling, Policy, Kind, ValueDomain, Positional, EnvDecl, Arity, Operation } =
+let { Grammar, Mode, Flag, Spelling, Policy, Kind, ValueDomain, Positional, EnvDecl, Arity, Operation } =
   import "vixen:command-grammar"
 
 let ld = Grammar {
@@ -32,15 +32,18 @@ let ld = Grammar {
 
 let cc = Grammar {
   name: "cc",
-  mode_selectors: ["-c"],
-  link_only: ["-l", "-shared", "-Wl,"],
+  modes: [
+    Mode { name: "link" },                      // the default mode (no selector)
+    Mode { name: "compile", selector: "-c" },
+  ],
   flags: [
     Flag { canonical: "-c", spelling: Spelling.Bare, policy: Policy.Once,
            role: "compile-only", operation: Operation.Enable, doc: "compile only; do not link" },
     Flag { canonical: "-fPIC", spelling: Spelling.Bare, policy: Policy.Once,
            role: "pic", operation: Operation.Enable, doc: "emit position-independent code" },
     Flag { canonical: "-shared", spelling: Spelling.Bare, policy: Policy.Once,
-           role: "shared", operation: Operation.Enable, doc: "produce a shared library" },
+           role: "shared", operation: Operation.Enable, modes: ["link"],
+           doc: "produce a shared library" },
     Flag { canonical: "-O", spelling: Spelling.Attached, policy: Policy.Group { name: "opt" },
            role: "optimization", value: ValueDomain.OneOf { values: ["0", "1", "2", "3", "s"] },
            doc: "optimization level" },
@@ -49,7 +52,7 @@ let cc = Grammar {
            doc: "C language standard" },
     Flag { canonical: "-W", spelling: Spelling.Attached, policy: Policy.DedupUnordered,
            role: "warning", operation: Operation.Enable, doc: "enable a warning group, e.g. -Wall" },
-    Flag { canonical: "-D", spelling: Spelling.Attached, policy: Policy.DefineProgram,
+    Flag { canonical: "-D", spelling: Spelling.Attached, policy: Policy.KeyedLastWins,
            role: "define", operation: Operation.Add,
            doc: "define a preprocessor macro (NAME or NAME=VALUE)" },
     Flag { canonical: "-I", spelling: Spelling.Separated, policy: Policy.DedupOrdered,
@@ -60,11 +63,12 @@ let cc = Grammar {
            kind: Kind.Input { dir: true }, role: "lib-dir", operation: Operation.Add,
            value: ValueDomain.Path { dir: true }, doc: "add a library search directory" },
     Flag { canonical: "-l", spelling: Spelling.Attached, policy: Policy.OrderedKeepAll,
-           role: "lib", operation: Operation.Add, value: ValueDomain.LibName,
+           role: "lib", operation: Operation.Add, modes: ["link"],
+           value: ValueDomain.Named { domain: "lib" },
            doc: "link against a library (order and repeats are significant)" },
     Flag { canonical: "-Wl,", spelling: Spelling.Passthrough { sep: ",", grammar: "ld" },
            policy: Policy.OrderedKeepAll, role: "linker-args", operation: Operation.Add,
-           doc: "pass comma-separated options through to the linker" },
+           modes: ["link"], doc: "pass comma-separated options through to the linker" },
     Flag { canonical: "-o", spelling: Spelling.Separated, policy: Policy.Once,
            kind: Kind.Output { dir: false }, role: "output", value: ValueDomain.Path { dir: false },
            doc: "write output to this file" },
