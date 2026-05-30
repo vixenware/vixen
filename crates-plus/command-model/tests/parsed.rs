@@ -56,8 +56,8 @@ fn ar_positionals_know_operation_archive_members() {
             _ => None,
         })
         .collect();
-    assert!(kinds.contains(&("archive".to_string(), Kind::PathOut)));
-    assert!(kinds.contains(&("member".to_string(), Kind::PathIn { dir: false })));
+    assert!(kinds.contains(&("archive".to_string(), Kind::InOut)));
+    assert!(kinds.contains(&("member".to_string(), Kind::Input { dir: false })));
 }
 
 #[test]
@@ -76,7 +76,7 @@ fn flags_are_role_tagged_with_spans() {
     assert!(
         pc.args.iter().any(|a| matches!(
             &a.role,
-            ArgRole::Flag { canonical, kind, .. } if canonical == "-o" && matches!(kind, Kind::PathOut)
+            ArgRole::Flag { canonical, kind, .. } if canonical == "-o" && matches!(kind, Kind::Output { .. })
         )),
         "the output flag carries its PathOut kind"
     );

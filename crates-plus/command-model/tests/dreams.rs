@@ -23,11 +23,7 @@ fn explain_describes_flags_and_positionals() {
         "got: {}",
         summary("-o")
     );
-    assert!(
-        summary("-I").contains("header search"),
-        "got: {}",
-        summary("-I")
-    );
+    assert!(summary("-I").contains("include"), "got: {}", summary("-I"));
     assert!(
         summary("x.c").contains("input"),
         "the positional knows it's an input: {}",

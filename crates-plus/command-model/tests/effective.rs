@@ -2,7 +2,7 @@
 //! the cache must hash (argv paths, env paths, bubbled-up passthrough paths),
 //! and impurity marks.
 
-use command_model::{CC, Impurity, Input, InputRole, effective_command};
+use command_model::{CC, Impurity, Input, effective_command};
 use std::collections::BTreeMap;
 
 fn argv(parts: &[&str]) -> Vec<String> {
@@ -16,9 +16,9 @@ fn env(pairs: &[(&str, &str)]) -> BTreeMap<String, String> {
         .collect()
 }
 
-fn has(ec: &command_model::EffectiveCommand, role: InputRole, path: &str) -> bool {
+fn has(ec: &command_model::EffectiveCommand, role: &str, path: &str) -> bool {
     ec.inputs.contains(&Input {
-        role,
+        role: role.to_string(),
         path: path.to_string(),
     })
 }
@@ -44,11 +44,11 @@ fn declared_env_enters_identity_ambient_does_not() {
     );
 
     // CPATH's dirs become include inputs alongside the explicit -I.
-    assert!(has(&ec, InputRole::Include, "vendor/include"));
-    assert!(has(&ec, InputRole::Include, "gen"));
-    assert!(has(&ec, InputRole::Include, "src"));
+    assert!(has(&ec, "include", "vendor/include"));
+    assert!(has(&ec, "include", "gen"));
+    assert!(has(&ec, "include", "src"));
     // The source file is an input.
-    assert!(has(&ec, InputRole::Source, "src/x.c"));
+    assert!(has(&ec, "source", "src/x.c"));
 }
 
 #[test]
@@ -67,8 +67,8 @@ fn passthrough_path_inputs_bubble_up() {
         ]),
         &BTreeMap::new(),
     );
-    assert!(has(&ec, InputRole::Source, "link.map"), "{:?}", ec.inputs);
-    assert!(has(&ec, InputRole::Source, "x.o"));
+    assert!(has(&ec, "version-script", "link.map"), "{:?}", ec.inputs);
+    assert!(has(&ec, "source", "x.o"));
 }
 
 #[test]
@@ -99,7 +99,7 @@ fn inputs_are_deduped() {
     let shared = ec
         .inputs
         .iter()
-        .filter(|i| i.path == "shared" && i.role == InputRole::Include)
+        .filter(|i| i.path == "shared" && i.role == "include")
         .count();
     assert_eq!(
         shared, 1,

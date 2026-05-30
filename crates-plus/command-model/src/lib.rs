@@ -75,23 +75,21 @@ pub enum Policy {
     Positional,
 }
 
-/// What a value slot *is* — drives sandbox mounting and cache-key treatment.
+/// How the engine treats a value for mounting and caching — the universal,
+/// domain-agnostic classification. Small and stable; it never grows with new
+/// tools. What the value *means* to the tool (header dir, library, define, …) is
+/// the open `role` string the grammar supplies, which the engine never
+/// interprets — that's where domain knowledge lives.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Kind {
     /// Literal text — hashed as text, never mounted.
-    Str,
-    /// Input path — mounted read-only, content-hashed into the key.
-    PathIn { dir: bool },
-    /// Output path — the writable target; not an input hash.
-    PathOut,
-    /// Header search directory.
-    Include,
-    /// Library search directory (a distinct namespace from `Include`).
-    LibSearchDir,
-    /// `-lfoo` — resolved against the search dirs to a concrete archive.
-    Lib,
-    /// `NAME` or `NAME=VALUE` preprocessor define.
-    Define,
+    Text,
+    /// Input file/dir — mounted read-only, content-hashed into the key.
+    Input { dir: bool },
+    /// Output target — written by the command; not an input hash.
+    Output { dir: bool },
+    /// Read and rewritten in place (e.g. an `ar` archive).
+    InOut,
 }
 
 /// An environment channel a tool reads. Declared by the grammar so it becomes
@@ -100,6 +98,7 @@ pub enum Kind {
 pub struct EnvDecl {
     pub name: &'static str,
     pub kind: Kind,
+    pub role: &'static str,
 }
 
 /// How many positional arguments a schema slot consumes.
@@ -120,7 +119,10 @@ pub enum Arity {
 #[derive(Debug, Clone, Copy)]
 pub struct Positional {
     pub name: &'static str,
+    /// Universal cache/IO class.
     pub kind: Kind,
+    /// Open domain tag, e.g. `"source"`, `"archive"`.
+    pub role: &'static str,
     pub arity: Arity,
     pub doc: &'static str,
 }
@@ -134,7 +136,11 @@ pub struct Flag {
     pub aliases: &'static [&'static str],
     pub spelling: Spelling,
     pub policy: Policy,
+    /// Universal cache/IO class of the value.
     pub kind: Kind,
+    /// Open domain tag — `"include"`, `"lib"`, `"define"`, … — engine-opaque,
+    /// for explain/completion and as translate's cross-grammar key.
+    pub role: &'static str,
 }
 
 /// A tool grammar: the flags, the env channels the tool reads, and the
@@ -281,6 +287,7 @@ pub enum ArgRole {
         canonical: String,
         value: Option<String>,
         kind: Kind,
+        role: String,
     },
     /// A positional resolved against the grammar's schema — it knows its meaning.
     Positional {
@@ -307,23 +314,11 @@ pub struct EffectiveCommand {
     pub lints: Vec<Lint>,
 }
 
-/// A path the command depends on, with the role it plays.
+/// A path the command depends on, tagged with its open domain role.
 #[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord)]
 pub struct Input {
-    pub role: InputRole,
+    pub role: String,
     pub path: String,
-}
-
-#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
-pub enum InputRole {
-    /// A source / object / generic input file.
-    Source,
-    /// A header search directory.
-    Include,
-    /// A library search directory.
-    LibSearchDir,
-    /// A library named for resolution against the search dirs.
-    Lib,
 }
 
 /// A reason the command's result cannot be soundly cached by output equality.
@@ -425,24 +420,46 @@ fn emit_one(flag: &Flag, value: Option<&str>) -> String {
     emit(flag, value).join(" ")
 }
 
-/// The role a path-kind value plays as a cache input, if any.
-fn input_role(kind: Kind) -> Option<InputRole> {
-    match kind {
-        Kind::PathIn { .. } => Some(InputRole::Source),
-        Kind::Include => Some(InputRole::Include),
-        Kind::LibSearchDir => Some(InputRole::LibSearchDir),
-        Kind::Lib => Some(InputRole::Lib),
-        Kind::Str | Kind::Define | Kind::PathOut => None,
-    }
+/// Whether a value of this kind is a cache input (mounted + content-hashed).
+fn is_input(kind: Kind) -> bool {
+    matches!(kind, Kind::Input { .. } | Kind::InOut)
 }
 
 fn dedup_inputs(inputs: &mut Vec<Input>) {
     let mut seen = BTreeSet::new();
-    inputs.retain(|i| seen.insert((i.role, i.path.clone())));
+    inputs.retain(|i| seen.insert((i.role.clone(), i.path.clone())));
 }
 
-/// Collect the path-kind inputs a flag's occurrences contribute, recursing into
-/// passthrough sub-grammars so their inner paths bubble up.
+/// Resolve each positional (in order) to its schema slot, or `None` if the
+/// schema has no slot for it.
+fn resolve_positionals(schema: &[Positional], count: usize) -> Vec<Option<&Positional>> {
+    let mut out: Vec<Option<&Positional>> = Vec::with_capacity(count);
+    let mut p = 0;
+    for slot in schema {
+        match slot.arity {
+            Arity::One | Arity::Optional => {
+                if p < count {
+                    out.push(Some(slot));
+                    p += 1;
+                }
+            }
+            Arity::Variadic => {
+                while p < count {
+                    out.push(Some(slot));
+                    p += 1;
+                }
+            }
+        }
+    }
+    while out.len() < count {
+        out.push(None);
+    }
+    out
+}
+
+/// Collect the inputs a flag's occurrences contribute, recursing into passthrough
+/// sub-grammars so their inner paths bubble up. The input's role is the flag's
+/// open domain tag.
 fn collect_inputs(flag: &Flag, occs: &[&Occurrence], inputs: &mut Vec<Input>) {
     if let Spelling::Passthrough { sep, grammar } = flag.spelling {
         let mut items: Vec<String> = Vec::new();
@@ -454,11 +471,11 @@ fn collect_inputs(flag: &Flag, occs: &[&Occurrence], inputs: &mut Vec<Input>) {
         inputs.extend(canon_pass(grammar, &items).inputs);
         return;
     }
-    if let Some(role) = input_role(flag.kind) {
+    if is_input(flag.kind) {
         for o in occs {
             if let Some(value) = &o.value {
                 inputs.push(Input {
-                    role,
+                    role: flag.role.to_string(),
                     path: value.clone(),
                 });
             }
@@ -608,7 +625,7 @@ fn canon_pass(grammar: &Grammar, args: &[String]) -> Pass {
                 selector: selector.to_string(),
             });
         }
-        if matches!(flag.kind, Kind::PathOut) {
+        if matches!(flag.kind, Kind::Output { .. }) {
             output_tokens.extend(emitted);
         } else {
             flag_tokens.extend(emitted);
@@ -616,12 +633,17 @@ fn canon_pass(grammar: &Grammar, args: &[String]) -> Pass {
     }
 
     let mut out = flag_tokens;
-    for p in &parsed.positionals {
+    let slots = resolve_positionals(grammar.positionals, parsed.positionals.len());
+    for (p, slot) in parsed.positionals.iter().zip(&slots) {
         out.push(p.clone());
-        inputs.push(Input {
-            role: InputRole::Source,
-            path: p.clone(),
-        });
+        if let Some(slot) = slot
+            && is_input(slot.kind)
+        {
+            inputs.push(Input {
+                role: slot.role.to_string(),
+                path: p.clone(),
+            });
+        }
     }
     out.extend(output_tokens);
     for token in &parsed.unknown {
@@ -703,6 +725,7 @@ pub fn parse_command(grammar: &Grammar, argv: &[String]) -> ParsedCommand {
                 canonical: flag.canonical.to_string(),
                 value,
                 kind: flag.kind,
+                role: flag.role.to_string(),
             }
         } else if token.starts_with('-') && token != "-" {
             ArgRole::Unknown
@@ -755,10 +778,10 @@ pub fn effective_command(
             continue;
         };
         consumed_env.push((decl.name.to_string(), value.clone()));
-        if let Some(role) = input_role(decl.kind) {
+        if is_input(decl.kind) {
             for part in value.split(ENV_PATH_SEP).filter(|s| !s.is_empty()) {
                 pass.inputs.push(Input {
-                    role,
+                    role: decl.role.to_string(),
                     path: part.to_string(),
                 });
             }
@@ -852,7 +875,8 @@ pub const LD: Grammar = Grammar {
     link_only: &[],
     positionals: &[Positional {
         name: "object",
-        kind: Kind::PathIn { dir: false },
+        kind: Kind::Input { dir: false },
+        role: "object",
         arity: Arity::Variadic,
         doc: "an object file to link",
     }],
@@ -863,21 +887,24 @@ pub const LD: Grammar = Grammar {
             aliases: &[],
             spelling: Spelling::Bare,
             policy: Policy::Once,
-            kind: Kind::Str,
+            kind: Kind::Text,
+            role: "gc-sections",
         },
         Flag {
             canonical: "--as-needed",
             aliases: &[],
             spelling: Spelling::Bare,
             policy: Policy::Once,
-            kind: Kind::Str,
+            kind: Kind::Text,
+            role: "as-needed",
         },
         Flag {
             canonical: "--version-script",
             aliases: &[],
             spelling: Spelling::Suffixed { sep: '=' },
             policy: Policy::Once,
-            kind: Kind::PathIn { dir: false },
+            kind: Kind::Input { dir: false },
+            role: "version-script",
         },
     ],
 };
@@ -889,22 +916,26 @@ pub const CC: Grammar = Grammar {
     link_only: &["-l", "-shared", "-Wl,"],
     positionals: &[Positional {
         name: "input",
-        kind: Kind::PathIn { dir: false },
+        kind: Kind::Input { dir: false },
+        role: "source",
         arity: Arity::Variadic,
         doc: "a source (.c) or object (.o) file to compile or link",
     }],
     env: &[
         EnvDecl {
             name: "CPATH",
-            kind: Kind::Include,
+            kind: Kind::Input { dir: true },
+            role: "include",
         },
         EnvDecl {
             name: "LIBRARY_PATH",
-            kind: Kind::LibSearchDir,
+            kind: Kind::Input { dir: true },
+            role: "lib-dir",
         },
         EnvDecl {
             name: "SOURCE_DATE_EPOCH",
-            kind: Kind::Str,
+            kind: Kind::Text,
+            role: "source-date",
         },
     ],
     flags: &[
@@ -913,70 +944,80 @@ pub const CC: Grammar = Grammar {
             aliases: &[],
             spelling: Spelling::Bare,
             policy: Policy::Once,
-            kind: Kind::Str,
+            kind: Kind::Text,
+            role: "compile-only",
         },
         Flag {
             canonical: "-fPIC",
             aliases: &[],
             spelling: Spelling::Bare,
             policy: Policy::Once,
-            kind: Kind::Str,
+            kind: Kind::Text,
+            role: "pic",
         },
         Flag {
             canonical: "-shared",
             aliases: &[],
             spelling: Spelling::Bare,
             policy: Policy::Once,
-            kind: Kind::Str,
+            kind: Kind::Text,
+            role: "shared",
         },
         Flag {
             canonical: "-O",
             aliases: &[],
             spelling: Spelling::Attached,
             policy: Policy::Group("opt"),
-            kind: Kind::Str,
+            kind: Kind::Text,
+            role: "optimization",
         },
         Flag {
             canonical: "-std",
             aliases: &[],
             spelling: Spelling::Suffixed { sep: '=' },
             policy: Policy::Once,
-            kind: Kind::Str,
+            kind: Kind::Text,
+            role: "std",
         },
         Flag {
             canonical: "-W",
             aliases: &[],
             spelling: Spelling::Attached,
             policy: Policy::DedupUnordered,
-            kind: Kind::Str,
+            kind: Kind::Text,
+            role: "warning",
         },
         Flag {
             canonical: "-D",
             aliases: &[],
             spelling: Spelling::Attached,
             policy: Policy::DefineProgram,
-            kind: Kind::Define,
+            kind: Kind::Text,
+            role: "define",
         },
         Flag {
             canonical: "-I",
             aliases: &[],
             spelling: Spelling::Separated,
             policy: Policy::DedupOrdered,
-            kind: Kind::Include,
+            kind: Kind::Input { dir: true },
+            role: "include",
         },
         Flag {
             canonical: "-L",
             aliases: &[],
             spelling: Spelling::Separated,
             policy: Policy::DedupOrdered,
-            kind: Kind::LibSearchDir,
+            kind: Kind::Input { dir: true },
+            role: "lib-dir",
         },
         Flag {
             canonical: "-l",
             aliases: &[],
             spelling: Spelling::Attached,
             policy: Policy::OrderedKeepAll,
-            kind: Kind::Lib,
+            kind: Kind::Text,
+            role: "lib",
         },
         Flag {
             canonical: "-Wl,",
@@ -986,14 +1027,16 @@ pub const CC: Grammar = Grammar {
                 grammar: &LD,
             },
             policy: Policy::OrderedKeepAll,
-            kind: Kind::Str,
+            kind: Kind::Text,
+            role: "linker-args",
         },
         Flag {
             canonical: "-o",
             aliases: &[],
             spelling: Spelling::Separated,
             policy: Policy::Once,
-            kind: Kind::PathOut,
+            kind: Kind::Output { dir: false },
+            role: "output",
         },
     ],
 };
@@ -1008,18 +1051,21 @@ pub const CL: Grammar = Grammar {
     link_only: &[],
     positionals: &[Positional {
         name: "input",
-        kind: Kind::PathIn { dir: false },
+        kind: Kind::Input { dir: false },
+        role: "source",
         arity: Arity::Variadic,
         doc: "a source or object file to compile or link",
     }],
     env: &[
         EnvDecl {
             name: "INCLUDE",
-            kind: Kind::Include,
+            kind: Kind::Input { dir: true },
+            role: "include",
         },
         EnvDecl {
             name: "LIB",
-            kind: Kind::LibSearchDir,
+            kind: Kind::Input { dir: true },
+            role: "lib-dir",
         },
     ],
     flags: &[
@@ -1028,70 +1074,80 @@ pub const CL: Grammar = Grammar {
             aliases: &["-c"],
             spelling: Spelling::Bare,
             policy: Policy::Once,
-            kind: Kind::Str,
+            kind: Kind::Text,
+            role: "compile-only",
         },
         Flag {
             canonical: "/nologo",
             aliases: &["-nologo"],
             spelling: Spelling::Bare,
             policy: Policy::Once,
-            kind: Kind::Str,
+            kind: Kind::Text,
+            role: "nologo",
         },
         Flag {
             canonical: "/EHsc",
             aliases: &["-EHsc"],
             spelling: Spelling::Bare,
             policy: Policy::Once,
-            kind: Kind::Str,
+            kind: Kind::Text,
+            role: "exceptions",
         },
         Flag {
             canonical: "/O",
             aliases: &["-O"],
             spelling: Spelling::Attached,
             policy: Policy::Group("opt"),
-            kind: Kind::Str,
+            kind: Kind::Text,
+            role: "optimization",
         },
         Flag {
             canonical: "/W",
             aliases: &["-W"],
             spelling: Spelling::Attached,
             policy: Policy::Group("warn"),
-            kind: Kind::Str,
+            kind: Kind::Text,
+            role: "warning",
         },
         Flag {
             canonical: "/std",
             aliases: &["-std"],
             spelling: Spelling::Suffixed { sep: ':' },
             policy: Policy::Once,
-            kind: Kind::Str,
+            kind: Kind::Text,
+            role: "std",
         },
         Flag {
             canonical: "/D",
             aliases: &["-D"],
             spelling: Spelling::Attached,
             policy: Policy::DefineProgram,
-            kind: Kind::Define,
+            kind: Kind::Text,
+            role: "define",
         },
         Flag {
             canonical: "/I",
             aliases: &["-I"],
             spelling: Spelling::Attached,
             policy: Policy::DedupOrdered,
-            kind: Kind::Include,
+            kind: Kind::Input { dir: true },
+            role: "include",
         },
         Flag {
             canonical: "/Fo",
             aliases: &["-Fo"],
             spelling: Spelling::Attached,
             policy: Policy::Once,
-            kind: Kind::PathOut,
+            kind: Kind::Output { dir: false },
+            role: "output",
         },
         Flag {
             canonical: "/Fe",
             aliases: &["-Fe"],
             spelling: Spelling::Attached,
             policy: Policy::Once,
-            kind: Kind::PathOut,
+            kind: Kind::Output { dir: false },
+            role: "output",
         },
     ],
 };
@@ -1107,19 +1163,22 @@ pub const AR: Grammar = Grammar {
     positionals: &[
         Positional {
             name: "operation",
-            kind: Kind::Str,
+            kind: Kind::Text,
+            role: "operation",
             arity: Arity::One,
             doc: "the operation + modifiers, e.g. `rcs`",
         },
         Positional {
             name: "archive",
-            kind: Kind::PathOut,
+            kind: Kind::InOut,
+            role: "archive",
             arity: Arity::One,
             doc: "the .a archive to create or update",
         },
         Positional {
             name: "member",
-            kind: Kind::PathIn { dir: false },
+            kind: Kind::Input { dir: false },
+            role: "object",
             arity: Arity::Variadic,
             doc: "an object file to add to the archive",
         },
@@ -1153,17 +1212,15 @@ impl fmt::Display for Explanation {
     }
 }
 
-/// A short human description of a value-slot's role.
-fn describe_kind(kind: Kind) -> &'static str {
+/// A short human description of a value's cache/IO class.
+fn describe_io(kind: Kind) -> &'static str {
     match kind {
-        Kind::Str => "literal",
-        Kind::PathIn { dir: true } => "input directory",
-        Kind::PathIn { dir: false } => "input file",
-        Kind::PathOut => "output path",
-        Kind::Include => "header search directory",
-        Kind::LibSearchDir => "library search directory",
-        Kind::Lib => "library to link",
-        Kind::Define => "preprocessor define",
+        Kind::Text => "literal",
+        Kind::Input { dir: true } => "input directory",
+        Kind::Input { dir: false } => "input file",
+        Kind::Output { dir: true } => "output directory",
+        Kind::Output { dir: false } => "output path",
+        Kind::InOut => "modified in place",
     }
 }
 
@@ -1181,10 +1238,19 @@ pub fn explain(grammar: &Grammar, argv: &[String]) -> Explanation {
                     canonical,
                     value,
                     kind,
-                } => match value {
-                    Some(v) => format!("{canonical}: {} = {v}", describe_kind(*kind)),
-                    None => format!("{canonical}: {}", describe_kind(*kind)),
-                },
+                    role,
+                } => {
+                    let io = describe_io(*kind);
+                    let what = if role.is_empty() {
+                        io.to_string()
+                    } else {
+                        format!("{role} ({io})")
+                    };
+                    match value {
+                        Some(v) => format!("{canonical}: {what} = {v}"),
+                        None => format!("{canonical}: {what}"),
+                    }
+                }
                 ArgRole::Positional { name, kind, value } => {
                     let doc = grammar
                         .positionals
@@ -1192,7 +1258,7 @@ pub fn explain(grammar: &Grammar, argv: &[String]) -> Explanation {
                         .find(|p| p.name == name.as_str())
                         .map(|p| p.doc)
                         .unwrap_or("");
-                    format!("{value}: {name} — {doc} ({})", describe_kind(*kind))
+                    format!("{value}: {name} — {doc} ({})", describe_io(*kind))
                 }
                 ArgRole::Unknown => {
                     "unrecognized — impure (not understood by the grammar)".to_string()
