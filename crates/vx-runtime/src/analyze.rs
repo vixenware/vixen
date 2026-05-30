@@ -35,7 +35,14 @@ use crate::graph::{DemandGraph, Node, NodeId, NodeKind, Span};
 
 /// Intrinsic/boundary call names — effectful or non-deterministic, so the kernel
 /// partition cuts here (a call to one of these is a `Boundary`, not a `Kernel`).
-const BOUNDARY_CALLS: &[&str] = &["exec", "acquire", "http", "Http", "discover", "fetch"];
+///
+/// `discover` is deliberately **absent**: it is *deprecated* — host facts now come
+/// from standing capability advertisement + predicate-based executor selection
+/// (`docs/design/runners-and-control-plane.md` §6), not an inline `discover`. The
+/// `discover`-using fixtures (`cc-version`, `remote-libpng`) are stale/aspirational
+/// and are **not** a target; a `discover(...)` call simply falls through as an
+/// ordinary call here.
+const BOUNDARY_CALLS: &[&str] = &["exec", "acquire", "Http", "http"];
 
 /// Turn `entry`'s body, in `source`, inside out — through the real front-end.
 /// Errors only if the source doesn't parse or the entry isn't found; unhandled
