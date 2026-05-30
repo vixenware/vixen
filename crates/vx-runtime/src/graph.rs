@@ -87,6 +87,35 @@ impl DemandGraph {
         // Our own owned, derive-`Facet` types — serialisation cannot fail.
         facet_json::to_string(self).expect("DemandGraph is facet-serialisable")
     }
+
+    /// Which nodes are reached **by demand** from the root — the "what actually
+    /// runs" overlay. This is **kind-aware**, not plain input-reachability: a
+    /// `LazyData` node does not demand its fields by existing (they are
+    /// structural references), and a `Project` demands only the slot it selects.
+    /// Everything left unreached (a bomb in an undemanded field) is the road not
+    /// taken; the playground renders it dark.
+    pub fn demand_reachable(&self) -> Vec<bool> {
+        let mut reached = vec![false; self.nodes.len()];
+        let mut stack = vec![self.root];
+        while let Some(NodeId(i)) = stack.pop() {
+            let i = i as usize;
+            if reached[i] {
+                continue;
+            }
+            reached[i] = true;
+            let node = &self.nodes[i];
+            match node.kind {
+                NodeKind::LazyData => {} // structural: fields demanded only via Project
+                NodeKind::Project { index } => {
+                    let container = node.inputs[0];
+                    stack.push(container);
+                    stack.push(self.nodes[container.0 as usize].inputs[index as usize]);
+                }
+                _ => stack.extend(node.inputs.iter().copied()),
+            }
+        }
+        reached
+    }
 }
 
 /// The canonical demand test — `let pair = (42, 💣); pair[0]` — turned inside out
@@ -142,32 +171,8 @@ mod tests {
         assert!(json.contains("Bomb"));
 
         // Demand-reachability is **kind-aware** — NOT plain input-reachability.
-        // A LazyData node does not demand its fields by existing (they are
-        // structural references); only a Project demands the slot it selects.
-        // This is the whole point: the bomb is referenced by the pair yet
-        // unreached by demand.
-        let mut reached = vec![false; g.nodes.len()];
-        let mut stack = vec![g.root];
-        while let Some(NodeId(i)) = stack.pop() {
-            let i = i as usize;
-            if reached[i] {
-                continue;
-            }
-            reached[i] = true;
-            let node = &g.nodes[i];
-            match node.kind {
-                // Structural: being demanded does not demand the fields.
-                NodeKind::LazyData => {}
-                // A projection demands its container, then only the selected slot.
-                NodeKind::Project { index } => {
-                    let container = node.inputs[0];
-                    stack.push(container);
-                    stack.push(g.nodes[container.0 as usize].inputs[index as usize]);
-                }
-                // Everything else demands all its inputs.
-                _ => stack.extend(node.inputs.iter().copied()),
-            }
-        }
+        // The bomb is referenced by the pair yet unreached by demand.
+        let reached = g.demand_reachable();
         assert!(reached[0], "Const 42 is reached via pair[0]");
         assert!(
             !reached[1],
