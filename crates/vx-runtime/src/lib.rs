@@ -23,6 +23,7 @@ pub mod eval;
 pub mod graph;
 pub mod kernel;
 pub mod lower;
+pub mod remote;
 pub mod value;
 
 /// Stencil machine code extracted from rustc's object output at build time

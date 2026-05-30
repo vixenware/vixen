@@ -26,6 +26,10 @@ vx-types = { workspace = true }
 # patching). Only the runtime surface (ExecBuf, patch_branch26) — the smoke test,
 # arithmetic stencils, and kernel→stencil-chain lowering stay in this crate.
 copypatch = { workspace = true }
+# Remote handles are async by nature — forcing an unproduced part suspends a strand
+# until the producer yields it. The cross-executor harness models two peers as
+# tasks over channels; the real wire (vox) slots in behind the same surface later.
+tokio = { workspace = true }
 
 [build-dependencies]
 # Build-time stencil extraction: compile stencils/stencils.rs with rustc

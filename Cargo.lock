@@ -4033,6 +4033,7 @@ dependencies = [
  "copypatch",
  "facet",
  "facet-json",
+ "tokio",
  "vx-ir",
  "vx-parser",
  "vx-stdlib",

@@ -358,17 +358,20 @@ mistaken for "the" graph.
   the remote's file opens are the demand, and bytes are served as read. The tree
   is still pending on the remote side.
 - *Outbound* (executor → orchestrator): `exec` returns a **bundle of
-  independently-resolving handles** — stdout stream, `exit`, observer fields —
-  each resolving at its own time (cf. query-surface's independently-timed
-  records: `rmeta` resolves off the stream the instant it's emitted, `exit` only
-  at close).
+  independently-resolving handles** — stdout stream, `exit`, observer fields, **and
+  the output tree itself** — each resolving at its own time. The output tree is a
+  *producing handle* (§4): `tree[path]` resolves the instant the producer writes
+  that path, independently of the rest and long before the whole-tree hash exists
+  (Cargo pipelining: `libA.rmeta` is readable while `libA.rlib` is still being
+  produced). `exit` resolves only at close. Granularity is per-kind: tree → path,
+  stdout/stderr → chunk, observer → field, scalar → atomic.
 
 So the demand model **spans the host boundary**: a value can be pending *because
 another host hasn't produced that part yet*.
 
 ---
 
-## 4. `Tree` — the richest primitive, under-specified
+## 4. `Tree` — the richest primitive
 
 A `Tree` is identified entirely by its content hash (merkle, structurally shared;
 `i[impl.tree]`). The session's carving:
@@ -387,9 +390,54 @@ A `Tree` is identified entirely by its content hash (merkle, structurally shared
   ingested-but-not-materialized vs materialized; identity-resolved vs
   identity-pending.
 
-**Open:** sub-tree slicing (`tree[path]`, O(1)), overlay/merge semantics, and the
-full state machine of a `Tree` across these axes. `Tree` deserves its own spec
-section; it does not have an adequate one today.
+### The runtime value model (settled — tentative; we test it, then adjust)
+
+A `Tree` value is in one of two states:
+
+- **Resolved** — a CAS `NodeHash` at a `DirectoryNode` (merkle: name-sorted
+  entries, `Dir{hash}` subdirs, Small/Large/Symlink leaves; chunks CDC-split).
+  Immutable, complete, every part present — every past build result and every
+  ingested input. The identity *is* the value; backing does not affect it.
+  **(Built: `build_merkle_tree` ingests; the VFS `mount` materialises lazily,
+  serving bytes from CAS on open.)**
+- **Producing handle** — a live reference to a running `exec`'s output on some
+  executor. Parts resolve **progressively, per path**: forcing `tree[path]` yields
+  that path's bytes *as soon as the producer has written it*, **blocks** on a path
+  not yet written, and **poisons** if the producer completes (or dies) without it.
+  The whole-tree `NodeHash` is **identity-pending** until the producer finishes
+  (`flush` discovers it post-hoc). The producer side *is* the running sandbox's
+  VFS (writes accumulate, reads serve); a consumer's `tree[path]` is a remote read
+  over the duplex connection (§3 outbound; §5 ③).
+
+**Why a producing handle is mandatory, not an optimisation — Cargo pipelining.**
+`rustc` emits `libA.rmeta` at end-of-type-check, long before `libA.rlib` (codegen).
+Crate B's compile — *on another executor* — reads `libA.rmeta` out of A's output
+tree *while A is still producing `libA.rlib`*: before A finishes, before A's
+whole-tree hash can exist (you cannot hash a directory still being written). An
+atomic, resolve-at-completion output tree cannot express this, and pipelined Rust
+builds *are* the workload. Per-path progressive resolution is therefore part of the
+`Tree` spec, not a later bolt-on. (Reaching for atomic here was an eager shortcut;
+the design is lazy/streaming end to end.)
+
+### Operations
+
+- **Slicing `tree[path]`** — walk the `DirectoryEntry`s to the child `Dir{hash}`;
+  that hash *is* the sub-tree's identity, already present in the merkle structure.
+  Cost O(depth) `get_node`s (cached), not O(1) — accepted; a flat path index is
+  premature. Materialisation stays lazy (mount only the slice). On a *producing*
+  handle, `tree[path]` is the per-path progressive demand above.
+- **Overlay / merge `a ⊕ b`** — a new content-addressed `DirectoryNode`: deep-merge
+  on directory collisions, **right operand wins** on leaf collisions (so
+  `inputs ⊕ outputs` layers outputs over inputs), shared subtrees reused by hash,
+  eager (only the touched spine allocates). **Tentative and genuinely open:**
+  right-wins is the build-layering default, but whether an output should clobber an
+  input (a log file: yes; a source file: no) is unsettled. Start right-wins;
+  revisit with real cases.
+
+**Still open:** the producing-handle ↔ L1-key collision (a consumer pipelines
+*before* the producer's whole-tree hash exists, yet its L1 key wants that hash —
+§6, §10·3); the exact retention/streaming protocol of a producing handle over the
+transport.
 
 ---
 
@@ -705,8 +753,15 @@ pending by default; eager only inside kernels.
 1. **Kernel boundary, precisely.** Force boundary vs async boundary vs intrinsic
    boundary — the async criterion (§2) is the current best cut, but the
    remote-handle case (forcing isn't clean materialization) is unsettled.
-2. **Remote-handle model.** What crosses as a handle vs materializes; how parts
-   resolve independently; how forcing a handle streams.
+2. **Remote-handle model.** *Now the main focus — being settled (§3, §4).*
+   Produced values cross as **handles**; the consumer pulls parts on demand (push
+   is only the predictive optimisation, §6). Parts resolve independently at
+   per-kind granularity (tree → path, stdout → chunk, observer → field, scalar →
+   atomic); forcing an unproduced part **blocks** the strand until it lands, or
+   **poisons** if the producer ends without it. The `Tree` producing-handle (§4) is
+   the central case, pinned by the cross-executor pipelining harness. **Live
+   sub-question:** the producing-handle ↔ L1-key collision (3 below) — a consumer
+   pipelines before the producer's whole-tree hash exists.
 3. **Caching mechanics.** L1 key/slot structure that avoids churn on volatile
    inputs (a stable `(signature + fingerprints)` slot carrying read-sets, *not*
    the volatile tree hash); L2 candidate retention; preemptive push of changed
