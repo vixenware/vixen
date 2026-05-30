@@ -11,7 +11,9 @@ Cross-refs: [`spec/language/build.md`](../content/spec/language/build.md)
 (Evaluation, normative), [`spec/internals.md`](../content/spec/internals.md)
 (representation, normative), [`kernel-abi.md`](kernel-abi.md) (kernels),
 [`command-model.md`](command-model.md) (canonical commands),
-[`test-runner.md`](test-runner.md) (firehose).
+[`test-runner.md`](test-runner.md) (firehose),
+[identity](https://kb.vixen.rs/identity) (the auth + transport the byte paths
+below ride on — mutual-auth duplex executor↔orchestrator connection; in the KB).
 
 ---
 
@@ -284,7 +286,8 @@ it needs:
   file.
 
 *Forcing here* transfers that file's bytes to the executor (pull, or push if
-predicted). Each read is recorded. → This set **is the L2 read-set**.
+predicted) over the authenticated duplex connection ([identity](https://kb.vixen.rs/identity)
+§ transport). Each read is recorded. → This set **is the L2 read-set**.
 
 **③ Produced** — *not* demands; outputs that resolve over time, forced **only by
 the requester peer** (the peer that issued the `exec`, transitively up to the root
@@ -415,6 +418,12 @@ changed (it holds the new hashes). So it can **push the changed read-set files t
 the executor preemptively**, instead of waiting for the executor to pull them on
 demand. Pull is the default; push is the latency optimization for the
 known-changed set.
+
+Push is load-bearing on the **transport** being a *bidirectional duplex channel
+regardless of who dialed*: in the cloud, executors dial out (NAT), yet the
+orchestrator must still push *into* them. That this works is exactly the
+mutual-auth duplex property recorded in [identity](https://kb.vixen.rs/identity)
+(§ transport); it is *why* the channel is duplex rather than request/response.
 
 ### Charter rot to fix
 
@@ -570,6 +579,13 @@ pending by default; eager only inside kernels.
    the volatile tree hash); L2 candidate retention; preemptive push of changed
    read-set files; how non-determinism is handled end-to-end via impurity marks;
    interaction with the store.
+   - **Executor reachability for progressive demand.** ②'s pulls and §6's pushes
+     assume the orchestrator and executor can move bytes both ways. *How* they
+     reach an executor that can't be dialed directly (NAT, cloud) — direct
+     NAT-traversed stream vs store-mediated fetch vs relay — is a **transport**
+     concern (see [identity](https://kb.vixen.rs/identity)), orthogonal to the
+     cache semantics here. Recorded so the cache design doesn't silently assume
+     reachability the transport hasn't established.
 4. **Sandbox platform feasibility (the fork).** Per-platform interception; L1-only
    fallback; lazy→eager degradation.
 5. **Demand-graph granularity.** What a node/edge/annotation is; coalescing pure
