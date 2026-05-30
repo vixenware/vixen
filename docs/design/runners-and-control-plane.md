@@ -6,6 +6,11 @@ detection, advertisement to a control plane, and CLI-driven placement. The
 *language surface* for this already exists in the normative spec (below); the
 *system that makes it real* did not, until this note.
 
+**Scope:** this is **Vixen build's** control plane — *not* CCC (a cache-warming
+job queue) and *not* CI runners. The existing app.vixen.rs code conflates the
+three; see [`product-boundaries.md`](product-boundaries.md) before forming a model
+from that code.
+
 Cross-refs: [`spec/language/core.md`](../content/spec/language/core.md)
 (`capability { advertises T }`, `r[constraint.requirement]`),
 [`spec/stdlib/build.md`](../content/spec/stdlib/build.md) (`r[exec.signature]`,
