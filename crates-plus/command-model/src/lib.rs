@@ -221,9 +221,32 @@ pub struct Mode {
     pub selector: String,
 }
 
-/// A tool grammar: a name, flags, env channels, the positional schema, and
-/// modes. Anything not matching a flag is a positional input. (Richer guarded
-/// productions — arbitrary predicates over parse state — remain future.)
+/// A **compatibility rule**: how a flag's value collapses when deriving the
+/// content-addressed cache identity, beyond plain canonicalization. This is the
+/// Tier-1 (closed-vocabulary, pure-data) equivalence layer — two commands that
+/// differ only in ways a rule deems equivalent share one cache key. The literal
+/// canonical form ([`canonicalize`]) is unaffected; only the
+/// [`effective_command`](GrammarSet::effective_command) identity is normalized.
+#[derive(Debug, Clone, PartialEq, Eq, Facet)]
+pub struct Compat {
+    /// The canonical lead this rule applies to (e.g. `-Copt-level`).
+    pub flag: String,
+    /// The flag never affects the cache identity — dropped entirely (e.g. rustc
+    /// `-Ccodegen-units`, always 1).
+    pub ignored: bool,
+    /// Value equivalence classes: values in the same inner list are
+    /// cache-equivalent and canonicalize to the list's first element (e.g.
+    /// `-Cdebuginfo`'s `["2", "full"]`, `-Clto`'s `["fat", "yes", "true"]`).
+    pub classes: Vec<Vec<String>>,
+    /// After class-canonicalization, a value equal to this is the tool's default
+    /// and is dropped (≡ omitting the flag); empty = no default elision.
+    pub default_value: String,
+}
+
+/// A tool grammar: a name, flags, env channels, the positional schema, modes,
+/// and cache-compatibility rules. Anything not matching a flag is a positional
+/// input. (Richer guarded productions — arbitrary predicates over parse state —
+/// remain future.)
 #[derive(Debug, Clone, PartialEq, Eq, Facet)]
 pub struct Grammar {
     /// The grammar's name, used for cross-grammar references (passthrough) and
@@ -239,6 +262,8 @@ pub struct Grammar {
     /// mode is entered by its selector flag. A flag is legal only in the modes it
     /// lists (all, if it lists none). Empty modes = a single unnamed mode.
     pub modes: Vec<Mode>,
+    /// Cache-compatibility rules (the Tier-1 equivalence layer), keyed by flag.
+    pub compat: Vec<Compat>,
 }
 
 /// A package of named grammars that can reference one another by name — e.g.
@@ -293,7 +318,9 @@ impl GrammarSet {
         dedup_inputs(&mut pass.inputs);
         EffectiveCommand {
             program,
-            args: pass.args,
+            // The cache identity uses the compat-normalized form, not the literal
+            // canonical args.
+            args: pass.cache_args,
             env: env_pairs,
             inputs: pass.inputs,
             impurities: pass.impurities,
@@ -731,6 +758,9 @@ fn reduce_flag(
 /// and the recursion through passthroughs.
 struct Pass {
     args: Vec<String>,
+    /// The compat-normalized form used as the cache identity (equals `args` when
+    /// the grammar declares no compatibility rules).
+    cache_args: Vec<String>,
     lints: Vec<Lint>,
     inputs: Vec<Input>,
     impurities: Vec<Impurity>,
@@ -770,6 +800,10 @@ fn canon_pass(set: &GrammarSet, grammar: &Grammar, args: &[String]) -> Pass {
 
     let mut flag_tokens: Vec<String> = Vec::new();
     let mut output_tokens: Vec<String> = Vec::new();
+    // The cache identity reuses the same emission, but with each flag's
+    // compatibility rule applied (ignore-drop, class-canonicalize, default-drop).
+    let mut cache_flag_tokens: Vec<String> = Vec::new();
+    let mut cache_output_tokens: Vec<String> = Vec::new();
     for (idx, flag) in grammar.flags.iter().enumerate() {
         let Some(occs) = by_flag.get(&idx) else {
             continue;
@@ -789,17 +823,38 @@ fn canon_pass(set: &GrammarSet, grammar: &Grammar, args: &[String]) -> Pass {
                 mode: mode.to_string(),
             });
         }
+
+        let compat = grammar.compat.iter().find(|c| c.flag == flag.canonical);
+        let cache_emitted = if compat.is_some_and(|c| c.ignored) {
+            Vec::new()
+        } else {
+            let norm: Vec<Occurrence> = occs
+                .iter()
+                .filter_map(|o| normalize_occ(o, compat))
+                .collect();
+            if norm.is_empty() {
+                Vec::new()
+            } else {
+                let refs: Vec<&Occurrence> = norm.iter().collect();
+                reduce_flag(set, flag, &refs, &mut Vec::new())
+            }
+        };
+
         if matches!(flag.kind, Kind::Output { .. }) {
             output_tokens.extend(emitted);
+            cache_output_tokens.extend(cache_emitted);
         } else {
             flag_tokens.extend(emitted);
+            cache_flag_tokens.extend(cache_emitted);
         }
     }
 
     let mut out = flag_tokens;
+    let mut cache_out = cache_flag_tokens;
     let slots = resolve_positionals(&grammar.positionals, parsed.positionals.len());
     for (p, slot) in parsed.positionals.iter().zip(&slots) {
         out.push(p.clone());
+        cache_out.push(p.clone());
         if let Some(slot) = slot
             && is_input(slot.kind)
         {
@@ -810,6 +865,7 @@ fn canon_pass(set: &GrammarSet, grammar: &Grammar, args: &[String]) -> Pass {
         }
     }
     out.extend(output_tokens);
+    cache_out.extend(cache_output_tokens);
     for token in &parsed.unknown {
         lints.push(Lint::UnknownFlag {
             token: token.clone(),
@@ -818,15 +874,47 @@ fn canon_pass(set: &GrammarSet, grammar: &Grammar, args: &[String]) -> Pass {
             token: token.clone(),
         });
         out.push(token.clone());
+        cache_out.push(token.clone());
     }
 
     dedup_inputs(&mut inputs);
     Pass {
         args: out,
+        cache_args: cache_out,
         lints,
         inputs,
         impurities,
     }
+}
+
+/// Apply a flag's compat rule to one occurrence, for the cache identity:
+/// canonicalize the value to its equivalence-class representative, then drop the
+/// occurrence (return `None`) if it equals the tool default. Valueless (bare)
+/// occurrences and flags without a rule pass through unchanged.
+fn normalize_occ(occ: &Occurrence, compat: Option<&Compat>) -> Option<Occurrence> {
+    let keep = |value: Option<String>| {
+        Some(Occurrence {
+            flag: occ.flag,
+            value,
+            pos: occ.pos,
+        })
+    };
+    let Some(compat) = compat else {
+        return keep(occ.value.clone());
+    };
+    let Some(raw) = occ.value.as_deref() else {
+        return keep(None);
+    };
+    let canon = compat
+        .classes
+        .iter()
+        .find(|class| class.iter().any(|v| v == raw))
+        .and_then(|class| class.first())
+        .map_or(raw, String::as_str);
+    if !compat.default_value.is_empty() && canon == compat.default_value {
+        return None;
+    }
+    keep(Some(canon.to_string()))
 }
 
 /// Assign parsed positionals to the grammar's schema slots, in order, tagging
@@ -1010,6 +1098,7 @@ pub fn diff(a: &EffectiveCommand, b: &EffectiveCommand) -> Vec<Change> {
 fn ld() -> Grammar {
     Grammar {
         name: "ld".into(),
+        compat: vec![],
         modes: vec![],
         positionals: vec![Positional {
             name: "object".into(),
@@ -1052,6 +1141,7 @@ fn ld() -> Grammar {
 fn cc() -> Grammar {
     Grammar {
         name: "cc".into(),
+        compat: vec![],
         modes: vec![
             Mode {
                 name: "link".into(),
@@ -1222,6 +1312,7 @@ fn cc() -> Grammar {
 fn cl() -> Grammar {
     Grammar {
         name: "cl".into(),
+        compat: vec![],
         modes: vec![
             Mode {
                 name: "link".into(),
@@ -1350,6 +1441,7 @@ fn cl() -> Grammar {
 fn ar() -> Grammar {
     Grammar {
         name: "ar".into(),
+        compat: vec![],
         modes: vec![],
         flags: vec![],
         env: vec![],
