@@ -11,7 +11,8 @@
 //! renders arbitrary zoo programs.)
 
 use facet::Facet;
-use vx_runtime::graph::{DemandGraph, NodeKind, example_bomb_pair};
+use vx_runtime::analyze::analyze_source;
+use vx_runtime::graph::{DemandGraph, NodeKind};
 
 /// A viewer-friendly projection of a node: `kind` as a plain string and a
 /// precomputed `reached` flag, so the page needs no knowledge of the Rust enum
@@ -54,10 +55,27 @@ fn view_nodes(g: &DemandGraph) -> Vec<ViewNode> {
 }
 
 fn main() {
-    let g = example_bomb_pair();
+    // `graph-viz <file.vx> <entry-fn>` analyses a real program; with no args it
+    // analyses a built-in sample. Either way the graph comes from the **real**
+    // front-end + VIR walk (analyze.rs), not a hand-built fixture.
+    let args: Vec<String> = std::env::args().collect();
+    let (g, title) = if args.len() >= 3 {
+        let src = std::fs::read_to_string(&args[1]).expect("read source file");
+        match analyze_source(&src, &args[2]) {
+            Ok(g) => (g, format!("{} :: {}", args[1], args[2])),
+            Err(e) => {
+                eprintln!("analysis failed: {e}");
+                std::process::exit(1);
+            }
+        }
+    } else {
+        let src = "fn demo() -> U64 ( (42, 💣)[0] )";
+        let g = analyze_source(src, "demo").expect("sample analyses");
+        (g, "demo() = (42, 💣)[0]  ·  real analysis".to_string())
+    };
     let nodes = view_nodes(&g);
     let json = facet_json::to_string(&nodes).expect("view nodes serialise");
-    print!("{}", render_html(&json, g.root.0, "(42, 💣); pair[0]"));
+    print!("{}", render_html(&json, g.root.0, &title));
 }
 
 fn render_html(nodes_json: &str, root: u32, title: &str) -> String {

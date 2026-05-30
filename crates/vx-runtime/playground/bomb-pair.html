@@ -2,7 +2,7 @@
 <html lang="en">
 <head>
 <meta charset="utf-8" />
-<title>vixen demand graph — (42, 💣); pair[0]</title>
+<title>vixen demand graph — demo() = (42, 💣)[0]  ·  real analysis</title>
 <script src="https://unpkg.com/cytoscape@3.30.2/dist/cytoscape.min.js"></script>
 <style>
   body { margin: 0; font: 14px ui-monospace, monospace; background: #11141a; color: #cdd3de; }
@@ -15,11 +15,11 @@
 </style>
 </head>
 <body>
-<header>vixen — the inside-out turn: <b>(42, 💣); pair[0]</b> &nbsp;·&nbsp; dim = unreached by demand (the road not taken)</header>
+<header>vixen — the inside-out turn: <b>demo() = (42, 💣)[0]  ·  real analysis</b> &nbsp;·&nbsp; dim = unreached by demand (the road not taken)</header>
 <div class="legend" id="legend"></div>
 <div id="cy"></div>
 <script>
-const NODES = [{"id":0,"label":"42","kind":"Const","reached":true,"inputs":[]},{"id":1,"label":"💣","kind":"Bomb","reached":false,"inputs":[]},{"id":2,"label":"(_, _)","kind":"LazyData","reached":true,"inputs":[0,1]},{"id":3,"label":"[0]","kind":"Project","reached":true,"inputs":[2]}];
+const NODES = [{"id":0,"label":"42","kind":"Const","reached":true,"inputs":[]},{"id":1,"label":"💣","kind":"Bomb","reached":false,"inputs":[]},{"id":2,"label":"(…)","kind":"LazyData","reached":true,"inputs":[0,1]},{"id":3,"label":"[0]","kind":"Project","reached":true,"inputs":[2]}];
 const ROOT = "3";
 const COLORS = {
   Const:"#9e9e9e", Param:"#42a5f5", Kernel:"#66bb6a", LazyData:"#ab47bc",

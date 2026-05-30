@@ -18,5 +18,8 @@ rustdoc-args = ["--html-in-header", "arborium-header.html"]
 [dependencies]
 facet = { workspace = true }
 facet-json = { workspace = true }
+vx-ir = { workspace = true }
+vx-parser = { workspace = true }
+vx-stdlib = { workspace = true }
 
 [dev-dependencies]

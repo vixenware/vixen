@@ -54,11 +54,23 @@ pub enum NodeKind {
     Unresolved,
 }
 
+/// A byte range in the source — `[start, end)`. Carried on every node so a
+/// future playground can light up the source region (via Arborium) when you click
+/// a node, and vice versa. The bidirectional source↔graph link.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Facet)]
+pub struct Span {
+    pub start: u32,
+    pub end: u32,
+}
+
 /// A node in the demand graph.
 #[derive(Debug, Clone, Facet)]
 pub struct Node {
     pub id: NodeId,
     pub kind: NodeKind,
+    /// The source range this node came from, if known (the analysis fills this;
+    /// hand-built example nodes leave it `None`).
+    pub span: Option<Span>,
     /// A short, human/LLM-readable label for rendering: `"42"`, `"+"`, `"Pair"`,
     /// `".a"`, `"exec"`, `"💣"`, `"import cc"`.
     pub label: String,
@@ -129,6 +141,7 @@ pub fn example_bomb_pair() -> DemandGraph {
             Node {
                 id: NodeId(0),
                 kind: NodeKind::Const,
+                span: None,
                 label: "42".to_string(),
                 ty: "U64".to_string(),
                 inputs: vec![],
@@ -136,6 +149,7 @@ pub fn example_bomb_pair() -> DemandGraph {
             Node {
                 id: NodeId(1),
                 kind: NodeKind::Bomb,
+                span: None,
                 label: "💣".to_string(),
                 ty: "⊥".to_string(),
                 inputs: vec![],
@@ -143,6 +157,7 @@ pub fn example_bomb_pair() -> DemandGraph {
             Node {
                 id: NodeId(2),
                 kind: NodeKind::LazyData,
+                span: None,
                 label: "(_, _)".to_string(),
                 ty: "(U64, ⊥)".to_string(),
                 inputs: vec![NodeId(0), NodeId(1)],
@@ -150,6 +165,7 @@ pub fn example_bomb_pair() -> DemandGraph {
             Node {
                 id: NodeId(3),
                 kind: NodeKind::Project { index: 0 },
+                span: None,
                 label: "[0]".to_string(),
                 ty: "U64".to_string(),
                 inputs: vec![NodeId(2)],
