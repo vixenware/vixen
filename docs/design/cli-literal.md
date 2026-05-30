@@ -32,11 +32,9 @@ let { cc } = import "@vixen/grammar-cc"
 let obj = @cc[ -c -O2 -I src main.c -o $out ]
 ```
 
-- **Sigil.** `@` and `~` are both free (paths are now provenance-carrying
-  strings, so `@` is no longer a path sigil). A sigil is *required* because
-  `cc[…]` already means array indexing (`cc[0]`); `@cc[…]` cannot. Open: `@`
-  vs `~` vs a doubled delimiter that needs no sigil (`cc[[ … ]]`) — see
-  [Open questions](#open-questions).
+- **Sigil: `@`.** A sigil is *required* because `cc[…]` already means array
+  indexing (`cc[0]`); `@cc[…]` cannot. `@` is free now that paths are
+  provenance-carrying strings rather than `@`-literals.
 - **Grammar name.** `cc` is an ordinary identifier that must resolve to a
   `Grammar` **imported from a package** (`@vixen/grammar-cc`). It names the
   grammar *and* (via the grammar) the program to run. You cannot target a
@@ -56,13 +54,14 @@ words until the matching `]`, with three exceptions:
   spaces, just like a shell. The quotes are part of the lexical grouping, not
   the value.
 - **`$ident` interpolation** — `-o $out` — splices the Vixen value bound to
-  `out`. Deliberately shell-shaped: `$name` reads as "the variable" to anyone
-  who has used a shell.
-- **`{ expr }` interpolation** — `-I {workspace.join("inc")}` — splices an
-  arbitrary Vixen expression where a bare `$ident` is not enough.
+  `out`. Shell-shaped on purpose, and `$` needs no escaping in ordinary command
+  text, so the body stays clean.
+- **`${ expr }` interpolation** — `-I ${workspace.join("inc")}` — the long form,
+  for an arbitrary Vixen expression where a bare `$ident` won't do. Exactly
+  Bash's `$name` / `${…}` split.
 
-Everything else is a literal command token. (Escaping rules for `$`, `]`, and
-quotes inside the body are an open detail.)
+Everything else is a literal command token. A backslash escapes the few special
+characters in the body — `\$`, `\]`, `\"`.
 
 ## The grammar is the type
 
@@ -82,10 +81,10 @@ type* of the spliced Vixen expression:
 
 | Position | Grammar says | Hole must be |
 | --- | --- | --- |
-| `-I {x}` | `ValueDomain.Path { dir: true }`, `Kind::Input` | a directory path (or list of them) |
-| `-o {out}` | `ValueDomain.Path { dir: false }`, `Kind::Output` | a single output path |
-| `-std={v}` | `ValueDomain.OneOf { … }` | one of the allowed strings |
-| trailing `{src}` | positional `source`, `Kind::Input` | a source path (or list) |
+| `-I $x` | `ValueDomain.Path { dir: true }`, `Kind::Input` | a directory path (or list of them) |
+| `-o $out` | `ValueDomain.Path { dir: false }`, `Kind::Output` | a single output path |
+| `-std=$v` | `ValueDomain.OneOf { … }` | one of the allowed strings |
+| trailing `$src` | positional `source`, `Kind::Input` | a source path (or list) |
 
 A hole whose Vixen expression doesn't match its position's domain is a type
 error — `@cc[ -o $dir ]` where `dir: Dir` fails because `-o` wants a file. This
@@ -158,18 +157,23 @@ product surface on its own.)
 - **F#/Scala type providers** — types materialized from an external schema,
   checked statically.
 
-## Open questions
+## Decisions
 
-1. **Sigil.** `@cc[ … ]` vs `~cc[ … ]` vs a doubled delimiter (`cc[[ … ]]`) that
-   needs no sigil because `[[` can't be indexing. Leaning `@` (free, short), but
-   not locked.
-2. **Hole syntax.** `$ident` for the common case (shell feel, which we want) and
-   `{ expr }` for arbitrary expressions — confirm we want both, and settle
-   `${ … }` vs `{ … }` for the general form.
-3. **Splatting.** A hole bound to `Array[Path]` in an `-I`/positional position
-   should expand to multiple tokens (`-I a -I b …`). Define how repetition vs a
-   single multi-valued token is expressed, driven by the flag's `Policy`.
-4. **Escaping.** How to write a literal `$`, `]`, or quote inside the body.
-5. **Program vs grammar name.** When the program binary differs from the grammar
-   (cross-compilers, wrappers), how the literal names the program — a grammar
-   field, or a form like `@cc as "aarch64-linux-gnu-gcc"[ … ]`.
+1. **Sigil: `@`.** (See [Syntax](#syntax).)
+2. **Hole syntax: Bash-style.** `$ident` short form, `${ expr }` long form. `$`
+   was chosen partly because it needs no escaping in ordinary command text, and
+   the short/long split mirrors a shell exactly.
+3. **Splatting is the `Policy`.** An `Array`-valued hole at a repeatable
+   position expands to repeated tokens (`-I a -I b`); a `Once` position takes a
+   single value; a `KeyedLastWins` position takes keyed pairs. The same `Policy`
+   that governs canonicalization governs expansion — no new concept. An array at
+   a non-repeatable position is a type error.
+4. **Escaping: backslash.** `\$`, `\]`, `\"` in the body; everything else is
+   literal command text.
+5. **Program override.** When the binary differs from the grammar
+   (cross-compilers, wrappers, an absolute path), two forms are on the table:
+   an inline colon override — `@cc:${gcc_path}[ … ]` — and an `exec` keyword
+   argument that overrides the program the grammar implies. The kwarg is the
+   general mechanism (it lets you hand `exec` an absolute path); the colon form
+   is inline shorthand. The remaining detail is which of the two we ship (likely
+   both, with the kwarg as the primitive).
