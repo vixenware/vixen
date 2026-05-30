@@ -26,6 +26,7 @@ syntax_kinds!(
     LINE_COMMENT,
     BLOCK_COMMENT,
     DOC_COMMENT,
+    FRONTMATTER,
     ERROR_TOKEN,
     LOWER_IDENT,
     UPPER_IDENT,

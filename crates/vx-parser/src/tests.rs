@@ -1090,3 +1090,34 @@ fn demo() {
     assert!(kinds.contains(&SyntaxKind::STRUCT_LITERAL_EXPR));
     assert!(!kinds.contains(&SyntaxKind::CALL_EXPR));
 }
+
+#[test]
+fn frontmatter_is_parsed_and_readable() {
+    let src =
+        "```styx\nid @vixen/grammar-cc\nversion 0.1.0\n```\n\nlet ld = Grammar { name: \"ld\" }\n";
+    let parsed = parse_source_file(src);
+    assert_eq!(parsed.errors(), []);
+    let fm = parsed.tree().frontmatter().expect("frontmatter present");
+    assert_eq!(fm.lang(), "styx");
+    assert_eq!(fm.content(), "id @vixen/grammar-cc\nversion 0.1.0");
+    assert!(
+        parsed.tree().statements().count() >= 1,
+        "the binding after frontmatter still parses"
+    );
+}
+
+#[test]
+fn import_parens_are_optional() {
+    // `import` is a builtin function: its string applies by juxtaposition, with
+    // parens optional. Both forms parse cleanly.
+    assert_eq!(parse("let a = import \"vixen:x\"\n").errors(), []);
+    assert_eq!(parse("let b = import(\"vixen:x\")\n").errors(), []);
+}
+
+#[test]
+fn let_destructures_uppercase_type_exports() {
+    assert_eq!(
+        parse("let { Grammar, Flag } = import \"vixen:cg\"\n").errors(),
+        []
+    );
+}

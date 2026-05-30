@@ -36,6 +36,7 @@ impl<'a> Lexer<'a> {
     }
 
     fn lex(mut self) -> Vec<Token> {
+        self.frontmatter();
         while !self.is_eof() {
             let start = self.pos;
             let kind = match self.modes.last().copied() {
@@ -55,6 +56,29 @@ impl<'a> Lexer<'a> {
             });
         }
         self.tokens
+    }
+
+    // r[lex.frontmatter] — a leading ```lang … ``` fence at the very top of the
+    // file is package frontmatter: one trivia token spanning open fence to close.
+    fn frontmatter(&mut self) {
+        if self.pos != 0 || !self.source.starts_with("```") {
+            return;
+        }
+        let Some(open_line) = self.source.find('\n') else {
+            return;
+        };
+        let Some(rel) = self.source[open_line + 1..].find("```") else {
+            return;
+        };
+        let close = open_line + 1 + rel + 3;
+        let end = self.source[close..]
+            .find('\n')
+            .map_or(self.source.len(), |n| close + n + 1);
+        self.tokens.push(Token {
+            kind: SyntaxKind::FRONTMATTER,
+            range: range(0, end),
+        });
+        self.pos = end;
     }
 
     fn normal_token(&mut self) -> Option<SyntaxKind> {

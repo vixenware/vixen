@@ -590,6 +590,45 @@ impl SourceFile {
     pub fn items(&self) -> AstChildren<Item> {
         AstChildren::new(self.syntax())
     }
+
+    /// The leading frontmatter fence, if present. Its content is foreign (e.g.
+    /// styx) — the parser keeps it opaque; the consumer reads `lang()`/`content()`
+    /// and parses accordingly.
+    pub fn frontmatter(&self) -> Option<Frontmatter> {
+        first_token(self.syntax(), |kind| kind == SyntaxKind::FRONTMATTER)
+            .map(|token| Frontmatter { token })
+    }
+}
+
+/// A `.vx` file's leading frontmatter fence (```` ```lang … ``` ````): a language
+/// tag and an opaque content blob the runtime parses (package id, version, …).
+#[derive(Debug, Clone)]
+pub struct Frontmatter {
+    token: SyntaxToken,
+}
+
+impl Frontmatter {
+    /// The language tag right after the opening fence (e.g. `"styx"`).
+    pub fn lang(&self) -> &str {
+        let text = self.token.text();
+        let after = text.strip_prefix("```").unwrap_or(text);
+        let line_end = after.find('\n').unwrap_or(after.len());
+        after[..line_end].trim()
+    }
+
+    /// The fenced body, between the opening-fence line and the closing fence.
+    pub fn content(&self) -> &str {
+        let text = self.token.text();
+        let start = text.find('\n').map_or(text.len(), |n| n + 1);
+        let body = &text[start..];
+        let end = body.rfind("```").unwrap_or(body.len());
+        body[..end].trim_matches('\n')
+    }
+
+    /// The raw fence text, fences included.
+    pub fn text(&self) -> &str {
+        self.token.text()
+    }
 }
 
 impl Item {

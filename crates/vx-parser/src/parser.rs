@@ -335,6 +335,11 @@ impl<'a> Sink<'a> {
 // r[decl.scope]
 fn source_file(p: &mut Parser<'_>) {
     let marker = p.start();
+    // Leading frontmatter (a ```lang … ``` fence) is a single opaque token,
+    // kept as a child of the source file so the runtime can read it back via
+    // `SourceFile::frontmatter()`. Its content is foreign (e.g. styx), parsed by
+    // the consumer, not here.
+    p.eat(SyntaxKind::FRONTMATTER);
     while p.current() != SyntaxKind::EOF {
         stmt(p);
         p.eat(SyntaxKind::SEMICOLON);
@@ -899,7 +904,9 @@ fn struct_pattern(p: &mut Parser<'_>) -> CompletedMarker {
     p.expect(SyntaxKind::L_CURLY);
     while !p.at(SyntaxKind::R_CURLY) && !p.at(SyntaxKind::EOF) {
         let field = p.start();
-        if p.at(SyntaxKind::LOWER_IDENT) {
+        // Lower-ident binds a value export; upper-ident binds a type export
+        // (e.g. `let { Grammar, Flag } = import "…"`).
+        if p.at(SyntaxKind::LOWER_IDENT) || p.at(SyntaxKind::UPPER_IDENT) {
             p.bump();
             if p.eat(SyntaxKind::COLON) {
                 binding_pattern(p);
@@ -1876,17 +1883,20 @@ fn general_array_pattern(p: &mut Parser<'_>) -> CompletedMarker {
     marker.complete(p, SyntaxKind::ARRAY_PATTERN)
 }
 
-// r[expr.import]
+// r[expr.import] — `import` is a builtin function: its string argument is
+// applied by juxtaposition (`import "x"`), with parens optional (`import("x")`).
 fn import_expr(p: &mut Parser<'_>) -> CompletedMarker {
     let marker = p.start();
     p.expect(SyntaxKind::IMPORT_KW);
-    p.expect(SyntaxKind::L_PAREN);
+    let parens = p.eat(SyntaxKind::L_PAREN);
     if p.at(SyntaxKind::STRING) {
         p.bump();
     } else {
         p.diagnose_at(ExpectedKind::StringLiteral);
     }
-    p.expect(SyntaxKind::R_PAREN);
+    if parens {
+        p.expect(SyntaxKind::R_PAREN);
+    }
     marker.complete(p, SyntaxKind::IMPORT_EXPR)
 }
 
