@@ -1125,3 +1125,156 @@ pub const AR: Grammar = Grammar {
         },
     ],
 };
+
+/// A human-readable breakdown of a command — one item per token, each explaining
+/// what it is and the part it plays. The basis for "explain this command" and
+/// LSP hover.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Explanation {
+    pub program: String,
+    pub items: Vec<ExplainItem>,
+}
+
+/// One explained token of a command.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ExplainItem {
+    pub span: Span,
+    pub spelling: String,
+    pub summary: String,
+}
+
+impl fmt::Display for Explanation {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        writeln!(f, "{}", self.program)?;
+        for item in &self.items {
+            writeln!(f, "  {:<16} {}", item.spelling, item.summary)?;
+        }
+        Ok(())
+    }
+}
+
+/// A short human description of a value-slot's role.
+fn describe_kind(kind: Kind) -> &'static str {
+    match kind {
+        Kind::Str => "literal",
+        Kind::PathIn { dir: true } => "input directory",
+        Kind::PathIn { dir: false } => "input file",
+        Kind::PathOut => "output path",
+        Kind::Include => "header search directory",
+        Kind::LibSearchDir => "library search directory",
+        Kind::Lib => "library to link",
+        Kind::Define => "preprocessor define",
+    }
+}
+
+/// Explain a command: parse it and describe every token by the part it plays.
+/// Flags are described from their role-kind; positionals from their schema slot
+/// (name + doc). When flags gain `doc`, that takes precedence here.
+pub fn explain(grammar: &Grammar, argv: &[String]) -> Explanation {
+    let parsed = parse_command(grammar, argv);
+    let items = parsed
+        .args
+        .iter()
+        .map(|arg| {
+            let summary = match &arg.role {
+                ArgRole::Flag {
+                    canonical,
+                    value,
+                    kind,
+                } => match value {
+                    Some(v) => format!("{canonical}: {} = {v}", describe_kind(*kind)),
+                    None => format!("{canonical}: {}", describe_kind(*kind)),
+                },
+                ArgRole::Positional { name, kind, value } => {
+                    let doc = grammar
+                        .positionals
+                        .iter()
+                        .find(|p| p.name == name.as_str())
+                        .map(|p| p.doc)
+                        .unwrap_or("");
+                    format!("{value}: {name} — {doc} ({})", describe_kind(*kind))
+                }
+                ArgRole::Unknown => {
+                    "unrecognized — impure (not understood by the grammar)".to_string()
+                }
+            };
+            ExplainItem {
+                span: arg.span,
+                spelling: arg.spelling.clone(),
+                summary,
+            }
+        })
+        .collect();
+    Explanation {
+        program: parsed.program,
+        items,
+    }
+}
+
+/// A flag-by-flag correspondence between two grammars, for [`translate`]. (Real
+/// correspondences will be derived from grammar-level semantic keys; this is the
+/// explicit form.)
+pub struct Correspondence {
+    /// `(from canonical, to canonical)` flag equivalences.
+    pub flags: &'static [(&'static str, &'static str)],
+}
+
+/// A token that could not be translated to the target grammar.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Untranslatable {
+    pub token: String,
+}
+
+/// Translate a command from one tool's grammar to another's, re-emitting each
+/// flag with the *target's* spelling — gcc `-I inc` becomes MSVC `/Iinc`, etc.
+/// Positionals pass through; anything without a correspondence is an error.
+pub fn translate(
+    from: &Grammar,
+    argv: &[String],
+    to: &Grammar,
+    corr: &Correspondence,
+) -> Result<Vec<String>, Vec<Untranslatable>> {
+    let parsed = parse_command(from, argv);
+    let mut out = Vec::new();
+    let mut errors = Vec::new();
+    for arg in &parsed.args {
+        match &arg.role {
+            ArgRole::Flag {
+                canonical, value, ..
+            } => {
+                let to_flag = corr
+                    .flags
+                    .iter()
+                    .find(|(f, _)| *f == canonical.as_str())
+                    .and_then(|(_, t)| to.flags.iter().find(|f| f.canonical == *t));
+                match to_flag {
+                    Some(flag) => out.extend(emit(flag, value.as_deref())),
+                    None => errors.push(Untranslatable {
+                        token: arg.spelling.clone(),
+                    }),
+                }
+            }
+            ArgRole::Positional { value, .. } => out.push(value.clone()),
+            ArgRole::Unknown => errors.push(Untranslatable {
+                token: arg.spelling.clone(),
+            }),
+        }
+    }
+    if errors.is_empty() {
+        Ok(out)
+    } else {
+        Err(errors)
+    }
+}
+
+/// A first-cut gcc/clang → MSVC correspondence for the `CC` → `CL` demo.
+pub const CC_TO_CL: Correspondence = Correspondence {
+    flags: &[
+        ("-c", "/c"),
+        ("-O", "/O"),
+        ("-D", "/D"),
+        ("-I", "/I"),
+        ("-std", "/std"),
+        ("-o", "/Fo"),
+    ],
+};
