@@ -511,7 +511,7 @@ name = "command-grammar-vx"
 version = "0.1.0"
 dependencies = [
  "command-model",
- "vx-parser 0.1.0 (git+ssh://git@code.vixen.rs/vixen/vixen.git?rev=c8df65afc64f03f8ed67376933927600dd572d36)",
+ "vx-parser 0.1.0 (git+ssh://git@code.vixen.rs/vixen/vixen.git?rev=007f1aa5906f1470906a598f6de5c5a52a426fd5)",
 ]
 
 [[package]]
@@ -2108,7 +2108,7 @@ dependencies = [
 [[package]]
 name = "margin"
 version = "0.1.0"
-source = "git+ssh://git@code.vixen.rs/vixen/vixen.git?rev=c8df65afc64f03f8ed67376933927600dd572d36#c8df65afc64f03f8ed67376933927600dd572d36"
+source = "git+ssh://git@code.vixen.rs/vixen/vixen.git?rev=007f1aa5906f1470906a598f6de5c5a52a426fd5#007f1aa5906f1470906a598f6de5c5a52a426fd5"
 dependencies = [
  "facet",
  "unicode-width",
@@ -3973,9 +3973,9 @@ dependencies = [
 [[package]]
 name = "vx-parser"
 version = "0.1.0"
-source = "git+ssh://git@code.vixen.rs/vixen/vixen.git?rev=c8df65afc64f03f8ed67376933927600dd572d36#c8df65afc64f03f8ed67376933927600dd572d36"
+source = "git+ssh://git@code.vixen.rs/vixen/vixen.git?rev=007f1aa5906f1470906a598f6de5c5a52a426fd5#007f1aa5906f1470906a598f6de5c5a52a426fd5"
 dependencies = [
- "margin 0.1.0 (git+ssh://git@code.vixen.rs/vixen/vixen.git?rev=c8df65afc64f03f8ed67376933927600dd572d36)",
+ "margin 0.1.0 (git+ssh://git@code.vixen.rs/vixen/vixen.git?rev=007f1aa5906f1470906a598f6de5c5a52a426fd5)",
  "rowan",
 ]
 

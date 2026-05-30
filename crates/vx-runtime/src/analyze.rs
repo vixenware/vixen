@@ -19,7 +19,7 @@ use std::collections::HashMap;
 
 use vx_ir::build::{VirBuilder, VirProgram};
 use vx_ir::compile::inject_implicit_stdlib_imports;
-use vx_ir::expr::{ArrayElement, ExprKind, FieldKey, LitKind};
+use vx_ir::expr::{ArrayElement, ExprKind, FieldKey, LitKind, StringPart};
 use vx_ir::ids::{BindingId, BodyId, ExprId, PatternId, StmtId};
 use vx_ir::item::ItemKind;
 use vx_ir::pattern::PatternKind;
@@ -313,6 +313,58 @@ impl Builder<'_> {
                 self.emit(NodeKind::Fail, "fail".into(), span, inputs)
             }
 
+            // `exec [...] where { observer, mounts, ... }` — the build boundary.
+            // References the underlying call and the keyword-config record.
+            ExprKind::Where(w) => {
+                let (callee, keywords) = (w.callee, w.keywords);
+                let c = self.walk(callee);
+                let k = self.walk(keywords);
+                self.emit(NodeKind::Boundary, "where".into(), span, vec![c, k])
+            }
+
+            // A closure (observer / probe): a shipped kernel. Inline its body's
+            // subgraph — captures resolve through the shared binding map, and its
+            // own params are bound first. You see the observer's demand graph.
+            ExprKind::Closure(cl) => {
+                let body = cl.body;
+                let cparams: Vec<PatternId> =
+                    prog.arena[body].params.iter().map(|p| p.pattern).collect();
+                for p in cparams {
+                    self.bind_param(p);
+                }
+                let croot = prog.arena[body].root_expr;
+                let child = self.walk(croot);
+                self.emit(NodeKind::Kernel, "(…)=>".into(), span, vec![child])
+            }
+
+            // An interpolated string is a kernel over its embedded expressions.
+            ExprKind::InterpolatedString(s) => {
+                let exprs: Vec<ExprId> = s
+                    .parts
+                    .iter()
+                    .filter_map(|p| match p {
+                        StringPart::Expr(x) => Some(*x),
+                        StringPart::Text(_) => None,
+                    })
+                    .collect();
+                let inputs = exprs.into_iter().map(|x| self.walk(x)).collect();
+                self.emit(NodeKind::Kernel, "`…`".into(), span, inputs)
+            }
+
+            // Bare invocation `f!` — a no-arg call.
+            ExprKind::Invoke(iv) => {
+                let name = match &prog.arena[iv.callee].kind {
+                    ExprKind::NameRef(n) => n.name.clone(),
+                    _ => "invoke".to_string(),
+                };
+                let kind = if BOUNDARY_CALLS.contains(&name.as_str()) {
+                    NodeKind::Boundary
+                } else {
+                    NodeKind::Kernel
+                };
+                self.emit(kind, format!("{name}!"), span, vec![])
+            }
+
             // A block: bind its `let`s (linking names to value subgraphs), value is
             // the tail.
             ExprKind::Block(bl) => {
@@ -393,13 +445,14 @@ fn to_span(range: vx_parser::TextRange) -> Span {
 fn expr_kind_name(k: &ExprKind) -> &'static str {
     match k {
         ExprKind::Map(_) => "%{map}",
-        ExprKind::Where(_) => "where",
         ExprKind::Match(_) => "match",
-        ExprKind::Closure(_) => "closure",
         ExprKind::With(_) => "with",
-        ExprKind::TypeOp(_) => "typeop",
-        ExprKind::Fallible(_) => "?",
-        ExprKind::InterpolatedString(_) => "`…`",
+        ExprKind::TypeOp(_) => "as/is",
+        ExprKind::Fallible(_) => "?suffix",
+        ExprKind::Range(_) => "range",
+        ExprKind::PartialApp(_) => "partial",
+        ExprKind::Import(_) => "import",
+        ExprKind::PathLiteral(_) => "path",
         _ => "?",
     }
 }
