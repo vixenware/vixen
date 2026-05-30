@@ -642,6 +642,8 @@ pub struct CliLiteralExpr {
 /// that resolves and type-checks like any other).
 #[derive(Debug, Clone)]
 pub struct CliArgIr {
+    /// Span of the whole argument, for diagnostics (e.g. an unknown flag).
+    pub span: SourceSpan,
     pub pieces: Vec<StringPart>,
 }
 

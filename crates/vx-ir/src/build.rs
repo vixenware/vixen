@@ -2432,6 +2432,7 @@ impl VirBuilder {
     /// become text; a `$name` hole becomes a NameRef, a `${expr}` hole the
     /// expression — both real sub-expressions that resolve + type-check.
     fn build_cli_arg(&mut self, arg: &vx_parser::CliArg) -> crate::expr::CliArgIr {
+        let arg_span = self.span(arg.syntax());
         let mut pieces = Vec::new();
         for child in arg.syntax().children_with_tokens() {
             if let Some(tok) = child.as_token() {
@@ -2465,7 +2466,10 @@ impl VirBuilder {
                 pieces.push(StringPart::Expr(self.build_expr(&inner)));
             }
         }
-        crate::expr::CliArgIr { pieces }
+        crate::expr::CliArgIr {
+            span: arg_span,
+            pieces,
+        }
     }
 
     fn build_path_literal_expr(&mut self, pl: &vx_parser::PathLiteralExpr) -> ExprId {

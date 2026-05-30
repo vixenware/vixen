@@ -3964,6 +3964,8 @@ dependencies = [
 name = "vx-ir"
 version = "0.1.0"
 dependencies = [
+ "command-grammar-vx",
+ "command-model",
  "margin",
  "rowan",
  "vx-package",

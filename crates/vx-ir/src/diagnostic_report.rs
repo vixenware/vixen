@@ -195,6 +195,49 @@ impl IrDiagnostic {
                 notes: Vec::new(),
                 sections: Vec::new(),
             },
+
+            IrDiagnostic::Cli { span, kind } => {
+                use crate::diagnostic::CliDiagnosticKind as K;
+                let (title, message, notes) = match kind {
+                    K::UnknownGrammar { name } => (
+                        "unknown grammar".to_string(),
+                        format!("`{name}` is not an imported grammar"),
+                        vec![Note {
+                            kind: NoteKind::Help,
+                            text: format!("import a grammar package that exports `{name}`"),
+                        }],
+                    ),
+                    K::UnknownFlag { token } => (
+                        "unknown flag".to_string(),
+                        format!("`{token}` is not defined by this grammar"),
+                        Vec::new(),
+                    ),
+                    K::IllegalInMode { flag, mode } => (
+                        "flag illegal in mode".to_string(),
+                        format!("`{flag}` is not allowed in mode `{mode}`"),
+                        Vec::new(),
+                    ),
+                    K::ValueNotAllowed {
+                        flag,
+                        value,
+                        allowed,
+                    } => (
+                        "value not allowed".to_string(),
+                        format!("`{value}` is not a valid value for `{flag}`"),
+                        vec![Note {
+                            kind: NoteKind::Help,
+                            text: format!("allowed values: {}", allowed.join(", ")),
+                        }],
+                    ),
+                };
+                Report {
+                    severity: Severity::Error,
+                    title,
+                    annotations: vec![primary(*span, Some(message))],
+                    notes,
+                    sections: Vec::new(),
+                }
+            }
         }
     }
 }

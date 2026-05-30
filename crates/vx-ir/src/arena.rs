@@ -50,6 +50,11 @@ pub struct VirArena {
     /// closure is built; read by name resolution + type checking to resolve
     /// `import` expressions and cross-module references.
     pub imports: std::collections::HashMap<String, SourceUnitId>,
+    /// Grammar sets loaded from imported grammar packages, keyed by import spec.
+    /// Populated by the compile driver (it has the package sources + resolver);
+    /// read by CLI-literal type checking to validate `@grammar[ … ]` against the
+    /// grammar the name resolves to.
+    pub grammars: std::collections::HashMap<String, command_model::GrammarSet>,
 }
 
 impl VirArena {
@@ -66,6 +71,7 @@ impl VirArena {
             type_refs: Vec::new(),
             source_units: Vec::new(),
             imports: std::collections::HashMap::new(),
+            grammars: std::collections::HashMap::new(),
         }
     }
 

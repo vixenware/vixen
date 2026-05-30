@@ -112,6 +112,37 @@ pub enum IrDiagnostic {
         /// The capability name token in source.
         name: SourceSpan,
     },
+
+    // -----------------------------------------------------------------
+    // CLI-literal grammar check (`@grammar[ … ]`)
+    // -----------------------------------------------------------------
+    /// A CLI literal failed validation against its tool grammar. The span
+    /// points at the offending source (the grammar name, or the bad argument);
+    /// `kind` carries the grammar-domain detail.
+    Cli {
+        span: SourceSpan,
+        kind: CliDiagnosticKind,
+    },
+}
+
+/// What a [`IrDiagnostic::Cli`] found wrong checking `@grammar[ … ]` against its
+/// grammar. The strings are grammar-domain data (flag names, values, modes),
+/// not source identifiers — the source location is carried by the diagnostic's
+/// span.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum CliDiagnosticKind {
+    /// `@name[ … ]` where `name` resolves to no imported grammar in scope.
+    UnknownGrammar { name: String },
+    /// A `-`-leading argument the grammar does not define.
+    UnknownFlag { token: String },
+    /// A flag used in a mode it is not legal in.
+    IllegalInMode { flag: String, mode: String },
+    /// A static value outside the flag's fixed value set.
+    ValueNotAllowed {
+        flag: String,
+        value: String,
+        allowed: Vec<String>,
+    },
 }
 
 /// A method candidate surfaced as part of a [`IrDiagnostic::NoSuchMethod`]
@@ -137,6 +168,7 @@ impl IrDiagnostic {
             IrDiagnostic::UnusedExprStatement { expr } => *expr,
             IrDiagnostic::CapabilityViolation { closure, .. } => *closure,
             IrDiagnostic::UnknownCapability { name } => *name,
+            IrDiagnostic::Cli { span, .. } => *span,
         }
     }
 
@@ -184,6 +216,7 @@ impl IrDiagnostic {
                 span: *slot,
                 kind: RelatedKind::SlotDeclaration,
             }],
+            IrDiagnostic::Cli { .. } => Vec::new(),
         }
     }
 }

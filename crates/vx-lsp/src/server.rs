@@ -1901,6 +1901,27 @@ fn format_ir_diagnostic(
             format!("unknown capability `#{}`", state.text_at(*name)),
             "vx-cap",
         ),
+        IrDiagnostic::Cli { kind, .. } => {
+            use vx_ir::CliDiagnosticKind as K;
+            let msg = match kind {
+                K::UnknownGrammar { name } => format!("`{name}` is not an imported grammar"),
+                K::UnknownFlag { token } => {
+                    format!("`{token}` is not defined by this grammar")
+                }
+                K::IllegalInMode { flag, mode } => {
+                    format!("`{flag}` is not allowed in mode `{mode}`")
+                }
+                K::ValueNotAllowed {
+                    flag,
+                    value,
+                    allowed,
+                } => format!(
+                    "`{value}` is not a valid value for `{flag}` (allowed: {})",
+                    allowed.join(", ")
+                ),
+            };
+            (msg, "vx-cli")
+        }
     }
 }
 

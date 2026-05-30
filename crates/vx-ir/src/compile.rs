@@ -223,6 +223,15 @@ pub fn compile_source_observed_with_resolver(
         }
     }
 
+    // Load any grammar packages into GrammarSets (keyed by import spec) so the
+    // CLI-literal check can validate `@grammar[ … ]` against them. A package
+    // that defines no grammars yields an empty set — harmless.
+    for pkg in &closure.packages {
+        if let Ok(set) = command_grammar_vx::load_str(&pkg.main) {
+            program.arena.grammars.insert(pkg.id.clone(), set);
+        }
+    }
+
     // The prelude is ambient in every non-stdlib unit (user module + packages);
     // package exports are import-scoped, not injected.
     let stdlib_su_ids: Vec<SourceUnitId> = stdlib_ids
@@ -355,39 +364,101 @@ fn probe() #discover -> String (
         program
     }
 
-    const SOURCE_CLI_LITERAL: &str = r#"
-fn probe() -> String (
-  let out = "x.o";
-  let cmd = @cc[ -c main.c -o $out ];
-  out
-)
-"#;
+    /// A resolver that serves the bundled `vixen:*` modules plus the real
+    /// on-disk `@vixen/*` packages under the repo's `packages/` directory.
+    fn packages_resolver() -> vx_package::CompositeResolver {
+        let root = concat!(env!("CARGO_MANIFEST_DIR"), "/../../packages");
+        vx_package::CompositeResolver::new(root)
+    }
+
+    /// Build a user module that imports the cc grammar and uses `body` (a CLI
+    /// literal source) inside `probe`. `out` is in scope for `$out` holes.
+    fn cc_user_module(body: &str) -> String {
+        format!(
+            "fn probe() -> Bool (\n  let {{ cc }} = import \"@vixen/grammar-cc\";\n  let out = \"a.out\";\n  let _cmd = {body};\n  true\n)\n"
+        )
+    }
+
+    fn cli_diags(tc_errors: &[String]) -> Vec<&String> {
+        tc_errors.iter().filter(|e| e.starts_with("Cli ")).collect()
+    }
 
     #[test]
-    fn cli_literal_builds_resolves_and_type_checks() {
-        // Phase A: the @cc[…] literal is a real IR expression whose holes ($out)
-        // resolve and type-check like any sub-expression. (The grammar check is a
-        // later phase; the literal's own type is poison for now.)
-        let mut program = semantically_analyze(SOURCE_CLI_LITERAL);
-        let mut types = collect_types_vir(&mut program.arena);
-        let resolve_errors = resolve_names(&mut program.arena);
+    fn cli_literal_valid_command_checks_clean() {
+        // A well-formed `@cc[…]` against the imported cc grammar: `-c` enters
+        // compile mode, `main.c` is the source positional, `-o $out` writes the
+        // output (the hole is a real, checked sub-expression). No diagnostics.
+        let source = cc_user_module("@cc[ -c main.c -o $out ]");
+        let (program, resolve_errors, tc_errors) = front_end(&source, &packages_resolver());
         assert!(
             resolve_errors.is_empty(),
-            "the literal's holes should resolve, got {resolve_errors:?}"
+            "should resolve (incl. the $out hole), got {resolve_errors:#?}"
         );
-        let tc_result = type_check_vir(&mut program.arena, &mut types);
         assert!(
-            tc_result.errors.is_empty(),
-            "the literal + holes should type-check, got {:?}",
-            tc_result.errors
+            tc_errors.is_empty(),
+            "a valid command should check clean, got {tc_errors:#?}"
         );
-
-        // The literal lowered to a real CliLiteral node with its grammar name.
         let found =
             program.arena.exprs.iter().any(
                 |e| matches!(&e.kind, crate::expr::ExprKind::CliLiteral(c) if c.grammar == "cc"),
             );
         assert!(found, "expected a CliLiteral IR node for grammar `cc`");
+    }
+
+    #[test]
+    fn cli_literal_reports_unknown_flag() {
+        // `-Q` matches no flag in the cc grammar.
+        let source = cc_user_module("@cc[ -Q ]");
+        let (_program, _resolve, tc_errors) = front_end(&source, &packages_resolver());
+        let diags = cli_diags(&tc_errors);
+        assert!(
+            diags
+                .iter()
+                .any(|d| d.contains("UnknownFlag") && d.contains("-Q")),
+            "expected an UnknownFlag diagnostic for -Q, got {tc_errors:#?}"
+        );
+    }
+
+    #[test]
+    fn cli_literal_reports_value_not_allowed() {
+        // `-std` is `OneOf {c99, c11, c17, c23}`; `cpp` is not a member.
+        let source = cc_user_module("@cc[ -std=cpp ]");
+        let (_program, _resolve, tc_errors) = front_end(&source, &packages_resolver());
+        let diags = cli_diags(&tc_errors);
+        assert!(
+            diags
+                .iter()
+                .any(|d| d.contains("ValueNotAllowed") && d.contains("cpp")),
+            "expected a ValueNotAllowed diagnostic for -std=cpp, got {tc_errors:#?}"
+        );
+    }
+
+    #[test]
+    fn cli_literal_reports_illegal_in_mode() {
+        // `-c` selects compile mode; `-shared` is legal only in link mode.
+        let source = cc_user_module("@cc[ -c -shared ]");
+        let (_program, _resolve, tc_errors) = front_end(&source, &packages_resolver());
+        let diags = cli_diags(&tc_errors);
+        assert!(
+            diags
+                .iter()
+                .any(|d| d.contains("IllegalInMode") && d.contains("-shared")),
+            "expected an IllegalInMode diagnostic for -shared, got {tc_errors:#?}"
+        );
+    }
+
+    #[test]
+    fn cli_literal_unknown_grammar_is_an_error() {
+        // `@nope[…]` with no grammar named `nope` in scope is a hard error.
+        let source = "fn probe() -> Bool (\n  let _cmd = @nope[ -x ];\n  true\n)\n";
+        let (_program, _resolve, tc_errors) = front_end(source, &vx_package::BundledResolver);
+        let diags = cli_diags(&tc_errors);
+        assert!(
+            diags
+                .iter()
+                .any(|d| d.contains("UnknownGrammar") && d.contains("nope")),
+            "expected an UnknownGrammar diagnostic, got {tc_errors:#?}"
+        );
     }
 
     /// Run the compiler front-end (parse user + stdlib + import closure, build
@@ -440,6 +511,11 @@ fn probe() -> String (
         for (spec, sid) in &import_specs {
             if let Some((su_id, _)) = program.arena.source_unit_for(*sid) {
                 program.arena.imports.insert(spec.clone(), su_id);
+            }
+        }
+        for pkg in &closure.packages {
+            if let Ok(set) = command_grammar_vx::load_str(&pkg.main) {
+                program.arena.grammars.insert(pkg.id.clone(), set);
             }
         }
         let stdlib_su_ids: Vec<SourceUnitId> = stdlib_ids
