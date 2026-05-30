@@ -45,11 +45,10 @@ pub fn parse(src: &str) -> vx_parser::Parsed<SourceFile> {
 }
 
 /// Load a `.vx` grammar module into a [`GrammarSet`]: every top-level
-/// `let X = Grammar { … }` becomes a grammar (the `import` binding and anything
-/// else is ignored). Frontmatter (a leading ```` ``` ```` fence) is stripped.
+/// `let X = Grammar { … }` becomes a grammar. Frontmatter and the `import`
+/// binding parse fine and are simply not `Grammar` literals, so they're skipped.
 pub fn load_str(src: &str) -> Result<GrammarSet> {
-    let body = strip_imports(strip_frontmatter(src));
-    let parsed = parse_source_file(&body, SourceId(0));
+    let parsed = parse_source_file(src, SourceId(0));
     if !parsed.errors().is_empty() {
         return bail(format!(
             "{} parse error(s): {:?}",
@@ -70,42 +69,6 @@ pub fn load_str(src: &str) -> Result<GrammarSet> {
         }
     }
     Ok(GrammarSet { grammars })
-}
-
-/// Strip a leading triple-backtick frontmatter fence, if present, returning the
-/// Vixen body. (The pinned parser has no frontmatter support yet.)
-fn strip_frontmatter(src: &str) -> &str {
-    let t = src.trim_start();
-    let Some(open_end) = t.strip_prefix("```").and(t.find('\n')) else {
-        return src;
-    };
-    let Some(rel) = t[open_end..].find("```") else {
-        return src;
-    };
-    let after_close = &t[open_end + rel + 3..];
-    match after_close.find('\n') {
-        Some(nl) => &after_close[nl + 1..],
-        None => "",
-    }
-}
-
-/// Remove a single import binding (`let … = import "…"`, one or two lines): the
-/// pinned parser predates `import`, and the loader resolves grammar/type names
-/// structurally, so the import is dead weight here. A future parser bump lets us
-/// drop this.
-fn strip_imports(body: &str) -> String {
-    let Some(imp) = body.find("import \"") else {
-        return body.to_string();
-    };
-    let start = body[..imp].rfind("let ").unwrap_or(imp);
-    let end = body[imp..]
-        .find('\n')
-        .map(|n| imp + n + 1)
-        .unwrap_or(body.len());
-    let mut out = String::with_capacity(body.len());
-    out.push_str(&body[..start]);
-    out.push_str(&body[end..]);
-    out
 }
 
 // ---- type-directed lowering -------------------------------------------------

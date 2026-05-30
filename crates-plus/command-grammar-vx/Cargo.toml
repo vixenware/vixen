@@ -15,7 +15,9 @@ rustdoc-args = ["--html-in-header", "arborium-header.html"]
 command-model = { path = "../command-model" }
 # The parser, PINNED to a pushed commit over SSH so an in-flight refactor of
 # vx-parser in this same checkout can't break our build. Bump deliberately.
-vx-parser = { git = "ssh://git@code.vixen.rs/vixen/vixen.git", rev = "e34d3f70d3ff6c7739c59908c30c6d43a5cbaf16" }
+# c8df65af adds frontmatter + parens-optional import, so the loader parses full
+# .vx files (no pre-stripping).
+vx-parser = { git = "ssh://git@code.vixen.rs/vixen/vixen.git", rev = "c8df65afc64f03f8ed67376933927600dd572d36" }
 
 [lints]
 workspace = true
