@@ -17,6 +17,52 @@ use facet::Facet;
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Facet)]
 pub struct NodeId(pub u32);
 
+/// A scalar binary operation carried on a [`KernelOp::Bin`] node. Decoupled from
+/// both `vx_ir::BinOp` (the front-end's) and `kernel::OpKind` (the executable
+/// IR's): the analysis maps `BinOp → BinKind`, the lowering maps `BinKind →
+/// OpKind`, two small total mappings instead of one brittle label string. Only the
+/// **scalar** operators live here — `++` (concat) and `|>` (pipe) are not scalar,
+/// so the analysis classifies them as [`KernelOp::Opaque`].
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Facet)]
+#[repr(C)]
+pub enum BinKind {
+    Add,
+    Sub,
+    Mul,
+    Div,
+    Rem,
+    Eq,
+    Ne,
+    Lt,
+    Le,
+    Gt,
+    Ge,
+    And,
+    Or,
+}
+
+/// What a [`NodeKind::Kernel`] node *computes* — the precise pure operation,
+/// carried structurally so [`crate::lower`] can lower it to a `kernel::Op`
+/// without re-deriving anything from the human label. The label is for the
+/// playground; this is for the runtime.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Facet)]
+#[repr(C)]
+pub enum KernelOp {
+    /// A scalar binary op over the node's two inputs.
+    Bin(BinKind),
+    /// Logical negation (`!`) over the node's single input.
+    Not,
+    /// `if cond ( then ) else ( else )` — inputs `[cond, then, else?]`. Lowers to
+    /// basic blocks + a conditional branch (short-circuit: only the taken side
+    /// runs, so a bomb in the dead branch never detonates).
+    If,
+    /// A pure operation the graph models but the scalar lowering doesn't handle
+    /// yet — calls, interpolation, `match`, closures, paths, ranges, `?`. The
+    /// lowering reports it [`NotLowerable`](crate::lower::NotLowerable) and the
+    /// evaluator tree-walks instead. Honest, never a silent miscompile.
+    Opaque,
+}
+
 /// What a node *is* — the partition (`runtime-semantics.md` §2) made explicit.
 ///
 /// The whole point of the inside-out turn is that this classification is visible:
@@ -31,8 +77,9 @@ pub enum NodeKind {
     Param,
     /// Eager straight-line pure compute (arithmetic, comparison, and **control
     /// flow** — `if`/`match` short-circuit *inside* a kernel). The JIT target.
-    /// Its `inputs` are the values it **consumes**.
-    Kernel,
+    /// Its `inputs` are the values it **consumes**; [`KernelOp`] says *which*
+    /// operation, so the lowering need not parse the label.
+    Kernel(KernelOp),
     /// Lazy-data construction (tuple / array / struct / record / map). Its
     /// `inputs` are its field/element nodes — **referenced, not forced**. This is
     /// the lift out of kernels: the bomb in an undemanded field rides here.
@@ -144,7 +191,7 @@ impl DemandGraph {
     /// `b`, `Pair { a, .. }.a` is `a`, and these compose through nesting. Returns
     /// `None` only if the chain bottoms out on something it can't fold (a dynamic
     /// container — a kernel/boundary result whose shape isn't statically known).
-    fn resolved_value(&self, n: NodeId) -> Option<NodeId> {
+    pub(crate) fn resolved_value(&self, n: NodeId) -> Option<NodeId> {
         let node = &self.nodes[n.0 as usize];
         match node.kind {
             NodeKind::Project { index } => {

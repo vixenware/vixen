@@ -38,6 +38,10 @@ pub struct Poison(pub String);
 pub enum OpKind {
     /// `dst = imm`
     Const,
+    /// `dst = slots[a]` — a slot move. The de-SSA'd φ: both sides of an `if`
+    /// write their value into one shared result slot via `Copy`, so the join
+    /// block reads a single slot regardless of which branch ran.
+    Copy,
     // arithmetic (U64, wrapping)
     Add,
     Sub,
@@ -114,6 +118,10 @@ fn st_const(s: &mut [Word], op: &Op) -> Result<(), Poison> {
     s[op.dst as usize] = op.imm;
     Ok(())
 }
+fn st_copy(s: &mut [Word], op: &Op) -> Result<(), Poison> {
+    s[op.dst as usize] = s[op.a as usize];
+    Ok(())
+}
 macro_rules! arith {
     ($name:ident, $f:expr) => {
         fn $name(s: &mut [Word], op: &Op) -> Result<(), Poison> {
@@ -165,6 +173,7 @@ fn stencil_for(kind: OpKind) -> Stencil {
     use OpKind::*;
     match kind {
         Const => st_const,
+        Copy => st_copy,
         Add => st_add,
         Sub => st_sub,
         Mul => st_mul,

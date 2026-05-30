@@ -22,4 +22,5 @@ pub mod analyze;
 pub mod eval;
 pub mod graph;
 pub mod kernel;
+pub mod lower;
 pub mod value;

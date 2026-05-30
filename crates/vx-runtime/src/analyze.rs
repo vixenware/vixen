@@ -19,7 +19,9 @@ use std::collections::HashMap;
 
 use vx_ir::build::{VirBuilder, VirProgram};
 use vx_ir::compile::inject_implicit_stdlib_imports;
-use vx_ir::expr::{ArrayElement, ExprKind, FieldKey, LitKind, MapElement, StringPart};
+use vx_ir::expr::{
+    ArrayElement, BinOp, ExprKind, FieldKey, LitKind, MapElement, PrefixOp, StringPart,
+};
 use vx_ir::ids::{BindingId, BodyId, ExprId, PatternId};
 use vx_ir::item::ItemKind;
 use vx_ir::pattern::PatternKind;
@@ -31,7 +33,7 @@ use vx_ir::type_collect::collect_types_vir;
 use vx_parser::{SourceId, parse_source_file};
 use vx_types::{TypeEnv, TypeId};
 
-use crate::graph::{DemandGraph, Node, NodeId, NodeKind, Span};
+use crate::graph::{BinKind, DemandGraph, KernelOp, Node, NodeId, NodeKind, Span};
 
 /// Intrinsic/boundary call names — effectful or non-deterministic, so the kernel
 /// partition cuts here (a call to one of these is a `Boundary`, not a `Kernel`).
@@ -225,15 +227,20 @@ impl Builder<'_> {
 
             // Eager straight-line compute → a kernel.
             ExprKind::Binary(bx) => {
-                let (lhs, rhs, op) = (bx.lhs, bx.rhs, format!("{:?}", bx.op));
+                let (lhs, rhs) = (bx.lhs, bx.rhs);
+                let (label, kop) = (format!("{:?}", bx.op), bin_kind(bx.op));
                 let l = self.walk(lhs);
                 let rr = self.walk(rhs);
-                self.emit(NodeKind::Kernel, op, span, vec![l, rr])
+                self.emit(NodeKind::Kernel(kop), label, span, vec![l, rr])
             }
             ExprKind::Prefix(px) => {
+                let kop = match px.op {
+                    PrefixOp::Not => KernelOp::Not,
+                    PrefixOp::Neg => KernelOp::Opaque, // scalar negation: deferred
+                };
                 let operand = self.walk(px.operand);
                 self.emit(
-                    NodeKind::Kernel,
+                    NodeKind::Kernel(kop),
                     format!("{:?}", px.op),
                     span,
                     vec![operand],
@@ -253,7 +260,9 @@ impl Builder<'_> {
                 let kind = if BOUNDARY_CALLS.contains(&callee_name.as_str()) {
                     NodeKind::Boundary
                 } else {
-                    NodeKind::Kernel
+                    // A pure call: a kernel, but not lowerable to scalar IR until
+                    // we inline callee bodies. Opaque for now.
+                    NodeKind::Kernel(KernelOp::Opaque)
                 };
                 self.emit(kind, format!("{callee_name}()"), span, inputs)
             }
@@ -296,7 +305,7 @@ impl Builder<'_> {
                 if let Some(eb) = e2 {
                     inputs.push(self.walk(eb));
                 }
-                self.emit(NodeKind::Kernel, "if".into(), span, inputs)
+                self.emit(NodeKind::Kernel(KernelOp::If), "if".into(), span, inputs)
             }
 
             // Explicit failure — poisons when reached. Its message is an input.
@@ -329,7 +338,12 @@ impl Builder<'_> {
                 }
                 let croot = prog.arena[body].root_expr;
                 let child = self.walk(croot);
-                self.emit(NodeKind::Kernel, "(…)=>".into(), span, vec![child])
+                self.emit(
+                    NodeKind::Kernel(KernelOp::Opaque),
+                    "(…)=>".into(),
+                    span,
+                    vec![child],
+                )
             }
 
             // An interpolated string is a kernel over its embedded expressions.
@@ -343,7 +357,12 @@ impl Builder<'_> {
                     })
                     .collect();
                 let inputs = exprs.into_iter().map(|x| self.walk(x)).collect();
-                self.emit(NodeKind::Kernel, "`…`".into(), span, inputs)
+                self.emit(
+                    NodeKind::Kernel(KernelOp::Opaque),
+                    "`…`".into(),
+                    span,
+                    inputs,
+                )
             }
 
             // Bare invocation `f!` — a no-arg call.
@@ -355,7 +374,7 @@ impl Builder<'_> {
                 let kind = if BOUNDARY_CALLS.contains(&name.as_str()) {
                     NodeKind::Boundary
                 } else {
-                    NodeKind::Kernel
+                    NodeKind::Kernel(KernelOp::Opaque)
                 };
                 self.emit(kind, format!("{name}!"), span, vec![])
             }
@@ -401,7 +420,12 @@ impl Builder<'_> {
                     self.emit(NodeKind::Const, "path".into(), span, vec![])
                 } else {
                     let inputs = exprs.into_iter().map(|x| self.walk(x)).collect();
-                    self.emit(NodeKind::Kernel, "p`…`".into(), span, inputs)
+                    self.emit(
+                        NodeKind::Kernel(KernelOp::Opaque),
+                        "p`…`".into(),
+                        span,
+                        inputs,
+                    )
                 }
             }
 
@@ -422,7 +446,12 @@ impl Builder<'_> {
             // Partial application `partial f(a, _)` — produces a kernel/closure.
             ExprKind::PartialApp(pa) => {
                 let callee = self.walk(pa.callee);
-                self.emit(NodeKind::Kernel, "partial".into(), span, vec![callee])
+                self.emit(
+                    NodeKind::Kernel(KernelOp::Opaque),
+                    "partial".into(),
+                    span,
+                    vec![callee],
+                )
             }
 
             // `match scrutinee { pat => body, ... }` — control flow, kernel-internal
@@ -437,7 +466,12 @@ impl Builder<'_> {
                     self.bind_param(pat);
                     inputs.push(self.walk(body));
                 }
-                self.emit(NodeKind::Kernel, "match".into(), span, inputs)
+                self.emit(
+                    NodeKind::Kernel(KernelOp::Opaque),
+                    "match".into(),
+                    span,
+                    inputs,
+                )
             }
 
             // Range `a..b` / `a..=b` — a small constructed value over its bounds.
@@ -456,7 +490,12 @@ impl Builder<'_> {
             // `expr?` — the fallible (Option-returning) variant; a kernel over expr.
             ExprKind::Fallible(fx) => {
                 let inner = self.walk(fx.expr);
-                self.emit(NodeKind::Kernel, "?".into(), span, vec![inner])
+                self.emit(
+                    NodeKind::Kernel(KernelOp::Opaque),
+                    "?".into(),
+                    span,
+                    vec![inner],
+                )
             }
 
             // A name: link to its bound value's node, else a leaf.
@@ -512,6 +551,29 @@ impl Builder<'_> {
             },
             _ => None,
         }
+    }
+}
+
+/// Map a front-end [`BinOp`] to the graph's [`KernelOp`]. Scalar operators get a
+/// [`BinKind`]; `++` (concat) and `|>` (pipe) aren't scalar, so they're
+/// [`KernelOp::Opaque`] — the lowering will decline them, the evaluator handles
+/// them. One total mapping, checked by the compiler, not a string.
+fn bin_kind(op: BinOp) -> KernelOp {
+    match op {
+        BinOp::Add => KernelOp::Bin(BinKind::Add),
+        BinOp::Sub => KernelOp::Bin(BinKind::Sub),
+        BinOp::Mul => KernelOp::Bin(BinKind::Mul),
+        BinOp::Div => KernelOp::Bin(BinKind::Div),
+        BinOp::Rem => KernelOp::Bin(BinKind::Rem),
+        BinOp::Eq => KernelOp::Bin(BinKind::Eq),
+        BinOp::Neq => KernelOp::Bin(BinKind::Ne),
+        BinOp::Lt => KernelOp::Bin(BinKind::Lt),
+        BinOp::LtEq => KernelOp::Bin(BinKind::Le),
+        BinOp::Gt => KernelOp::Bin(BinKind::Gt),
+        BinOp::GtEq => KernelOp::Bin(BinKind::Ge),
+        BinOp::And => KernelOp::Bin(BinKind::And),
+        BinOp::Or => KernelOp::Bin(BinKind::Or),
+        BinOp::Concat | BinOp::Pipe => KernelOp::Opaque,
     }
 }
 
