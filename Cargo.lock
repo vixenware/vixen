@@ -507,6 +507,14 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "1d07550c9036bf2ae0c684c4297d503f838287c83c53686d05370d0e139ae570"
 
 [[package]]
+name = "command-grammar-vx"
+version = "0.1.0"
+dependencies = [
+ "command-model",
+ "vx-parser 0.1.0 (git+ssh://git@code.vixen.rs/vixen/vixen.git?rev=e34d3f70d3ff6c7739c59908c30c6d43a5cbaf16)",
+]
+
+[[package]]
 name = "command-model"
 version = "0.1.0"
 dependencies = [
@@ -2098,11 +2106,20 @@ dependencies = [
 ]
 
 [[package]]
+name = "margin"
+version = "0.1.0"
+source = "git+ssh://git@code.vixen.rs/vixen/vixen.git?rev=e34d3f70d3ff6c7739c59908c30c6d43a5cbaf16#e34d3f70d3ff6c7739c59908c30c6d43a5cbaf16"
+dependencies = [
+ "facet",
+ "unicode-width",
+]
+
+[[package]]
 name = "margin-term"
 version = "0.1.0"
 dependencies = [
  "arborium-theme",
- "margin",
+ "margin 0.1.0",
  "unicode-width",
 ]
 
@@ -3829,7 +3846,7 @@ dependencies = [
  "facet",
  "facet-styx",
  "futures-util",
- "margin",
+ "margin 0.1.0",
  "moire",
  "thiserror 2.0.18",
  "tokio",
@@ -3837,7 +3854,7 @@ dependencies = [
  "vox",
  "vx-diagnostics",
  "vx-ir",
- "vx-parser",
+ "vx-parser 0.1.0",
  "vx-runner",
  "vx-services",
  "vx-store",
@@ -3854,12 +3871,12 @@ dependencies = [
  "arborium-theme",
  "eyre",
  "libc",
- "margin",
+ "margin 0.1.0",
  "margin-term",
  "terminal-light",
  "tree-sitter-vixen",
  "vx-ir",
- "vx-parser",
+ "vx-parser 0.1.0",
  "vx-stdlib",
  "vx-types",
 ]
@@ -3922,9 +3939,9 @@ dependencies = [
 name = "vx-ir"
 version = "0.1.0"
 dependencies = [
- "margin",
+ "margin 0.1.0",
  "rowan",
- "vx-parser",
+ "vx-parser 0.1.0",
  "vx-rt",
  "vx-stdlib",
  "vx-types",
@@ -3940,7 +3957,7 @@ dependencies = [
  "tower-lsp",
  "tracing",
  "vx-ir",
- "vx-parser",
+ "vx-parser 0.1.0",
  "vx-stdlib",
  "vx-types",
 ]
@@ -3949,7 +3966,16 @@ dependencies = [
 name = "vx-parser"
 version = "0.1.0"
 dependencies = [
- "margin",
+ "margin 0.1.0",
+ "rowan",
+]
+
+[[package]]
+name = "vx-parser"
+version = "0.1.0"
+source = "git+ssh://git@code.vixen.rs/vixen/vixen.git?rev=e34d3f70d3ff6c7739c59908c30c6d43a5cbaf16#e34d3f70d3ff6c7739c59908c30c6d43a5cbaf16"
+dependencies = [
+ "margin 0.1.0 (git+ssh://git@code.vixen.rs/vixen/vixen.git?rev=e34d3f70d3ff6c7739c59908c30c6d43a5cbaf16)",
  "rowan",
 ]
 
@@ -3959,7 +3985,7 @@ version = "0.1.0"
 dependencies = [
  "thiserror 2.0.18",
  "vx-ir",
- "vx-parser",
+ "vx-parser 0.1.0",
 ]
 
 [[package]]
@@ -3984,7 +4010,7 @@ dependencies = [
  "facet",
  "facet-postcard",
  "fastcdc",
- "margin",
+ "margin 0.1.0",
  "tokio",
  "vox",
  "vox-types",
@@ -4024,7 +4050,7 @@ dependencies = [
 name = "vx-types"
 version = "0.1.0"
 dependencies = [
- "vx-parser",
+ "vx-parser 0.1.0",
 ]
 
 [[package]]

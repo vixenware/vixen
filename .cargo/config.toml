@@ -1,2 +1,8 @@
 [alias]
 xtask = "run --package xtask --"
+
+# SSH git dependencies (e.g. the pinned vx-parser in command-grammar-vx) fetch
+# via the system git, which uses the user's SSH agent/keys reliably — libgit2's
+# SSH handling is flakier across setups and CI.
+[net]
+git-fetch-with-cli = true

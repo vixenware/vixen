@@ -1,0 +1,21 @@
+[package]
+name = "command-grammar-vx"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+description = "Load command-model grammars authored in Vixen (.vx) via the Vixen parser — no evaluator."
+
+[package.metadata]
+
+[package.metadata."docs.rs"]
+rustdoc-args = ["--html-in-header", "arborium-header.html"]
+
+[dependencies]
+# The engine, live from the working tree (we co-evolve it).
+command-model = { path = "../command-model" }
+# The parser, PINNED to a pushed commit over SSH so an in-flight refactor of
+# vx-parser in this same checkout can't break our build. Bump deliberately.
+vx-parser = { git = "ssh://git@code.vixen.rs/vixen/vixen.git", rev = "e34d3f70d3ff6c7739c59908c30c6d43a5cbaf16" }
+
+[lints]
+workspace = true
