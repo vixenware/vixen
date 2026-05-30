@@ -16,5 +16,7 @@ rustdoc-args = ["--html-in-header", "arborium-header.html"]
 # graph types (this crate is deliberately dependency-light at this stage).
 
 [dependencies]
+facet = { workspace = true }
+facet-json = { workspace = true }
 
 [dev-dependencies]

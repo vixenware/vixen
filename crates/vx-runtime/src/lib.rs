@@ -18,4 +18,5 @@
 //! `docs/design/runtime-semantics.md`. The non-negotiables (no `Pending(String)`,
 //! no flat ISA, pending-is-a-resolver, bomb-detonates-on-force) are load-bearing.
 
+pub mod graph;
 pub mod value;
