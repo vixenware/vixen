@@ -30,6 +30,11 @@ pub(crate) fn infer_field(tc: &mut TypeChecker, _expr_id: ExprId, f: &FieldExpr)
         return static_ty;
     }
 
+    // Check if this is a module-record field access: `let m = import "…"; m.x`.
+    if let Some(module_ty) = infer_module_record_field(tc, f) {
+        return module_ty;
+    }
+
     let receiver_ty = tc.infer_expr(f.receiver);
 
     // Check namespace methods on the receiver type.
@@ -85,6 +90,38 @@ fn infer_static_namespace_field(tc: &mut TypeChecker, f: &FieldExpr) -> Option<T
     }
 
     None
+}
+
+/// Module-record field: `m.field` where `m` is a whole-module import binding
+/// (`let m = import "…"`). A module is a value — a record — so its fields are
+/// the imported unit's exports. Resolves `field` to an export and returns its
+/// type. Mirrors the destructure path (which redirects names through the same
+/// `unit_export`), but here the projection is spelled with a `.`.
+fn infer_module_record_field(tc: &mut TypeChecker, f: &FieldExpr) -> Option<TypeId> {
+    let FieldKey::Name(ref field_name) = f.field else {
+        return None;
+    };
+    // Receiver must be a NameRef that resolved to a whole-module import binding.
+    let ExprKind::NameRef(ref nr) = tc.arena[f.receiver].kind else {
+        return None;
+    };
+    let DefTarget::Binding(bid) = nr.resolved? else {
+        return None;
+    };
+    let unit = match &tc.arena[bid].import_origin {
+        Some(origin) if origin.export.is_none() => origin.unit,
+        _ => return None,
+    };
+
+    // The field names an export of the imported unit.
+    match crate::resolve::unit_export(tc.arena, unit, field_name)? {
+        DefTarget::Item(item_id) => Some(super::names::type_of_item(tc, item_id)),
+        DefTarget::Binding(export_bid) => Some(super::names::type_of_binding(tc, export_bid)),
+        DefTarget::Variant {
+            enum_item,
+            variant_index,
+        } => Some(super::names::type_of_variant(tc, enum_item, variant_index)),
+    }
 }
 
 /// Resolve a method on a receiver type by looking up the type's namespace.

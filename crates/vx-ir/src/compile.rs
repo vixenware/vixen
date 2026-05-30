@@ -491,6 +491,37 @@ fn probe() -> String (
     }
 
     #[test]
+    fn whole_module_import_is_a_record_value() {
+        // `let m = import "…"` binds the whole module as a value; `m.Export`
+        // projects an export. A module is a record — both destructure and
+        // field access work. Here we project a type export and a struct export.
+        let source = r#"
+fn probe() -> Bool (
+  let m = import "vixen:command-grammar";
+  let _grammar = m.Grammar;
+  let _spelling = m.Spelling;
+  true
+)
+"#;
+        let (program, resolve_errors, tc_errors) = front_end(source, &vx_package::BundledResolver);
+        assert!(
+            resolve_errors.is_empty(),
+            "whole-module import should resolve, got {resolve_errors:#?}"
+        );
+        assert!(
+            tc_errors.is_empty(),
+            "module-record field access should type-check, got {tc_errors:#?}"
+        );
+        // The `m` binding carries whole-module provenance (export == None).
+        let has_whole_module = program.arena.bindings.iter().any(|b| {
+            b.name == "m"
+                && matches!(&b.import_origin, Some(o) if o.export.is_none()
+                    && o.spec == "vixen:command-grammar")
+        });
+        assert!(has_whole_module, "expected a whole-module binding for `m`");
+    }
+
+    #[test]
     fn grammar_cc_package_genuinely_compiles() {
         // The real @vixen/grammar-cc package imports `vixen:command-grammar`,
         // destructures 11 of its types, and builds Grammar/Flag/Spelling.Bare/
