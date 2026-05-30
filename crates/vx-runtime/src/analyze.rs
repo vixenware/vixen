@@ -19,8 +19,8 @@ use std::collections::HashMap;
 
 use vx_ir::build::{VirBuilder, VirProgram};
 use vx_ir::compile::inject_implicit_stdlib_imports;
-use vx_ir::expr::{ArrayElement, ExprKind, FieldKey, LitKind, StringPart};
-use vx_ir::ids::{BindingId, BodyId, ExprId, PatternId, StmtId};
+use vx_ir::expr::{ArrayElement, ExprKind, FieldKey, LitKind, MapElement, StringPart};
+use vx_ir::ids::{BindingId, BodyId, ExprId, PatternId};
 use vx_ir::item::ItemKind;
 use vx_ir::pattern::PatternKind;
 use vx_ir::resolve::resolve_names;
@@ -161,18 +161,6 @@ impl Builder<'_> {
             let span = to_span(p.span.range);
             let node = self.emit(NodeKind::Param, name, span, vec![]);
             self.bindings.insert(binding, node);
-        }
-    }
-
-    /// Process a statement for its bindings: `let x = e` walks `e` and binds `x`.
-    fn bind_stmt(&mut self, s: StmtId) {
-        let prog = self.program;
-        if let StmtKind::Let(let_stmt) = &prog.arena[s].kind {
-            let (pat, init) = (let_stmt.pattern, let_stmt.init);
-            let node = self.walk(init);
-            if let PatternKind::Binding(pb) = &prog.arena[pat].kind {
-                self.bindings.insert(pb.binding, node);
-            }
         }
     }
 
@@ -365,18 +353,84 @@ impl Builder<'_> {
                 self.emit(kind, format!("{name}!"), span, vec![])
             }
 
-            // A block: bind its `let`s (linking names to value subgraphs), value is
-            // the tail.
+            // A block: process its statements — bind `let`s (so names link to
+            // their value subgraphs) and walk expression statements — then take the
+            // tail, else the last expression statement, else unit, as the value.
             ExprKind::Block(bl) => {
                 let stmts = bl.stmts.clone();
                 let tail = bl.tail;
+                let mut last_expr: Option<NodeId> = None;
                 for s in stmts {
-                    self.bind_stmt(s);
+                    match &prog.arena[s].kind {
+                        StmtKind::Let(l) => {
+                            let (pat, init) = (l.pattern, l.init);
+                            let node = self.walk(init);
+                            if let PatternKind::Binding(pb) = &prog.arena[pat].kind {
+                                self.bindings.insert(pb.binding, node);
+                            }
+                        }
+                        StmtKind::Expr(e) => last_expr = Some(self.walk(*e)),
+                        _ => {}
+                    }
                 }
-                match tail {
-                    Some(t) => return self.walk(t),
-                    None => self.emit(NodeKind::Unresolved, "{block}".into(), span, vec![]),
+                match tail.map(|t| self.walk(t)).or(last_expr) {
+                    Some(v) => return v,
+                    None => self.emit(NodeKind::Const, "()".into(), span, vec![]),
                 }
+            }
+
+            // Path literal `p"a/{x}/b"` — a constant if pure, else a kernel over
+            // its interpolated parts.
+            ExprKind::PathLiteral(p) => {
+                let exprs: Vec<ExprId> = p
+                    .parts
+                    .iter()
+                    .filter_map(|pt| match pt {
+                        StringPart::Expr(x) => Some(*x),
+                        StringPart::Text(_) => None,
+                    })
+                    .collect();
+                if exprs.is_empty() {
+                    self.emit(NodeKind::Const, "path".into(), span, vec![])
+                } else {
+                    let inputs = exprs.into_iter().map(|x| self.walk(x)).collect();
+                    self.emit(NodeKind::Kernel, "p`…`".into(), span, inputs)
+                }
+            }
+
+            // A map literal — lazy data over its entry values (and spreads).
+            ExprKind::Map(m) => {
+                let exprs: Vec<ExprId> = m
+                    .entries
+                    .iter()
+                    .map(|el| match el {
+                        MapElement::Entry(en) => en.value,
+                        MapElement::Spread(x) => *x,
+                    })
+                    .collect();
+                let inputs = exprs.into_iter().map(|x| self.walk(x)).collect();
+                self.emit(NodeKind::LazyData, "%{…}".into(), span, inputs)
+            }
+
+            // Partial application `partial f(a, _)` — produces a kernel/closure.
+            ExprKind::PartialApp(pa) => {
+                let callee = self.walk(pa.callee);
+                self.emit(NodeKind::Kernel, "partial".into(), span, vec![callee])
+            }
+
+            // `match scrutinee { pat => body, ... }` — control flow, kernel-internal
+            // (short-circuit on the scrutinee). Static snapshot draws all arms.
+            // Arm patterns that bind a simple name are bound best-effort.
+            ExprKind::Match(mx) => {
+                let scrutinee = mx.scrutinee;
+                let arms: Vec<(PatternId, ExprId)> =
+                    mx.arms.iter().map(|a| (a.pattern, a.body)).collect();
+                let mut inputs = vec![self.walk(scrutinee)];
+                for (pat, body) in arms {
+                    self.bind_param(pat);
+                    inputs.push(self.walk(body));
+                }
+                self.emit(NodeKind::Kernel, "match".into(), span, inputs)
             }
 
             // A name: link to its bound value's node, else a leaf.
@@ -444,15 +498,11 @@ fn to_span(range: vx_parser::TextRange) -> Span {
 
 fn expr_kind_name(k: &ExprKind) -> &'static str {
     match k {
-        ExprKind::Map(_) => "%{map}",
-        ExprKind::Match(_) => "match",
         ExprKind::With(_) => "with",
         ExprKind::TypeOp(_) => "as/is",
         ExprKind::Fallible(_) => "?suffix",
         ExprKind::Range(_) => "range",
-        ExprKind::PartialApp(_) => "partial",
         ExprKind::Import(_) => "import",
-        ExprKind::PathLiteral(_) => "path",
         _ => "?",
     }
 }
