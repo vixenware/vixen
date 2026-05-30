@@ -3954,6 +3954,15 @@ dependencies = [
 ]
 
 [[package]]
+name = "vx-package"
+version = "0.1.0"
+dependencies = [
+ "facet",
+ "facet-styx",
+ "vx-parser",
+]
+
+[[package]]
 name = "vx-parser"
 version = "0.1.0"
 dependencies = [

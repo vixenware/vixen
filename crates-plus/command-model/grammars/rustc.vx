@@ -1,6 +1,6 @@
 ```styx
-id @vixen/grammar-rustc
-version 0.1.0
+id "@vixen/grammar-rustc"
+version "0.1.0"
 ```
 
 // The rustc grammar, authored in Vixen against @vixen/command-grammar.

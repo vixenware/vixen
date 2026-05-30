@@ -1,6 +1,6 @@
 ```styx
-id @vixen/command-grammar
-version 0.1.0
+id "@vixen/command-grammar"
+version "0.1.0"
 ```
 
 // Types for describing a CLI tool's argument grammar, authored in Vixen.

@@ -1,6 +1,6 @@
 ```styx
-id @vixen/grammar-cc
-version 0.1.0
+id "@vixen/grammar-cc"
+version "0.1.0"
 ```
 
 // The cc/clang grammar, authored in Vixen against @vixen/command-grammar.

@@ -5,6 +5,7 @@ members = [
 
   ## lang crates
   "crates/vx-parser",
+  "crates/vx-package",
   "crates/vx-types",
   "crates/vx-diagnostics",
   "crates/vx-ir",

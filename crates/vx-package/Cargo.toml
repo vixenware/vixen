@@ -1,0 +1,19 @@
+[package]
+name = "vx-package"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+description = "Vixen package resolution: manifests + resolving an import to a package's source."
+
+[package.metadata]
+
+[package.metadata."docs.rs"]
+rustdoc-args = ["--html-in-header", "arborium-header.html"]
+
+[dependencies]
+facet = { workspace = true }
+facet-styx = { workspace = true }
+vx-parser = { workspace = true }
+
+[lints]
+workspace = true
