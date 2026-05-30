@@ -130,17 +130,53 @@ the daemon's continuous capability detection, not as a build-graph operation.
 handled separately, as a build-output-overlaid-as-input plus overrides; see
 [`runtime-semantics.md`](runtime-semantics.md).)
 
-## 7. Open questions
+## 7. Deployment: cloud, local, embedded
+
+The control plane is a **role** — *"hold the live `(runner, capabilities)` registry
+and place `exec` by predicate"* — **not a single hosted service**. That role runs
+in one of three places, and **the vox RPC protocol between daemons and the CLI is
+identical in all three**:
+
+- **Embedded** — no separate process. The `vx` CLI holds a configured (or
+  LAN-discovered) set of daemon endpoints, asks each for its capabilities, and
+  places `exec` itself. The simplest case — a few machines at home; the
+  control-plane role lives *inside the CLI*.
+- **Local** — a self-hosted control-plane process on a LAN. Daemons advertise to
+  it; the CLI queries it. Persistent registry, multi-user, dynamic fleet — no
+  cloud.
+- **Cloud** — app.vixen.rs. Managed, org-scoped, billed, fleet-over-internet. The
+  commercial offering — and **one deployment of this component, not its only
+  home.**
+
+**Invariant** across all three: daemon advertises capabilities → registry →
+predicate placement. **Variable**: who hosts the registry, and **identity** —
+which is therefore a *pluggable layer*:
+
+- **Cloud identity** — GitHub auth + organizations + billing (app.vixen.rs).
+- **Local identity** — LAN trust: configured endpoints + keys, a shared cluster
+  token, or SSH-like mutual-key trust. **No GitHub required.**
+
+Principle: **Vixen build is fully usable without the commercial cloud.** GitHub /
+orgs / billing is a *cloud binding*, not a protocol requirement — the vox services
+must not bake it in. (Open-core / self-hostable; the cloud is the managed
+deployment.)
+
+## 8. Open questions
 
 - **Detection mechanism** per capability: watch vs poll vs hybrid; latency bounds
   on advertisement freshness.
-- **Control-plane protocol** — presumably vox RPC; the shape of the
-  `(runner, capabilities)` registry and its update/subscription model.
+- **Registry protocol** — vox RPC (confirmed). Open: the shape of the
+  `(runner, capabilities)` registry and its update/subscription model, defined
+  **once and deployment-agnostic** so embedded/local/cloud all speak it.
+- **Local discovery** — how the CLI and daemons find each other with no cloud
+  endpoint: configured addresses, LAN discovery (mDNS / DNS-SD), or a local
+  control-plane endpoint.
+- **Identity abstraction** — the pluggable seam between the protocol and the
+  identity binding (GitHub/orgs vs LAN trust); what the protocol must carry so both
+  fit without the protocol knowing which is in use.
 - **Staleness / trust** — how stale an advertisement may be before a build refuses
-  it; recheck-on-runner is the correctness backstop, but the placement decision
-  uses possibly-stale advertised data.
-- **CLI ↔ control plane** — connection, auth, and whether the CLI talks to one
-  control plane or a federation.
+  it; recheck-on-runner is the correctness backstop, but placement uses
+  possibly-stale advertised data.
 - **Hermetic vs host-present** — how the choice is expressed in a build and who
   makes it (author policy vs runtime).
 - **Relationship to packages** — a capability-advertising package runs *on* a

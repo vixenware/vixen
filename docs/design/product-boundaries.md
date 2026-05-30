@@ -67,7 +67,11 @@ The actual Vixen build system (this repo).
 
 ## Open
 
-- Whether the Vixen control plane **lives inside** app.vixen.rs or is a **separate
-  service** sitting on app's identity/org layer.
+- The Vixen control plane is **deployment-agnostic**: app.vixen.rs is its *cloud*
+  deployment, but it also runs **local** (self-hosted) and **embedded** (in the
+  CLI), with identity as a pluggable layer — GitHub/orgs in the cloud, LAN trust
+  locally. See [`runners-and-control-plane.md`](runners-and-control-plane.md) §7.
+  (Vixen build must be usable with **no** commercial cloud.) Still open: whether
+  the *cloud* control plane is a distinct service or part of app.vixen.rs proper.
 - How (if at all) CCC's content-addressed cache and Vixen build's cache/store
   relate as **shared storage** — same backend, or merely similar.
