@@ -3,9 +3,10 @@ use std::{fs, path::Path};
 use rowan::TextSize;
 
 use crate::{
-    AstNode, Breadcrumb, DocumentSymbol, Expr, FoldingRangeKind, Item, LineIndex, MapEntry, Parse,
-    Parsed, PathLiteralExpr, Position, SemanticTokenType, SourceFile, SourceId, Stmt, SymbolKind,
-    SyntaxKind, Type, document_symbols, enclosing_nodes, folding_ranges, semantic_tokens,
+    AstNode, Breadcrumb, CliLiteralExpr, DocumentSymbol, Expr, FoldingRangeKind, Item, LineIndex,
+    MapEntry, Parse, Parsed, PathLiteralExpr, Position, SemanticTokenType, SourceFile, SourceId,
+    Stmt, SymbolKind, SyntaxKind, Type, document_symbols, enclosing_nodes, folding_ranges,
+    semantic_tokens,
 };
 
 /// Test wrapper that defaults the source id to `SourceId(0)` so the test
@@ -1119,5 +1120,82 @@ fn let_destructures_uppercase_type_exports() {
     assert_eq!(
         parse("let { Grammar, Flag } = import \"vixen:cg\"\n").errors(),
         []
+    );
+}
+
+fn only_cli_literal(src: &str) -> (Parse, CliLiteralExpr) {
+    let parse = parse(src);
+    assert_eq!(parse.errors(), [], "should parse cleanly");
+    let lit = parse
+        .syntax()
+        .descendants()
+        .find_map(CliLiteralExpr::cast)
+        .expect("a CLI literal");
+    (parse, lit)
+}
+
+#[test]
+fn cli_literal_parses_into_grammar_and_args() {
+    let (_p, lit) = only_cli_literal("let o = @cc[ -c -O2 -I src main.c ]\n");
+    assert_eq!(
+        lit.grammar().map(|t| t.text().to_string()).as_deref(),
+        Some("cc"),
+        "the grammar name follows @"
+    );
+    let args: Vec<String> = lit.args().map(|a| a.text().trim().to_string()).collect();
+    assert_eq!(args, ["-c", "-O2", "-I", "src", "main.c"]);
+}
+
+#[test]
+fn cli_literal_handles_quotes_and_interpolation() {
+    // A quoted value with a space stays one argument; `$out` is a short
+    // interpolation; `${ … }` splices a full Vixen expression.
+    let (_p, lit) = only_cli_literal("let o = @cc[ -DMSG=\"hi there\" -o $out --jobs ${n + 1} ]\n");
+    let args: Vec<String> = lit.args().map(|a| a.text().trim().to_string()).collect();
+    assert_eq!(
+        args,
+        ["-DMSG=\"hi there\"", "-o", "$out", "--jobs", "${n + 1}"]
+    );
+
+    // The `${ … }` hole exposes its Vixen expression to the checker.
+    let holes: Vec<Expr> = lit
+        .args()
+        .flat_map(|a| a.interpolations())
+        .filter_map(|h| h.expr())
+        .collect();
+    assert_eq!(holes.len(), 1, "exactly one ${{ … }} hole");
+    assert!(
+        matches!(holes[0], Expr::Binary(_)),
+        "the hole holds `n + 1`, a binary expr"
+    );
+}
+
+#[test]
+fn cli_literal_glued_interpolation_is_one_arg() {
+    // `-I$dir` (no gap) is a single argument: a word piece + an interpolation.
+    let (_p, lit) = only_cli_literal("let o = @cc[ -I$dir main.c ]\n");
+    let args: Vec<String> = lit.args().map(|a| a.text().trim().to_string()).collect();
+    assert_eq!(args, ["-I$dir", "main.c"]);
+}
+
+#[test]
+fn at_path_literal_is_untouched_by_cli_literals() {
+    // `@` not followed by `ident[` is still a path literal, not a CLI literal.
+    let parse = parse("let p = @Cargo.lock\n");
+    assert_eq!(parse.errors(), []);
+    assert!(
+        parse
+            .syntax()
+            .descendants()
+            .find_map(CliLiteralExpr::cast)
+            .is_none(),
+        "no CLI literal here"
+    );
+    assert!(
+        parse
+            .syntax()
+            .descendants()
+            .any(|n| n.kind() == SyntaxKind::PATH_LITERAL_EXPR),
+        "still a path literal"
     );
 }

@@ -17,12 +17,29 @@ struct Lexer<'a> {
     pos: usize,
     tokens: Vec<Token>,
     modes: Vec<Mode>,
+    /// Tracks the `@ ident [` CLI-literal opener across iterations so the opener
+    /// bracket can be emitted as `CLI_OPEN` (and command mode entered).
+    cli: CliOpen,
 }
 
 #[derive(Debug, Clone, Copy)]
 enum Mode {
     Template,
-    TemplateExpr { brace_depth: usize },
+    TemplateExpr {
+        brace_depth: usize,
+    },
+    /// The body of a CLI literal (`@cc[ … ]`): command words, quoted strings,
+    /// and `$`/`${ }` interpolation, until the matching `]`.
+    Command,
+}
+
+/// Progress through a CLI-literal opener. `@` (recognised as an opener) → `AfterAt`;
+/// the grammar identifier → `AfterIdent`; the `[` → emit `CLI_OPEN`, enter command mode.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum CliOpen {
+    None,
+    AfterAt,
+    AfterIdent,
 }
 
 impl<'a> Lexer<'a> {
@@ -32,6 +49,7 @@ impl<'a> Lexer<'a> {
             pos: 0,
             tokens: Vec::new(),
             modes: Vec::new(),
+            cli: CliOpen::None,
         }
     }
 
@@ -42,6 +60,7 @@ impl<'a> Lexer<'a> {
             let kind = match self.modes.last().copied() {
                 Some(Mode::Template) => self.template_chunk(),
                 Some(Mode::TemplateExpr { .. }) => self.template_expr_token(),
+                Some(Mode::Command) => self.command_chunk(),
                 None => match self.normal_token() {
                     Some(kind) => kind,
                     None => break,
@@ -81,7 +100,100 @@ impl<'a> Lexer<'a> {
         self.pos = end;
     }
 
+    // r[lex.cli-literal] — does `@` at the cursor open a CLI literal, i.e.
+    // `@<ident>[` with no gaps? Distinguishes it from a path literal / bare `@`.
+    fn is_cli_opener(&self) -> bool {
+        let Some(after_at) = self.source[self.pos..].strip_prefix('@') else {
+            return false;
+        };
+        if !matches!(after_at.chars().next(), Some(c) if is_ident_start(c)) {
+            return false;
+        }
+        let ident_end = after_at
+            .char_indices()
+            .take_while(|(_, c)| is_ident_continue(*c))
+            .map(|(i, c)| i + c.len_utf8())
+            .last()
+            .unwrap_or(0);
+        after_at[ident_end..].starts_with('[')
+    }
+
+    // r[lex.cli-literal] — one piece of a CLI-literal body: the closing `]`,
+    // whitespace, a quoted string, a `${ expr }` hole (delegates to template-expr
+    // mode), a `$ident` interpolation, or a bare command word (backslash-escaped).
+    fn command_chunk(&mut self) -> SyntaxKind {
+        match self.current_char() {
+            Some(']') => {
+                self.bump_char();
+                self.modes.pop();
+                SyntaxKind::R_BRACKET
+            }
+            Some(c) if c.is_whitespace() => {
+                self.bump_char();
+                while matches!(self.current_char(), Some(c) if c.is_whitespace()) {
+                    self.bump_char();
+                }
+                SyntaxKind::WHITESPACE
+            }
+            Some('"') => self.string(),
+            Some('$') if self.peek_char() == Some('{') => {
+                self.pos += 2; // consume "${"
+                self.modes.push(Mode::TemplateExpr { brace_depth: 0 });
+                SyntaxKind::INTERP_START
+            }
+            Some('$') if matches!(self.peek_char(), Some(c) if is_ident_start(c)) => {
+                self.bump_char(); // '$'
+                while matches!(self.current_char(), Some(c) if is_ident_continue(c)) {
+                    self.bump_char();
+                }
+                SyntaxKind::CLI_INTERP_VAR
+            }
+            // A bare word runs until whitespace / `]` / `"` / `$`; `\` escapes the
+            // next char (so `\]`, `\$`, `\"` stay in the word). A lone `$` that
+            // started neither form above is itself a one-char word.
+            Some('$') => {
+                self.bump_char();
+                SyntaxKind::CLI_WORD
+            }
+            Some(_) => {
+                loop {
+                    match self.current_char() {
+                        Some('\\') => {
+                            self.bump_char();
+                            if !self.is_eof() {
+                                self.bump_char();
+                            }
+                        }
+                        Some(c) if c.is_whitespace() || c == ']' || c == '"' || c == '$' => break,
+                        Some(_) => self.bump_char(),
+                        None => break,
+                    }
+                }
+                SyntaxKind::CLI_WORD
+            }
+            None => SyntaxKind::CLI_WORD, // EOF inside the body: no advance ⇒ lexer loop stops
+        }
+    }
+
     fn normal_token(&mut self) -> Option<SyntaxKind> {
+        // r[lex.cli-literal] — drive the contiguous `@ ident [` opener: after a
+        // recognised `@`, the next token is the grammar name, then `[` becomes
+        // CLI_OPEN and the body enters command mode. (is_cli_opener guarantees the
+        // sequence, so this always completes.)
+        match self.cli {
+            CliOpen::AfterAt if matches!(self.current_char(), Some(c) if is_ident_start(c)) => {
+                self.cli = CliOpen::AfterIdent;
+                return Some(self.ident_or_keyword());
+            }
+            CliOpen::AfterIdent if self.current_char() == Some('[') => {
+                self.cli = CliOpen::None;
+                self.bump_char();
+                self.modes.push(Mode::Command);
+                return Some(SyntaxKind::CLI_OPEN);
+            }
+            CliOpen::None => {}
+            _ => self.cli = CliOpen::None,
+        }
         let kind = match self.current_char() {
             // r[lex.whitespace]
             Some(ch) if ch.is_whitespace() => {
@@ -138,6 +250,11 @@ impl<'a> Lexer<'a> {
             Some('|') if self.starts_with("|>") => self.bump_two(SyntaxKind::PIPE_GT),
             Some('|') if self.starts_with("||") => self.bump_two(SyntaxKind::PIPE2),
             Some('|') => self.bump_one(SyntaxKind::PIPE),
+            Some('@') if self.is_cli_opener() => {
+                self.bump_char();
+                self.cli = CliOpen::AfterAt;
+                SyntaxKind::AT
+            }
             Some('@') => self.bump_one(SyntaxKind::AT),
             Some('#') => self.bump_one(SyntaxKind::HASH),
             Some('?') => self.bump_one(SyntaxKind::QUESTION),

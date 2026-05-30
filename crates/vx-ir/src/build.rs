@@ -1120,6 +1120,9 @@ impl VirBuilder {
             vx_parser::Expr::InterpolatedString(is) => self.build_interpolated_string_expr(is),
             vx_parser::Expr::PathLiteral(pl) => self.build_path_literal_expr(pl),
             vx_parser::Expr::Import(i) => self.build_import_expr(i),
+            // CLI literals (`@cc[ … ]`) are lowered by the new runtime, not this
+            // legacy IR; treat as an unbuildable expr here.
+            vx_parser::Expr::CliLiteral(c) => self.error_expr(self.span(c.syntax())),
         }
     }
 

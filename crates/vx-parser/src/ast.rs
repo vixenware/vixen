@@ -145,6 +145,9 @@ ast_node!(NameRefExpr, SyntaxKind::NAME_REF_EXPR);
 ast_node!(LiteralExpr, SyntaxKind::LITERAL_EXPR);
 ast_node!(InterpolatedStringExpr, SyntaxKind::INTERPOLATED_STRING_EXPR);
 ast_node!(PathLiteralExpr, SyntaxKind::PATH_LITERAL_EXPR);
+ast_node!(CliLiteralExpr, SyntaxKind::CLI_LITERAL_EXPR);
+ast_node!(CliArg, SyntaxKind::CLI_ARG);
+ast_node!(CliInterp, SyntaxKind::CLI_INTERP);
 ast_node!(ImportExpr, SyntaxKind::IMPORT_EXPR);
 ast_node!(StringInterpolation, SyntaxKind::STRING_INTERPOLATION);
 ast_node!(LetStmt, SyntaxKind::LET_STMT);
@@ -246,6 +249,7 @@ pub enum Expr {
     Literal(LiteralExpr),
     InterpolatedString(InterpolatedStringExpr),
     PathLiteral(PathLiteralExpr),
+    CliLiteral(CliLiteralExpr),
     Import(ImportExpr),
 }
 
@@ -405,6 +409,7 @@ impl AstNode for Expr {
                 | SyntaxKind::LITERAL_EXPR
                 | SyntaxKind::INTERPOLATED_STRING_EXPR
                 | SyntaxKind::PATH_LITERAL_EXPR
+                | SyntaxKind::CLI_LITERAL_EXPR
                 | SyntaxKind::IMPORT_EXPR
         )
     }
@@ -443,6 +448,7 @@ impl AstNode for Expr {
                 InterpolatedStringExpr::cast(node)?,
             )),
             SyntaxKind::PATH_LITERAL_EXPR => Some(Self::PathLiteral(PathLiteralExpr::cast(node)?)),
+            SyntaxKind::CLI_LITERAL_EXPR => Some(Self::CliLiteral(CliLiteralExpr::cast(node)?)),
             SyntaxKind::IMPORT_EXPR => Some(Self::Import(ImportExpr::cast(node)?)),
             _ => None,
         }
@@ -478,6 +484,7 @@ impl AstNode for Expr {
             Self::Literal(node) => node.syntax(),
             Self::InterpolatedString(node) => node.syntax(),
             Self::PathLiteral(node) => node.syntax(),
+            Self::CliLiteral(node) => node.syntax(),
             Self::Import(node) => node.syntax(),
         }
     }
@@ -1361,6 +1368,41 @@ impl PathLiteralExpr {
     }
 
     pub fn interpolated(&self) -> Option<InterpolatedStringExpr> {
+        child(self.syntax())
+    }
+}
+
+impl CliLiteralExpr {
+    /// The grammar name after `@` — the tool whose grammar types this command.
+    pub fn grammar(&self) -> Option<SyntaxToken> {
+        first_token(self.syntax(), |kind| {
+            matches!(kind, SyntaxKind::LOWER_IDENT | SyntaxKind::UPPER_IDENT)
+        })
+    }
+
+    /// The command's arguments, in order (each a whitespace-delimited run).
+    pub fn args(&self) -> AstChildren<CliArg> {
+        AstChildren::new(self.syntax())
+    }
+}
+
+impl CliArg {
+    /// The argument as written, interpolation holes included (`-I$dir` →
+    /// `"-I$dir"`). The source slice; the type-checker reads it against the
+    /// grammar position this argument lands on.
+    pub fn text(&self) -> String {
+        self.syntax().text().to_string()
+    }
+
+    /// The `${ expr }` interpolation holes within this argument, in order.
+    pub fn interpolations(&self) -> AstChildren<CliInterp> {
+        AstChildren::new(self.syntax())
+    }
+}
+
+impl CliInterp {
+    /// The Vixen expression spliced into the command.
+    pub fn expr(&self) -> Option<Expr> {
         child(self.syntax())
     }
 }

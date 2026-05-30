@@ -41,6 +41,12 @@ syntax_kinds!(
     INTERP_START,
     INTERP_END,
     INTERP_STRING,
+    // CLI-literal tokens (`@cc[ … ]`): the opener bracket, a bare command word,
+    // and a `$ident` interpolation. `${ expr }` reuses INTERP_START/INTERP_END;
+    // the body is lexed in a dedicated command mode.
+    CLI_OPEN,
+    CLI_WORD,
+    CLI_INTERP_VAR,
     FN_KW,
     LET_KW,
     TYPE_KW,
@@ -155,6 +161,11 @@ syntax_kinds!(
     CLOSURE_PARAM_CLAUSE,
     INTERPOLATED_STRING_EXPR,
     PATH_LITERAL_EXPR,
+    // CLI-literal nodes: the whole literal, one argument (a run of adjacent
+    // words/strings/interpolations), and a `${ expr }` interpolation hole.
+    CLI_LITERAL_EXPR,
+    CLI_ARG,
+    CLI_INTERP,
     STRING_INTERPOLATION,
     TUPLE_EXPR,
     PAREN_EXPR,

@@ -1214,6 +1214,8 @@ fn multiplicative_expr(p: &mut Parser<'_>) -> CompletedMarker {
 
 fn prefix_expr(p: &mut Parser<'_>) -> CompletedMarker {
     match p.current() {
+        // `@grammar[ … ]` (the opener `[` lexes to CLI_OPEN) vs an `@path` literal.
+        SyntaxKind::AT if p.nth(2) == SyntaxKind::CLI_OPEN => cli_literal_expr(p),
         SyntaxKind::AT => path_literal_expr(p),
         SyntaxKind::BANG | SyntaxKind::MINUS => {
             let marker = p.start();
@@ -1255,6 +1257,65 @@ fn path_literal_expr(p: &mut Parser<'_>) -> CompletedMarker {
         }
     }
     marker.complete(p, SyntaxKind::PATH_LITERAL_EXPR)
+}
+
+// r[expr.cli-literal] — `@grammar[ … ]`: a tool command typed by its grammar.
+// The body is lexed in command mode; here we just group its tokens into args.
+fn cli_literal_expr(p: &mut Parser<'_>) -> CompletedMarker {
+    let marker = p.start();
+    p.expect(SyntaxKind::AT);
+    if p.at(SyntaxKind::LOWER_IDENT) || p.at(SyntaxKind::UPPER_IDENT) {
+        p.bump(); // the grammar name
+    } else {
+        p.diagnose_at(ExpectedKind::Identifier);
+    }
+    p.expect(SyntaxKind::CLI_OPEN);
+    while !p.at(SyntaxKind::R_BRACKET) && !p.at(SyntaxKind::EOF) {
+        if at_cli_arg_start(p) {
+            cli_arg(p);
+        } else {
+            // An unexpected token in the body (shouldn't happen from the lexer);
+            // recover by consuming it so we still make progress.
+            p.diagnose_at(ExpectedKind::Expression);
+            p.bump();
+        }
+    }
+    p.expect(SyntaxKind::R_BRACKET);
+    marker.complete(p, SyntaxKind::CLI_LITERAL_EXPR)
+}
+
+fn at_cli_arg_start(p: &Parser<'_>) -> bool {
+    matches!(
+        p.current(),
+        SyntaxKind::CLI_WORD
+            | SyntaxKind::STRING
+            | SyntaxKind::CLI_INTERP_VAR
+            | SyntaxKind::INTERP_START
+    )
+}
+
+// One argument is a run of *adjacent* pieces — bare words, quoted strings, and
+// `$ident` / `${ expr }` interpolations. A whitespace gap (or `]`) ends it, so
+// `-I $dir` is one flag word and one separate argument, while `-I$dir` is one.
+fn cli_arg(p: &mut Parser<'_>) -> CompletedMarker {
+    let marker = p.start();
+    loop {
+        match p.current() {
+            SyntaxKind::CLI_WORD | SyntaxKind::STRING | SyntaxKind::CLI_INTERP_VAR => p.bump(),
+            SyntaxKind::INTERP_START => {
+                let hole = p.start();
+                p.bump();
+                expr(p);
+                p.expect(SyntaxKind::INTERP_END);
+                hole.complete(p, SyntaxKind::CLI_INTERP);
+            }
+            _ => break,
+        }
+        if p.has_significant_gap_before_current() {
+            break;
+        }
+    }
+    marker.complete(p, SyntaxKind::CLI_ARG)
 }
 
 fn type_op_expr(p: &mut Parser<'_>) -> CompletedMarker {
