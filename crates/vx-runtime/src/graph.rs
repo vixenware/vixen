@@ -48,6 +48,10 @@ pub enum NodeKind {
     /// `💣` — referenced but never evaluated. Forcing it poisons. If a correct
     /// demand walk reaches it, that's a bug; in the graph it sits *dark*.
     Bomb,
+    /// `fail "msg"` — an **explicit** failure expression. Poisons *whenever
+    /// reached* (not only when forced like a bomb). In a `#[test(poisons)]` this
+    /// is deliberately on the demand path; its message is an input.
+    Fail,
     /// The dynamic frontier: an `import`, an unresolved name, or a value of
     /// runtime-determined shape the static snapshot cannot see past. Honest
     /// marker that the graph is incomplete by nature, not by laziness.

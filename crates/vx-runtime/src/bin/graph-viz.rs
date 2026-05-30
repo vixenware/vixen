@@ -35,6 +35,7 @@ fn kind_str(kind: &NodeKind) -> &'static str {
         NodeKind::Project { .. } => "Project",
         NodeKind::Boundary => "Boundary",
         NodeKind::Bomb => "Bomb",
+        NodeKind::Fail => "Fail",
         NodeKind::Unresolved => "Unresolved",
     }
 }
@@ -108,10 +109,10 @@ const NODES = {nodes_json};
 const ROOT = "{root}";
 const COLORS = {{
   Const:"#9e9e9e", Param:"#42a5f5", Kernel:"#66bb6a", LazyData:"#ab47bc",
-  Project:"#ffa726", Boundary:"#ef5350", Bomb:"#161616", Unresolved:"#fdd835"
+  Project:"#ffa726", Boundary:"#ef5350", Bomb:"#161616", Fail:"#b71c1c", Unresolved:"#fdd835"
 }};
 const LEGEND = {{ Kernel:"eager / JIT", LazyData:"lifted structure", Project:"selects a slot",
-  Boundary:"effect (exec/intrinsic)", Bomb:"forcing poisons", Const:"literal", Param:"input", Unresolved:"dynamic frontier" }};
+  Boundary:"effect (exec/intrinsic)", Bomb:"forcing poisons", Fail:"explicit fail", Const:"literal", Param:"input", Unresolved:"dynamic frontier" }};
 
 const legend = document.getElementById("legend");
 for (const [k, desc] of Object.entries(LEGEND)) {{

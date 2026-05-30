@@ -271,6 +271,15 @@ impl Builder<'_> {
                 self.emit(NodeKind::Kernel, "if".into(), span, inputs)
             }
 
+            // Explicit failure — poisons when reached. Its message is an input.
+            ExprKind::Fail(fx) => {
+                let inputs = match fx.message {
+                    Some(m) => vec![self.walk(m)],
+                    None => vec![],
+                };
+                self.emit(NodeKind::Fail, "fail".into(), span, inputs)
+            }
+
             // A block: bind its `let`s (linking names to value subgraphs), value is
             // the tail.
             ExprKind::Block(bl) => {
@@ -420,5 +429,37 @@ mod tests {
         // assert_eq(pair[0], 42): the call must reach into its args.
         let g = analyze_source("fn d() -> Bool ( let pair = (7, 💣); pair[0] == 7 )", "d").unwrap();
         bombs_unreached(&g);
+    }
+
+    #[test]
+    fn explicit_fail_is_modelled_and_reached() {
+        // poisons.vx `explicit_fail_detonates`: `fail "boom"`.
+        let g = analyze_source(r#"fn d() -> U64 ( fail "boom" )"#, "d").unwrap();
+        let reached = g.demand_reachable();
+        let fail_reached = g
+            .nodes
+            .iter()
+            .enumerate()
+            .any(|(i, n)| n.kind == NodeKind::Fail && reached[i]);
+        assert!(
+            fail_reached,
+            "`fail` must be a reached Fail node: {:?}",
+            g.nodes
+        );
+    }
+
+    #[test]
+    fn a_demanded_bomb_is_reached() {
+        // poisons.vx `forcing_a_bomb_detonates`: `(42, 💣)[1]` DEMANDS the bomb,
+        // so it must be reached (it detonates — the point of a poisons test). The
+        // mirror of demand_basis, and proof the walk isn't marking every bomb dark.
+        let g = analyze_source("fn d() -> U64 ( let pair = (42, 💣); pair[1] )", "d").unwrap();
+        let reached = g.demand_reachable();
+        let bomb_reached = g
+            .nodes
+            .iter()
+            .enumerate()
+            .any(|(i, n)| n.kind == NodeKind::Bomb && reached[i]);
+        assert!(bomb_reached, "the demanded bomb (pair[1]) must be reached");
     }
 }
