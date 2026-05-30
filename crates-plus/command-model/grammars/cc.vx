@@ -28,6 +28,10 @@ let ld = Grammar {
            role: "version-script", value: ValueDomain.Path { dir: false },
            doc: "restrict exported symbols using a version script" },
   ],
+  positionals: [
+    Positional { name: "object", kind: Kind.Input { dir: false }, role: "object",
+                 arity: Arity.Variadic, doc: "an object file to link" },
+  ],
 }
 
 let cc = Grammar {

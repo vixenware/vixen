@@ -1024,12 +1024,14 @@ fn ld() -> Grammar {
                 canonical: "--gc-sections".into(),
                 role: "gc-sections".into(),
                 operation: Operation::Enable,
+                doc: "remove unused sections".into(),
                 ..Flag::DEFAULT
             },
             Flag {
                 canonical: "--as-needed".into(),
                 role: "as-needed".into(),
                 operation: Operation::Enable,
+                doc: "only link libraries that resolve a symbol".into(),
                 ..Flag::DEFAULT
             },
             Flag {
@@ -1037,6 +1039,8 @@ fn ld() -> Grammar {
                 spelling: Spelling::Suffixed { sep: "=".into() },
                 kind: Kind::Input { dir: false },
                 role: "version-script".into(),
+                value: ValueDomain::Path { dir: false },
+                doc: "restrict exported symbols using a version script".into(),
                 ..Flag::DEFAULT
             },
         ],
@@ -1071,21 +1075,21 @@ fn cc() -> Grammar {
                 kind: Kind::Input { dir: true },
                 role: "include".into(),
                 operation: Operation::Add,
-                doc: String::new(),
+                doc: "additional header search directories".into(),
             },
             EnvDecl {
                 name: "LIBRARY_PATH".into(),
                 kind: Kind::Input { dir: true },
                 role: "lib-dir".into(),
                 operation: Operation::Add,
-                doc: String::new(),
+                doc: "additional library search directories".into(),
             },
             EnvDecl {
                 name: "SOURCE_DATE_EPOCH".into(),
                 kind: Kind::Text,
                 role: "source-date".into(),
                 operation: Operation::Set,
-                doc: String::new(),
+                doc: "fixed timestamp for reproducible builds".into(),
             },
         ],
         flags: vec![
@@ -1093,12 +1097,14 @@ fn cc() -> Grammar {
                 canonical: "-c".into(),
                 role: "compile-only".into(),
                 operation: Operation::Enable,
+                doc: "compile only; do not link".into(),
                 ..Flag::DEFAULT
             },
             Flag {
                 canonical: "-fPIC".into(),
                 role: "pic".into(),
                 operation: Operation::Enable,
+                doc: "emit position-independent code".into(),
                 ..Flag::DEFAULT
             },
             Flag {
@@ -1106,6 +1112,7 @@ fn cc() -> Grammar {
                 role: "shared".into(),
                 operation: Operation::Enable,
                 modes: vec!["link".into()],
+                doc: "produce a shared library".into(),
                 ..Flag::DEFAULT
             },
             Flag {
@@ -1113,12 +1120,20 @@ fn cc() -> Grammar {
                 spelling: Spelling::Attached,
                 policy: Policy::Group { name: "opt".into() },
                 role: "optimization".into(),
+                value: ValueDomain::OneOf {
+                    values: vec!["0".into(), "1".into(), "2".into(), "3".into(), "s".into()],
+                },
+                doc: "optimization level".into(),
                 ..Flag::DEFAULT
             },
             Flag {
                 canonical: "-std".into(),
                 spelling: Spelling::Suffixed { sep: "=".into() },
                 role: "std".into(),
+                value: ValueDomain::OneOf {
+                    values: vec!["c99".into(), "c11".into(), "c17".into(), "c23".into()],
+                },
+                doc: "C language standard".into(),
                 ..Flag::DEFAULT
             },
             Flag {
@@ -1127,6 +1142,7 @@ fn cc() -> Grammar {
                 policy: Policy::DedupUnordered,
                 role: "warning".into(),
                 operation: Operation::Enable,
+                doc: "enable a warning group, e.g. -Wall".into(),
                 ..Flag::DEFAULT
             },
             Flag {
@@ -1135,6 +1151,7 @@ fn cc() -> Grammar {
                 policy: Policy::KeyedLastWins,
                 role: "define".into(),
                 operation: Operation::Add,
+                doc: "define a preprocessor macro (NAME or NAME=VALUE)".into(),
                 ..Flag::DEFAULT
             },
             Flag {
@@ -1144,6 +1161,8 @@ fn cc() -> Grammar {
                 kind: Kind::Input { dir: true },
                 role: "include".into(),
                 operation: Operation::Add,
+                value: ValueDomain::Path { dir: true },
+                doc: "add a header search directory (search order is significant)".into(),
                 ..Flag::DEFAULT
             },
             Flag {
@@ -1153,6 +1172,8 @@ fn cc() -> Grammar {
                 kind: Kind::Input { dir: true },
                 role: "lib-dir".into(),
                 operation: Operation::Add,
+                value: ValueDomain::Path { dir: true },
+                doc: "add a library search directory".into(),
                 ..Flag::DEFAULT
             },
             Flag {
@@ -1165,6 +1186,7 @@ fn cc() -> Grammar {
                 value: ValueDomain::Named {
                     domain: "lib".into(),
                 },
+                doc: "link against a library (order and repeats are significant)".into(),
                 ..Flag::DEFAULT
             },
             Flag {
@@ -1177,6 +1199,7 @@ fn cc() -> Grammar {
                 role: "linker-args".into(),
                 operation: Operation::Add,
                 modes: vec!["link".into()],
+                doc: "pass comma-separated options through to the linker".into(),
                 ..Flag::DEFAULT
             },
             Flag {
@@ -1184,6 +1207,8 @@ fn cc() -> Grammar {
                 spelling: Spelling::Separated,
                 kind: Kind::Output { dir: false },
                 role: "output".into(),
+                value: ValueDomain::Path { dir: false },
+                doc: "write output to this file".into(),
                 ..Flag::DEFAULT
             },
         ],
