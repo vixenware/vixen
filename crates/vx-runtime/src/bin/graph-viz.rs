@@ -22,6 +22,7 @@ struct ViewNode {
     id: u32,
     label: String,
     kind: String,
+    ty: String,
     reached: bool,
     inputs: Vec<u32>,
 }
@@ -49,6 +50,7 @@ fn view_nodes(g: &DemandGraph) -> Vec<ViewNode> {
             id: n.id.0,
             label: n.label.clone(),
             kind: kind_str(&n.kind).to_string(),
+            ty: n.ty.clone(),
             reached: reached[i],
             inputs: n.inputs.iter().map(|d| d.0).collect(),
         })
@@ -123,7 +125,8 @@ for (const [k, desc] of Object.entries(LEGEND)) {{
 
 const elements = [];
 for (const n of NODES) {{
-  elements.push({{ data: {{ id: String(n.id), label: `${{n.label}}\n#${{n.id}} ${{n.kind}}`, kind: n.kind, reached: n.reached }} }});
+  const ty = n.ty && n.ty !== "?" ? ` : ${{n.ty}}` : "";
+  elements.push({{ data: {{ id: String(n.id), label: `${{n.label}}${{ty}}\n#${{n.id}} ${{n.kind}}`, kind: n.kind, reached: n.reached }} }});
 }}
 for (const n of NODES) {{
   for (const dep of n.inputs) {{

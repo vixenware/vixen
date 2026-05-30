@@ -4007,6 +4007,7 @@ dependencies = [
  "vx-ir",
  "vx-parser 0.1.0",
  "vx-stdlib",
+ "vx-types",
 ]
 
 [[package]]

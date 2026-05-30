@@ -19,14 +19,14 @@
 <div class="legend" id="legend"></div>
 <div id="cy"></div>
 <script>
-const NODES = [{"id":0,"label":"42","kind":"Const","reached":true,"inputs":[]},{"id":1,"label":"💣","kind":"Bomb","reached":false,"inputs":[]},{"id":2,"label":"(…)","kind":"LazyData","reached":true,"inputs":[0,1]},{"id":3,"label":"[0]","kind":"Project","reached":true,"inputs":[2]}];
+const NODES = [{"id":0,"label":"42","kind":"Const","ty":"U64","reached":true,"inputs":[]},{"id":1,"label":"💣","kind":"Bomb","ty":"<poison>","reached":false,"inputs":[]},{"id":2,"label":"(…)","kind":"LazyData","ty":"(U64, <poison>)","reached":true,"inputs":[0,1]},{"id":3,"label":"[0]","kind":"Project","ty":"U64","reached":true,"inputs":[2]}];
 const ROOT = "3";
 const COLORS = {
   Const:"#9e9e9e", Param:"#42a5f5", Kernel:"#66bb6a", LazyData:"#ab47bc",
-  Project:"#ffa726", Boundary:"#ef5350", Bomb:"#161616", Unresolved:"#fdd835"
+  Project:"#ffa726", Boundary:"#ef5350", Bomb:"#161616", Fail:"#b71c1c", Unresolved:"#fdd835"
 };
 const LEGEND = { Kernel:"eager / JIT", LazyData:"lifted structure", Project:"selects a slot",
-  Boundary:"effect (exec/intrinsic)", Bomb:"forcing poisons", Const:"literal", Param:"input", Unresolved:"dynamic frontier" };
+  Boundary:"effect (exec/intrinsic)", Bomb:"forcing poisons", Fail:"explicit fail", Const:"literal", Param:"input", Unresolved:"dynamic frontier" };
 
 const legend = document.getElementById("legend");
 for (const [k, desc] of Object.entries(LEGEND)) {
@@ -37,7 +37,8 @@ for (const [k, desc] of Object.entries(LEGEND)) {
 
 const elements = [];
 for (const n of NODES) {
-  elements.push({ data: { id: String(n.id), label: `${n.label}\n#${n.id} ${n.kind}`, kind: n.kind, reached: n.reached } });
+  const ty = n.ty && n.ty !== "?" ? ` : ${n.ty}` : "";
+  elements.push({ data: { id: String(n.id), label: `${n.label}${ty}\n#${n.id} ${n.kind}`, kind: n.kind, reached: n.reached } });
 }
 for (const n of NODES) {
   for (const dep of n.inputs) {

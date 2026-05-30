@@ -29,6 +29,7 @@ use vx_ir::stmt::StmtKind;
 use vx_ir::type_check::type_check_vir;
 use vx_ir::type_collect::collect_types_vir;
 use vx_parser::{SourceId, parse_source_file};
+use vx_types::{TypeEnv, TypeId};
 
 use crate::graph::{DemandGraph, Node, NodeId, NodeKind, Span};
 
@@ -79,6 +80,7 @@ pub fn analyze_source(source: &str, entry: &str) -> Result<DemandGraph, String> 
 
     let mut b = Builder {
         program: &program,
+        env: &types.env,
         nodes: Vec::new(),
         memo: HashMap::new(),
         bindings: HashMap::new(),
@@ -96,6 +98,7 @@ pub fn analyze_source(source: &str, entry: &str) -> Result<DemandGraph, String> 
 
 struct Builder<'a> {
     program: &'a VirProgram,
+    env: &'a TypeEnv,
     nodes: Vec<Node>,
     memo: HashMap<ExprId, NodeId>,
     /// Local binding → the node of its value (the link that makes `pair[0]` reach
@@ -153,6 +156,7 @@ impl Builder<'_> {
         let prog = self.program;
         let expr = &prog.arena[e];
         let span = to_span(expr.span.range);
+        let ty_str = self.render_ty(expr.ty);
 
         let id = match &expr.kind {
             ExprKind::Bomb => self.emit(NodeKind::Bomb, "💣".into(), span, vec![]),
@@ -312,8 +316,20 @@ impl Builder<'_> {
                 vec![],
             ),
         };
+        // For fall-through arms, `id` is the node just emitted for *this* expr —
+        // stamp its real type. (Early-return arms forward to another node, which
+        // already carries its own type.)
+        self.nodes[id.0 as usize].ty = ty_str;
         self.memo.insert(e, id);
         id
+    }
+
+    /// Render a node's static type via the `TypeEnv` (`"?"` if not yet inferred).
+    fn render_ty(&self, ty: Option<TypeId>) -> String {
+        match ty {
+            Some(tid) => format!("{}", self.env.get_ty(tid).display_with_env(self.env)),
+            None => "?".to_string(),
+        }
     }
 
     /// Emit a lazy-data node for a named record/struct and remember its field

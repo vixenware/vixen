@@ -21,5 +21,6 @@ facet-json = { workspace = true }
 vx-ir = { workspace = true }
 vx-parser = { workspace = true }
 vx-stdlib = { workspace = true }
+vx-types = { workspace = true }
 
 [dev-dependencies]
