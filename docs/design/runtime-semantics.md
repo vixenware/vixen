@@ -104,12 +104,12 @@ getting fused with its neighbours.
 - **tracked mount** — the spec's `mounts` (`r[exec.arg]`): fine-grained VFS
   content (`Tree`/`Blob`). Reads are intercepted ⇒ lazy transfer **and** read-set
   capture both possible ⇒ L2 available. The common case (a workspace).
-- **fingerprinted mount** — the spec's `coarse_mounts` (`r[exec.coarse-mounts]`):
-  a **host-backed sandbox exemption**, *not* content-addressed and *outside* the
-  VFS, so its reads cannot be tracked. Its identity is a **fingerprint** — the
-  probe/discovery observations attached to it (`host.which`, `host.hash`,
-  version), rechecked on the runner. Fingerprint → L1 key; no read-set. The system
-  C toolchain is the canonical case.
+- **fingerprinted exemption** — the spec's `exemptions` (`r[exec.exemptions]`): a
+  **host-backed sandbox exemption** (*not a mount*), *not* content-addressed and
+  *outside* the VFS, so its reads cannot be tracked. Its identity is a
+  **fingerprint** — the probe/discovery observations attached to it (`host.which`,
+  `host.hash`, version), rechecked on the runner. Fingerprint → L1 key; no
+  read-set. The system C toolchain is the canonical case.
 
 **Tooling**
 - **demand graph** — the analyzed dataflow graph; the runtime's substrate, the
@@ -268,8 +268,8 @@ cache:
 - **argv** — fully resolved (the command identity; canonical via command-model).
 - **env** — fully resolved.
 - **observer** — code identity + resolved captures (it is a shipped kernel).
-- **fingerprinted mounts** (`coarse_mounts`) — their fingerprint (rechecked probe
-  observations); identity only.
+- **exemptions** (`exemptions`) — their fingerprint (rechecked probe
+  observations); identity only. (Host-backed; not mounts.)
 - **tracked mounts** (`mounts`) — addressed by identity, but **not** contents.
 
 *Forcing here* resolves the argv/env/capture dataflow and pins mount identities.
@@ -368,11 +368,11 @@ command-model already tracks. Three pieces snap together: build.md's broad key
 (L1), command-model's signature + impurity (L2 candidate + determinism escape),
 the firehose's provenance (read-set recording).
 
-### Mount kind drives the strategy
+### Input kind drives the strategy
 
-Not all inputs cache the same way; the *kind of mount* decides:
+Not all inputs cache the same way; the *kind of input* decides:
 
-- **Fingerprinted inputs** (`coarse_mounts`) — host-backed exemptions, identified
+- **Fingerprinted inputs** (`exemptions`) — host-backed exemptions, identified
   by rechecked probe observations; not content-addressed, not trackable (outside
   the VFS). The **fingerprint goes in the L1 key**; no read-set. Read-tracking is
   impossible here and unnecessary (same probe ⇒ same facts). Their reuse is
@@ -423,7 +423,7 @@ states the read-set governs *invalidation/rerun and never the key*; pubgrub's
   fine-grained VFS mount.** The same VFS does double duty: **lazy materialization**
   (serve bytes as opened) **and** **read-set capture** (record what's opened) —
   they are the same interception.
-- **Fingerprinted mounts (`coarse_mounts`) are a deliberate mode, not a
+- **Exemptions (`exemptions`) are a deliberate mode, not a
   fallback.** They are host-backed exemptions (a discovered system toolchain),
   *outside* the VFS, so their reads are inherently untrackable — and that's fine,
   because the identity is the rechecked **fingerprint** (probe observations), not
@@ -432,7 +432,7 @@ states the read-set governs *invalidation/rerun and never the key*; pubgrub's
 So there is a coupling worth stating plainly: **L2 (and lazy transfer) are
 available exactly where the input is a tracked (VFS) mount on a platform that can
 intercept reads.** Two different reasons read-set capture is unavailable:
-**fingerprinted by design** (a host-backed `coarse_mount` — never tracked, by
+**fingerprinted by design** (a host-backed `exemption` — never tracked, by
 construction) or **forced** (a tracked mount on a platform that can't intercept —
 a real limitation, below). Don't conflate them.
 

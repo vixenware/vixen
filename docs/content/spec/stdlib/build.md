@@ -195,7 +195,7 @@ model, but they are not part of the core language syntax.
 > ) with {
 >   env: Map[String, ExecInput] = %{},
 >   mounts: Map[Path, TreeEntry] = %{},
->   coarse_mounts: Array[SandboxExemption] = [],
+>   exemptions: Array[SandboxExemption] = [],
 >   writable: Array[Path] = [],
 >   create_dirs: Array[Path] = [],
 >   observer: Fn(Process, Tree) -> T,
@@ -232,13 +232,13 @@ model, but they are not part of the core language syntax.
 > location directly. `Blob`, `Tree`, and `ExecPath` carry implicit mount
 > obligations.
 
-> r[exec.coarse-mounts]
+> r[exec.exemptions]
 >
-> `coarse_mounts` is the explicit surface for host-backed sandbox
-> exemptions that cannot be justified through ordinary VFS tracking.
-> Unlike `mounts`, which are fine-grained VFS content exposures, coarse
-> mounts are host filesystem holes chosen by authored Vixen code and
-> verified by the runtime on the concrete runner.
+> `exemptions` is the explicit surface for host-backed sandbox exemptions
+> that cannot be justified through ordinary VFS tracking. Unlike `mounts`,
+> which are fine-grained VFS content exposures, an exemption is **not a
+> mount** — it is a read-only host filesystem hole chosen by authored Vixen
+> code and verified by the runtime on the concrete runner.
 >
 > ```vixen
 > enum SandboxExemption {
@@ -252,11 +252,11 @@ model, but they are not part of the core language syntax.
 > }
 > ```
 >
-> Both variants are **read-only**: a coarse exemption never grants write
+> Both variants are **read-only**: an exemption never grants write
 > access to the host filesystem. `ReadSubpath` permits reads under `root`;
 > `ExecSubpath` permits read and execute (running a discovered tool) but
 > never write. Host state is an input to a build, never a sink — nothing
-> the sandboxed process does can mutate a coarse-mounted host path. The
+> the sandboxed process does can mutate an exempted host path. The
 > runtime applies these exemptions only after rechecking the discovery
 > observations attached to them on the concrete runner.
 
@@ -532,8 +532,8 @@ model, but they are not part of the core language syntax.
 > `HostOutput` (captured output bytes and exit code) — deliberately
 > narrower than the observer's `Process`, to keep the recorded obligation
 > tuple small. `host.exec_subpath(root)` and `host.read_subpath(root)`
-> produce explicit coarse sandbox exemptions to be carried out of a probe
-> and later passed back into `exec` through `coarse_mounts`. Every such
+> produce explicit sandbox exemptions to be carried out of a probe
+> and later passed back into `exec` through `exemptions`. Every such
 > operation is recorded as an obligation on the values that flow out of
 > the probe. These operations are for probing and rechecking probed
 > facts, not for general network access.
@@ -552,7 +552,7 @@ model, but they are not part of the core language syntax.
 > Coarse host facts are therefore justified by probing and verification,
 > not by ordinary VFS tracking. Authored Vixen code must carry explicit
 > `SandboxExemption` values out of a probe and pass them back into
-> `exec` through `coarse_mounts`; the runtime does not invent coarse host
+> `exec` through `exemptions`; the runtime does not invent coarse host
 > policy on behalf of the build. When a discovered exemption later
 > authorizes host-side access during `exec`, that access must be
 > explained by the carried observations attached to the exemption and
