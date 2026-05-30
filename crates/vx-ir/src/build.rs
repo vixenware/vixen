@@ -2433,7 +2433,7 @@ impl VirBuilder {
                     SyntaxKind::CLI_INTERP_VAR => {
                         let text = tok.text();
                         let name = text.strip_prefix('$').unwrap_or(text).to_string();
-                        let name_span = self.token_span(&tok);
+                        let name_span = self.token_span(tok);
                         let nr = self.arena.alloc_expr(Expr {
                             span: name_span,
                             body: self.current_body(),
