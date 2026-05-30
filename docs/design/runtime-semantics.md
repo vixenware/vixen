@@ -280,6 +280,54 @@ other values, where the boundaries fell. The **playground** (§8) is therefore
 promoted from "nice observability" to "how you see and verify the inside-out
 transformation" — bump it up the rebuild plan.
 
+### The cost model: pay for laziness only where it's used
+
+The guiding principle: **where laziness isn't needed, the code is exactly as fast
+as an eager language.** You pay the node/memo cost *only* at positions that are
+genuinely lazy / shared / effectful; everywhere else is unboxed register compute.
+
+- **Node cost is a *seam* cost, not a per-op cost.** Inside a kernel there are no
+  nodes — the JIT **scalarizes** values into registers (the ABI words). NodeRefs
+  appear only at seams: a kernel's lazy/deferred inputs, its node-producing
+  outputs, lazy-data construction, and boundaries. Large kernels ⇒ rare seams ⇒
+  amortized cost (kernel-abi's "make kernels large" goal). This is GHC
+  **worker/wrapper**: the worker (kernel) is unboxed registers; the wrapper (seam)
+  handles the boxed/lazy node interface.
+- **Scalarization is recursive.** Not just a flat struct — a struct field inside an
+  array inside another struct, all eager, scalarizes *wholesale* into registers.
+  One lazy position deep inside must **not** box its eager container (per-field, à
+  la GHC per-field strictness). *[Open: confirm per-field scalarization composes
+  through arbitrary nesting — the load-bearing case.]*
+- **Three tiers:**
+  - **Tier 0 — register** (not a node): kernel-local, eager, unshared. Recomputed
+    if needed. No alloc, no memo, no indirection. The common case.
+  - **Tier 1 — InMemory node**: memoised this run. Lazy-data, shared-and-expensive,
+    multiply-demanded. Arena (`Vec`, `NodeId = u32` — no malloc); flat-array memo
+    (no hashmap).
+  - **Tier 2 — Persist node**: content-addressed across runs (the boundary
+    intrinsics). kernel-abi's `Persist`.
+- **Static typing spares the dynamic tag.** A position's type is statically known,
+  so the only dynamic bit is concrete-vs-pending — not a NaN-box / tagged-pointer
+  tax. The runtime envelope stays thin.
+- **Tier-0-vs-tier-1 is unsolved** and needs a **cost heuristic** (recompute-cheap
+  vs memo-overhead). This is the load-bearing analysis; getting it wrong is where
+  the design gets slow. GHC demand analysis to raid.
+
+### The graph is built at runtime, not compiled once
+
+**There is no static analysis in a JIT'd language.** `import` is a function call
+that resolves to something; a package can be **downloaded mid-invocation**; an
+`exec` produces a value of runtime-determined shape that streams back into other
+nodes. So the inside-out turn (code → graph) is **an ongoing process during
+evaluation**, not a compile-time pass with a runtime patch. It is *not* "mostly
+static plus one exception" — it is dynamic from the start: new code and new
+structure enter as the program runs.
+
+What we *can* do statically is a **snapshot**: turn the code currently in hand
+inside out, honest about being one frame of a moving picture. That snapshot is what
+the first analysis sketch produces and what the playground renders — useful, never
+mistaken for "the" graph.
+
 ---
 
 ## 3. Values, pending, remote handles
