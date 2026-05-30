@@ -45,6 +45,11 @@ pub struct VirArena {
     pub type_refs: Vec<TypeRef>,
     /// All source file roots.
     pub source_units: Vec<SourceUnit>,
+    /// Resolved imports: import spec (`@scope/name`, `vixen:…`) → the source
+    /// unit that provides it. Populated by the compile driver after the import
+    /// closure is built; read by name resolution + type checking to resolve
+    /// `import` expressions and cross-module references.
+    pub imports: std::collections::HashMap<String, SourceUnitId>,
 }
 
 impl VirArena {
@@ -60,6 +65,7 @@ impl VirArena {
             scopes: Vec::new(),
             type_refs: Vec::new(),
             source_units: Vec::new(),
+            imports: std::collections::HashMap::new(),
         }
     }
 

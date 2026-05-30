@@ -12,6 +12,7 @@
 //! `reference_order` contextually (not stored on nodes).
 
 use crate::arena::VirArena;
+use crate::binding::ImportOrigin;
 use crate::diagnostic::IrDiagnostic;
 use crate::expr::{
     ArrayElement, ExprKind, MapElement, MapKey, PartialArg, StringPart, UpdateField,
@@ -20,7 +21,7 @@ use crate::item::ItemKind;
 use crate::pattern::PatternKind;
 use crate::scope::{self, DefTarget, ScopeEntryTarget};
 use crate::stmt::StmtKind;
-use crate::{BodyId, ExprId, ItemId, PatternId, ScopeId, SourceUnitId, StmtId};
+use crate::{BindingId, BodyId, ExprId, ItemId, PatternId, ScopeId, SourceUnitId, StmtId};
 use vx_parser::{SourceId, SourceSpan};
 
 // ---------------------------------------------------------------------------
@@ -168,8 +169,20 @@ fn resolve_expr(
                 resolve_expr(arena, arm.body, u32::MAX, errors);
             }
         }
+        // An `import "spec"` resolves to the source unit the compile driver
+        // recorded for that spec. Record the target source so the demand
+        // evaluator (and tooling) can follow the link.
+        ExprKind::Import(imp) => {
+            let unit = arena.imports.get(&imp.path).copied();
+            if let Some(unit) = unit {
+                let source = arena[unit].source;
+                if let ExprKind::Import(ref mut i) = arena[expr_id].kind {
+                    i.resolved_source = Some(source);
+                }
+            }
+        }
         // All other expression kinds: recurse into children with same ref_order.
-        ExprKind::Literal(_) | ExprKind::Import(_) | ExprKind::Error => {}
+        ExprKind::Literal(_) | ExprKind::Error => {}
         ExprKind::PathLiteral(pl) => {
             for part in &pl.parts {
                 if let StringPart::Expr(id) = part {
@@ -328,7 +341,20 @@ fn resolve_stmt(
             // Init expression uses stmt_order as reference_order so the
             // binding being defined is invisible in its own initializer.
             resolve_expr(arena, let_.init, stmt_order, errors);
-            // Pattern doesn't need resolution — bindings already allocated.
+            // Pattern bindings are already allocated; but if the initializer is
+            // an `import`, stamp provenance on them so cross-module references
+            // redirect to the imported exports. `let m = import "…"` binds the
+            // whole module record; `let { a, b } = import "…"` binds exports.
+            let import_path = match &arena[let_.init].kind {
+                ExprKind::Import(imp) => Some(imp.path.clone()),
+                _ => None,
+            };
+            if let Some(path) = import_path {
+                let unit = arena.imports.get(&path).copied();
+                if let Some(unit) = unit {
+                    bind_import_pattern(arena, let_.pattern, unit, &path);
+                }
+            }
         }
         StmtKind::Assign(assign) => {
             resolve_assign_target(
@@ -467,6 +493,81 @@ fn should_skip(name: &str) -> bool {
     name == "_" || name.starts_with('$')
 }
 
+// ---------------------------------------------------------------------------
+// Cross-module imports (a module is a record value)
+// ---------------------------------------------------------------------------
+
+/// Record import provenance on the bindings introduced by an import's `let`
+/// pattern, so later references redirect to the imported exports.
+///
+/// - `let m = import "…"` → a whole-module binding (`export: None`); `m`
+///   denotes the module record and is accessed as `m.field`.
+/// - `let { a, b } = import "…"` → one binding per field, each naming the
+///   export it pulls in (`export: Some("a")`, …).
+fn bind_import_pattern(arena: &mut VirArena, pattern: PatternId, unit: SourceUnitId, spec: &str) {
+    // Collect the (binding, export-name) targets first so the immutable borrow
+    // on the pattern is dropped before we mutate the bindings.
+    let targets: Vec<(BindingId, Option<String>)> = match &arena[pattern].kind {
+        PatternKind::Binding(b) => vec![(b.binding, None)],
+        PatternKind::Struct(s) => s
+            .fields
+            .iter()
+            .filter_map(|f| match &arena[f.pattern].kind {
+                PatternKind::Binding(b) => Some((b.binding, Some(f.name.clone()))),
+                _ => None,
+            })
+            .collect(),
+        _ => Vec::new(),
+    };
+    for (bid, export) in targets {
+        arena[bid].import_origin = Some(ImportOrigin {
+            unit,
+            spec: spec.to_string(),
+            export,
+        });
+    }
+}
+
+/// If `target` is a binding pulled in by a destructuring import
+/// (`let { x } = import "…"`), follow it to the export it names in the
+/// imported unit. Whole-module bindings (`let m = import "…"`) and ordinary
+/// bindings pass through unchanged — `m` stays a value, accessed via fields.
+fn redirect_import(arena: &VirArena, target: DefTarget) -> DefTarget {
+    if let DefTarget::Binding(bid) = target
+        && let Some(origin) = &arena[bid].import_origin
+        && let Some(export_name) = &origin.export
+        && let Some(redirected) = unit_export(arena, origin.unit, export_name)
+    {
+        return redirected;
+    }
+    target
+}
+
+/// Find the export named `name` provided by `unit`: one of the unit's own
+/// top-level items (struct/enum/fn/namespace/…) or a top-level `let` binding.
+/// The injected prelude is *not* an export — only the unit's own definitions.
+fn unit_export(arena: &VirArena, unit: SourceUnitId, name: &str) -> Option<DefTarget> {
+    // The unit's own items: types, functions, namespaces.
+    for &item_id in &arena[unit].items {
+        if arena.item_name(item_id) == name {
+            return Some(DefTarget::Item(item_id));
+        }
+    }
+    // Top-level `let` bindings in the unit's implicit thunk block.
+    let root = arena[arena[unit].top_level_body].root_expr;
+    if let ExprKind::Block(block) = &arena[root].kind {
+        for &stmt_id in &block.stmts {
+            if let StmtKind::Let(let_) = &arena[stmt_id].kind
+                && let PatternKind::Binding(b) = &arena[let_.pattern].kind
+                && b.name == name
+            {
+                return Some(DefTarget::Binding(b.binding));
+            }
+        }
+    }
+    None
+}
+
 /// Resolve a NameRefExpr. No target-kind constraint.
 fn resolve_name_ref(
     arena: &mut VirArena,
@@ -480,7 +581,7 @@ fn resolve_name_ref(
         return;
     }
 
-    let result = scope::lookup_at(arena, name, scope, ref_order);
+    let result = scope::lookup_at(arena, name, scope, ref_order).map(|t| redirect_import(arena, t));
     match result {
         Some(target) => {
             if let ExprKind::NameRef(ref mut nr) = arena[expr_id].kind {
@@ -601,7 +702,9 @@ fn resolve_field_assign_target(
     }
 }
 
-/// Resolve a struct literal name. Must resolve to an Item with ItemKind::Struct.
+/// Resolve a struct literal name. Plain `Struct { … }` must resolve to a
+/// struct item; the enum-variant form `Enum.Variant { … }` must resolve to an
+/// enum item whose variant set includes `Variant`.
 fn resolve_struct_literal(
     arena: &mut VirArena,
     expr_id: ExprId,
@@ -614,16 +717,18 @@ fn resolve_struct_literal(
         return;
     }
 
-    let result = scope::lookup_at(arena, name, scope, ref_order);
-    // Use the struct name token span rather than the full literal span
-    // (which includes the `{ ... }` braces and preceding whitespace).
-    let span = match &arena[expr_id].kind {
-        ExprKind::StructLiteral(sl) => sl.name_span,
-        _ => arena[expr_id].span,
+    let result = scope::lookup_at(arena, name, scope, ref_order).map(|t| redirect_import(arena, t));
+    // Use the struct/enum name token span rather than the full literal span
+    // (which includes the `{ ... }` braces and preceding whitespace), plus the
+    // variant name + its span for the `Enum.Variant { … }` form.
+    let (span, variant, variant_span) = match &arena[expr_id].kind {
+        ExprKind::StructLiteral(sl) => (sl.name_span, sl.variant.clone(), sl.variant_span),
+        _ => (arena[expr_id].span, None, None),
     };
 
-    match result {
-        Some(DefTarget::Item(item_id)) => {
+    match (result, variant) {
+        // Plain struct construction: `Struct { … }`.
+        (Some(DefTarget::Item(item_id)), None) => {
             if matches!(arena[item_id].kind, ItemKind::Struct(_)) {
                 if let ExprKind::StructLiteral(ref mut sl) = arena[expr_id].kind {
                     sl.resolved = Some(item_id);
@@ -635,10 +740,33 @@ fn resolve_struct_literal(
                 });
             }
         }
-        Some(found) => {
+        // Enum-variant construction: `Enum.Variant { … }`.
+        (Some(DefTarget::Item(item_id)), Some(variant_name)) => {
+            // Compute the variant index (dropping the borrow before mutating).
+            let variant_idx = match &arena[item_id].kind {
+                ItemKind::Enum(e) => Some(e.variants.iter().position(|v| v.name == variant_name)),
+                _ => None,
+            };
+            match variant_idx {
+                None => errors.push(IrDiagnostic::InvalidTarget {
+                    name: span,
+                    found: DefTarget::Item(item_id),
+                }),
+                Some(None) => errors.push(IrDiagnostic::Unresolved {
+                    name: variant_span.unwrap_or(span),
+                }),
+                Some(Some(i)) => {
+                    if let ExprKind::StructLiteral(ref mut sl) = arena[expr_id].kind {
+                        sl.resolved = Some(item_id);
+                        sl.resolved_variant = Some(i as u32);
+                    }
+                }
+            }
+        }
+        (Some(found), _) => {
             errors.push(IrDiagnostic::InvalidTarget { name: span, found });
         }
-        None => {
+        (None, _) => {
             errors.push(IrDiagnostic::Unresolved { name: span });
         }
     }

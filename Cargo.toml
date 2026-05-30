@@ -57,6 +57,7 @@ vx-vfs = { path = "crates/vx-vfs" }
 vx-vfsd = { path = "crates/vx-vfsd" }
 vx-vfs-types = { path = "crates/vx-vfs-types" }
 vx-parser = { path = "crates/vx-parser" }
+vx-package = { path = "crates/vx-package" }
 vx-ir = { path = "crates/vx-ir" }
 vx-stdlib = { path = "crates/vx-stdlib" }
 vx-types = { path = "crates/vx-types" }

@@ -9,7 +9,7 @@
 //! [`DefId`](crate::def::DefId) (for top-level definitions). There is exactly
 //! one canonical `Binding` per introduced name — no second lookup mechanism.
 
-use crate::{BodyId, ExprId, ScopeId};
+use crate::{BodyId, ExprId, ScopeId, SourceUnitId};
 use vx_parser::SourceSpan;
 use vx_types::TypeId;
 
@@ -54,6 +54,25 @@ pub struct Binding {
     /// resolves to this binding). The CST walk initializes this to `false`;
     /// the resolver upgrades it to `true` for bindings that are assigned to.
     pub mutable: bool,
+
+    /// If this binding comes from an `import` (`let m = import "…"` or
+    /// `let { x } = import "…"`), where its value comes from: the imported
+    /// module unit, the import spec (for grammar loading), and the export name
+    /// it binds (`None` = the whole module record).
+    /// Populated during: name resolution pass.
+    pub import_origin: Option<ImportOrigin>,
+}
+
+/// The provenance of a binding introduced by an `import`.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ImportOrigin {
+    /// The imported module's source unit.
+    pub unit: SourceUnitId,
+    /// The import spec as written (`@vixen/grammar-cc`, `vixen:…`).
+    pub spec: String,
+    /// The export this binding names, or `None` for a whole-module binding
+    /// (`let m = import "…"`, accessed as `m.field`).
+    pub export: Option<String>,
 }
 
 /// How a binding was introduced in source.

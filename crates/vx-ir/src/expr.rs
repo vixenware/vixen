@@ -316,16 +316,27 @@ pub struct StructLiteralField {
     pub value: ExprId,
 }
 
-/// A named struct literal: `Point { x: 1, y: 2 }`.
+/// A named struct literal: `Point { x: 1, y: 2 }`, or an enum-variant
+/// construction with a struct payload: `Kind.Input { dir: false }`.
 #[derive(Debug, Clone)]
 pub struct StructLiteralExpr {
-    /// The struct name as written (e.g. `"Point"`).
+    /// The struct or enum name as written (e.g. `"Point"`, or `"Kind"` for the
+    /// enum-variant form `Kind.Input { … }`).
     pub name: String,
-    /// Span of the struct name, for diagnostics.
+    /// Span of the struct/enum name, for diagnostics.
     pub name_span: SourceSpan,
-    /// The resolved target of the struct name.
+    /// For enum-variant construction `Enum.Variant { … }`, the variant name
+    /// (`"Input"`). `None` for plain struct construction.
+    pub variant: Option<String>,
+    /// Span of the variant name token, when `variant` is set.
+    pub variant_span: Option<SourceSpan>,
+    /// The resolved target of the name: the struct item for plain construction,
+    /// or the enum item for variant construction.
     /// Populated during: name resolution pass.
     pub resolved: Option<ItemId>,
+    /// For variant construction, the resolved variant index within the enum.
+    /// Populated during: name resolution pass.
+    pub resolved_variant: Option<u32>,
     /// The field initializers.
     pub fields: Vec<StructLiteralField>,
 }

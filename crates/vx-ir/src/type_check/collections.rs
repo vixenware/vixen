@@ -81,6 +81,20 @@ pub(crate) fn infer_struct_literal(tc: &mut TypeChecker, sl: &StructLiteralExpr)
         tc.infer_expr(field.value);
     }
 
+    // Enum-variant construction `Enum.Variant { … }`: the value has the enum
+    // type. `resolved` is the enum item, `resolved_variant` the chosen variant.
+    if let Some(item_id) = sl.resolved
+        && sl.resolved_variant.is_some()
+        && let crate::item::ItemKind::Enum(ref e) = tc.arena[item_id].kind
+    {
+        let enum_name_span = e.name_span;
+        if let Some(&def_id) = tc.types.def_to_type.get(&enum_name_span)
+            && matches!(tc.types.env[def_id], vx_types::TypeDef::Enum(_))
+        {
+            return tc.types.env.intern_enum(def_id, vec![]);
+        }
+    }
+
     // Use the resolved struct item to find the TypeDefId.
     if let Some(item_id) = sl.resolved
         && let crate::item::ItemKind::Struct(ref s) = tc.arena[item_id].kind

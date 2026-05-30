@@ -40,6 +40,7 @@ fn arena_round_trip() {
         ty: None,
         init_expr: None,
         mutable: false,
+        import_origin: None,
     });
 
     // Register binding in scope
@@ -203,6 +204,7 @@ fn visitor_traversal_count() {
         ty: None,
         init_expr: None,
         mutable: false,
+        import_origin: None,
     });
 
     arena[scope_id].entries.push(ScopeEntry {

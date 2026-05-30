@@ -21,6 +21,7 @@ use crate::resolve::resolve_names;
 use crate::scope::{ScopeEntry, ScopeEntryTarget};
 use crate::type_check::type_check_vir;
 use crate::type_collect::collect_types_vir;
+use crate::{ItemId, SourceUnitId};
 
 #[derive(Debug)]
 pub enum CompileError {
@@ -56,51 +57,58 @@ impl fmt::Display for CompileError {
 
 impl std::error::Error for CompileError {}
 
-pub fn inject_implicit_stdlib_imports(program: &mut crate::build::VirProgram) {
-    let Some(&primary_su) = program.source_units.first() else {
-        return;
-    };
-
-    let primary_module_scope = program.arena[program.arena[primary_su].top_level_body].scope;
-    let imported_items = program
-        .source_units
+/// Inject the **prelude** — the stdlib units' top-level items — into the module
+/// scope of each `target` unit. The prelude is ambient (available un-imported)
+/// everywhere, so a package module (e.g. `cc.vx`) sees `String`/`Array`/… just
+/// like user code. Package *exports* are **not** injected — those are
+/// import-scoped (bound where they're imported), only the prelude is global.
+pub fn inject_prelude(
+    program: &mut crate::build::VirProgram,
+    stdlib_su_ids: &[SourceUnitId],
+    targets: &[SourceUnitId],
+) {
+    let prelude_items: Vec<ItemId> = stdlib_su_ids
         .iter()
-        .copied()
-        .skip(1)
-        .flat_map(|su_id| program.arena[su_id].items.iter().copied())
-        .collect::<Vec<_>>();
+        .flat_map(|&su_id| program.arena[su_id].items.iter().copied())
+        .collect();
 
-    // Collect namespace names from imports. When stdlib exposes both an opaque
-    // type alias (e.g. `type Toml;`) and a namespace with the same name
-    // (`namespace Toml { ... }`), the namespace should win in the user's scope
-    // so that `Toml.parse(...)` resolves to the namespace.
-    let namespace_names: std::collections::HashSet<String> = imported_items
+    // When the prelude exposes both an opaque type alias (`type Toml;`) and a
+    // namespace with the same name (`namespace Toml { ... }`), the namespace
+    // wins so `Toml.parse(...)` resolves to it.
+    let namespace_names: std::collections::HashSet<String> = prelude_items
         .iter()
-        .filter_map(|&id| {
-            if let ItemKind::Namespace(ns) = &program.arena[id].kind {
-                Some(ns.name.clone())
-            } else {
-                None
-            }
+        .filter_map(|&id| match &program.arena[id].kind {
+            ItemKind::Namespace(ns) => Some(ns.name.clone()),
+            _ => None,
         })
         .collect();
 
-    for item_id in imported_items {
-        // Skip stdlib type aliases that are also exposed as a namespace.
-        if let ItemKind::TypeAlias(t) = &program.arena[item_id].kind
-            && namespace_names.contains(&t.name)
-        {
-            continue;
-        }
-        program.arena[primary_module_scope]
-            .entries
-            .push(ScopeEntry {
+    for &target in targets {
+        let module_scope = program.arena[program.arena[target].top_level_body].scope;
+        for &item_id in &prelude_items {
+            if let ItemKind::TypeAlias(t) = &program.arena[item_id].kind
+                && namespace_names.contains(&t.name)
+            {
+                continue;
+            }
+            program.arena[module_scope].entries.push(ScopeEntry {
                 target: ScopeEntryTarget::Item(item_id),
-                // Module scopes are order-independent, but lower decl_order keeps
-                // user-defined top-level items winning on ties and later lookups.
                 decl_order: 0,
             });
+        }
     }
+}
+
+/// Back-compat shim: inject every non-primary unit (all stdlib, no packages)
+/// into the primary module scope. Used by callers/tests that compile a single
+/// module with no package imports.
+pub fn inject_implicit_stdlib_imports(program: &mut crate::build::VirProgram) {
+    if program.source_units.is_empty() {
+        return;
+    }
+    let primary = program.source_units[0];
+    let stdlib: Vec<SourceUnitId> = program.source_units.iter().copied().skip(1).collect();
+    inject_prelude(program, &stdlib, &[primary]);
 }
 
 /// Compile Vixen source text to an executable program.
@@ -137,10 +145,27 @@ pub fn compile_source(
 }
 
 /// Like [`compile_source`], but reports each pipeline phase to `observer` as it
-/// completes.
+/// completes. Uses bundled built-ins only for `import`s.
 pub fn compile_source_observed(
     source: &str,
     function_name: &str,
+    observer: &mut dyn CompileObserver,
+) -> Result<ExecutableProgram, CompileError> {
+    compile_source_observed_with_resolver(
+        source,
+        function_name,
+        &vx_package::BundledResolver,
+        observer,
+    )
+}
+
+/// Like [`compile_source_observed`], with an explicit package `resolver` for
+/// `import`s. Pass a [`vx_package::CompositeResolver`] (with a packages root) to
+/// resolve `@scope/name` packages from disk.
+pub fn compile_source_observed_with_resolver(
+    source: &str,
+    function_name: &str,
+    resolver: &dyn vx_package::PackageResolver,
     observer: &mut dyn CompileObserver,
 ) -> Result<ExecutableProgram, CompileError> {
     // Parse user source — short-circuit on errors.
@@ -152,25 +177,66 @@ pub fn compile_source_observed(
     let cst_nodes = parsed.tree().syntax().descendants().count() as u64;
     observer.parsed(t.elapsed(), cst_nodes, source.len() as u64);
 
-    // Parse stdlib sources (trusted — panic on errors).
     let mut sources: Vec<(SourceId, vx_parser::SourceFile)> = vec![(SourceId(0), parsed.tree())];
-    for (i, stdlib) in vx_stdlib::stdlib_sources().iter().enumerate() {
-        let stdlib_id = SourceId(i as u32 + 1);
-        let stdlib_parsed = vx_parser::parse_source_file(stdlib.text, stdlib_id);
+    let mut next_id: u32 = 1;
+
+    // The prelude: stdlib sources, parsed and bundled (trusted — panic on error).
+    let mut stdlib_ids: Vec<SourceId> = Vec::new();
+    for stdlib in vx_stdlib::stdlib_sources() {
+        let id = SourceId(next_id);
+        next_id += 1;
+        let stdlib_parsed = vx_parser::parse_source_file(stdlib.text, id);
         assert!(
             stdlib_parsed.errors().is_empty(),
             "stdlib source {} has parse errors: {:?}",
             stdlib.logical_path,
             stdlib_parsed.errors()
         );
-        sources.push((stdlib_id, stdlib_parsed.tree()));
+        sources.push((id, stdlib_parsed.tree()));
+        stdlib_ids.push(id);
     }
 
-    // Build VIR + collect types + resolve names. (Bundled under name
-    // resolution — VIR construction has no separate protocol phase.)
+    // The import closure: every package reachable from the user module via
+    // `import`, parsed and added as a source unit. Unresolved imports surface
+    // during name resolution (the spec simply won't be in the import map).
+    let closure = vx_package::resolve_closure(source, resolver);
+    let mut import_specs: Vec<(String, SourceId)> = Vec::new();
+    for pkg in &closure.packages {
+        let id = SourceId(next_id);
+        next_id += 1;
+        let pkg_parsed = vx_parser::parse_source_file(&pkg.main, id);
+        if !pkg_parsed.errors().is_empty() {
+            return Err(CompileError::Parse(pkg_parsed.errors().to_vec()));
+        }
+        sources.push((id, pkg_parsed.tree()));
+        import_specs.push((pkg.id.clone(), id));
+    }
+
+    // Build VIR over the whole module graph.
     let t = Instant::now();
     let mut program = VirBuilder::build_program(&sources);
-    inject_implicit_stdlib_imports(&mut program);
+
+    // Record the import map (spec → source unit) for cross-module resolution.
+    for (spec, sid) in &import_specs {
+        if let Some((su_id, _)) = program.arena.source_unit_for(*sid) {
+            program.arena.imports.insert(spec.clone(), su_id);
+        }
+    }
+
+    // The prelude is ambient in every non-stdlib unit (user module + packages);
+    // package exports are import-scoped, not injected.
+    let stdlib_su_ids: Vec<SourceUnitId> = stdlib_ids
+        .iter()
+        .filter_map(|&sid| program.arena.source_unit_for(sid).map(|(su, _)| su))
+        .collect();
+    let prelude_targets: Vec<SourceUnitId> = program
+        .source_units
+        .iter()
+        .copied()
+        .filter(|su| !stdlib_su_ids.contains(su))
+        .collect();
+    inject_prelude(&mut program, &stdlib_su_ids, &prelude_targets);
+
     let mut types = collect_types_vir(&mut program.arena);
     let resolve_errors = resolve_names(&mut program.arena);
     if !resolve_errors.is_empty() {
@@ -322,6 +388,126 @@ fn probe() -> String (
                 |e| matches!(&e.kind, crate::expr::ExprKind::CliLiteral(c) if c.grammar == "cc"),
             );
         assert!(found, "expected a CliLiteral IR node for grammar `cc`");
+    }
+
+    /// Run the compiler front-end (parse user + stdlib + import closure, build
+    /// VIR, inject prelude, collect types, resolve names, type-check) over
+    /// `source` with `resolver`, stopping before demand/lowering. Returns the
+    /// program plus debug-formatted resolve and type errors.
+    fn front_end(
+        source: &str,
+        resolver: &dyn vx_package::PackageResolver,
+    ) -> (crate::build::VirProgram, Vec<String>, Vec<String>) {
+        use crate::SourceUnitId;
+
+        let parsed = vx_parser::parse_source_file(source, SourceId(0));
+        assert!(parsed.errors().is_empty(), "user source should parse");
+        let mut sources = vec![(SourceId(0), parsed.tree())];
+        let mut next_id: u32 = 1;
+
+        let mut stdlib_ids = Vec::new();
+        for stdlib in stdlib_sources() {
+            let id = SourceId(next_id);
+            next_id += 1;
+            let p = vx_parser::parse_source_file(stdlib.text, id);
+            assert!(p.errors().is_empty(), "stdlib should parse");
+            sources.push((id, p.tree()));
+            stdlib_ids.push(id);
+        }
+
+        let closure = vx_package::resolve_closure(source, resolver);
+        assert!(
+            closure.errors.is_empty(),
+            "import closure should resolve cleanly, got {:?}",
+            closure.errors
+        );
+        let mut import_specs = Vec::new();
+        for pkg in &closure.packages {
+            let id = SourceId(next_id);
+            next_id += 1;
+            let p = vx_parser::parse_source_file(&pkg.main, id);
+            assert!(
+                p.errors().is_empty(),
+                "package {} should parse, got {:?}",
+                pkg.id,
+                p.errors()
+            );
+            sources.push((id, p.tree()));
+            import_specs.push((pkg.id.clone(), id));
+        }
+
+        let mut program = VirBuilder::build_program(&sources);
+        for (spec, sid) in &import_specs {
+            if let Some((su_id, _)) = program.arena.source_unit_for(*sid) {
+                program.arena.imports.insert(spec.clone(), su_id);
+            }
+        }
+        let stdlib_su_ids: Vec<SourceUnitId> = stdlib_ids
+            .iter()
+            .filter_map(|&sid| program.arena.source_unit_for(sid).map(|(su, _)| su))
+            .collect();
+        let prelude_targets: Vec<SourceUnitId> = program
+            .source_units
+            .iter()
+            .copied()
+            .filter(|su| !stdlib_su_ids.contains(su))
+            .collect();
+        super::inject_prelude(&mut program, &stdlib_su_ids, &prelude_targets);
+
+        let mut types = collect_types_vir(&mut program.arena);
+        let resolve_errors = resolve_names(&mut program.arena)
+            .iter()
+            .map(|e| format!("{e:?}"))
+            .collect();
+        let tc_result = type_check_vir(&mut program.arena, &mut types);
+        let tc_errors = tc_result.errors.iter().map(|e| format!("{e:?}")).collect();
+        (program, resolve_errors, tc_errors)
+    }
+
+    #[test]
+    fn enum_variant_struct_construction_resolves_and_types() {
+        // `Enum.Variant { field: value }` (struct-payload variant construction)
+        // resolves to the enum + variant index and types as the enum.
+        let src = "enum Kind { struct Text, struct Input { dir: Bool } }\nfn p() -> Kind ( Kind.Input { dir: false } )\n";
+        let mut program = semantically_analyze(src);
+        let mut types = collect_types_vir(&mut program.arena);
+        let resolve_errors = resolve_names(&mut program.arena);
+        assert!(
+            resolve_errors.is_empty(),
+            "variant construction should resolve, got {resolve_errors:?}"
+        );
+        let tc = type_check_vir(&mut program.arena, &mut types);
+        assert!(
+            tc.errors.is_empty(),
+            "variant construction should type-check, got {:?}",
+            tc.errors
+        );
+        // The literal resolved to an enum item + a variant index.
+        let ok = program.arena.exprs.iter().any(|e| {
+            matches!(&e.kind, crate::expr::ExprKind::StructLiteral(sl)
+                if sl.variant.as_deref() == Some("Input") && sl.resolved_variant == Some(1))
+        });
+        assert!(ok, "expected resolved Kind.Input variant (index 1)");
+    }
+
+    #[test]
+    fn grammar_cc_package_genuinely_compiles() {
+        // The real @vixen/grammar-cc package imports `vixen:command-grammar`,
+        // destructures 11 of its types, and builds Grammar/Flag/Spelling.Bare/
+        // Policy.Group{…} literals against them. Compiling it as the entry
+        // module proves cross-module name resolution + type-checking: the
+        // imported `Grammar` struct name and `Spelling`/`Policy`/`Kind` enums
+        // resolve to command-grammar's items, across the unit boundary.
+        let source = include_str!("../../../packages/@vixen/grammar-cc/main.vx");
+        let (_program, resolve_errors, tc_errors) = front_end(source, &vx_package::BundledResolver);
+        assert!(
+            resolve_errors.is_empty(),
+            "grammar-cc names should resolve across the import, got {resolve_errors:#?}"
+        );
+        assert!(
+            tc_errors.is_empty(),
+            "grammar-cc should type-check against the imported vocabulary, got {tc_errors:#?}"
+        );
     }
 
     #[test]

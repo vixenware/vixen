@@ -629,6 +629,7 @@ impl VirBuilder {
             ty: None,
             init_expr: None,
             mutable: false,
+            import_origin: None,
         });
         let scope = self.current_scope();
         let order = self.arena[scope].entries.len() as u32;
@@ -666,6 +667,7 @@ impl VirBuilder {
             ty: None,
             init_expr: None,
             mutable: false,
+            import_origin: None,
         });
         let scope = self.current_scope();
         let order = self.arena[scope].entries.len() as u32;
@@ -1341,6 +1343,7 @@ impl VirBuilder {
             ty: None,
             init_expr: None,
             mutable: false,
+            import_origin: None,
         });
         let scope = self.current_scope();
         let order = self.arena[scope].entries.len() as u32;
@@ -2022,6 +2025,9 @@ impl VirBuilder {
     fn build_struct_literal_expr(&mut self, sl: &vx_parser::StructLiteralExpr) -> ExprId {
         let sl_span = self.span(sl.syntax());
         let name = sl.name().map(|t| t.text().to_string()).unwrap_or_default();
+        // `Enum.Variant { … }` carries a second UPPER_IDENT after the `.`.
+        let variant = sl.variant().map(|t| t.text().to_string());
+        let variant_span = sl.variant().map(|t| self.token_span(&t));
 
         // Find the STRUCT_LITERAL_BODY child, then iterate its raw children.
         let body_node = sl
@@ -2082,7 +2088,10 @@ impl VirBuilder {
             kind: ExprKind::StructLiteral(VirStructLiteralExpr {
                 name: name.clone(),
                 name_span: sl.name().map(|t| self.token_span(&t)).unwrap_or(sl_span),
+                variant,
+                variant_span,
                 resolved: None,
+                resolved_variant: None,
                 fields,
             }),
             ty: None,
@@ -2833,6 +2842,7 @@ impl VirBuilder {
             ty: None,
             init_expr: None,
             mutable,
+            import_origin: None,
         });
         let scope = self.current_scope();
         let order = self.arena[scope].entries.len() as u32;
@@ -2930,6 +2940,7 @@ impl VirBuilder {
                                 ty: None,
                                 init_expr: None,
                                 mutable: false,
+                                import_origin: None,
                             });
                             let scope = self.current_scope();
                             let order = self.arena[scope].entries.len() as u32;
@@ -3010,6 +3021,7 @@ impl VirBuilder {
                 ty: None,
                 init_expr: None,
                 mutable: false,
+                import_origin: None,
             });
             let scope = self.current_scope();
             let order = self.arena[scope].entries.len() as u32;
@@ -3062,6 +3074,7 @@ impl VirBuilder {
                                         ty: None,
                                         init_expr: None,
                                         mutable: false,
+                                        import_origin: None,
                                     });
                                     let scope = self.current_scope();
                                     let order = self.arena[scope].entries.len() as u32;
@@ -3132,6 +3145,7 @@ impl VirBuilder {
             ty: None,
             init_expr: None,
             mutable,
+            import_origin: None,
         });
         let scope = self.current_scope();
         let order = self.arena[scope].entries.len() as u32;

@@ -1191,6 +1191,16 @@ impl StructLiteralExpr {
         first_token(self.syntax(), |kind| kind == SyntaxKind::UPPER_IDENT)
     }
 
+    /// For enum-variant construction `Enum.Variant { … }`, the variant token
+    /// (the second `UPPER_IDENT`, after the `.`). `None` for plain `Struct { … }`.
+    pub fn variant(&self) -> Option<SyntaxToken> {
+        self.syntax()
+            .children_with_tokens()
+            .filter_map(|c| c.into_token())
+            .filter(|t| t.kind() == SyntaxKind::UPPER_IDENT)
+            .nth(1)
+    }
+
     pub fn fields(&self) -> AstChildren<StructLiteralField> {
         nested_children(self.syntax(), &[SyntaxKind::STRUCT_LITERAL_BODY])
     }
@@ -1523,7 +1533,12 @@ impl StructPattern {
 
 impl StructPatternField {
     pub fn name(&self) -> Option<SyntaxToken> {
-        first_token(self.syntax(), |kind| kind == SyntaxKind::LOWER_IDENT)
+        // A field name is lowercase for ordinary struct destructuring, but a
+        // module-record destructure (`let { Grammar, cc } = import "…"`) names
+        // exports that may be types (uppercase) as well as values (lowercase).
+        first_token(self.syntax(), |kind| {
+            kind == SyntaxKind::LOWER_IDENT || kind == SyntaxKind::UPPER_IDENT
+        })
     }
 
     pub fn pattern(&self) -> Option<Pattern> {
