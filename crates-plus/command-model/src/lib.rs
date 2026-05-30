@@ -19,8 +19,9 @@
 //! DualLead (`/c` ≡ `-c`), ColonAttached (`/std:c++20`), and GluedNoDelim
 //! (`/Foout.obj`).
 //!
-//! Still future work (see `docs/design/command-model.md`): guarded productions
-//! (mode-by-flag), command-level reducers + a coupling graph (the `-W` polarity
+//! Still future work (see `docs/design/command-model.md`): full guarded
+//! productions (arbitrary predicates; this has the mode-by-flag first cut),
+//! command-level reducers + a coupling graph (the `-W` polarity
 //! algebra, cross-flag aliasing), discovered-from-file-content inputs, the
 //! caching-hazard neutralizers, and link-order semantics.
 
@@ -113,13 +114,22 @@ pub struct Flag {
     pub kind: Kind,
 }
 
-/// A flat tool grammar: a set of flags plus the env channels the tool reads.
-/// Anything not matching a flag is a positional input. (The recursive,
-/// guarded-production form is future work.)
+/// A tool grammar: the flags, the env channels the tool reads, and the
+/// mode-by-flag guards. Anything not matching a flag is a positional input.
+/// (Full guarded productions — arbitrary predicates over parse state — remain
+/// future; this carries the mode-by-flag first cut.)
 #[derive(Debug, Clone, Copy)]
 pub struct Grammar {
     pub flags: &'static [Flag],
     pub env: &'static [EnvDecl],
+    /// Flags that switch the command out of the default (link) mode — e.g.
+    /// `-c` (compile-only), `-E` (preprocess). The legal flag set then depends
+    /// on accumulated parse state: the mode-by-flag first cut of guarded
+    /// productions.
+    pub mode_selectors: &'static [&'static str],
+    /// Canonical flag names legal only in the default (link) mode; using one
+    /// after a `mode_selector` is present is an impurity (e.g. `-l` with `-c`).
+    pub link_only: &'static [&'static str],
 }
 
 /// One parsed flag occurrence, remembering its argv position for last-wins.
@@ -249,6 +259,8 @@ pub enum InputRole {
 pub enum Impurity {
     /// A `-`-leading token matched no flag, so its effect is unknown.
     UnknownFlag { token: String },
+    /// A flag legal only in the default mode was used after a mode selector.
+    IllegalInMode { flag: String, selector: String },
 }
 
 /// Something the canonicalizer found worth reporting.
@@ -272,6 +284,8 @@ pub enum Lint {
     Duplicate { flag: String, value: String },
     /// A `-`-leading token matched no flag in the grammar.
     UnknownFlag { token: String },
+    /// A flag legal only in the default mode was used after a mode selector.
+    IllegalInMode { flag: String, selector: String },
 }
 
 impl fmt::Display for Lint {
@@ -294,6 +308,9 @@ impl fmt::Display for Lint {
             }
             Lint::Duplicate { flag, value } => write!(f, "duplicate {flag} `{value}`"),
             Lint::UnknownFlag { token } => write!(f, "unknown flag `{token}` (not in grammar)"),
+            Lint::IllegalInMode { flag, selector } => {
+                write!(f, "{flag} is illegal after {selector} (wrong mode)")
+            }
         }
     }
 }
@@ -472,6 +489,14 @@ fn canon_pass(grammar: &Grammar, args: &[String]) -> Pass {
         by_flag.entry(occ.flag).or_default().push(occ);
     }
 
+    // Mode-by-flag guard: a mode selector (e.g. `-c`) makes link-only flags
+    // illegal. The active selector is the first one present.
+    let active_selector = parsed
+        .occurrences
+        .iter()
+        .map(|o| grammar.flags[o.flag].canonical)
+        .find(|c| grammar.mode_selectors.contains(c));
+
     let mut flag_tokens: Vec<String> = Vec::new();
     let mut output_tokens: Vec<String> = Vec::new();
     for (idx, flag) in grammar.flags.iter().enumerate() {
@@ -480,6 +505,18 @@ fn canon_pass(grammar: &Grammar, args: &[String]) -> Pass {
         };
         let emitted = reduce_flag(flag, occs, &mut lints);
         collect_inputs(flag, occs, &mut inputs);
+        if let Some(selector) = active_selector
+            && grammar.link_only.contains(&flag.canonical)
+        {
+            lints.push(Lint::IllegalInMode {
+                flag: flag.canonical.to_string(),
+                selector: selector.to_string(),
+            });
+            impurities.push(Impurity::IllegalInMode {
+                flag: flag.canonical.to_string(),
+                selector: selector.to_string(),
+            });
+        }
         if matches!(flag.kind, Kind::PathOut) {
             output_tokens.extend(emitted);
         } else {
@@ -572,6 +609,8 @@ pub fn effective_command(
 
 /// A minimal `ld` grammar — enough for the `-Wl,` passthroughs `libpng` emits.
 pub const LD: Grammar = Grammar {
+    mode_selectors: &[],
+    link_only: &[],
     env: &[],
     flags: &[
         Flag {
@@ -601,6 +640,8 @@ pub const LD: Grammar = Grammar {
 /// The `cc`/clang grammar — the compile invocation `libpng` drives, plus a slice
 /// of linking. Gcc-style; MSVC and the full surface are future work.
 pub const CC: Grammar = Grammar {
+    mode_selectors: &["-c"],
+    link_only: &["-l", "-shared", "-Wl,"],
     env: &[
         EnvDecl {
             name: "CPATH",
@@ -712,6 +753,8 @@ pub const CC: Grammar = Grammar {
 /// out of longest-prefix matching). Slice; `/link` mode-switching awaits guarded
 /// productions.
 pub const CL: Grammar = Grammar {
+    mode_selectors: &[],
+    link_only: &[],
     env: &[
         EnvDecl {
             name: "INCLUDE",
