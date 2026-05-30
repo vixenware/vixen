@@ -372,10 +372,11 @@ fn probe() #discover -> String (
     }
 
     /// Build a user module that imports the cc grammar and uses `body` (a CLI
-    /// literal source) inside `probe`. `out` is in scope for `$out` holes.
+    /// literal source) inside `probe`. `out` is a `Path` in scope (so a `$out`
+    /// hole at a path position type-checks).
     fn cc_user_module(body: &str) -> String {
         format!(
-            "fn probe() -> Bool (\n  let {{ cc }} = import \"@vixen/grammar-cc\";\n  let out = \"a.out\";\n  let _cmd = {body};\n  true\n)\n"
+            "fn probe() -> Bool (\n  let {{ cc }} = import \"@vixen/grammar-cc\";\n  let out = @out;\n  let _cmd = {body};\n  true\n)\n"
         )
     }
 
@@ -444,6 +445,24 @@ fn probe() #discover -> String (
                 .iter()
                 .any(|d| d.contains("IllegalInMode") && d.contains("-shared")),
             "expected an IllegalInMode diagnostic for -shared, got {tc_errors:#?}"
+        );
+    }
+
+    #[test]
+    fn cli_literal_hole_typed_by_position() {
+        // `-o` is a path position; the grammar makes `$out` demand a `Path`.
+        // A `String` there is a type error (paths are first-class in Vixen);
+        // a `Path` (`@out`) checks clean — covered by the valid-command test.
+        let source = "fn probe() -> Bool (\n  let { cc } = import \"@vixen/grammar-cc\";\n  let out = \"a.out\";\n  let _cmd = @cc[ -o $out ];\n  true\n)\n";
+        let (_program, resolve_errors, tc_errors) = front_end(source, &packages_resolver());
+        assert!(
+            resolve_errors.is_empty(),
+            "should resolve, got {resolve_errors:#?}"
+        );
+        let diags = cli_diags(&tc_errors);
+        assert!(
+            diags.iter().any(|d| d.contains("HoleType")),
+            "expected a HoleType diagnostic for a String at a path position, got {tc_errors:#?}"
         );
     }
 

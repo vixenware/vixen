@@ -1902,7 +1902,7 @@ fn format_ir_diagnostic(
             "vx-cap",
         ),
         IrDiagnostic::Cli { kind, .. } => {
-            use vx_ir::CliDiagnosticKind as K;
+            use vx_ir::{CliDiagnosticKind as K, CliHoleExpect};
             let msg = match kind {
                 K::UnknownGrammar { name } => format!("`{name}` is not an imported grammar"),
                 K::UnknownFlag { token } => {
@@ -1919,6 +1919,16 @@ fn format_ir_diagnostic(
                     "`{value}` is not a valid value for `{flag}` (allowed: {})",
                     allowed.join(", ")
                 ),
+                K::HoleType { expected, found } => {
+                    let want = match expected {
+                        CliHoleExpect::Path => "a path",
+                        CliHoleExpect::Text => "a string",
+                    };
+                    format!(
+                        "this position expects {want}, found `{}`",
+                        env.get_ty(*found).display_with_env(env)
+                    )
+                }
             };
             (msg, "vx-cli")
         }

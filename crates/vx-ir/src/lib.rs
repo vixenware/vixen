@@ -67,5 +67,7 @@ pub use visitor::VirVisitor;
 // etc. instead of `vx_ir::def::Definition`.
 pub use cap::{CapCheckResult, CapSet};
 pub use def::{DefId, DefKind, DefSite, Definition};
-pub use diagnostic::{CliDiagnosticKind, IrDiagnostic, MethodCandidate, RelatedKind, RelatedSpan};
+pub use diagnostic::{
+    CliDiagnosticKind, CliHoleExpect, IrDiagnostic, MethodCandidate, RelatedKind, RelatedSpan,
+};
 pub use type_collection::{TypeCollection, TypeKind};

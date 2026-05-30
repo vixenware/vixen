@@ -143,6 +143,26 @@ pub enum CliDiagnosticKind {
         value: String,
         allowed: Vec<String>,
     },
+    /// An interpolation hole whose Vixen type doesn't match the type the grammar
+    /// position demands (a path position spliced with a non-path, etc.).
+    HoleType {
+        /// What the grammar position expects.
+        expected: CliHoleExpect,
+        /// The hole expression's inferred Vixen type.
+        found: TypeId,
+    },
+}
+
+/// The type a grammar position demands of an interpolation hole. Read off the
+/// position's [`command_model::ValueDomain`] / [`command_model::Kind`].
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum CliHoleExpect {
+    /// A path position (`ValueDomain::Path`, or an input/output `Kind`): the
+    /// hole must be a `Path`/`ExecPath` (or an array of them when repeatable).
+    Path,
+    /// A textual position (`ValueDomain::OneOf`/`Named`/`Any`, `Kind::Text`):
+    /// the hole must be a `String` (or an array of them when repeatable).
+    Text,
 }
 
 /// A method candidate surfaced as part of a [`IrDiagnostic::NoSuchMethod`]

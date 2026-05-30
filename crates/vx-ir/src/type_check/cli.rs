@@ -7,17 +7,19 @@
 //! the compile driver loaded from the imported grammar package (keyed on the
 //! arena by import spec); we find it through the binding `@name` resolves to.
 //!
-//! Interpolation holes (`$x` / `${ … }`) are inferred as real sub-expressions.
-//! Reading each hole's *expected* type off the grammar position it lands on (so
-//! the spliced expression is unified against what the grammar demands) is the
-//! next layer; this one establishes the structural check and the seam.
+//! Crucially, **holes are typed by position**: each `$x` / `${ … }` sits at a
+//! grammar position whose [`ValueDomain`]/[`Kind`] becomes the *expected type*
+//! of the spliced expression — a path position demands a `Path`, a fixed-value
+//! position demands a `String`. A hole whose Vixen type doesn't match its
+//! position is a type error. This is where Vixen's own type system meets the
+//! grammar's value domains.
 
-use command_model::{ArgRole, Grammar, GrammarSet, Lint, ValueDomain};
+use command_model::{ArgRole, Arity, Grammar, GrammarSet, Kind, Lint, Policy, ValueDomain};
 use vx_parser::SourceSpan;
-use vx_types::TypeId;
+use vx_types::{Scalar, TypeId};
 
 use crate::arena::VirArena;
-use crate::diagnostic::{CliDiagnosticKind, IrDiagnostic};
+use crate::diagnostic::{CliDiagnosticKind, CliHoleExpect, IrDiagnostic};
 use crate::expr::{CliLiteralExpr, StringPart};
 use crate::scope::{self, DefTarget};
 use crate::{ExprId, ScopeId};
@@ -37,6 +39,29 @@ fn contains_hole(value: &str) -> bool {
     value.contains(MARK)
 }
 
+/// Every hole index a sentinel-bearing value carries, in order.
+fn hole_indices(value: &str) -> Vec<usize> {
+    let mut out = Vec::new();
+    let mut rest = value;
+    while let Some(start) = rest.find(MARK) {
+        let after = &rest[start + MARK.len_utf8()..];
+        let Some(end) = after.find(MARK) else { break };
+        if let Ok(n) = after[..end].parse() {
+            out.push(n);
+        }
+        rest = &after[end + MARK.len_utf8()..];
+    }
+    out
+}
+
+/// What a hole at a given grammar position must be.
+struct HoleReq {
+    expect: CliHoleExpect,
+    /// A repeatable position (repeatable flag policy / variadic positional) also
+    /// accepts an `Array` of the element type (splatting).
+    repeatable: bool,
+}
+
 pub(crate) fn infer_cli_literal(
     tc: &mut TypeChecker,
     expr_id: ExprId,
@@ -45,8 +70,8 @@ pub(crate) fn infer_cli_literal(
     let scope = tc.arena[expr_id].scope;
 
     // Lower the literal to a synthetic argv: static text verbatim, each hole a
-    // unique sentinel the engine's parser can tag. Holes are recorded as the
-    // sub-expressions they splice, to be inferred once the grammar borrow ends.
+    // unique sentinel the engine's parser can tag. Record each hole's spliced
+    // expression so we can infer + position-check it.
     let mut argv = vec![cli.grammar.clone()];
     let mut hole_exprs: Vec<ExprId> = Vec::new();
     for arg in &cli.args {
@@ -63,14 +88,20 @@ pub(crate) fn infer_cli_literal(
         argv.push(s);
     }
 
-    // Resolve the grammar `@name` refers to and check the static argv against
-    // it. All grammar work is immutable on the arena; diagnostics are collected
-    // owned so the arena borrow is released before we infer holes / push them.
+    // Holes are real, checked sub-expressions — infer them up front (mutable),
+    // so the grammar phase below can run entirely on an immutable arena borrow.
+    let hole_tys: Vec<TypeId> = hole_exprs.iter().map(|&id| tc.infer_expr(id)).collect();
+
+    // Resolve the grammar `@name` refers to. All grammar work is immutable on
+    // the arena; structural diagnostics + per-hole requirements are collected
+    // owned so the borrow releases before we type-check holes / push.
     let mut diags: Vec<(SourceSpan, CliDiagnosticKind)> = Vec::new();
+    let mut hole_reqs: Vec<(usize, HoleReq)> = Vec::new();
     match resolve_grammar_set(tc.arena, &cli.grammar, scope) {
         Some(set) if set.get(&cli.grammar).is_some() => {
             let grammar = set.get(&cli.grammar).unwrap();
-            check_argv(set, grammar, &cli.grammar, &argv, cli, &mut diags);
+            check_structural(set, grammar, &cli.grammar, &argv, cli, &mut diags);
+            hole_reqs = collect_hole_reqs(grammar, &argv);
         }
         _ => {
             diags.push((
@@ -82,9 +113,15 @@ pub(crate) fn infer_cli_literal(
         }
     }
 
-    // Holes are real, checked sub-expressions regardless of grammar outcome.
-    for &id in &hole_exprs {
-        tc.infer_expr(id);
+    // Type each hole against the position it lands on.
+    for (hole_idx, req) in &hole_reqs {
+        let Some(&hty) = hole_tys.get(*hole_idx) else {
+            continue;
+        };
+        if let Some(kind) = check_hole_type(tc, hty, req) {
+            let span = tc.arena[hole_exprs[*hole_idx]].span;
+            diags.push((span, kind));
+        }
     }
 
     for (span, kind) in diags {
@@ -111,10 +148,10 @@ fn resolve_grammar_set<'a>(
     arena.grammars.get(&origin.spec)
 }
 
-/// Check the synthetic `argv` against `grammar` (resolved from `set`), pushing a
-/// `(span, kind)` for each problem. Holes (sentinel-bearing tokens) are skipped
-/// here — they carry no statically-known value to validate.
-fn check_argv(
+/// Structural checks on the static argv: unknown flag, flag illegal in the
+/// active mode, and static values outside a fixed (`OneOf`) domain. Holes
+/// (sentinel-bearing tokens) are skipped here — they are typed by position.
+fn check_structural(
     set: &GrammarSet,
     grammar: &Grammar,
     name: &str,
@@ -122,7 +159,6 @@ fn check_argv(
     cli: &CliLiteralExpr,
     diags: &mut Vec<(SourceSpan, CliDiagnosticKind)>,
 ) {
-    // Structural lints the canonicalizer already computes (unknown flag, mode).
     for lint in &set.canonicalize(name, argv).lints {
         match lint {
             Lint::UnknownFlag { token } if !contains_hole(token) => {
@@ -146,7 +182,6 @@ fn check_argv(
         }
     }
 
-    // Per-flag: a static value in a fixed domain must be a member of it.
     let parsed = command_model::parse_command(grammar, argv);
     for arg in &parsed.args {
         if let ArgRole::Flag {
@@ -172,6 +207,92 @@ fn check_argv(
             ));
         }
     }
+}
+
+/// Read each interpolation hole's expected type off the grammar position it
+/// occupies: a flag value's [`ValueDomain`], or a positional's [`Kind`].
+fn collect_hole_reqs(grammar: &Grammar, argv: &[String]) -> Vec<(usize, HoleReq)> {
+    let mut reqs = Vec::new();
+    for arg in &command_model::parse_command(grammar, argv).args {
+        match &arg.role {
+            ArgRole::Flag {
+                canonical,
+                value: Some(value),
+                ..
+            } => {
+                let holes = hole_indices(value);
+                if holes.is_empty() {
+                    continue;
+                }
+                let flag = grammar.flags.iter().find(|f| &f.canonical == canonical);
+                let expect = match flag.map(|f| &f.value) {
+                    Some(ValueDomain::Path { .. }) => CliHoleExpect::Path,
+                    _ => CliHoleExpect::Text,
+                };
+                let repeatable = flag.is_some_and(|f| is_repeatable(&f.policy));
+                for h in holes {
+                    reqs.push((h, HoleReq { expect, repeatable }));
+                }
+            }
+            ArgRole::Positional { name, value, .. } => {
+                let holes = hole_indices(value);
+                if holes.is_empty() {
+                    continue;
+                }
+                let pos = grammar.positionals.iter().find(|p| &p.name == name);
+                let expect = match pos.map(|p| &p.kind) {
+                    Some(Kind::Text) | None => CliHoleExpect::Text,
+                    Some(_) => CliHoleExpect::Path,
+                };
+                let repeatable = pos.is_some_and(|p| matches!(p.arity, Arity::Variadic));
+                for h in holes {
+                    reqs.push((h, HoleReq { expect, repeatable }));
+                }
+            }
+            _ => {}
+        }
+    }
+    reqs
+}
+
+/// A policy under which a flag may legally appear more than once (so an
+/// `Array`-valued hole at it splats into repeats).
+fn is_repeatable(policy: &Policy) -> bool {
+    matches!(
+        policy,
+        Policy::DedupOrdered
+            | Policy::DedupUnordered
+            | Policy::OrderedKeepAll
+            | Policy::KeyedLastWins
+    )
+}
+
+/// Check one hole's inferred type against its position's expectation, returning
+/// a diagnostic kind on mismatch. A repeatable position also accepts an `Array`
+/// of the element type.
+fn check_hole_type(tc: &mut TypeChecker, hty: TypeId, req: &HoleReq) -> Option<CliDiagnosticKind> {
+    if tc.types.env.get_ty(hty).is_poison() {
+        return None;
+    }
+    let elems: Vec<TypeId> = match req.expect {
+        CliHoleExpect::Path => vec![tc.nominal_ty("Path"), tc.nominal_ty("ExecPath")],
+        CliHoleExpect::Text => vec![tc.types.env.intern_scalar(Scalar::String)],
+    };
+    if elems.iter().any(|&e| tc.types_compatible(hty, e)) {
+        return None;
+    }
+    if req.repeatable {
+        for &e in &elems {
+            let arr = tc.types.env.intern_array(e);
+            if tc.types_compatible(hty, arr) {
+                return None;
+            }
+        }
+    }
+    Some(CliDiagnosticKind::HoleType {
+        expected: req.expect,
+        found: hty,
+    })
 }
 
 /// The span of the source argument whose static text carries `token` (an exact

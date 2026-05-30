@@ -197,8 +197,22 @@ impl IrDiagnostic {
             },
 
             IrDiagnostic::Cli { span, kind } => {
-                use crate::diagnostic::CliDiagnosticKind as K;
+                use crate::diagnostic::{CliDiagnosticKind as K, CliHoleExpect};
                 let (title, message, notes) = match kind {
+                    K::HoleType { expected, found } => {
+                        let want = match expected {
+                            CliHoleExpect::Path => "a path",
+                            CliHoleExpect::Text => "a string",
+                        };
+                        (
+                            "wrong type for command hole".to_string(),
+                            format!(
+                                "this position expects {want}, found `{}`",
+                                env.get_ty(*found).display_with_env(env)
+                            ),
+                            Vec::new(),
+                        )
+                    }
                     K::UnknownGrammar { name } => (
                         "unknown grammar".to_string(),
                         format!("`{name}` is not an imported grammar"),

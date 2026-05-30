@@ -177,3 +177,24 @@ product surface on its own.)
    general mechanism (it lets you hand `exec` an absolute path); the colon form
    is inline shorthand. The remaining detail is which of the two we ship (likely
    both, with the kwarg as the primitive).
+
+## Status
+
+Implemented in the main compiler (`vx-ir`), checked at `type_check` time against
+the real imported grammar package:
+
+- The `@grammar[ … ]` literal is a first-class IR expression (`ExprKind::CliLiteral`).
+- Grammar resolution: `@name` resolves to its in-scope import binding, whose
+  package's `GrammarSet` the compile driver loaded (via `command-grammar-vx`) and
+  keyed on the arena by import spec.
+- Static checks: unknown flag, flag illegal in the active mode, value outside a
+  fixed `OneOf` domain.
+- **Holes are typed by position** (the table above): a `ValueDomain.Path` / input
+  or output `Kind` position demands a `Path`/`ExecPath` (or an `Array` of them at
+  a repeatable position — splatting); a fixed/named/any value position demands a
+  `String`. A mismatch is a `vx-cli` type error.
+
+Not yet built: the literal's runtime **value** (the effective `Command` that
+`exec` consumes, carrying argv + mounts + cache identity) — this is back-end
+work, landing with the demand-evaluator rebuild. The program override (decision
+5) is also still unimplemented.
