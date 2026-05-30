@@ -77,6 +77,11 @@ figue = { version = "2.0.1" }
 vox = { version = "0.8.2", features = ["transport-tcp", "transport-local"] }
 vox-types = { version = "0.8.2" }
 
+# copy-and-patch JIT substrate (from ~/phon): executable memory + AArch64
+# relocation patching + build-time stencil extraction. Backend-agnostic — no IR.
+# Path dep for now; Vixen will reach phon through Vox eventually.
+copypatch = { path = "../../phon/rust/copypatch" }
+
 # process management
 
 # hashing

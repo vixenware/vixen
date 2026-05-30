@@ -24,3 +24,15 @@ pub mod graph;
 pub mod kernel;
 pub mod lower;
 pub mod value;
+
+/// Stencil machine code extracted from rustc's object output at build time
+/// (`build.rs`). Only on the native target; the interpreter is the path elsewhere.
+#[cfg(all(target_os = "macos", target_arch = "aarch64"))]
+mod stencils {
+    include!(concat!(env!("OUT_DIR"), "/stencils.rs"));
+}
+
+/// The native copy-and-patch JIT: run the kernel stencils as machine code from
+/// `MAP_JIT` memory. `kernel.rs` is its oracle.
+#[cfg(all(target_os = "macos", target_arch = "aarch64"))]
+pub mod jit;

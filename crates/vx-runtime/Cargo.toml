@@ -22,5 +22,14 @@ vx-ir = { workspace = true }
 vx-parser = { workspace = true }
 vx-stdlib = { workspace = true }
 vx-types = { workspace = true }
+# The copy-and-patch JIT substrate (executable memory + AArch64 relocation
+# patching). Only the runtime surface (ExecBuf, patch_branch26) — the smoke test,
+# arithmetic stencils, and kernel→stencil-chain lowering stay in this crate.
+copypatch = { workspace = true }
+
+[build-dependencies]
+# Build-time stencil extraction: compile stencils/stencils.rs with rustc
+# (--emit=obj) and pull each stencil's bytes + continuation relocs by symbol.
+copypatch = { workspace = true, features = ["build"] }
 
 [dev-dependencies]
