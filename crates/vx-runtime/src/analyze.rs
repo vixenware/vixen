@@ -433,6 +433,25 @@ impl Builder<'_> {
                 self.emit(NodeKind::Kernel, "match".into(), span, inputs)
             }
 
+            // Range `a..b` / `a..=b` — a small constructed value over its bounds.
+            ExprKind::Range(rx) => {
+                let mut inputs = Vec::new();
+                if let Some(s) = rx.start {
+                    inputs.push(self.walk(s));
+                }
+                if let Some(en) = rx.end {
+                    inputs.push(self.walk(en));
+                }
+                let label = if rx.inclusive { "..=" } else { ".." };
+                self.emit(NodeKind::LazyData, label.into(), span, inputs)
+            }
+
+            // `expr?` — the fallible (Option-returning) variant; a kernel over expr.
+            ExprKind::Fallible(fx) => {
+                let inner = self.walk(fx.expr);
+                self.emit(NodeKind::Kernel, "?".into(), span, vec![inner])
+            }
+
             // A name: link to its bound value's node, else a leaf.
             ExprKind::NameRef(n) => {
                 if let Some(DefTarget::Binding(bid)) = n.resolved
@@ -500,8 +519,6 @@ fn expr_kind_name(k: &ExprKind) -> &'static str {
     match k {
         ExprKind::With(_) => "with",
         ExprKind::TypeOp(_) => "as/is",
-        ExprKind::Fallible(_) => "?suffix",
-        ExprKind::Range(_) => "range",
         ExprKind::Import(_) => "import",
         _ => "?",
     }
