@@ -11,16 +11,14 @@ description = "Load command-model grammars authored in Vixen (.vx) via the Vixen
 rustdoc-args = ["--html-in-header", "arborium-header.html"]
 
 [dependencies]
-# The engine, live from the working tree (we co-evolve it).
 command-model = { path = "../command-model" }
-# The parser, PINNED to a pushed commit over SSH so an in-flight refactor of
-# vx-parser in this same checkout can't break our build. Bump deliberately.
-# 007f1aa5 adds frontmatter, parens-optional import, and the @cc[…] CLI literal.
-vx-parser = { git = "ssh://git@code.vixen.rs/vixen/vixen.git", rev = "007f1aa5906f1470906a598f6de5c5a52a426fd5" }
+# The workspace parser — one shared instance with the rest of Vixen (vx-ir et
+# al.), so a CLI-literal AST here is the *same type* the compiler front-end sees.
+# (Was a git pin during the prototype; now integrated.)
+vx-parser = { workspace = true }
 
 [dev-dependencies]
-# Same pinned rev — cargo unifies to one instance, so test types match the lib's.
-vx-parser = { git = "ssh://git@code.vixen.rs/vixen/vixen.git", rev = "007f1aa5906f1470906a598f6de5c5a52a426fd5" }
+vx-parser = { path = "../../crates/vx-parser" }
 
 [lints]
 workspace = true

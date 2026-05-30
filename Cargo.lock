@@ -511,7 +511,7 @@ name = "command-grammar-vx"
 version = "0.1.0"
 dependencies = [
  "command-model",
- "vx-parser 0.1.0 (git+ssh://git@code.vixen.rs/vixen/vixen.git?rev=007f1aa5906f1470906a598f6de5c5a52a426fd5)",
+ "vx-parser",
 ]
 
 [[package]]
@@ -2106,20 +2106,11 @@ dependencies = [
 ]
 
 [[package]]
-name = "margin"
-version = "0.1.0"
-source = "git+ssh://git@code.vixen.rs/vixen/vixen.git?rev=007f1aa5906f1470906a598f6de5c5a52a426fd5#007f1aa5906f1470906a598f6de5c5a52a426fd5"
-dependencies = [
- "facet",
- "unicode-width",
-]
-
-[[package]]
 name = "margin-term"
 version = "0.1.0"
 dependencies = [
  "arborium-theme",
- "margin 0.1.0",
+ "margin",
  "unicode-width",
 ]
 
@@ -3846,7 +3837,7 @@ dependencies = [
  "facet",
  "facet-styx",
  "futures-util",
- "margin 0.1.0",
+ "margin",
  "moire",
  "thiserror 2.0.18",
  "tokio",
@@ -3854,7 +3845,7 @@ dependencies = [
  "vox",
  "vx-diagnostics",
  "vx-ir",
- "vx-parser 0.1.0",
+ "vx-parser",
  "vx-runner",
  "vx-services",
  "vx-store",
@@ -3871,12 +3862,12 @@ dependencies = [
  "arborium-theme",
  "eyre",
  "libc",
- "margin 0.1.0",
+ "margin",
  "margin-term",
  "terminal-light",
  "tree-sitter-vixen",
  "vx-ir",
- "vx-parser 0.1.0",
+ "vx-parser",
  "vx-stdlib",
  "vx-types",
 ]
@@ -3939,9 +3930,9 @@ dependencies = [
 name = "vx-ir"
 version = "0.1.0"
 dependencies = [
- "margin 0.1.0",
+ "margin",
  "rowan",
- "vx-parser 0.1.0",
+ "vx-parser",
  "vx-rt",
  "vx-stdlib",
  "vx-types",
@@ -3957,7 +3948,7 @@ dependencies = [
  "tower-lsp",
  "tracing",
  "vx-ir",
- "vx-parser 0.1.0",
+ "vx-parser",
  "vx-stdlib",
  "vx-types",
 ]
@@ -3966,16 +3957,7 @@ dependencies = [
 name = "vx-parser"
 version = "0.1.0"
 dependencies = [
- "margin 0.1.0",
- "rowan",
-]
-
-[[package]]
-name = "vx-parser"
-version = "0.1.0"
-source = "git+ssh://git@code.vixen.rs/vixen/vixen.git?rev=007f1aa5906f1470906a598f6de5c5a52a426fd5#007f1aa5906f1470906a598f6de5c5a52a426fd5"
-dependencies = [
- "margin 0.1.0 (git+ssh://git@code.vixen.rs/vixen/vixen.git?rev=007f1aa5906f1470906a598f6de5c5a52a426fd5)",
+ "margin",
  "rowan",
 ]
 
@@ -3985,7 +3967,7 @@ version = "0.1.0"
 dependencies = [
  "thiserror 2.0.18",
  "vx-ir",
- "vx-parser 0.1.0",
+ "vx-parser",
 ]
 
 [[package]]
@@ -4005,7 +3987,7 @@ dependencies = [
  "facet",
  "facet-json",
  "vx-ir",
- "vx-parser 0.1.0",
+ "vx-parser",
  "vx-stdlib",
  "vx-types",
 ]
@@ -4018,7 +4000,7 @@ dependencies = [
  "facet",
  "facet-postcard",
  "fastcdc",
- "margin 0.1.0",
+ "margin",
  "tokio",
  "vox",
  "vox-types",
@@ -4058,7 +4040,7 @@ dependencies = [
 name = "vx-types"
 version = "0.1.0"
 dependencies = [
- "vx-parser 0.1.0",
+ "vx-parser",
 ]
 
 [[package]]
