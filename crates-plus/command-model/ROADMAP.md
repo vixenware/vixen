@@ -39,10 +39,13 @@ What the model is *for*. Status: ✅ built · 🟡 enabled, small additive work 
    canonical argv is runnable). Caveat: canonical reordering must stay
    semantically safe (that's what `Policy` is for); link-order is the known
    incomplete case.
-3. **Generate shell completions (bash/zsh/…).** 🟡 the grammar *is* the source;
-   needs a generator + **value domains** (enumerable/typed flag values).
-4. **LSP autocomplete of invocations.** 🟡 same grammar + a "legal-at-cursor"
-   query; guarded productions make it mode-aware. Needs value domains.
+3. **Autocomplete CLI invocations — Vixen LSP, not shells.** 🟡 the consumer is
+   the Vixen LSP completing inside `exec [...]` arrays (and, increasingly likely,
+   a dedicated **CLI literal**), *not* an external shell — we don't ship one, so
+   bash/zsh completion-file generation is a **non-goal**. Needs **value domains**.
+4. **Legal-at-cursor query.** 🟡 the grammar answers "what flags/values are legal
+   here, given what's typed so far" — mode-aware via guarded productions. The
+   engine behind #3.
 5. **Docs on every option (incl. positionals), LSP hover.** 🟡 flags need a
    `doc` field. 🔴 positionals need the **positional schema** (study B7).
 6. **Validate invocations — diagnostics, where/why/how-to-fix.** 🟡 structured
@@ -128,7 +131,11 @@ back to runtime-evaluated Vixen IR.
 **Runtime coupling is acceptable.** We are making this *for* Vixen and Vixen
 *for* this; we won't contort the design to keep `command-model` standalone if
 that costs more than it's worth. The Rust crate is the engine; grammars are
-Vixen values that lower to its `Grammar` form.
+Vixen values that lower to its `Grammar` form. When the engine must *evaluate*
+Vixen (a Turing-complete reducer), it targets the **daemon's** evaluator — never
+`vx-rt`, a defunct duplicate being removed. A dedicated **CLI literal** in Vixen
+(first-class syntax for command invocations) is looking increasingly likely as
+the surface where this intelligence lives.
 
 **Scope: comprehensive now, not MVP slices.** CLI argument schemes have been
 stable for 20–30 years — this is not a moving target. So we build the *complete*

@@ -335,6 +335,25 @@ pub enum Impurity {
     IllegalInMode { flag: String, selector: String },
 }
 
+/// One difference between two [`EffectiveCommand`]s — the structured answer to
+/// "why did this rebuild?".
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum Change {
+    Program {
+        from: String,
+        to: String,
+    },
+    ArgAdded(String),
+    ArgRemoved(String),
+    EnvChanged {
+        name: String,
+        from: Option<String>,
+        to: Option<String>,
+    },
+    InputAdded(Input),
+    InputRemoved(Input),
+}
+
 /// Something the canonicalizer found worth reporting.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum Lint {
@@ -756,6 +775,75 @@ pub fn effective_command(
         impurities: pass.impurities,
         lints: pass.lints,
     }
+}
+
+/// Diff two effective commands — the structured "why did it rebuild?": exactly
+/// which args, env channels, and inputs differ in the cache identity. An empty
+/// result means the two commands share a cache key.
+pub fn diff(a: &EffectiveCommand, b: &EffectiveCommand) -> Vec<Change> {
+    let mut changes = Vec::new();
+
+    if a.program != b.program {
+        changes.push(Change::Program {
+            from: a.program.clone(),
+            to: b.program.clone(),
+        });
+    }
+
+    // Args as a multiset: positive count = only in `a` (removed), negative = added.
+    let mut counts: BTreeMap<&str, i64> = BTreeMap::new();
+    for arg in &a.args {
+        *counts.entry(arg.as_str()).or_default() += 1;
+    }
+    for arg in &b.args {
+        *counts.entry(arg.as_str()).or_default() -= 1;
+    }
+    for (arg, count) in &counts {
+        for _ in 0..count.unsigned_abs() {
+            changes.push(if *count > 0 {
+                Change::ArgRemoved(arg.to_string())
+            } else {
+                Change::ArgAdded(arg.to_string())
+            });
+        }
+    }
+
+    // Env: keyed comparison.
+    let am: BTreeMap<&str, &str> = a
+        .env
+        .iter()
+        .map(|(k, v)| (k.as_str(), v.as_str()))
+        .collect();
+    let bm: BTreeMap<&str, &str> = b
+        .env
+        .iter()
+        .map(|(k, v)| (k.as_str(), v.as_str()))
+        .collect();
+    let keys: BTreeSet<&str> = am.keys().chain(bm.keys()).copied().collect();
+    for k in keys {
+        let (av, bv) = (am.get(k), bm.get(k));
+        if av != bv {
+            changes.push(Change::EnvChanged {
+                name: k.to_string(),
+                from: av.map(|s| s.to_string()),
+                to: bv.map(|s| s.to_string()),
+            });
+        }
+    }
+
+    // Inputs are deduped sets.
+    for input in &a.inputs {
+        if !b.inputs.contains(input) {
+            changes.push(Change::InputRemoved(input.clone()));
+        }
+    }
+    for input in &b.inputs {
+        if !a.inputs.contains(input) {
+            changes.push(Change::InputAdded(input.clone()));
+        }
+    }
+
+    changes
 }
 
 /// A minimal `ld` grammar — enough for the `-Wl,` passthroughs `libpng` emits.
