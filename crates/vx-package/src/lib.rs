@@ -9,9 +9,10 @@
 //! built-in, or (later) a registry + content store.
 
 use facet::Facet;
+use std::collections::{HashMap, HashSet, VecDeque};
 use std::fmt;
 use std::path::{Path, PathBuf};
-use vx_parser::{SourceId, parse_source_file};
+use vx_parser::{AstNode, SourceId, parse_source_file};
 
 /// A package manifest — the `main.vx` frontmatter, written in styx.
 #[derive(Debug, Clone, PartialEq, Eq, Facet)]
@@ -183,4 +184,71 @@ impl PackageResolver for CompositeResolver {
             other => other,
         }
     }
+}
+
+/// An in-memory resolver (`id → main.vx`), for tests and embedding.
+#[derive(Debug, Clone, Default)]
+pub struct MapResolver {
+    pub packages: HashMap<String, String>,
+}
+
+impl MapResolver {
+    pub fn insert(&mut self, id: impl Into<String>, main: impl Into<String>) {
+        self.packages.insert(id.into(), main.into());
+    }
+}
+
+impl PackageResolver for MapResolver {
+    fn resolve(&self, spec: &str) -> Result<ResolvedPackage, ResolveError> {
+        match self.packages.get(spec) {
+            Some(main) => Ok(ResolvedPackage {
+                id: spec.to_string(),
+                main: main.clone(),
+            }),
+            None => Err(ResolveError::NotFound(spec.to_string())),
+        }
+    }
+}
+
+/// The import specs (`import "…"` strings) appearing in a source.
+pub fn import_specs(source: &str) -> Vec<String> {
+    let parsed = parse_source_file(source, SourceId(0));
+    parsed
+        .tree()
+        .syntax()
+        .descendants()
+        .filter_map(vx_parser::ImportExpr::cast)
+        .filter_map(|i| i.path())
+        .collect()
+}
+
+/// The transitive set of packages reachable from `root_source` via `import`,
+/// resolved through `resolver`, deduped by id, in discovery order. Unresolved
+/// imports are returned in `errors` (the compiler surfaces them as diagnostics)
+/// rather than aborting — so one bad import doesn't hide the rest.
+#[derive(Debug, Clone, Default)]
+pub struct Closure {
+    pub packages: Vec<ResolvedPackage>,
+    pub errors: Vec<(String, ResolveError)>,
+}
+
+pub fn resolve_closure(root_source: &str, resolver: &dyn PackageResolver) -> Closure {
+    let mut out = Closure::default();
+    let mut seen: HashSet<String> = HashSet::new();
+    let mut queue: VecDeque<String> = import_specs(root_source).into_iter().collect();
+    while let Some(spec) = queue.pop_front() {
+        if !seen.insert(spec.clone()) {
+            continue;
+        }
+        match resolver.resolve(&spec) {
+            Ok(pkg) => {
+                for dep in import_specs(&pkg.main) {
+                    queue.push_back(dep);
+                }
+                out.packages.push(pkg);
+            }
+            Err(e) => out.errors.push((spec, e)),
+        }
+    }
+    out
 }

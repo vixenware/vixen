@@ -1,6 +1,9 @@
 //! Manifest parsing + resolution against the real first-party grammar packages.
 
-use vx_package::{Manifest, PackageResolver, ResolveError, parse_manifest};
+use vx_package::{
+    Manifest, MapResolver, PackageResolver, ResolveError, import_specs, parse_manifest,
+    resolve_closure,
+};
 
 const CC_MAIN: &str = include_str!("../../../packages/@vixen/grammar-cc/main.vx");
 
@@ -62,4 +65,43 @@ fn fs_resolver_reads_a_package_main() {
     assert!(matches!(r.resolve("bare"), Err(ResolveError::BadSpec(_))));
 
     let _ = std::fs::remove_dir_all(&dir);
+}
+
+#[test]
+fn import_specs_are_extracted() {
+    let src = "let { foo } = import \"@acme/lib\"\nlet core = import \"vixen:core\"\n";
+    assert_eq!(import_specs(src), vec!["@acme/lib", "vixen:core"]);
+}
+
+#[test]
+fn closure_is_transitive_and_deduped() {
+    let mut r = MapResolver::default();
+    r.insert("@acme/app", "let { mid } = import \"@acme/mid\"\n");
+    r.insert(
+        "@acme/mid",
+        "let { leaf } = import \"@acme/leaf\"\nlet x = import \"@acme/app\"\n",
+    );
+    r.insert("@acme/leaf", "let leaf = 1\n");
+
+    let root = "let { app } = import \"@acme/app\"\n";
+    let closure = resolve_closure(root, &r);
+
+    assert!(
+        closure.errors.is_empty(),
+        "all resolve; got {:?}",
+        closure.errors
+    );
+    let ids: Vec<&str> = closure.packages.iter().map(|p| p.id.as_str()).collect();
+    // discovery order: app, then its dep mid, then mid's dep leaf; the back-edge
+    // mid -> app is deduped away.
+    assert_eq!(ids, ["@acme/app", "@acme/mid", "@acme/leaf"]);
+}
+
+#[test]
+fn closure_collects_unresolved_imports() {
+    let r = MapResolver::default();
+    let closure = resolve_closure("let { x } = import \"@acme/missing\"\n", &r);
+    assert!(closure.packages.is_empty());
+    assert_eq!(closure.errors.len(), 1);
+    assert!(matches!(closure.errors[0].1, ResolveError::NotFound(_)));
 }
