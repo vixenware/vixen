@@ -174,7 +174,7 @@ The link step itself is structurally just another `exec` node in the graph; the 
 
 ## Open sub-tasks identified so far
 
-- File shape for the Vixen entry: separate `vixen.styx` / `vx.build` vs frontmatter on `main.vx`. Deferred earlier; see [Packages and publishing](/packages-and-publishing/).
+- ~~File shape for the Vixen entry: separate `vixen.styx` / `vx.build` vs frontmatter on `main.vx`.~~ **Decided: frontmatter on `main.vx`** (a `` ```styx `` fence); see [Packages and publishing](/packages-and-publishing/) and [Vixen language → Frontmatter](/vixen-language/#frontmatter).
 - Mechanism / name for `vx init` (the command that bakes current defaults into the workspace).
 - The shape of the arg-parsing library Vixen provides.
 - Filtering policy for env passed to `main` (all of it, a curated subset, a configurable set).

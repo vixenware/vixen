@@ -159,6 +159,23 @@ Same shape across all three sources (stdlib, cross-package, intra-package). Dott
 
 Stdlib intrinsics (`exec`, `acquire`, `Toml::parse`, …) are in scope via an implicit prelude — no explicit `import("vixen:core")` needed. Users writing build code see the intrinsic surface as ambient identifiers.
 
+## Frontmatter
+
+A `.vx` file may open with a **frontmatter fence** — a fenced block at the very top of the file, analogous to markdown's `+++`:
+
+```vixen
+```styx
+id @vixen/grammar-cc
+version 0.1.0
+```
+
+let { Grammar, Flag } = import "vixen:command-grammar"
+```
+
+The fence carries metadata *about* the module — most importantly a package's manifest (see [Packages and publishing](/packages-and-publishing/)), which is why there is no separate `package.styx`. The tag after the opening fence (`styx` here) names the body's language; the body is **opaque to the Vixen parser** — it is not Vixen, and is parsed by whoever consumes it (styx for the manifest). The parser keeps the whole fence as a single token, reachable as structured data via `SourceFile::frontmatter()` (`lang()` + `content()`), so the runtime reads it back rather than discarding it as a comment would.
+
+Only one frontmatter block is allowed, and only at the very top (before any declarations). It is optional: a `.vx` file with no manifest needs no fence.
+
 ## Brackets: `( ... )` groups, `{ ... }` is structural, `[ ... ]` is positional
 
 The three bracket pairs carry distinct roles, and the distinction is load-bearing for readability.

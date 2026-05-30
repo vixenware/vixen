@@ -21,12 +21,11 @@ A package is a directory containing:
 
 ```
 package-name/
-├── package.styx       # manifest
-├── main.vx            # entry point module
+├── main.vx            # entry point module; manifest in its frontmatter
 └── …additional .vx files referenced from main.vx
 ```
 
-The manifest is a styx file validated against a schema — same machinery as the wiki frontmatter. Minimum fields:
+The manifest lives as **frontmatter** on `main.vx` — a leading fenced block (`` ```styx … ``` ``) at the top of the file, written in styx and validated against a schema (same machinery as the wiki's `+++` frontmatter). See [Vixen language → Frontmatter](/vixen-language/#frontmatter). Minimum fields:
 
 - `id` — package name (scoped, see below)
 - `version` — semver
@@ -38,7 +37,7 @@ The manifest is a styx file validated against a schema — same machinery as the
 
 `main.vx` is the single entry-point module; it re-exports anything else the package surfaces. No multi-entry-point complexity (no npm-style `exports` map) on day one — submodules sit as sibling `.vx` files and are referenced from `main.vx`.
 
-An open option not yet picked: instead of a separate `package.styx`, the manifest could live as **frontmatter** on `main.vx` itself, with `.vx` files gaining a frontmatter syntax analogous to markdown's `+++`. Either works for the package mechanism we're committing to; the choice is deferred.
+There is no separate `package.styx`: a `.vx` file carries frontmatter natively (a fenced block analogous to markdown's `+++`), so the manifest rides on `main.vx`. The parser keeps the fence as one opaque token exposed via `SourceFile::frontmatter()`; the runtime parses its styx body for the manifest fields above.
 
 ## Names are scoped, npm-style
 
@@ -132,6 +131,5 @@ Package bytes are pinned (see [Architecture](/architecture-and-infrastructure/#r
 
 ## What's still open
 
-- Whether `package.styx` is a separate file or `main.vx`-frontmatter.
 - Mirroring policy for the index (deferred, same shape as the crates.io discussion).
 - Whether we sign packages beyond the OIDC-provenance attestation (signed releases, trusted-publisher chains, reproducibility-quorum tiers).
