@@ -34,6 +34,7 @@ use std::sync::{Arc, Mutex};
 use std::thread::JoinHandle;
 
 use corosensei::{Coroutine, CoroutineResult, Yielder};
+use tokio::sync::mpsc::{UnboundedReceiver, UnboundedSender};
 
 /// What a strand yields when it parks: the typed reason **plus** a backtrace
 /// captured on the strand's own (deep) stack at the park point — the stall report's
@@ -212,10 +213,17 @@ pub struct Scheduler(Rc<RefCell<Inner>>, Rc<Pool>);
 /// between runs, holding its parked coroutines.
 struct Pool {
     /// One private command channel per worker (a `Resume` must reach the worker that
-    /// owns the coroutine; a new strand goes to the least-loaded worker).
+    /// owns the coroutine; a new strand goes to the least-loaded worker). Std mpsc —
+    /// workers block-recv on it.
     cmd_tx: Vec<mpsc::Sender<Command>>,
-    result_rx: RefCell<mpsc::Receiver<WorkerMsg>>,
+    /// Worker→boss reports. A *tokio* channel so the boss can `await` it inside the
+    /// async `run` loop, alongside driving in-flight remote forces.
+    result_rx: RefCell<UnboundedReceiver<WorkerMsg>>,
     handles: RefCell<Vec<JoinHandle<()>>>,
+    /// The boss's current-thread runtime: it drives the remote-part vox `force()`
+    /// calls (and owns the vox clients) interleaved with scheduling. `run()` blocks
+    /// on it.
+    runtime: tokio::runtime::Runtime,
 }
 
 impl Drop for Pool {
@@ -236,7 +244,7 @@ impl Scheduler {
         let n_workers = std::thread::available_parallelism()
             .map_or(4, |n| n.get())
             .clamp(1, 16);
-        let (result_tx, result_rx) = mpsc::channel::<WorkerMsg>();
+        let (result_tx, result_rx) = tokio::sync::mpsc::unbounded_channel::<WorkerMsg>();
         let mut cmd_tx = Vec::with_capacity(n_workers);
         let mut handles = Vec::with_capacity(n_workers);
         for idx in 0..n_workers {
@@ -248,6 +256,10 @@ impl Scheduler {
             }));
         }
         drop(result_tx); // only the workers' clones remain
+        let runtime = tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .expect("build the boss's current-thread runtime");
         let inner = Rc::new(RefCell::new(Inner {
             resources: capacities.iter().map(|&c| (c, 0)).collect(),
             peak: vec![0; capacities.len()],
@@ -263,6 +275,7 @@ impl Scheduler {
                 cmd_tx,
                 result_rx: RefCell::new(result_rx),
                 handles: RefCell::new(handles),
+                runtime,
             }),
         )
     }
@@ -331,8 +344,15 @@ impl Scheduler {
     /// stay alive (idle on their channels, holding parked coroutines) for the next
     /// `run()`.
     pub fn run(&self) {
+        self.1.runtime.block_on(self.run_async());
+    }
+
+    /// The boss loop, async so it can drive in-flight remote forces (the vox
+    /// `force()` calls) alongside worker reports. Today's body: dispatch every
+    /// admittable strand, then await the next worker report, until quiescent.
+    async fn run_async(&self) {
         let pool = &self.1;
-        let result_rx = pool.result_rx.borrow();
+        let mut result_rx = pool.result_rx.borrow_mut();
         loop {
             // Dispatch every admittable strand (permit-gated) to its worker. Dispatch
             // *all* of them before blocking on a result, so peers that must run at the
@@ -354,6 +374,7 @@ impl Scheduler {
             // A worker will report (something is in flight); record + free its permit.
             let msg = result_rx
                 .recv()
+                .await
                 .expect("a result while strands are in flight");
             self.complete(msg);
         }
@@ -491,7 +512,7 @@ fn least_loaded(worker_load: &[u32]) -> usize {
 /// (`Resume`) one, running it on its real stack until it parks or finishes, and
 /// report back. The coroutine never leaves this thread (it is `!Send`). Exits on
 /// `Shutdown` or when the command channel closes.
-fn worker_loop(idx: usize, rx: &mpsc::Receiver<Command>, result_tx: &mpsc::Sender<WorkerMsg>) {
+fn worker_loop(idx: usize, rx: &mpsc::Receiver<Command>, result_tx: &UnboundedSender<WorkerMsg>) {
     let mut coros: HashMap<StrandId, Coro> = HashMap::new();
     while let Ok(cmd) = rx.recv() {
         match cmd {
@@ -519,7 +540,7 @@ fn worker_loop(idx: usize, rx: &mpsc::Receiver<Command>, result_tx: &mpsc::Sende
 }
 
 /// Resume one coroutine and report what it did (parked with reason+stack, or done).
-fn drive(idx: usize, id: StrandId, coro: &mut Coro, result_tx: &mpsc::Sender<WorkerMsg>) {
+fn drive(idx: usize, id: StrandId, coro: &mut Coro, result_tx: &UnboundedSender<WorkerMsg>) {
     let msg = match coro.resume(()) {
         CoroutineResult::Yield((reason, backtrace)) => WorkerMsg::Parked {
             id,

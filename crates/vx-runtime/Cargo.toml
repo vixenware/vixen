@@ -32,8 +32,11 @@ copypatch = { workspace = true }
 corosensei = { workspace = true }
 # Remote handles are async by nature — forcing an unproduced part suspends until the
 # producer yields it. The cross-executor harness runs the producer↔consumer exchange
-# over vox (transport-local, in-process) — the real wire, not raw channels.
+# over vox (transport-local, in-process) — the real wire, not raw channels. The boss
+# drives those vox forces on a current-thread runtime; futures-util's FuturesUnordered
+# holds the in-flight ones (on the boss thread — no Send bound on the vox futures).
 tokio = { workspace = true }
+futures-util = { workspace = true }
 vox = { workspace = true }
 
 [build-dependencies]

@@ -4047,6 +4047,7 @@ dependencies = [
  "corosensei",
  "facet",
  "facet-json",
+ "futures-util",
  "tokio",
  "vox",
  "vx-ir",
