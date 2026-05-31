@@ -57,11 +57,13 @@ pub fn lower_node(g: &DemandGraph, root: NodeId) -> Result<(Kernel, Vec<NodeId>)
     // Phase 2: emit the region, then return its root value.
     let root_slot = lo.emit_value(root)?;
     lo.close(Term::Return(root_slot));
+    let span = lo.node(root).span;
     Ok((
         Kernel {
             n_slots: lo.n_slots,
             n_params: lo.params.len() as u32,
             blocks: lo.blocks,
+            span,
         },
         lo.params,
     ))
@@ -169,6 +171,7 @@ impl<'g> Lowerer<'g> {
                     a: 0,
                     b: 0,
                     imm,
+                    span: node.span,
                 });
                 Ok(dst)
             }
@@ -183,12 +186,14 @@ impl<'g> Lowerer<'g> {
                     a: 0,
                     b: 0,
                     imm: 0,
+                    span: node.span,
                 });
                 Ok(dst)
             }
 
             NodeKind::Kernel(KernelOp::Bin(bin)) => {
                 let kind = bin_op(*bin);
+                let span = node.span;
                 let (an, bn) = (node.inputs[0], node.inputs[1]);
                 let a = self.emit_value(an)?;
                 let b = self.emit_value(bn)?;
@@ -199,11 +204,13 @@ impl<'g> Lowerer<'g> {
                     a,
                     b,
                     imm: 0,
+                    span,
                 });
                 Ok(dst)
             }
 
             NodeKind::Kernel(KernelOp::Not) => {
+                let span = node.span;
                 let an = node.inputs[0];
                 let a = self.emit_value(an)?;
                 let dst = self.alloc();
@@ -213,6 +220,7 @@ impl<'g> Lowerer<'g> {
                     a,
                     b: 0,
                     imm: 0,
+                    span,
                 });
                 Ok(dst)
             }
@@ -247,6 +255,7 @@ impl<'g> Lowerer<'g> {
             a: t,
             b: 0,
             imm: 0,
+            span: None, // synthetic φ move, not a source op
         });
         let then_end = self.close(Term::Return(result));
 
@@ -258,6 +267,7 @@ impl<'g> Lowerer<'g> {
             a: e,
             b: 0,
             imm: 0,
+            span: None, // synthetic φ move, not a source op
         });
         let else_end = self.close(Term::Return(result));
 
@@ -317,7 +327,7 @@ mod tests {
     fn lower_run(src: &str, entry: &str, args: &[Word]) -> Result<Word, String> {
         let g = analyze_source(src, entry).map_err(|e| format!("analyze: {e}"))?;
         let k = lower_root(&g).map_err(|e| format!("lower: {e:?}"))?;
-        kernel::run(&k, args).map_err(|p| format!("poison: {}", p.0))
+        kernel::run(&k, args).map_err(|p| format!("poison: {}", p.reason))
     }
 
     #[test]
@@ -368,6 +378,33 @@ mod tests {
         // tree-walk. (string `++` likewise.)
         let g = analyze_source("fn f() -> U64 ( g(1) ) fn g(x: U64) -> U64 ( x )", "f").unwrap();
         assert!(lower_root(&g).is_err());
+    }
+
+    /// I6 — Source fidelity: a poison reports its source span, and the spanned
+    /// text is the token that detonated (divide-by-zero, `fail`, a forced `💣`).
+    #[test]
+    fn i6_poison_carries_its_source_span() {
+        for (src, marker) in [
+            ("fn f() -> U64 ( 10 / 0 )", "/"),
+            (r#"fn f() -> U64 ( fail "boom" )"#, "fail"),
+            ("fn f() -> U64 ( (42, 💣)[1] )", "💣"),
+        ] {
+            let g = analyze_source(src, "f").expect("analyze");
+            let k = lower_root(&g).expect("lower");
+            let span = match kernel::run(&k, &[]) {
+                Err(p) => p
+                    .span
+                    .unwrap_or_else(|| panic!("{src}: poison carried no span")),
+                Ok(v) => panic!("{src}: expected poison, got {v}"),
+            };
+            let text = src
+                .get(span.start as usize..span.end as usize)
+                .unwrap_or_else(|| panic!("{src}: span {span:?} out of bounds"));
+            assert!(
+                text.contains(marker),
+                "{src}: span text {text:?} should contain {marker:?}"
+            );
+        }
     }
 
     /// `eval.rs` is the oracle: lowering must agree with the tree-walker on every

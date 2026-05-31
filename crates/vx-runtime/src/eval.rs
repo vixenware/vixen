@@ -362,7 +362,10 @@ impl Evaluator<'_> {
             } else {
                 Value::U64(w)
             }),
-            Err(p) => Err(Poison(p.0)),
+            // The kernel poison carries a source span (I6); eval's `Poison` is a
+            // bare string for now, so take the reason. (Threading the span into
+            // eval's `Outcome` is the follow-up.)
+            Err(p) => Err(Poison(p.reason)),
         })
     }
 

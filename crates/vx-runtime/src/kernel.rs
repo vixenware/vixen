@@ -20,16 +20,23 @@
 //! block runs), which the native backend chains by **relocation** (phon's
 //! `patch_branch26`), never by evaluating both sides.
 
+use crate::graph::Span;
+
 /// One ABI word. Scalars are unboxed into it; wider values span several.
 pub type Word = u64;
 
 /// An SSA register index into the kernel's slot array (params first).
 pub type Slot = u32;
 
-/// A poison — a detonation reason. Returned across a stencil boundary, never
-/// panicked (phon's rule).
+/// A poison — a detonation reason plus **where in the source** it detonated
+/// (I6 — source fidelity). Returned across a stencil boundary, never panicked
+/// (phon's rule). The span rides the IR, so a poison three layers down and one
+/// host over still points at the original line.
 #[derive(Debug, Clone)]
-pub struct Poison(pub String);
+pub struct Poison {
+    pub reason: String,
+    pub span: Option<Span>,
+}
 
 /// The fixed stencil-op vocabulary. One variant ⇒ one stencil function ⇒ one
 /// machine-code fragment. Scalar-first; string/struct ops arrive with layout
@@ -73,6 +80,9 @@ pub struct Op {
     pub a: Slot,
     pub b: Slot,
     pub imm: Word,
+    /// Source span this op lowered from — carried so a poison points at source
+    /// (I6). `None` for synthetic ops (e.g. a φ `Copy`) and hand-built kernels.
+    pub span: Option<Span>,
 }
 
 /// A basic block: straight-line ops then a terminator.
@@ -106,6 +116,10 @@ pub struct Kernel {
     pub n_slots: u32,
     pub n_params: u32,
     pub blocks: Vec<Block>,
+    /// The source span of the region this kernel lowered from — the coarse
+    /// fallback a poison reports when the precise op isn't attributable (the
+    /// native JIT path, until per-op fault attribution lands).
+    pub span: Option<Span>,
 }
 
 /// A stencil: the per-op fragment. The interpreter calls it through this pointer;
@@ -150,7 +164,10 @@ fn st_not(s: &mut [Word], op: &Op) -> Result<(), Poison> {
 fn st_div(s: &mut [Word], op: &Op) -> Result<(), Poison> {
     let b = s[op.b as usize];
     if b == 0 {
-        return Err(Poison("divide by zero".into()));
+        return Err(Poison {
+            reason: "divide by zero".into(),
+            span: op.span,
+        });
     }
     s[op.dst as usize] = s[op.a as usize] / b;
     Ok(())
@@ -158,13 +175,19 @@ fn st_div(s: &mut [Word], op: &Op) -> Result<(), Poison> {
 fn st_rem(s: &mut [Word], op: &Op) -> Result<(), Poison> {
     let b = s[op.b as usize];
     if b == 0 {
-        return Err(Poison("remainder by zero".into()));
+        return Err(Poison {
+            reason: "remainder by zero".into(),
+            span: op.span,
+        });
     }
     s[op.dst as usize] = s[op.a as usize] % b;
     Ok(())
 }
-fn st_fail(_: &mut [Word], _: &Op) -> Result<(), Poison> {
-    Err(Poison("fail".into()))
+fn st_fail(_: &mut [Word], op: &Op) -> Result<(), Poison> {
+    Err(Poison {
+        reason: "fail".into(),
+        span: op.span,
+    })
 }
 
 /// The stencil for an op kind — the function-pointer table the interpreter
@@ -223,9 +246,10 @@ pub fn run(k: &Kernel, args: &[Word]) -> Result<Word, Poison> {
             }
         }
     }
-    Err(Poison(
-        "kernel step budget exhausted (cyclic blocks?)".into(),
-    ))
+    Err(Poison {
+        reason: "kernel step budget exhausted (cyclic blocks?)".into(),
+        span: None,
+    })
 }
 
 #[cfg(test)]
@@ -239,6 +263,7 @@ mod tests {
             a,
             b,
             imm: 0,
+            span: None,
         }
     }
     fn konst(dst: Slot, imm: Word) -> Op {
@@ -248,6 +273,7 @@ mod tests {
             a: 0,
             b: 0,
             imm,
+            span: None,
         }
     }
 
@@ -267,6 +293,7 @@ mod tests {
                 ],
                 term: Term::Return(4),
             }],
+            span: None,
         };
         assert_eq!(run(&k, &[]).unwrap(), 9);
     }
@@ -298,6 +325,7 @@ mod tests {
                     term: Term::Return(3),
                 },
             ],
+            span: None,
         }
     }
 
@@ -319,6 +347,7 @@ mod tests {
                 ops: vec![op(OpKind::Div, 2, 0, 1)],
                 term: Term::Return(2),
             }],
+            span: None,
         };
         assert_eq!(run(&k, &[10, 2]).unwrap(), 5);
         assert!(run(&k, &[10, 0]).is_err()); // no panic across the stencil boundary

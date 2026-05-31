@@ -153,7 +153,12 @@ pub fn jit_run(k: &Kernel, args: &[Word]) -> Option<Result<Word, Poison>> {
     entry(&mut ctx);
 
     Some(if ctx.status != 0 {
-        Err(Poison("kernel poisoned".into()))
+        // The native path can't yet attribute the failing op, so report the
+        // kernel's region span (coarse). Per-op fault attribution is a follow-up.
+        Err(Poison {
+            reason: "kernel poisoned".into(),
+            span: k.span,
+        })
     } else {
         Ok(ctx.ret)
     })
