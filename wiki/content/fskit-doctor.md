@@ -177,64 +177,112 @@ In rough order of frequency:
 > r[fskit.killswitch.single-capability]
 >
 > The daemon exposes **exactly one** operation: terminate the system FSKit
-> daemon. It accepts no path, no PID, no filesystem type, no command — nothing
-> that changes *what* it kills. There is no general "run as root" surface, by
-> construction, so a compromised or malicious caller gains nothing beyond the one
-> button.
+> daemon. There is no message payload — the trigger (§5) carries no path, PID,
+> type, command, or argument of any kind; its mere presence *is* the request.
+> Nothing a caller supplies can change *what* the daemon does. There is no
+> general "run as root" surface, by construction, so a malicious caller gains
+> nothing beyond the one button.
 
 > r[fskit.killswitch.target]
 >
 > The target is resolved **by the daemon itself** — the running launchd job
-> `com.apple.filesystems.fskitd` (`/usr/libexec/fskitd`) — never from a
-> caller-supplied identifier. The client cannot redirect the kill at another
-> process.
+> `com.apple.filesystems.fskitd` (`/usr/libexec/fskitd`) — never from caller
+> input. The client cannot redirect the kill at another process.
 
 > r[fskit.killswitch.terminate]
 >
-> Termination sends `SIGTERM`, escalating to `SIGKILL` if `fskitd` does not exit
-> within a bounded wait. Because the job has no `KeepAlive`
+> Per launch the daemon performs **at most one** terminate regardless of how many
+> triggers are queued: `SIGTERM`, escalating to `SIGKILL` if `fskitd` does not
+> exit within a bounded wait. Because the job has no `KeepAlive`
 > (`r[fskit.facts.no-keepalive]`), `fskitd` stays down until the next mount demand
-> relaunches it. The daemon does **not** relaunch `fskitd` itself.
+> relaunches it. The daemon does **not** relaunch `fskitd`, unmount, or remount —
+> those are the doctor's unprivileged job. One trigger, one effect.
 
-> r[fskit.killswitch.returns-to-doctor]
+## 5. Transport — the trigger queue
+
+The privileged hop is **not** XPC and **not** Vox. XPC is painful from Rust; Vox
+is a full RPC framework for what is a single fire-and-forget signal. Instead the
+daemon is a launchd **`QueueDirectories`** job: it is not even running until
+launchd starts it because a file appeared in its queue. This is the disciplined
+form of "the daemon watches a path; drop a file to fire it."
+
+> r[fskit.killswitch.transport]
 >
-> The kill-switch kills and returns a result (killed / already-dead / failed). It
-> does **not** unmount or remount — those are the doctor's unprivileged job. This
-> keeps the privileged surface minimal: one verb, one effect.
+> The trigger is a **file dropped into a queue directory** watched by launchd via
+> `QueueDirectories`. The doctor creates a uniquely-named file in the queue; that
+> wakes the daemon. The daemon runs `r[fskit.killswitch.terminate]`, writes its
+> audit record, **drains** the queue (unlinks all trigger files — required so
+> launchd stops relaunching), and exits. The plist sets `RunAtLoad` (to
+> create/repair the queue directory on load) and **no** `KeepAlive`.
 
-## 5. Installation & trust (SMAppService)
+> r[fskit.killswitch.ack-by-drain]
+>
+> There is no response channel. The doctor treats **removal of its trigger file
+> within a bounded timeout as the acknowledgement** that the daemon ran; a timeout
+> means the kill-switch is unavailable (not installed / not approved), which the
+> doctor reports. Success of the kill itself is confirmed by the doctor
+> independently re-probing `fskitd`/the mount before remounting — the privileged
+> side never reports status.
+
+> r[fskit.killswitch.auth-by-perms]
+>
+> Authorization is by **filesystem permission on the queue directory**, not by
+> authenticating the caller's code identity. The queue is writable only by the
+> `admin` group (owner `root`, group `admin`, mode `1730`); a non-admin process
+> cannot fire it. We deliberately accept admin-uid gating over XPC audit-token
+> code-signing checks **because the capability is a recoverable restart**: the
+> worst an unwanted-but-authorized trigger can do is bounce `fskitd` for a
+> transient VFS stall — not escalation, data loss, or persistence. The narrowness
+> of the capability is the security property; the transport need only gate *who
+> may fire it*. (If code-identity gating is ever required, the upgrade is an XPC
+> Mach service with audit-token verification, at the cost of XPC-from-Rust.)
+
+> r[fskit.killswitch.queue-perms]
+>
+> On each launch the daemon **asserts** the queue directory's ownership and mode
+> before acting, repairs them if wrong, and refuses to act on a world-writable
+> queue. A misconfigured queue must not silently widen who can press the button.
 
 > r[fskit.killswitch.install]
 >
-> The daemon ships **inside `Vixen.app`** — its launchd plist under
-> `Contents/Library/LaunchDaemons/`, its executable bundled and referenced via
-> `BundleProgram` — and is registered with
-> `SMAppService.daemon(plistName:).register()`. Files are **not** copied into
-> `/Library/LaunchDaemons` or `/Library/PrivilegedHelperTools`.
+> The daemon ships **inside `Vixen.app`**: plist at
+> `Contents/Library/LaunchDaemons/eu.bearcove.vixen.fskit-killswitch.plist`,
+> executable at `Contents/MacOS/fskit-killswitch` (referenced by the plist's
+> bundle-relative `BundleProgram`). It is registered with
+> `SMAppService.daemon(plistName: "eu.bearcove.vixen.fskit-killswitch.plist").register()`.
+> Nothing is copied to `/Library/LaunchDaemons` or `/Library/PrivilegedHelperTools`.
 
 > r[fskit.killswitch.approval]
 >
 > First registration requires a **one-time** user approval (System Settings →
-> Login Items) plus an admin authentication prompt (installing a root daemon).
-> After approval there is **no per-use prompt** — the button works for every
-> subsequent invocation, across reboots.
+> Login Items) plus an admin authentication prompt. Afterwards there is **no
+> per-use prompt** — the button works for every subsequent invocation, across
+> reboots.
 
 > r[fskit.killswitch.signed]
 >
-> The daemon is Developer-ID signed as part of the app. SMAppService refuses
-> unsigned or misplaced daemons; signing is the trust root for the whole scheme.
-
-> r[fskit.killswitch.caller-auth]
->
-> The daemon authenticates its IPC peer before acting: it checks the connecting
-> process's code-signing identity against Vixen's designated requirement (team +
-> bundle). Only the Vixen app / `vx` CLI may press the button; arbitrary local
-> processes may not.
+> The daemon is signed with team `B2N6FSRTPV` as part of the app. SMAppService
+> refuses unsigned or misplaced daemons; the signature is the trust root that
+> makes the in-bundle install safe.
 
 > r[fskit.killswitch.audit]
 >
-> Every invocation is logged (caller identity, timestamp, outcome) via
-> `tracing` / `os_log`. A privileged action is always auditable.
+> Every launch logs the caller-visible facts (timestamp, whether `fskitd` was
+> found, signal sent, outcome) via `os_log` and an append-only record in the
+> kill-switch support directory. A privileged action is always auditable.
+
+### Concrete names [settled]
+
+| thing | value |
+| --- | --- |
+| app bundle id | `eu.bearcove.vixen` |
+| team id | `B2N6FSRTPV` |
+| daemon label / bundle id | `eu.bearcove.vixen.fskit-killswitch` |
+| daemon plist (in app) | `Contents/Library/LaunchDaemons/eu.bearcove.vixen.fskit-killswitch.plist` |
+| daemon executable (in app) | `Contents/MacOS/fskit-killswitch` |
+| support dir | `/Library/Application Support/Vixen/fskit-killswitch/` (`root`-owned) |
+| trigger queue dir | `…/fskit-killswitch/queue/` (`root:admin`, `1730`) |
+| audit log | `…/fskit-killswitch/audit.log` (`root`-written) |
 
 ## 6. Failure & reporting
 
@@ -244,26 +292,30 @@ a structured result naming the terminal rung and state (healthy / recovered-at-r
 after the kill-switch (e.g. SMAppService not yet approved, or `fskitd` re-wedging
 immediately) is reported as such with the diagnostics attached — never swallowed.
 
-## 7. Decision ledger (what needs deciding)
+## 7. Decision ledger
 
-1. **Doctor location & name.** [lean] A `vx` subcommand (e.g. `vx doctor`) —
-   most ergonomic for agents to call — over a standalone `vx-vfs-doctor` binary.
-   Name TBD. *Need: yes/redirect.*
-2. **Kill-switch transport.** [open] Native **XPC/Mach** (the SMAppService idiom,
-   gives peer code-signing checks for free) vs. the **Vox `local://`** socket used
-   everywhere else in Vixen. The unprivileged VFS data plane stays Vox regardless;
-   this is only about the privileged hop. *Genuine fork.*
-3. **Caller authorization mechanism.** [lean] Audit-token + designated-requirement
-   code-signing check on the connecting peer (`r[fskit.killswitch.caller-auth]`).
-   Confirm this is the bar.
+1. **Doctor location & name.** [lean] A `vx` subcommand (e.g. `vx doctor`) — most
+   ergonomic for agents to call — over a standalone `vx-vfs-doctor` binary. Name
+   TBD. *Need: yes/redirect.*
+2. **Kill-switch transport.** [settled] launchd `QueueDirectories` file-drop (§5).
+   Not XPC, not Vox. Rationale + threat model in `r[fskit.killswitch.transport]` /
+   `r[fskit.killswitch.auth-by-perms]`.
+3. **Caller authorization.** [settled] `admin`-group write on the trigger queue;
+   no code-identity check (`r[fskit.killswitch.auth-by-perms]`), justified by the
+   recoverable-restart capability.
 4. **Capability surface.** [settled] The button is `fskitd` only. `fskit_agent` is
    user-owned and handled by the doctor's unprivileged rung
    (`r[fskit.doctor.kill-extension]`); `userfsd`/`fskit_helper` are out of scope.
 5. **Sparkle clean-unmount hole.** [open] Whether the app/doctor proactively
-   clean-unmounts on update (closing failure-mode §1.2). Proposed out of scope for
-   v1, tracked as a known hazard.
-6. **Bundle id / label.** [lean] `eu.bearcove.vixen.fskit-killswitch`, matching
-   the `eu.bearcove.vixenfs` convention. Confirm.
+   clean-unmounts on update (closing failure-mode §1.2). Out of scope for v1,
+   tracked as a known hazard.
+6. **Bundle id / label.** [settled] `eu.bearcove.vixen.fskit-killswitch`, team
+   `B2N6FSRTPV` (§5 concrete names).
+7. **SMAppService from a sandboxed app.** [verify] `Vixen.app` is sandboxed
+   (`com.apple.security.app-sandbox`). Confirm `SMAppService` daemon registration
+   is permitted from a sandboxed app (login-item/agent registration is; daemon
+   registration must be verified). Does not affect the transport or names above —
+   the trigger is dropped by the unsandboxed `vx` CLI, not the app.
 
 ## 8. First implementation slice (orientation)
 
@@ -284,12 +336,16 @@ immediately) is reported as such with the diagnostics attached — never swallow
 
 - The doctor ladder in `vx-vfsd`'s macOS platform module, plus a `vx` subcommand
   to invoke it (§7.1).
-- The kill-switch daemon: a tiny binary + its launchd plist inside
-  [`apps/mac/xcode/Vixen`](apps/mac/xcode/Vixen), with the `SMAppService` register
-  call in the app (`VixenApp.swift`) and the matching entitlements
-  (`Vixen.entitlements`). The daemon resolves and kills `fskitd`
-  (`r[fskit.killswitch.target]` / `r[fskit.killswitch.terminate]`) and authenticates
-  its caller (`r[fskit.killswitch.caller-auth]`).
+- The kill-switch daemon: a **tiny Rust binary** (no XPC, no Vox — just `libc`
+  `kill` + draining the queue dir) plus its launchd plist (`QueueDirectories` +
+  `RunAtLoad`, no `KeepAlive`), both bundled in
+  [`apps/mac/xcode/Vixen`](apps/mac/xcode/Vixen) per §5's concrete names. The
+  `SMAppService.daemon(…).register()` call and the helper's signing live in the
+  app (`VixenApp.swift`, `Vixen.entitlements`, the xcodeproj build phase copying
+  the binary into `Contents/MacOS`). The daemon resolves and kills `fskitd`
+  (`r[fskit.killswitch.target]` / `.terminate`); the doctor fires it by writing a
+  file (`r[fskit.killswitch.transport]`) and acks by drain
+  (`r[fskit.killswitch.ack-by-drain]`).
 
 The one empirical check to run first on a throwaway mount: confirm that killing
 the appex leaves a force-unmountable zombie (vs. `fskitd` auto-reaping it). That
