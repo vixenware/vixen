@@ -5,19 +5,28 @@
 //! reason**. From the demand edges + park reasons the scheduler can always say
 //! *why* a build isn't progressing (the wait-for tree), which tokio cannot.
 //!
-//! This is the minimal core: a single-threaded, cooperative, demand-driven
-//! executor (concurrency via interleaving at await points; thread-pool parallelism
-//! is a later grow-step *under the same seven invariants*). It owns the permit
-//! pools and the observability firehose; every transition is an [`Event`], and the
-//! invariant tests assert over that firehose — max-concurrency, ran-once,
-//! undemanded-never-ran, the stall report. Emit **only what is real** (§8).
+//! Concurrency is **real, on a worker thread pool**, kept low-risk by a
+//! boss/workers split: the `run()` thread (the boss) owns all scheduler state and
+//! is the only one that touches it — it admits ready strands up to each resource's
+//! permit count and hands their futures to a pool of workers, which poll them **in
+//! parallel** and report back. The only shared state is the work queue, the result
+//! channel, and the `Signal`s (an `Arc<Mutex>`); the scheduler's `Inner` never
+//! needs a lock. (Per-run thread spawn for now; a persistent pool is a grow-step.)
+//!
+//! Every transition is an [`Event`]; the invariant tests assert over that firehose
+//! — now under genuine parallelism. Emit **only what is real** (§8).
 
 use std::cell::RefCell;
 use std::collections::VecDeque;
 use std::future::Future;
 use std::pin::Pin;
 use std::rc::Rc;
+use std::sync::mpsc;
+use std::sync::{Arc, Condvar, Mutex};
 use std::task::{Context, Poll, RawWaker, RawWakerVTable, Waker};
+
+/// A strand's work: a `Send` future (it crosses to a worker thread and back).
+type Fut = Pin<Box<dyn Future<Output = Outcome> + Send>>;
 
 /// A permit-bearing resource: a local-pool slot, a remote executor's capacity, a
 /// host's concurrent-request limit — all the same mechanism (§2).
@@ -44,7 +53,7 @@ pub enum ParkReason {
 pub enum Event {
     /// A strand became (transitively) demanded.
     Demanded(StrandId),
-    /// A strand acquired a permit and is now actively running.
+    /// A strand acquired a permit and is now actively running (on a worker).
     Admitted {
         strand: StrandId,
         resource: ResourceId,
@@ -60,10 +69,11 @@ pub enum Event {
     Finished { strand: StrandId, poisoned: bool },
 }
 
-/// A signal a strand can await (the minimal "part"): pending until `fire`d, then
-/// it wakes whatever parked on it. Stands in for a producer yielding a part.
+/// A signal a strand can await (the minimal "part"): pending until `fire`d, then it
+/// wakes whatever parked on it. Shared across threads (a worker parks on it, the
+/// boss fires it), so it's an `Arc<Mutex>`.
 #[derive(Clone, Default)]
-pub struct Signal(Rc<RefCell<SignalState>>);
+pub struct Signal(Arc<Mutex<SignalState>>);
 
 #[derive(Default)]
 struct SignalState {
@@ -73,10 +83,7 @@ struct SignalState {
 
 impl Signal {
     pub fn new() -> Signal {
-        Signal(Rc::new(RefCell::new(SignalState::default())))
-    }
-    fn is_fired(&self) -> bool {
-        self.0.borrow().fired
+        Signal::default()
     }
 }
 
@@ -88,16 +95,16 @@ pub enum Outcome {
 }
 
 struct Strand {
-    /// Taken out while being polled (so polling holds no scheduler borrow — the
-    /// future calls back in), re-stashed if it parks, left `None` once finished.
-    fut: Option<Pin<Box<dyn Future<Output = Outcome>>>>,
+    /// Taken out while a worker polls it (so the boss holds no reference during the
+    /// parallel poll), re-stashed if it parks, left `None` once finished.
+    fut: Option<Fut>,
     resource: ResourceId,
     demanded: bool,
     /// `None` while runnable/parked; `Some` once finished (memoised result).
     done: Option<Outcome>,
     /// Set when parked; cleared on admit. The live half of the wait-for tree.
     parked: Option<ParkReason>,
-    /// Currently holding a permit (admitted, not yet parked/finished).
+    /// Currently holding a permit (admitted to a worker, not yet returned).
     admitted: bool,
 }
 
@@ -109,9 +116,28 @@ struct Inner {
     strands: Vec<Strand>,
     ready: VecDeque<StrandId>,
     events: Vec<Event>,
+    /// Strands admitted to workers and not yet reported back.
+    in_flight: u32,
 }
 
-/// The scheduler: owns permits, strands, the ready queue, and the firehose.
+/// What a worker reports after polling one strand.
+enum WorkerResult {
+    Done(Outcome),
+    /// Parked: the reason it recorded, and its future handed back to re-stash.
+    Parked {
+        reason: Option<ParkReason>,
+        fut: Fut,
+    },
+}
+
+/// A pending pop-able queue of work for the pool, with a close flag.
+struct WorkQueue {
+    items: VecDeque<(StrandId, Fut)>,
+    closed: bool,
+}
+
+/// The scheduler: the boss owns `Inner` (single-threaded); workers only touch the
+/// work queue, the result channel, and `Signal`s.
 #[derive(Clone)]
 pub struct Scheduler(Rc<RefCell<Inner>>);
 
@@ -125,14 +151,16 @@ impl Scheduler {
             strands: Vec::new(),
             ready: VecDeque::new(),
             events: Vec::new(),
+            in_flight: 0,
         })))
     }
 
     /// Register a strand on `resource` running `fut`. It does **not** run until
-    /// [`demand`](Self::demand)ed (I1).
+    /// [`demand`](Self::demand)ed (I1). The future must be `Send` — it is polled on
+    /// a worker thread.
     pub fn spawn<F>(&self, resource: ResourceId, fut: F) -> StrandId
     where
-        F: Future<Output = Outcome> + 'static,
+        F: Future<Output = Outcome> + Send + 'static,
     {
         let mut inner = self.0.borrow_mut();
         let id = StrandId(inner.strands.len() as u32);
@@ -159,90 +187,125 @@ impl Scheduler {
         inner.ready.push_back(id);
     }
 
-    /// A signal a strand can `park_on` and the scheduler can `fire`.
+    /// A signal a strand can `park_on` and the boss can `fire`.
     pub fn signal(&self) -> Signal {
         Signal::new()
     }
 
     /// Fire a signal: mark it fired and re-queue every strand parked on it (each
-    /// must still re-acquire a permit to resume — parking released it).
+    /// must still re-acquire a permit to resume — parking released it). Called on
+    /// the boss thread, between or after `run()`s.
     pub fn fire(&self, sig: &Signal) {
         let waiters = {
-            let mut st = sig.0.borrow_mut();
+            let mut st = sig.0.lock().unwrap();
             st.fired = true;
             std::mem::take(&mut st.waiters)
         };
         let mut inner = self.0.borrow_mut();
         for w in waiters {
             inner.events.push(Event::Woken(w));
+            inner.strands[w.0 as usize].parked = None;
             inner.ready.push_back(w);
         }
     }
 
-    /// Drive demanded strands to quiescence: admit ready strands up to each
-    /// resource's capacity, poll them, release permits on park/finish. Returns
-    /// when nothing more can make progress (all done or all parked).
+    /// Drive demanded strands to quiescence on a worker pool: admit ready strands
+    /// up to each resource's capacity, hand their futures to workers that poll them
+    /// in parallel, release permits as they park/finish. Returns when nothing more
+    /// can make progress (all done or all parked).
     pub fn run(&self) {
+        let n_workers = std::thread::available_parallelism()
+            .map_or(4, |n| n.get())
+            .clamp(1, 16);
+        let work: Arc<(Mutex<WorkQueue>, Condvar)> = Arc::new((
+            Mutex::new(WorkQueue {
+                items: VecDeque::new(),
+                closed: false,
+            }),
+            Condvar::new(),
+        ));
+        let (result_tx, result_rx) = mpsc::channel::<(StrandId, WorkerResult)>();
+        let handles: Vec<_> = (0..n_workers)
+            .map(|_| {
+                let work = Arc::clone(&work);
+                let result_tx = result_tx.clone();
+                std::thread::spawn(move || worker_loop(&work, &result_tx))
+            })
+            .collect();
+        drop(result_tx); // only the workers' clones remain
+
         loop {
-            // Pick a ready strand whose resource has a free permit.
-            let next = {
-                let mut inner = self.0.borrow_mut();
-                let mut picked = None;
-                for _ in 0..inner.ready.len() {
-                    let id = inner.ready.pop_front().unwrap();
-                    let r = inner.strands[id.0 as usize].resource;
-                    let (cap, used) = inner.resources[r.0 as usize];
-                    if used < cap {
-                        picked = Some(id);
-                        break;
-                    }
-                    inner.ready.push_back(id); // no permit yet — leave it queued
-                }
-                picked
-            };
-            let Some(id) = next else { return };
-            self.admit_and_poll(id);
+            // Hand every admittable strand to the pool (permit-gated).
+            while let Some(item) = self.admit_one() {
+                work.0.lock().unwrap().items.push_back(item);
+                work.1.notify_one();
+            }
+            // Quiescent when nothing is running and nothing more is admittable.
+            if self.0.borrow().in_flight == 0 {
+                break;
+            }
+            // A worker will report (something is in flight); record + free its permit.
+            let (id, res) = result_rx
+                .recv()
+                .expect("a result while strands are in flight");
+            self.complete(id, res);
+        }
+
+        // Close the queue and join the pool.
+        {
+            let mut q = work.0.lock().unwrap();
+            q.closed = true;
+        }
+        work.1.notify_all();
+        for h in handles {
+            let _ = h.join();
         }
     }
 
-    /// Admit one strand (take a permit), poll it once, and release the permit if it
-    /// parked or finished.
-    fn admit_and_poll(&self, id: StrandId) {
-        // Admit: take a permit, record peak concurrency, and take the future out so
-        // polling holds no scheduler borrow (the future calls back in).
-        let mut fut = {
-            let mut inner = self.0.borrow_mut();
+    /// Admit one ready strand whose resource has a free permit: take the permit,
+    /// record peak concurrency, and hand its future out. `None` if nothing is
+    /// admittable right now (ready empty, or all ready strands blocked on permits).
+    fn admit_one(&self) -> Option<(StrandId, Fut)> {
+        let mut inner = self.0.borrow_mut();
+        for _ in 0..inner.ready.len() {
+            let id = inner.ready.pop_front().unwrap();
             let r = inner.strands[id.0 as usize].resource;
+            let (cap, used) = inner.resources[r.0 as usize];
+            if used >= cap {
+                inner.ready.push_back(id); // no permit yet — leave it queued
+                continue;
+            }
             inner.resources[r.0 as usize].1 += 1;
             let now = inner.resources[r.0 as usize].1;
             if now > inner.peak[r.0 as usize] {
                 inner.peak[r.0 as usize] = now;
             }
+            inner.in_flight += 1;
             inner.strands[id.0 as usize].admitted = true;
             inner.strands[id.0 as usize].parked = None;
             inner.events.push(Event::Admitted {
                 strand: id,
                 resource: r,
             });
-            inner.strands[id.0 as usize]
+            let fut = inner.strands[id.0 as usize]
                 .fut
                 .take()
-                .expect("an admitted strand has a future")
-        };
+                .expect("an admitted strand has a future");
+            return Some((id, fut));
+        }
+        None
+    }
 
-        CURRENT.with(|c| *c.borrow_mut() = Some((self.clone(), id)));
-        let waker = strand_waker();
-        let mut cx = Context::from_waker(&waker);
-        let poll = fut.as_mut().poll(&mut cx);
-        CURRENT.with(|c| *c.borrow_mut() = None);
-
-        // Release the permit; record the outcome or re-stash the parked future.
+    /// Record a worker's report: release the permit and either memoise the result
+    /// or re-stash the parked future with its typed reason.
+    fn complete(&self, id: StrandId, res: WorkerResult) {
         let mut inner = self.0.borrow_mut();
         let r = inner.strands[id.0 as usize].resource;
         inner.resources[r.0 as usize].1 -= 1;
+        inner.in_flight -= 1;
         inner.strands[id.0 as usize].admitted = false;
-        match poll {
-            Poll::Ready(outcome) => {
+        match res {
+            WorkerResult::Done(outcome) => {
                 let poisoned = matches!(outcome, Outcome::Poisoned(_));
                 inner.strands[id.0 as usize].done = Some(outcome);
                 inner.events.push(Event::Finished {
@@ -250,14 +313,10 @@ impl Scheduler {
                     poisoned,
                 });
             }
-            Poll::Pending => {
+            WorkerResult::Parked { reason, fut } => {
                 inner.strands[id.0 as usize].fut = Some(fut);
-                // The await-primitive recorded the park reason before returning
-                // Pending; surface it (I7 — never park silently).
-                let reason = inner.strands[id.0 as usize]
-                    .parked
-                    .clone()
-                    .unwrap_or(ParkReason::AwaitingPermit { resource: r });
+                let reason = reason.unwrap_or(ParkReason::AwaitingPermit { resource: r });
+                inner.strands[id.0 as usize].parked = Some(reason.clone());
                 inner.events.push(Event::Parked { strand: id, reason });
             }
         }
@@ -294,14 +353,57 @@ impl Scheduler {
     }
 }
 
-thread_local! {
-    /// The strand currently being polled, so an await-primitive can find its
-    /// scheduler + id to record a park reason.
-    static CURRENT: RefCell<Option<(Scheduler, StrandId)>> = const { RefCell::new(None) };
+/// A worker: pop a strand's future, poll it (in parallel with its peers), report
+/// the outcome (or the parked future + reason) to the boss. Exits when the queue
+/// is closed and drained.
+fn worker_loop(
+    work: &(Mutex<WorkQueue>, Condvar),
+    result_tx: &mpsc::Sender<(StrandId, WorkerResult)>,
+) {
+    let (lock, cv) = work;
+    loop {
+        let item = {
+            let mut q = lock.lock().unwrap();
+            loop {
+                if let Some(item) = q.items.pop_front() {
+                    break Some(item);
+                }
+                if q.closed {
+                    break None;
+                }
+                q = cv.wait(q).unwrap();
+            }
+        };
+        let Some((id, mut fut)) = item else { return };
+
+        CURRENT.with(|c| *c.borrow_mut() = Some(WorkerCtx { id, park: None }));
+        let waker = noop_waker();
+        let poll = fut.as_mut().poll(&mut Context::from_waker(&waker));
+        let park = CURRENT.with(|c| c.borrow_mut().take().and_then(|ctx| ctx.park));
+
+        let res = match poll {
+            Poll::Ready(outcome) => WorkerResult::Done(outcome),
+            Poll::Pending => WorkerResult::Parked { reason: park, fut },
+        };
+        let _ = result_tx.send((id, res));
+    }
 }
 
-/// Await a signal: if already fired, resume; else record the park reason
-/// (`AwaitingPart`) and park (the permit is released by the executor on Pending).
+thread_local! {
+    /// The strand the current worker is polling, so an await-primitive can record
+    /// its park reason (read back by the worker after poll).
+    static CURRENT: RefCell<Option<WorkerCtx>> = const { RefCell::new(None) };
+}
+
+struct WorkerCtx {
+    id: StrandId,
+    park: Option<ParkReason>,
+}
+
+/// Await a signal: if already fired, resume; else register as a waiter and record
+/// the park reason (`AwaitingPart`), then park (the worker releases the permit on
+/// Pending). The fired-check and waiter-registration are atomic under the signal
+/// lock, so a concurrent `fire` either drains this waiter or is seen as fired.
 pub async fn park_on(sig: Signal, producer: StrandId, part: &str) {
     ParkOn {
         sig,
@@ -320,28 +422,26 @@ struct ParkOn {
 impl Future for ParkOn {
     type Output = ();
     fn poll(self: Pin<&mut Self>, _cx: &mut Context<'_>) -> Poll<()> {
-        if self.sig.is_fired() {
+        let mut st = self.sig.0.lock().unwrap();
+        if st.fired {
             return Poll::Ready(());
         }
-        // Record this strand as a waiter and its typed park reason.
         CURRENT.with(|c| {
-            if let Some((sched, id)) = &*c.borrow() {
-                self.sig.0.borrow_mut().waiters.push(*id);
-                sched.0.borrow_mut().strands[id.0 as usize].parked =
-                    Some(ParkReason::AwaitingPart {
-                        producer: self.producer,
-                        part: self.part.clone(),
-                    });
+            if let Some(ctx) = &mut *c.borrow_mut() {
+                st.waiters.push(ctx.id);
+                ctx.park = Some(ParkReason::AwaitingPart {
+                    producer: self.producer,
+                    part: self.part.clone(),
+                });
             }
         });
         Poll::Pending
     }
 }
 
-// A no-op-ish waker: waking is driven by `fire` re-queueing, so the waker itself
-// need not do anything (the executor re-polls from the ready queue). We still need
-// a valid Waker for `Context`.
-fn strand_waker() -> Waker {
+/// A no-op waker: wakeups are driven by `fire` re-queueing (the boss re-polls from
+/// the ready queue), so the std waker is unused — but `Context` needs a valid one.
+fn noop_waker() -> Waker {
     fn clone(_: *const ()) -> RawWaker {
         RawWaker::new(std::ptr::null(), &VTABLE)
     }
@@ -399,14 +499,13 @@ mod tests {
     /// I2 + I5 — capacity respected, and parked work never starves runnable work.
     /// 16 strands, capacity 2; the first 8 park forever awaiting a never-fired
     /// signal (parked → permit released); assert the other 8 finish and peak
-    /// concurrency stayed 2.
+    /// concurrency stayed 2 — now under real parallelism.
     #[test]
     fn i2_i5_capacity_and_progress() {
         let s = Scheduler::new(&[2]);
         let never = s.signal(); // never fired
         let mut stuck = Vec::new();
         let mut runnable = Vec::new();
-        // Dispatch the 8 stuck first (they're "ahead in the queue").
         for _ in 0..8 {
             let sig = never.clone();
             let id = s.spawn(R0, async move {
@@ -441,8 +540,8 @@ mod tests {
     }
 
     /// I4 — Schedule-independent results: the same strands, run under different
-    /// capacities (strictly serial at 1, interleaved at 8), yield identical
-    /// per-strand outcomes. Scheduling can't change the answer.
+    /// capacities (and thus different parallelism), yield identical per-strand
+    /// outcomes. Scheduling can't change the answer.
     #[test]
     fn i4_results_independent_of_capacity() {
         fn build_and_run(capacity: u32) -> Vec<Option<Outcome>> {
@@ -492,7 +591,6 @@ mod tests {
         }
         s.run();
         let report = s.stall_report();
-        // Two parked (capacity 2 admitted them); all reasons are typed AwaitingPart.
         assert!(!report.is_empty(), "a stalled run must explain itself");
         assert!(
             report
@@ -520,5 +618,47 @@ mod tests {
         s.fire(&sig);
         s.run();
         assert_eq!(s.outcome(id), Some(Outcome::Clean), "resumes after fire");
+    }
+
+    /// Real parallelism: `par` strands at capacity `par`, each blocking on a
+    /// `Barrier(par)` — which releases only if all `par` are polled *simultaneously*
+    /// on distinct worker threads. Run on a side thread with a generous timeout, so
+    /// a failure to parallelize surfaces as a failed test, not a hang. `par` adapts
+    /// to the machine (so a 1-core box trivially passes).
+    #[test]
+    fn strands_run_in_parallel_on_the_pool() {
+        use std::sync::Barrier;
+        use std::time::Duration;
+
+        let par = std::thread::available_parallelism()
+            .map_or(1, |n| n.get())
+            .min(4);
+        let (done_tx, done_rx) = mpsc::channel();
+        std::thread::spawn(move || {
+            let s = Scheduler::new(&[par as u32]);
+            let barrier = Arc::new(Barrier::new(par));
+            let ids: Vec<_> = (0..par)
+                .map(|_| {
+                    let b = Arc::clone(&barrier);
+                    s.spawn(R0, async move {
+                        b.wait(); // releases only when all `par` are here at once
+                        Outcome::Clean
+                    })
+                })
+                .collect();
+            for &id in &ids {
+                s.demand(id);
+            }
+            s.run();
+            let all_clean = ids.iter().all(|&id| s.outcome(id) == Some(Outcome::Clean));
+            let _ = done_tx.send(all_clean);
+        });
+        match done_rx.recv_timeout(Duration::from_secs(10)) {
+            Ok(true) => {}
+            Ok(false) => panic!("strands did not all complete"),
+            Err(_) => {
+                panic!("timed out — strands did not run in parallel (barrier never released)")
+            }
+        }
     }
 }
