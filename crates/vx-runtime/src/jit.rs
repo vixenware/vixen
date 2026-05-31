@@ -21,6 +21,7 @@
 
 use copypatch::{ExecBuf, patch_branch26};
 
+use crate::graph::Span;
 use crate::kernel::{Kernel, Op, OpKind, Poison, Term, Word};
 use crate::stencils;
 
@@ -32,6 +33,9 @@ struct Ctx {
     prog_base: *const u64,
     status: u64,
     ret: u64,
+    /// On poison, the index of the faulting op (into the kernel's op-lay order);
+    /// `u64::MAX` = no fault. The driver maps it to that op's source span (I6).
+    fault: u64,
 }
 
 /// Run `smoke(x) = x*3 + 1` as rustc-emitted machine code from a `MAP_JIT` page —
@@ -61,6 +65,9 @@ pub fn jit_run(k: &Kernel, args: &[Word]) -> Option<Result<Word, Poison>> {
 
     let mut code: Vec<u8> = Vec::new();
     let mut prog: Vec<u64> = Vec::new();
+    // Per-op source spans in lay order. A poisoning op reports its index in
+    // `ctx.fault`, mapped back to its span here (I6 — per-op on the native path).
+    let mut op_spans: Vec<Option<Span>> = Vec::new();
     // Each block's start offset in `code` / `prog`, for resolving cross-block
     // branches and terminator cursor resets once every block is laid out.
     let mut block_code = vec![0usize; k.blocks.len()];
@@ -80,7 +87,9 @@ pub fn jit_run(k: &Kernel, args: &[Word]) -> Option<Result<Word, Poison>> {
         for op in &block.ops {
             op_starts.push(code.len());
             code.extend_from_slice(stencil_bytes(op.kind));
-            push_imms(&mut prog, op);
+            let op_index = op_spans.len() as u64;
+            op_spans.push(op.span);
+            push_imms(&mut prog, op, op_index);
         }
 
         // The terminator stencil + its immediates.
@@ -148,16 +157,22 @@ pub fn jit_run(k: &Kernel, args: &[Word]) -> Option<Result<Word, Poison>> {
         prog_base: base,
         status: 0,
         ret: 0,
+        fault: u64::MAX,
     };
     let entry: extern "C" fn(*mut Ctx) = unsafe { core::mem::transmute(buf.as_ptr()) };
     entry(&mut ctx);
 
     Some(if ctx.status != 0 {
-        // The native path can't yet attribute the failing op, so report the
-        // kernel's region span (coarse). Per-op fault attribution is a follow-up.
+        // Map the faulting op to its source span (I6), falling back to the
+        // kernel's region span if it's unattributed or spanless.
+        let span = op_spans
+            .get(ctx.fault as usize)
+            .copied()
+            .flatten()
+            .or(k.span);
         Err(Poison {
             reason: "kernel poisoned".into(),
-            span: k.span,
+            span,
         })
     } else {
         Ok(ctx.ret)
@@ -214,9 +229,11 @@ fn stencil_cont(kind: OpKind) -> &'static [usize] {
 }
 
 /// Push an op's immediates onto the `prog` stream in the order its stencil reads
-/// them: `Const` → `[dst, imm]`, `Copy`/`Not` → `[dst, a]`, `Fail` → none, every
-/// other op → `[dst, a, b]`.
-fn push_imms(prog: &mut Vec<u64>, op: &Op) {
+/// them: `Const` → `[dst, imm]`, `Copy`/`Not` → `[dst, a]`, `Fail` → `[op_index]`,
+/// `Div`/`Rem` → `[dst, a, b, op_index]`, every other op → `[dst, a, b]`. The
+/// poisoning ops (`Fail`/`Div`/`Rem`) carry `op_index` so they can report which op
+/// faulted (→ its source span, I6).
+fn push_imms(prog: &mut Vec<u64>, op: &Op, op_index: u64) {
     use OpKind::*;
     match op.kind {
         Const => {
@@ -227,7 +244,15 @@ fn push_imms(prog: &mut Vec<u64>, op: &Op) {
             prog.push(op.dst as u64);
             prog.push(op.a as u64);
         }
-        Fail => {}
+        Fail => {
+            prog.push(op_index);
+        }
+        Div | Rem => {
+            prog.push(op.dst as u64);
+            prog.push(op.a as u64);
+            prog.push(op.b as u64);
+            prog.push(op_index);
+        }
         _ => {
             prog.push(op.dst as u64);
             prog.push(op.a as u64);
@@ -314,6 +339,30 @@ mod tests {
         assert!(
             k.blocks.len() > 1,
             "the `if` kernel should have multiple blocks"
+        );
+    }
+
+    /// I6 on the JIT path: a poison reports the *failing op's* span, not the whole
+    /// kernel's. `(10 / 0) + 5` — the poison points at the `/`, not at the `+ 5`.
+    #[test]
+    fn jit_poison_reports_the_failing_op_not_the_whole_kernel() {
+        let src = "fn f() -> U64 ( (10 / 0) + 5 )";
+        let g = analyze_source(src, "f").unwrap();
+        let k = lower_root(&g).unwrap();
+        let span = match jit_run(&k, &[]) {
+            Some(Err(p)) => p.span.expect("jit poison carries a span"),
+            other => panic!("expected a jit poison, got {other:?}"),
+        };
+        let text = src
+            .get(span.start as usize..span.end as usize)
+            .expect("span in bounds");
+        assert!(
+            text.contains('/'),
+            "span {text:?} should be the failing divide"
+        );
+        assert!(
+            !text.contains('5'),
+            "span {text:?} should be the div sub-expr, not the whole kernel"
         );
     }
 }

@@ -38,6 +38,10 @@ pub struct Ctx {
     pub status: u64,
     /// The returned word, written by `vx_stencil_return`.
     pub ret: u64,
+    /// On poison, the index of the op that faulted (so the driver maps it to a
+    /// source span — I6, per-op). `u64::MAX` means "no fault". A poisoning op reads
+    /// its index from the prog stream and writes it here before stopping.
+    pub fault: u64,
 }
 
 extern "C" {
@@ -137,9 +141,11 @@ pub unsafe extern "C" fn vx_stencil_div(cx: *mut Ctx) {
     let dst = *c.prog as usize;
     let ai = *c.prog.add(1) as usize;
     let bi = *c.prog.add(2) as usize;
-    c.prog = c.prog.add(3);
+    let op_index = *c.prog.add(3);
+    c.prog = c.prog.add(4);
     let b = *c.slots.add(bi);
     if b == 0 {
+        c.fault = op_index;
         c.status = 1;
         return;
     }
@@ -155,9 +161,11 @@ pub unsafe extern "C" fn vx_stencil_rem(cx: *mut Ctx) {
     let dst = *c.prog as usize;
     let ai = *c.prog.add(1) as usize;
     let bi = *c.prog.add(2) as usize;
-    c.prog = c.prog.add(3);
+    let op_index = *c.prog.add(3);
+    c.prog = c.prog.add(4);
     let b = *c.slots.add(bi);
     if b == 0 {
+        c.fault = op_index;
         c.status = 1;
         return;
     }
@@ -165,11 +173,13 @@ pub unsafe extern "C" fn vx_stencil_rem(cx: *mut Ctx) {
     cont!(cx);
 }
 
-/// `fail` — poison unconditionally (status 1) and stop. No operands, no
-/// continuation: just a `ret`.
+/// `fail` — poison unconditionally (status 1) and stop. prog `[op_index]` (so the
+/// driver can map the poison to its source span); no continuation, just a `ret`.
 #[no_mangle]
 pub unsafe extern "C" fn vx_stencil_fail(cx: *mut Ctx) {
-    (*cx).status = 1;
+    let c = &mut *cx;
+    c.fault = *c.prog;
+    c.status = 1;
 }
 
 /// Unconditional jump — prog `[target_off]`. Reset the cursor to the target
