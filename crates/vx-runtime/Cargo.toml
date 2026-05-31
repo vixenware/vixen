@@ -26,6 +26,10 @@ vx-types = { workspace = true }
 # patching). Only the runtime surface (ExecBuf, patch_branch26) — the smoke test,
 # arithmetic stencils, and kernel→stencil-chain lowering stay in this crate.
 copypatch = { workspace = true }
+# Stackful coroutines: the strand scheduler runs each strand on its own real stack
+# (dumpable, steppable, off-CPU-profilable) instead of an async future. Workers own
+# their coroutines — a strand never migrates threads, so eval stays single-threaded.
+corosensei = { workspace = true }
 # Remote handles are async by nature — forcing an unproduced part suspends until the
 # producer yields it. The cross-executor harness runs the producer↔consumer exchange
 # over vox (transport-local, in-process) — the real wire, not raw channels.

@@ -83,6 +83,11 @@ vox-types = { version = "0.8.2" }
 # Path dep for now; Vixen will reach phon through Vox eventually.
 copypatch = { path = "../../phon/rust/copypatch" }
 
+# stackful coroutines (the strand substrate): each strand is a real stack we can
+# dump, step through, and off-CPU-profile — which async futures (a shredded state
+# machine, no persistent stack while parked) cannot give us. See vx-runtime/strand.
+corosensei = "0.3.4"
+
 # process management
 
 # hashing

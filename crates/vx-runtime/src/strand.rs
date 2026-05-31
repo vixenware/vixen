@@ -5,29 +5,50 @@
 //! reason**. From the demand edges + park reasons the scheduler can always say
 //! *why* a build isn't progressing (the wait-for tree), which tokio cannot.
 //!
+//! **Strands are stackful coroutines, not futures.** Each runs on its own real
+//! stack (corosensei): we can capture that stack on a park (the stall report shows
+//! *where* a strand blocked, not just that it did), step through it in a debugger,
+//! and attribute its off-CPU time — none of which a shredded async state machine
+//! gives us. It also means eval stays plain synchronous Rust: it `park`s deep in a
+//! call tree without every caller becoming `async`.
+//!
 //! Concurrency is **real, on a worker thread pool**, kept low-risk by a
 //! boss/workers split: the `run()` thread (the boss) owns all scheduler state and
-//! is the only one that touches it — it admits ready strands up to each resource's
-//! permit count and hands their futures to a pool of workers, which poll them **in
-//! parallel** and report back. The only shared state is the work queue, the result
-//! channel, and the `Signal`s (an `Arc<Mutex>`); the scheduler's `Inner` never
-//! needs a lock. (Per-run thread spawn for now; a persistent pool is a grow-step.)
+//! is the only one that touches it. Because a coroutine holding eval's `Rc` state
+//! is `!Send`, **a worker owns its coroutines and they never migrate** — the boss
+//! and workers exchange only `StrandId`s and `Send` payloads (`Command` /
+//! `WorkerMsg`), never coroutines. The boss admits ready strands up to each
+//! resource's permit count, routing a new strand to the least-loaded worker and a
+//! resumed one back to its home worker; the worker builds/resumes the coroutine in
+//! place and reports done-or-parked.
 //!
 //! Every transition is an [`Event`]; the invariant tests assert over that firehose
-//! — now under genuine parallelism. Emit **only what is real** (§8).
+//! — under genuine parallelism. Emit **only what is real** (§8).
 
+use std::backtrace::Backtrace;
 use std::cell::RefCell;
-use std::collections::VecDeque;
-use std::future::Future;
-use std::pin::Pin;
+use std::collections::{HashMap, VecDeque};
 use std::rc::Rc;
 use std::sync::mpsc;
-use std::sync::{Arc, Condvar, Mutex};
-use std::task::{Context, Poll, RawWaker, RawWakerVTable, Waker};
+use std::sync::{Arc, Mutex};
 use std::thread::JoinHandle;
 
-/// A strand's work: a `Send` future (it crosses to a worker thread and back).
-type Fut = Pin<Box<dyn Future<Output = Outcome> + Send>>;
+use corosensei::{Coroutine, CoroutineResult, Yielder};
+
+/// What a strand yields when it parks: the typed reason **plus** a backtrace
+/// captured on the strand's own (deep) stack at the park point — the stall report's
+/// evidence of *where* it blocked.
+type Yielded = (ParkReason, Backtrace);
+
+/// A strand's coroutine: resumed with `()`, [`Yielded`] each time it parks, returns
+/// its [`Outcome`] when done. `!Send` (it may hold eval's `Rc` state) — so it lives
+/// and dies on one worker and is never put in a message.
+type Coro = Coroutine<(), Yielded, Outcome>;
+
+/// A strand body: the synchronous work. It parks via [`park_on`] (which reaches the
+/// coroutine's yielder through a thread-local), so it takes no yielder argument and
+/// stays uncoloured. `Send` so the boss can hand it to a worker to build the coro.
+type Body = Box<dyn FnOnce() -> Outcome + Send>;
 
 /// A permit-bearing resource: a local-pool slot, a remote executor's capacity, a
 /// host's concurrent-request limit — all the same mechanism (§2).
@@ -95,16 +116,32 @@ pub enum Outcome {
     Poisoned(String),
 }
 
+/// One leaf of the live wait-for tree: a demanded, unfinished, parked strand — its
+/// typed reason and the stack where it blocked (I7, with the coroutine payoff).
+#[derive(Debug, Clone)]
+pub struct Stalled {
+    pub strand: StrandId,
+    pub reason: ParkReason,
+    /// The strand's stack at the park point, rendered on demand. `None` only if the
+    /// park carried no captured stack.
+    pub backtrace: Option<String>,
+}
+
 struct Strand {
-    /// Taken out while a worker polls it (so the boss holds no reference during the
-    /// parallel poll), re-stashed if it parks, left `None` once finished.
-    fut: Option<Fut>,
+    /// The body, taken out and shipped to a worker on first admit (`Start`). `None`
+    /// after — the worker owns the coroutine from then on.
+    body: Option<Body>,
     resource: ResourceId,
     demanded: bool,
+    /// The worker that owns this strand's coroutine, set on first admit. Every later
+    /// admit `Resume`s on this same worker (the coroutine never migrates).
+    home: Option<usize>,
     /// `None` while runnable/parked; `Some` once finished (memoised result).
     done: Option<Outcome>,
     /// Set when parked; cleared on admit. The live half of the wait-for tree.
     parked: Option<ParkReason>,
+    /// The stack captured at the most recent park (for the stall report).
+    park_bt: Option<Backtrace>,
     /// Currently holding a permit (admitted to a worker, not yet returned).
     admitted: bool,
 }
@@ -119,43 +156,73 @@ struct Inner {
     events: Vec<Event>,
     /// Strands admitted to workers and not yet reported back.
     in_flight: u32,
+    /// Per-worker outstanding-command count, for least-loaded routing of new strands.
+    worker_load: Vec<u32>,
 }
 
-/// What a worker reports after polling one strand.
-enum WorkerResult {
-    Done(Outcome),
-    /// Parked: the reason it recorded, and its future handed back to re-stash.
+/// A boss→worker command on a worker's private channel. Carries only `Send` data —
+/// never a coroutine (those stay worker-local, enforced by `Coro: !Send`).
+enum Command {
+    /// Build this strand's coroutine here and run it for the first time.
+    Start { id: StrandId, body: Body },
+    /// Resume the coroutine this worker already owns.
+    Resume { id: StrandId },
+    /// Drain and exit (pool shutdown).
+    Shutdown,
+}
+
+/// A worker→boss report. `worker` lets the boss release that worker's load + permit.
+enum WorkerMsg {
+    Done {
+        id: StrandId,
+        worker: usize,
+        outcome: Outcome,
+    },
     Parked {
-        reason: Option<ParkReason>,
-        fut: Fut,
+        id: StrandId,
+        worker: usize,
+        reason: ParkReason,
+        backtrace: Backtrace,
     },
 }
 
-/// A pending pop-able queue of work for the pool, with a close flag.
-struct WorkQueue {
-    items: VecDeque<(StrandId, Fut)>,
-    closed: bool,
+/// What [`Scheduler::admit_one`] decided: ship a new strand's body to `worker`
+/// (`Start`), or resume the coroutine `worker` already owns (`Resume`).
+enum Dispatch {
+    Start {
+        worker: usize,
+        id: StrandId,
+        body: Body,
+    },
+    Resume {
+        worker: usize,
+        id: StrandId,
+    },
 }
 
-/// The scheduler: the boss owns `Inner` (single-threaded); workers only touch the
-/// work queue, the result channel, and `Signal`s. The worker `Pool` is spawned
+/// The scheduler: the boss owns `Inner` (single-threaded); workers own their
+/// coroutines and touch only the channels + `Signal`s. The worker `Pool` is spawned
 /// once and reused by every `run()`.
 #[derive(Clone)]
 pub struct Scheduler(Rc<RefCell<Inner>>, Rc<Pool>);
 
 /// A persistent worker pool: spawned at [`Scheduler::new`], reused by every
-/// `run()`, and stopped (queue closed + joined) when the last `Scheduler` handle
-/// drops. Workers idle on the work-queue condvar between runs.
+/// `run()`, and stopped (a `Shutdown` per worker, then joined) when the last
+/// `Scheduler` handle drops. Each worker idles on its private command channel
+/// between runs, holding its parked coroutines.
 struct Pool {
-    work: Arc<(Mutex<WorkQueue>, Condvar)>,
-    result_rx: RefCell<mpsc::Receiver<(StrandId, WorkerResult)>>,
+    /// One private command channel per worker (a `Resume` must reach the worker that
+    /// owns the coroutine; a new strand goes to the least-loaded worker).
+    cmd_tx: Vec<mpsc::Sender<Command>>,
+    result_rx: RefCell<mpsc::Receiver<WorkerMsg>>,
     handles: RefCell<Vec<JoinHandle<()>>>,
 }
 
 impl Drop for Pool {
     fn drop(&mut self) {
-        self.work.0.lock().unwrap().closed = true;
-        self.work.1.notify_all();
+        for tx in &self.cmd_tx {
+            let _ = tx.send(Command::Shutdown);
+        }
         for h in self.handles.borrow_mut().drain(..) {
             let _ = h.join();
         }
@@ -166,6 +233,21 @@ impl Scheduler {
     /// A scheduler with the given per-resource capacities (`capacities[i]` is the
     /// permit count of `ResourceId(i)`). Spawns the worker pool.
     pub fn new(capacities: &[u32]) -> Scheduler {
+        let n_workers = std::thread::available_parallelism()
+            .map_or(4, |n| n.get())
+            .clamp(1, 16);
+        let (result_tx, result_rx) = mpsc::channel::<WorkerMsg>();
+        let mut cmd_tx = Vec::with_capacity(n_workers);
+        let mut handles = Vec::with_capacity(n_workers);
+        for idx in 0..n_workers {
+            let (tx, rx) = mpsc::channel::<Command>();
+            cmd_tx.push(tx);
+            let result_tx = result_tx.clone();
+            handles.push(std::thread::spawn(move || {
+                worker_loop(idx, &rx, &result_tx)
+            }));
+        }
+        drop(result_tx); // only the workers' clones remain
         let inner = Rc::new(RefCell::new(Inner {
             resources: capacities.iter().map(|&c| (c, 0)).collect(),
             peak: vec![0; capacities.len()],
@@ -173,51 +255,35 @@ impl Scheduler {
             ready: VecDeque::new(),
             events: Vec::new(),
             in_flight: 0,
+            worker_load: vec![0; n_workers],
         }));
-        let n_workers = std::thread::available_parallelism()
-            .map_or(4, |n| n.get())
-            .clamp(1, 16);
-        let work: Arc<(Mutex<WorkQueue>, Condvar)> = Arc::new((
-            Mutex::new(WorkQueue {
-                items: VecDeque::new(),
-                closed: false,
-            }),
-            Condvar::new(),
-        ));
-        let (result_tx, result_rx) = mpsc::channel::<(StrandId, WorkerResult)>();
-        let handles: Vec<_> = (0..n_workers)
-            .map(|_| {
-                let work = Arc::clone(&work);
-                let result_tx = result_tx.clone();
-                std::thread::spawn(move || worker_loop(&work, &result_tx))
-            })
-            .collect();
-        drop(result_tx); // only the workers' clones remain
         Scheduler(
             inner,
             Rc::new(Pool {
-                work,
+                cmd_tx,
                 result_rx: RefCell::new(result_rx),
                 handles: RefCell::new(handles),
             }),
         )
     }
 
-    /// Register a strand on `resource` running `fut`. It does **not** run until
-    /// [`demand`](Self::demand)ed (I1). The future must be `Send` — it is polled on
-    /// a worker thread.
-    pub fn spawn<F>(&self, resource: ResourceId, fut: F) -> StrandId
+    /// Register a strand on `resource` running `body`. It does **not** run until
+    /// [`demand`](Self::demand)ed (I1). The body must be `Send` — it is shipped to a
+    /// worker, which builds the coroutine and runs it there.
+    pub fn spawn<F>(&self, resource: ResourceId, body: F) -> StrandId
     where
-        F: Future<Output = Outcome> + Send + 'static,
+        F: FnOnce() -> Outcome + Send + 'static,
     {
         let mut inner = self.0.borrow_mut();
         let id = StrandId(inner.strands.len() as u32);
         inner.strands.push(Strand {
-            fut: Some(Box::pin(fut)),
+            body: Some(Box::new(body)),
             resource,
             demanded: false,
+            home: None,
             done: None,
             parked: None,
+            park_bt: None,
             admitted: false,
         });
         id
@@ -253,40 +319,52 @@ impl Scheduler {
         for w in waiters {
             inner.events.push(Event::Woken(w));
             inner.strands[w.0 as usize].parked = None;
+            inner.strands[w.0 as usize].park_bt = None;
             inner.ready.push_back(w);
         }
     }
 
     /// Drive demanded strands to quiescence on the persistent worker pool: admit
-    /// ready strands up to each resource's capacity, hand their futures to workers
-    /// that poll them in parallel, release permits as they park/finish. Returns when
-    /// nothing more can make progress (all done or all parked); the workers stay
-    /// alive (idle on the queue condvar) for the next `run()`.
+    /// ready strands up to each resource's capacity, command their home worker to
+    /// start/resume them in parallel, release permits as they park/finish. Returns
+    /// when nothing more can make progress (all done or all parked); the workers
+    /// stay alive (idle on their channels, holding parked coroutines) for the next
+    /// `run()`.
     pub fn run(&self) {
         let pool = &self.1;
         let result_rx = pool.result_rx.borrow();
         loop {
-            // Hand every admittable strand to the pool (permit-gated).
-            while let Some(item) = self.admit_one() {
-                pool.work.0.lock().unwrap().items.push_back(item);
-                pool.work.1.notify_one();
+            // Dispatch every admittable strand (permit-gated) to its worker. Dispatch
+            // *all* of them before blocking on a result, so peers that must run at the
+            // same time (a barrier) can.
+            while let Some(dispatch) = self.admit_one() {
+                match dispatch {
+                    Dispatch::Start { worker, id, body } => {
+                        let _ = pool.cmd_tx[worker].send(Command::Start { id, body });
+                    }
+                    Dispatch::Resume { worker, id } => {
+                        let _ = pool.cmd_tx[worker].send(Command::Resume { id });
+                    }
+                }
             }
             // Quiescent when nothing is running and nothing more is admittable.
             if self.0.borrow().in_flight == 0 {
                 break;
             }
             // A worker will report (something is in flight); record + free its permit.
-            let (id, res) = result_rx
+            let msg = result_rx
                 .recv()
                 .expect("a result while strands are in flight");
-            self.complete(id, res);
+            self.complete(msg);
         }
     }
 
     /// Admit one ready strand whose resource has a free permit: take the permit,
-    /// record peak concurrency, and hand its future out. `None` if nothing is
-    /// admittable right now (ready empty, or all ready strands blocked on permits).
-    fn admit_one(&self) -> Option<(StrandId, Fut)> {
+    /// record peak concurrency, choose its worker (home if started, else the
+    /// least-loaded — recorded as home), and decide start-vs-resume. `None` if
+    /// nothing is admittable right now (ready empty, or all ready strands blocked on
+    /// permits).
+    fn admit_one(&self) -> Option<Dispatch> {
         let mut inner = self.0.borrow_mut();
         for _ in 0..inner.ready.len() {
             let id = inner.ready.pop_front().unwrap();
@@ -302,31 +380,47 @@ impl Scheduler {
                 inner.peak[r.0 as usize] = now;
             }
             inner.in_flight += 1;
+            // Home worker: reuse if started, else route to the least-loaded one.
+            let worker = match inner.strands[id.0 as usize].home {
+                Some(h) => h,
+                None => {
+                    let h = least_loaded(&inner.worker_load);
+                    inner.strands[id.0 as usize].home = Some(h);
+                    h
+                }
+            };
+            inner.worker_load[worker] += 1;
             inner.strands[id.0 as usize].admitted = true;
             inner.strands[id.0 as usize].parked = None;
             inner.events.push(Event::Admitted {
                 strand: id,
                 resource: r,
             });
-            let fut = inner.strands[id.0 as usize]
-                .fut
-                .take()
-                .expect("an admitted strand has a future");
-            return Some((id, fut));
+            // First admit ships the body (`Start`); later admits resume the coro.
+            return Some(match inner.strands[id.0 as usize].body.take() {
+                Some(body) => Dispatch::Start { worker, id, body },
+                None => Dispatch::Resume { worker, id },
+            });
         }
         None
     }
 
-    /// Record a worker's report: release the permit and either memoise the result
-    /// or re-stash the parked future with its typed reason.
-    fn complete(&self, id: StrandId, res: WorkerResult) {
+    /// Record a worker's report: release the permit + worker load, and either
+    /// memoise the result or record the parked strand's typed reason and stack.
+    fn complete(&self, msg: WorkerMsg) {
         let mut inner = self.0.borrow_mut();
+        let (id, worker) = match &msg {
+            WorkerMsg::Done { id, worker, .. } | WorkerMsg::Parked { id, worker, .. } => {
+                (*id, *worker)
+            }
+        };
         let r = inner.strands[id.0 as usize].resource;
         inner.resources[r.0 as usize].1 -= 1;
         inner.in_flight -= 1;
+        inner.worker_load[worker] -= 1;
         inner.strands[id.0 as usize].admitted = false;
-        match res {
-            WorkerResult::Done(outcome) => {
+        match msg {
+            WorkerMsg::Done { outcome, .. } => {
                 let poisoned = matches!(outcome, Outcome::Poisoned(_));
                 inner.strands[id.0 as usize].done = Some(outcome);
                 inner.events.push(Event::Finished {
@@ -334,10 +428,11 @@ impl Scheduler {
                     poisoned,
                 });
             }
-            WorkerResult::Parked { reason, fut } => {
-                inner.strands[id.0 as usize].fut = Some(fut);
-                let reason = reason.unwrap_or(ParkReason::AwaitingPermit { resource: r });
+            WorkerMsg::Parked {
+                reason, backtrace, ..
+            } => {
                 inner.strands[id.0 as usize].parked = Some(reason.clone());
+                inner.strands[id.0 as usize].park_bt = Some(backtrace);
                 inner.events.push(Event::Parked { strand: id, reason });
             }
         }
@@ -360,115 +455,155 @@ impl Scheduler {
         self.0.borrow().strands[id.0 as usize].done.clone()
     }
 
-    /// The live **stall report** (I7): every demanded, unfinished strand and the
-    /// typed reason it is parked — the leaves of the wait-for tree.
-    pub fn stall_report(&self) -> Vec<(StrandId, ParkReason)> {
+    /// The live **stall report** (I7): every demanded, unfinished, parked strand,
+    /// its typed reason, and the stack where it blocked — the leaves of the wait-for
+    /// tree. Backtraces are rendered here (lazily), not at park time.
+    pub fn stall_report(&self) -> Vec<Stalled> {
         let inner = self.0.borrow();
         inner
             .strands
             .iter()
             .enumerate()
             .filter(|(_, s)| s.demanded && s.done.is_none())
-            .filter_map(|(i, s)| s.parked.clone().map(|r| (StrandId(i as u32), r)))
+            .filter_map(|(i, s)| {
+                s.parked.clone().map(|reason| Stalled {
+                    strand: StrandId(i as u32),
+                    reason,
+                    backtrace: s.park_bt.as_ref().map(|bt| bt.to_string()),
+                })
+            })
             .collect()
     }
 }
 
-/// A worker: pop a strand's future, poll it (in parallel with its peers), report
-/// the outcome (or the parked future + reason) to the boss. Exits when the queue
-/// is closed and drained.
-fn worker_loop(
-    work: &(Mutex<WorkQueue>, Condvar),
-    result_tx: &mpsc::Sender<(StrandId, WorkerResult)>,
-) {
-    let (lock, cv) = work;
-    loop {
-        let item = {
-            let mut q = lock.lock().unwrap();
-            loop {
-                if let Some(item) = q.items.pop_front() {
-                    break Some(item);
+/// The least-loaded worker (fewest outstanding commands); ties go to the lowest
+/// index. `worker_load` is never empty (at least one worker is spawned).
+fn least_loaded(worker_load: &[u32]) -> usize {
+    worker_load
+        .iter()
+        .enumerate()
+        .min_by_key(|&(_, &load)| load)
+        .map(|(i, _)| i)
+        .unwrap_or(0)
+}
+
+/// A worker: own a set of coroutines, and on each command build (`Start`) or resume
+/// (`Resume`) one, running it on its real stack until it parks or finishes, and
+/// report back. The coroutine never leaves this thread (it is `!Send`). Exits on
+/// `Shutdown` or when the command channel closes.
+fn worker_loop(idx: usize, rx: &mpsc::Receiver<Command>, result_tx: &mpsc::Sender<WorkerMsg>) {
+    let mut coros: HashMap<StrandId, Coro> = HashMap::new();
+    while let Ok(cmd) = rx.recv() {
+        match cmd {
+            Command::Shutdown => return,
+            Command::Start { id, body } => {
+                let mut coro = Coroutine::new(move |yielder: &Yielder<(), Yielded>, _: ()| {
+                    put_current(id, yielder as *const _);
+                    body()
+                });
+                drive(idx, id, &mut coro, result_tx);
+                if !coro.done() {
+                    coros.insert(id, coro);
                 }
-                if q.closed {
-                    break None;
-                }
-                q = cv.wait(q).unwrap();
             }
-        };
-        let Some((id, mut fut)) = item else { return };
-
-        CURRENT.with(|c| *c.borrow_mut() = Some(WorkerCtx { id, park: None }));
-        let waker = noop_waker();
-        let poll = fut.as_mut().poll(&mut Context::from_waker(&waker));
-        let park = CURRENT.with(|c| c.borrow_mut().take().and_then(|ctx| ctx.park));
-
-        let res = match poll {
-            Poll::Ready(outcome) => WorkerResult::Done(outcome),
-            Poll::Pending => WorkerResult::Parked { reason: park, fut },
-        };
-        let _ = result_tx.send((id, res));
+            Command::Resume { id } => {
+                let mut coro = coros.remove(&id).expect("Resume of an owned coroutine");
+                drive(idx, id, &mut coro, result_tx);
+                if !coro.done() {
+                    coros.insert(id, coro);
+                }
+            }
+        }
+        clear_current();
     }
+}
+
+/// Resume one coroutine and report what it did (parked with reason+stack, or done).
+fn drive(idx: usize, id: StrandId, coro: &mut Coro, result_tx: &mpsc::Sender<WorkerMsg>) {
+    let msg = match coro.resume(()) {
+        CoroutineResult::Yield((reason, backtrace)) => WorkerMsg::Parked {
+            id,
+            worker: idx,
+            reason,
+            backtrace,
+        },
+        CoroutineResult::Return(outcome) => WorkerMsg::Done {
+            id,
+            worker: idx,
+            outcome,
+        },
+    };
+    let _ = result_tx.send(msg);
 }
 
 thread_local! {
-    /// The strand the current worker is polling, so an await-primitive can record
-    /// its park reason (read back by the worker after poll).
-    static CURRENT: RefCell<Option<WorkerCtx>> = const { RefCell::new(None) };
+    /// The strand the current worker is running, plus a pointer to its coroutine's
+    /// yielder, so a park-primitive deep in the body can suspend without the body
+    /// having to thread a yielder argument through every call. Valid only while a
+    /// coroutine body is executing on this thread.
+    static CURRENT: RefCell<Option<CurCtx>> = const { RefCell::new(None) };
 }
 
-struct WorkerCtx {
+struct CurCtx {
     id: StrandId,
-    park: Option<ParkReason>,
+    yielder: *const Yielder<(), Yielded>,
 }
 
-/// Await a signal: if already fired, resume; else register as a waiter and record
-/// the park reason (`AwaitingPart`), then park (the worker releases the permit on
-/// Pending). The fired-check and waiter-registration are atomic under the signal
-/// lock, so a concurrent `fire` either drains this waiter or is seen as fired.
-pub async fn park_on(sig: Signal, producer: StrandId, part: &str) {
-    ParkOn {
-        sig,
-        producer,
-        part: part.to_string(),
-    }
-    .await
+fn put_current(id: StrandId, yielder: *const Yielder<(), Yielded>) {
+    CURRENT.with(|c| *c.borrow_mut() = Some(CurCtx { id, yielder }));
 }
 
-struct ParkOn {
-    sig: Signal,
-    producer: StrandId,
-    part: String,
+fn clear_current() {
+    CURRENT.with(|c| *c.borrow_mut() = None);
 }
 
-impl Future for ParkOn {
-    type Output = ();
-    fn poll(self: Pin<&mut Self>, _cx: &mut Context<'_>) -> Poll<()> {
-        let mut st = self.sig.0.lock().unwrap();
+/// The current strand's id + yielder pointer. Panics if called outside a strand
+/// body (a park must happen on a worker, inside a running coroutine).
+fn current() -> (StrandId, *const Yielder<(), Yielded>) {
+    CURRENT.with(|c| {
+        let b = c.borrow();
+        let ctx = b.as_ref().expect("park outside a strand body");
+        (ctx.id, ctx.yielder)
+    })
+}
+
+/// Park the current strand with a typed reason: capture its stack, suspend the
+/// coroutine (the worker frees its permit boss-side), and — on resume —
+/// re-establish the thread-local so a later park in the same body still finds its
+/// yielder. The backtrace is captured frames-only here; symbols resolve lazily in
+/// the stall report. (Capture is unconditional by design — observability is the
+/// point; gate it if it ever shows up hot.)
+fn park(reason: ParkReason) {
+    let (id, y) = current();
+    let backtrace = Backtrace::force_capture();
+    // SAFETY: `y` came from the yielder borrowed by *this* coroutine's body, which
+    // is valid for the whole body execution; we deref it only here, on the worker
+    // thread that is running this very body, and the coroutine never migrates.
+    let yielder = unsafe { &*y };
+    yielder.suspend((reason, backtrace));
+    // Resumed (same worker). The worker cleared CURRENT after the prior segment, so
+    // restore it for any subsequent park in this body.
+    put_current(id, y);
+}
+
+/// Park the current strand until `sig` fires: if already fired, return immediately;
+/// else register as a waiter and record the reason (`AwaitingPart`), then suspend.
+/// The fired-check and waiter-registration are atomic under the signal lock, so a
+/// concurrent `fire` either drains this waiter or is seen as fired.
+pub fn park_on(sig: Signal, producer: StrandId, part: &str) {
+    let reason = {
+        let mut st = sig.0.lock().unwrap();
         if st.fired {
-            return Poll::Ready(());
+            return;
         }
-        CURRENT.with(|c| {
-            if let Some(ctx) = &mut *c.borrow_mut() {
-                st.waiters.push(ctx.id);
-                ctx.park = Some(ParkReason::AwaitingPart {
-                    producer: self.producer,
-                    part: self.part.clone(),
-                });
-            }
-        });
-        Poll::Pending
-    }
-}
-
-/// A no-op waker: wakeups are driven by `fire` re-queueing (the boss re-polls from
-/// the ready queue), so the std waker is unused — but `Context` needs a valid one.
-fn noop_waker() -> Waker {
-    fn clone(_: *const ()) -> RawWaker {
-        RawWaker::new(std::ptr::null(), &VTABLE)
-    }
-    fn noop(_: *const ()) {}
-    static VTABLE: RawWakerVTable = RawWakerVTable::new(clone, noop, noop, noop);
-    unsafe { Waker::from_raw(RawWaker::new(std::ptr::null(), &VTABLE)) }
+        let (id, _) = current();
+        st.waiters.push(id);
+        ParkReason::AwaitingPart {
+            producer,
+            part: part.to_string(),
+        }
+    }; // lock released before suspending
+    park(reason);
 }
 
 #[cfg(test)]
@@ -487,8 +622,8 @@ mod tests {
     #[test]
     fn i1_undemanded_never_runs() {
         let s = Scheduler::new(&[4]);
-        let bomb = s.spawn(R0, async { Outcome::Poisoned("💣 forced".into()) });
-        let live = s.spawn(R0, async { Outcome::Clean });
+        let bomb = s.spawn(R0, || Outcome::Poisoned("💣 forced".into()));
+        let live = s.spawn(R0, || Outcome::Clean);
         s.demand(live);
         s.run();
         assert_eq!(s.outcome(live), Some(Outcome::Clean));
@@ -505,7 +640,7 @@ mod tests {
     #[test]
     fn i3_single_execution() {
         let s = Scheduler::new(&[4]);
-        let id = s.spawn(R0, async { Outcome::Clean });
+        let id = s.spawn(R0, || Outcome::Clean);
         s.demand(id);
         s.demand(id); // idempotent
         s.run();
@@ -520,7 +655,7 @@ mod tests {
     /// I2 + I5 — capacity respected, and parked work never starves runnable work.
     /// 16 strands, capacity 2; the first 8 park forever awaiting a never-fired
     /// signal (parked → permit released); assert the other 8 finish and peak
-    /// concurrency stayed 2 — now under real parallelism.
+    /// concurrency stayed 2 — under real parallelism.
     #[test]
     fn i2_i5_capacity_and_progress() {
         let s = Scheduler::new(&[2]);
@@ -529,14 +664,14 @@ mod tests {
         let mut runnable = Vec::new();
         for _ in 0..8 {
             let sig = never.clone();
-            let id = s.spawn(R0, async move {
-                park_on(sig, StrandId(u32::MAX), "never").await;
+            let id = s.spawn(R0, move || {
+                park_on(sig, StrandId(u32::MAX), "never");
                 Outcome::Clean
             });
             stuck.push(id);
         }
         for _ in 0..8 {
-            let id = s.spawn(R0, async { Outcome::Clean });
+            let id = s.spawn(R0, || Outcome::Clean);
             runnable.push(id);
         }
         for &id in stuck.iter().chain(runnable.iter()) {
@@ -569,7 +704,7 @@ mod tests {
             let s = Scheduler::new(&[capacity]);
             let ids: Vec<_> = (0..8u32)
                 .map(|i| {
-                    s.spawn(R0, async move {
+                    s.spawn(R0, move || {
                         if i % 3 == 0 {
                             Outcome::Poisoned(format!("p{i}"))
                         } else {
@@ -591,8 +726,8 @@ mod tests {
         );
     }
 
-    /// I7 — No silent blocking: every parked strand has a typed reason, and the
-    /// stall report names them.
+    /// I7 — No silent blocking: every parked strand has a typed reason **and** a
+    /// captured stack, and the stall report names them.
     #[test]
     fn i7_stall_report_explains_the_block() {
         let s = Scheduler::new(&[2]);
@@ -601,8 +736,8 @@ mod tests {
             .map(|i| {
                 let sig = never.clone();
                 let part = format!("part{i}");
-                s.spawn(R0, async move {
-                    park_on(sig, StrandId(99), &part).await;
+                s.spawn(R0, move || {
+                    park_on(sig, StrandId(99), &part);
                     Outcome::Clean
                 })
             })
@@ -616,20 +751,25 @@ mod tests {
         assert!(
             report
                 .iter()
-                .all(|(_, r)| matches!(r, ParkReason::AwaitingPart { .. })),
+                .all(|st| matches!(st.reason, ParkReason::AwaitingPart { .. })),
             "no strand parks without a typed reason: {report:?}"
+        );
+        assert!(
+            report.iter().all(|st| st.backtrace.is_some()),
+            "the stall report carries each parked strand's stack"
         );
     }
 
-    /// A parked strand resumes when its signal fires (and re-acquires a permit).
+    /// A parked strand resumes when its signal fires (and re-acquires a permit) —
+    /// the coroutine continues on its home worker from exactly where it suspended.
     #[test]
     fn parked_strand_resumes_on_fire() {
         let s = Scheduler::new(&[1]);
         let sig = s.signal();
         let id = {
             let sig = sig.clone();
-            s.spawn(R0, async move {
-                park_on(sig, StrandId(0), "rmeta").await;
+            s.spawn(R0, move || {
+                park_on(sig, StrandId(0), "rmeta");
                 Outcome::Clean
             })
         };
@@ -642,7 +782,7 @@ mod tests {
     }
 
     /// Real parallelism: `par` strands at capacity `par`, each blocking on a
-    /// `Barrier(par)` — which releases only if all `par` are polled *simultaneously*
+    /// `Barrier(par)` — which releases only if all `par` are running *simultaneously*
     /// on distinct worker threads. Run on a side thread with a generous timeout, so
     /// a failure to parallelize surfaces as a failed test, not a hang. `par` adapts
     /// to the machine (so a 1-core box trivially passes).
@@ -661,7 +801,7 @@ mod tests {
             let ids: Vec<_> = (0..par)
                 .map(|_| {
                     let b = Arc::clone(&barrier);
-                    s.spawn(R0, async move {
+                    s.spawn(R0, move || {
                         b.wait(); // releases only when all `par` are here at once
                         Outcome::Clean
                     })
