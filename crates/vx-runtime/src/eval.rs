@@ -24,12 +24,10 @@ use vx_ir::item::ItemKind;
 use vx_ir::pattern::PatternKind;
 use vx_ir::scope::DefTarget;
 use vx_ir::stmt::StmtKind;
-use vx_types::{TypeEnv, TypeId};
+use vx_types::TypeEnv;
 
-use crate::analyze::build_graph_indexed;
-use crate::graph::{DemandGraph, NodeId, Span};
-use crate::kernel;
-use crate::lower::lower_node;
+use crate::dispatch::{self, Dispatcher};
+use crate::graph::Span;
 
 /// `assert`/`assert_eq` are themselves Vixen — prepended so the `.vx` tests
 /// resolve them (same prelude the old harnesses use).
@@ -99,25 +97,6 @@ enum ThunkState {
     Done(Result<Value, Poison>),
 }
 
-/// A scalar (sub-)expression that lowers to a kernel, with what's needed to run
-/// it: the kernel, the bindings feeding its parameter slots (in order — a slot
-/// reads the forced value of `param_bindings[i]`), and whether to read the
-/// returned word as `Bool` (vs `U64`).
-#[derive(Clone)]
-struct DispatchPlan {
-    kernel: kernel::Kernel,
-    param_bindings: Vec<BindingId>,
-    returns_bool: bool,
-}
-
-/// One body's demand graph plus the indices that map an evaluated expression to
-/// its node, and a parameter node back to the binding it came from.
-struct BodyGraph {
-    graph: DemandGraph,
-    exprmap: HashMap<ExprId, NodeId>,
-    bindmap: HashMap<NodeId, BindingId>,
-}
-
 struct Evaluator<'a> {
     program: &'a VirProgram,
     env: &'a TypeEnv,
@@ -125,11 +104,8 @@ struct Evaluator<'a> {
     /// entering a body (a call) or forcing a thunk, so sub-expression dispatch
     /// uses the right graph. Saved/restored, not threaded through `eval`.
     current_body: Cell<BodyId>,
-    /// Per-body demand graph + indices, built once on first dispatch in that body.
-    body_graphs: RefCell<HashMap<BodyId, BodyGraph>>,
-    /// Per-expression dispatch decision: `Some` = run as a kernel, `None` =
-    /// tree-walk. Decided once per expression (lower + soundness gates).
-    plan_cache: RefCell<HashMap<ExprId, Option<DispatchPlan>>>,
+    /// The kernel-dispatch decider (per-body graphs + per-expression plans).
+    dispatch: Dispatcher,
     /// How many (sub-)expressions ran as kernels — observability; tests assert it.
     dispatches: Cell<u64>,
 }
@@ -356,10 +332,11 @@ impl Evaluator<'_> {
 
     /// Try to run expression `e` (in `env`) as a kernel — the JIT/interpreter path
     /// on the real eval run. `None` ⇒ not dispatchable; `eval` tree-walks. `Some` ⇒
-    /// the value (or poison), provably equal to tree-walking (the gates are in
-    /// [`build_plan`]). Only scalar *compute* expressions are candidates; the
-    /// kernel folds projections into constants, so an arithmetic expression over
-    /// struct/tuple fields runs as one kernel rather than a walk.
+    /// the value (or poison), provably equal to tree-walking. Only scalar *compute*
+    /// expressions are candidates; the kernel folds projections into constants, so
+    /// an arithmetic expression over struct/tuple fields runs as one kernel. The
+    /// plan (and its soundness gates) lives in [`crate::dispatch`]; this is the hook
+    /// that forces the parameter bindings from `env` and runs it.
     fn dispatch_scalar(&self, e: ExprId, env: &Env) -> Option<Result<Value, Poison>> {
         if !matches!(
             self.program.arena[e].kind,
@@ -367,16 +344,9 @@ impl Evaluator<'_> {
         ) {
             return None;
         }
-        let body = self.current_body.get();
-        // Decide + lower once per expression; clone the plan out so the cache
-        // borrow is not held across argument forcing (which recurses into eval).
-        let plan = {
-            let mut cache = self.plan_cache.borrow_mut();
-            cache
-                .entry(e)
-                .or_insert_with(|| self.build_plan(e, body))
-                .clone()
-        }?;
+        let plan = self
+            .dispatch
+            .plan(self.program, self.env, e, self.current_body.get())?;
 
         // Force each parameter's binding to a scalar word. A non-scalar value (a
         // string, a compound) ⇒ fall back to the tree-walker, which handles it
@@ -390,7 +360,7 @@ impl Evaluator<'_> {
         }
 
         self.dispatches.set(self.dispatches.get() + 1);
-        Some(match run_kernel(&plan.kernel, &words) {
+        Some(match dispatch::run_kernel(&plan.kernel, &words) {
             Ok(w) => Ok(if plan.returns_bool {
                 Value::Bool(w != 0)
             } else {
@@ -401,53 +371,6 @@ impl Evaluator<'_> {
                 reason: p.reason,
                 span: p.span,
             }),
-        })
-    }
-
-    /// Build this body's demand graph (with indices) on first use, caching it.
-    fn ensure_body_graph(&self, body: BodyId) {
-        if !self.body_graphs.borrow().contains_key(&body) {
-            let (graph, exprmap, bindmap) = build_graph_indexed(self.program, self.env, body);
-            self.body_graphs.borrow_mut().insert(
-                body,
-                BodyGraph {
-                    graph,
-                    exprmap,
-                    bindmap,
-                },
-            );
-        }
-    }
-
-    /// Decide whether expression `e` (in `body`) can run as a kernel, lowering it
-    /// and resolving its parameters to bindings if so. The soundness gates that
-    /// make dispatch outcome-identical to the tree-walker:
-    ///
-    /// - **scalar result**: `e`'s type is concretely `U64`/`Bool`, so the returned word wraps back to the right `Value`.
-    /// - **lowers**: the region anchored at `e` lowers (only scalar-safe word ops; non-scalar constants and ops like `++` are already `NotLowerable`).
-    /// - **strict params**: every kernel parameter is read in the entry block — used unconditionally — so forcing its binding eagerly can't detonate a path the lazy walker would skip.
-    ///
-    /// The fourth — scalar arguments — is checked per evaluation in
-    /// [`dispatch_scalar`], where a non-scalar binding falls back.
-    fn build_plan(&self, e: ExprId, body: BodyId) -> Option<DispatchPlan> {
-        let ety = self.program.arena[e].ty?;
-        let returns_bool = matches!(scalar_kind(self.env, ety)?, ScalarKind::Bool);
-        self.ensure_body_graph(body);
-        let graphs = self.body_graphs.borrow();
-        let bg = graphs.get(&body)?;
-        let node = *bg.exprmap.get(&e)?;
-        let (kernel, param_nodes) = lower_node(&bg.graph, node).ok()?;
-        if !all_params_read_in_entry(&kernel) {
-            return None;
-        }
-        let param_bindings: Vec<BindingId> = param_nodes
-            .iter()
-            .map(|n| bg.bindmap.get(n).copied())
-            .collect::<Option<_>>()?;
-        Some(DispatchPlan {
-            kernel,
-            param_bindings,
-            returns_bool,
         })
     }
 
@@ -593,64 +516,6 @@ fn scalar_word(v: &Value) -> Option<u64> {
     }
 }
 
-enum ScalarKind {
-    U64,
-    Bool,
-}
-
-/// The scalar kind of a type, by its rendered name (`None` if not `U64`/`Bool`).
-fn scalar_kind(env: &TypeEnv, ty: TypeId) -> Option<ScalarKind> {
-    match format!("{}", env.get_ty(ty).display_with_env(env)).as_str() {
-        "U64" => Some(ScalarKind::U64),
-        "Bool" => Some(ScalarKind::Bool),
-        _ => None,
-    }
-}
-
-/// Whether every kernel parameter (slots `0..n_params`) is read in the entry
-/// block — i.e. used unconditionally, before any branch (the laziness gate).
-fn all_params_read_in_entry(k: &kernel::Kernel) -> bool {
-    use kernel::{OpKind, Term};
-    if k.n_params == 0 {
-        return true;
-    }
-    let entry = &k.blocks[0];
-    let mut read = std::collections::HashSet::new();
-    for op in &entry.ops {
-        match op.kind {
-            OpKind::Const => {}
-            OpKind::Copy | OpKind::Not => {
-                read.insert(op.a);
-            }
-            OpKind::Fail => {}
-            _ => {
-                read.insert(op.a);
-                read.insert(op.b);
-            }
-        }
-    }
-    match entry.term {
-        Term::Return(s) => {
-            read.insert(s);
-        }
-        Term::BranchIf { cond, .. } => {
-            read.insert(cond);
-        }
-        Term::Jump(_) => {}
-    }
-    (0..k.n_params).all(|p| read.contains(&p))
-}
-
-/// Run a kernel, preferring the native JIT and falling back to the interpreter
-/// (and on non-native targets, the interpreter is the only path).
-fn run_kernel(k: &kernel::Kernel, args: &[u64]) -> Result<u64, kernel::Poison> {
-    #[cfg(all(target_os = "macos", target_arch = "aarch64"))]
-    if let Some(r) = crate::jit::jit_run(k, args) {
-        return r;
-    }
-    kernel::run(k, args)
-}
-
 /// Evaluate function `entry` in `source` through the demand-driven engine, with
 /// the assert prelude prepended. `Err` is a setup failure (parse / not found);
 /// `Ok(Outcome)` is the evaluation result (clean or poisoned).
@@ -679,8 +544,7 @@ pub fn run_with_dispatches(source: &str, entry: &str) -> Result<(Outcome, u64), 
         program: &program,
         env: &env,
         current_body: Cell::new(body),
-        body_graphs: RefCell::new(HashMap::new()),
-        plan_cache: RefCell::new(HashMap::new()),
+        dispatch: Dispatcher::default(),
         dispatches: Cell::new(0),
     };
     let outcome = match ev.eval(root, &Env::new()) {
