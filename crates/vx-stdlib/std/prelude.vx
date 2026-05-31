@@ -1,0 +1,15 @@
+// Ambient assertion helpers — pure Vixen, available un-imported everywhere.
+//
+// These are real stdlib, not a test-only injection: `.vx` tests, zoo fixtures,
+// and production code all share one definition. A failed assertion poisons, so
+// in the self-hosting test harness "clean evaluation" is the pass condition.
+
+/// Poison with a generic message unless `cond` holds.
+fn assert(cond: Bool) -> Bool (
+    if cond ( true ) else ( fail "assertion failed" )
+)
+
+/// Poison unless `got` equals `want`.
+fn assert_eq[T](got: T, want: T) -> Bool (
+    if got == want ( true ) else ( fail "not equal" )
+)

@@ -169,12 +169,20 @@ fn all_params_read_in_entry(k: &kernel::Kernel) -> bool {
     (0..k.n_params).all(|p| read.contains(&p))
 }
 
-/// Run a kernel, preferring the native JIT and falling back to the interpreter
-/// (and on non-native targets, the interpreter is the only path).
-pub(crate) fn run_kernel(k: &kernel::Kernel, args: &[u64]) -> Result<u64, kernel::Poison> {
+/// Run a kernel. With `use_jit`, prefer the native JIT and fall back to the
+/// interpreter; without it, force the interpreter. On non-native targets the
+/// interpreter is the only path regardless. The harness runs every `.vx` test
+/// both ways and asserts the results agree (the JIT-vs-interpreter oracle).
+pub(crate) fn run_kernel(
+    k: &kernel::Kernel,
+    args: &[u64],
+    use_jit: bool,
+) -> Result<u64, kernel::Poison> {
     #[cfg(all(target_os = "macos", target_arch = "aarch64"))]
-    if let Some(r) = crate::jit::jit_run(k, args) {
+    if use_jit && let Some(r) = crate::jit::jit_run(k, args) {
         return r;
     }
+    #[cfg(not(all(target_os = "macos", target_arch = "aarch64")))]
+    let _ = use_jit; // no JIT on this target — the interpreter is the only path
     kernel::run(k, args)
 }

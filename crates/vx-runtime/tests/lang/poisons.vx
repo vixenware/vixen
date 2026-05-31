@@ -1,0 +1,23 @@
+// Error-path tests: `#[test(poisons)]` inverts the floor — the body is
+// expected to detonate, so poisoning is the pass condition. These exercise the
+// poison channel directly; the `?`→`Result` recovery surface (divide?, is Err)
+// is a separate increment.
+
+// An explicit fail is a poison.
+#[test(poisons)]
+fn explicit_fail_detonates() (
+    fail "boom"
+)
+
+// Forcing the bomb detonates — the inverse of the demand-driven floor.
+#[test(poisons)]
+fn forcing_a_bomb_detonates() (
+    let pair = (42, 💣);
+    pair[1]
+)
+
+// A failed assertion poisons.
+#[test(poisons)]
+fn false_assertion_detonates() (
+    assert_eq(1, 2)
+)

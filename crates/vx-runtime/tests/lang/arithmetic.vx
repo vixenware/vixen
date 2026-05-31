@@ -1,0 +1,26 @@
+// Scalar arithmetic — the kernel/JIT path. `#[test(kernel)]` additionally asserts
+// the body actually dispatched a kernel (rather than only tree-walking). Every
+// test also runs in `Off` (tree-walk) mode, so the kernel result is checked
+// against the tree-walker for free.
+
+#[test(kernel)]
+fn addition() ( assert_eq(20 + 22, 42) )
+
+#[test(kernel)]
+fn subtraction() ( let n = 43; assert_eq(n - 1, 42) )
+
+#[test(kernel)]
+fn multiplication() ( assert_eq(6 * 7, 42) )
+
+#[test(kernel)]
+fn division() ( assert_eq(84 / 2, 42) )
+
+#[test(kernel)]
+fn remainder() ( assert_eq(85 % 43, 42) )
+
+#[test]
+fn constant_flows_through() ( let x = 42; assert_eq(x, 42) )
+
+// Divide-by-zero detonates — and the tree-walker and the kernel must agree it does.
+#[test(poisons)]
+fn divide_by_zero_detonates() ( 1 / 0 )

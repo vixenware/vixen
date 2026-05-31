@@ -1,0 +1,12 @@
+// Strings: concatenation and equality. The word-kernel only handles scalars, so
+// string operands fall back to the tree-walker — and both must agree.
+
+#[test]
+fn concat() ( assert_eq("hello" ++ " world", "hello world") )
+
+#[test]
+fn equality() ( assert("hi" == "hi") )
+
+// NOTE: string *methods* (`.len()`, `.slice(…)`) are `ExprKind::Invoke`, which the
+// tree-walker doesn't handle yet ("indirect calls not yet supported"). Those
+// cases from the old suite are parked until the evaluator grows native methods.

@@ -29,18 +29,6 @@ use vx_types::TypeEnv;
 use crate::dispatch::{self, Dispatcher};
 use crate::graph::Span;
 
-/// `assert`/`assert_eq` are themselves Vixen — prepended so the `.vx` tests
-/// resolve them (same prelude the old harnesses use).
-const PRELUDE: &str = r#"
-fn assert(cond: Bool) -> Bool (
-    if cond ( true ) else ( fail "assertion failed" )
-)
-
-fn assert_eq[T](got: T, want: T) -> Bool (
-    if got == want ( true ) else ( fail "not equal" )
-)
-"#;
-
 /// A poison — a detonation with a reason and **where in the source** it
 /// originated (I6). Propagates like an error; `eval` attaches the span of the
 /// expression a poison surfaces at (the innermost one wins).
@@ -77,6 +65,21 @@ pub enum Outcome {
     Poisoned { reason: String, span: Option<Span> },
 }
 
+/// Which execution path dispatchable scalar regions take. The `.vx` harness runs
+/// every test in each available mode and asserts the outcomes agree: `Off` (pure
+/// tree-walk) is the ground-truth oracle for the kernel, and the interpreter is
+/// the oracle for the JIT.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum KernelMode {
+    /// Never dispatch — every expression tree-walks. The simplest evaluator, and
+    /// the oracle the kernel path is checked against.
+    Off,
+    /// Dispatch scalar regions to the kernel interpreter; never the JIT.
+    Interp,
+    /// Dispatch, preferring the native JIT (interpreter fallback). The default.
+    Jit,
+}
+
 type Env = HashMap<BindingId, Thunk>;
 
 /// A lazily-evaluated, memoised value. Forcing runs its expression in its
@@ -108,6 +111,8 @@ struct Evaluator<'a> {
     dispatch: Dispatcher,
     /// How many (sub-)expressions ran as kernels — observability; tests assert it.
     dispatches: Cell<u64>,
+    /// Which kernel path dispatch takes (`Off` ⇒ pure tree-walk, no dispatch).
+    mode: KernelMode,
 }
 
 impl Evaluator<'_> {
@@ -338,6 +343,9 @@ impl Evaluator<'_> {
     /// plan (and its soundness gates) lives in [`crate::dispatch`]; this is the hook
     /// that forces the parameter bindings from `env` and runs it.
     fn dispatch_scalar(&self, e: ExprId, env: &Env) -> Option<Result<Value, Poison>> {
+        if self.mode == KernelMode::Off {
+            return None; // pure tree-walk — never dispatch (the ground-truth oracle)
+        }
         if !matches!(
             self.program.arena[e].kind,
             ExprKind::Binary(_) | ExprKind::Prefix(_) | ExprKind::If(_)
@@ -360,18 +368,20 @@ impl Evaluator<'_> {
         }
 
         self.dispatches.set(self.dispatches.get() + 1);
-        Some(match dispatch::run_kernel(&plan.kernel, &words) {
-            Ok(w) => Ok(if plan.returns_bool {
-                Value::Bool(w != 0)
-            } else {
-                Value::U64(w)
-            }),
-            // Propagate the kernel poison's source span (I6) into eval's poison.
-            Err(p) => Err(Poison {
-                reason: p.reason,
-                span: p.span,
-            }),
-        })
+        Some(
+            match dispatch::run_kernel(&plan.kernel, &words, self.mode == KernelMode::Jit) {
+                Ok(w) => Ok(if plan.returns_bool {
+                    Value::Bool(w != 0)
+                } else {
+                    Value::U64(w)
+                }),
+                // Propagate the kernel poison's source span (I6) into eval's poison.
+                Err(p) => Err(Poison {
+                    reason: p.reason,
+                    span: p.span,
+                }),
+            },
+        )
     }
 
     fn call(
@@ -520,15 +530,23 @@ fn scalar_word(v: &Value) -> Option<u64> {
 /// the assert prelude prepended. `Err` is a setup failure (parse / not found);
 /// `Ok(Outcome)` is the evaluation result (clean or poisoned).
 pub fn run(source: &str, entry: &str) -> Result<Outcome, String> {
-    run_with_dispatches(source, entry).map(|(outcome, _)| outcome)
+    run_in_mode(source, entry, KernelMode::Jit).map(|(outcome, _)| outcome)
 }
 
 /// As [`run`], but also reports how many calls ran as kernels (the JIT/interpreter
 /// path) rather than tree-walking — the observable proof that the kernel path is
-/// on the real evaluation run.
+/// on the real evaluation run. Uses the default [`KernelMode::Jit`].
 pub fn run_with_dispatches(source: &str, entry: &str) -> Result<(Outcome, u64), String> {
-    let full = format!("{PRELUDE}\n{source}");
-    let (program, env) = crate::analyze::front_end(&full)?;
+    run_in_mode(source, entry, KernelMode::Jit)
+}
+
+/// Evaluate `entry` in `source` under an explicit [`KernelMode`], reporting the
+/// outcome and the kernel-dispatch count. The self-hosting `.vx` harness calls
+/// this once per available mode and asserts the outcomes agree (cross-mode
+/// parity = the kernel and JIT oracles). `assert`/`assert_eq` resolve from the
+/// stdlib prelude — no string prepending.
+pub fn run_in_mode(source: &str, entry: &str, mode: KernelMode) -> Result<(Outcome, u64), String> {
+    let (program, env) = crate::analyze::front_end(source)?;
     let primary = *program.source_units.first().ok_or("no source unit")?;
     let body = program.arena[primary]
         .items
@@ -546,6 +564,7 @@ pub fn run_with_dispatches(source: &str, entry: &str) -> Result<(Outcome, u64), 
         current_body: Cell::new(body),
         dispatch: Dispatcher::default(),
         dispatches: Cell::new(0),
+        mode,
     };
     let outcome = match ev.eval(root, &Env::new()) {
         Ok(v) => Outcome::Clean(v),
@@ -741,13 +760,14 @@ mod tests {
             ("fn f() -> U64 ( 10 / 0 )", "/"),       // kernel-dispatched poison
             ("fn f() -> U64 ( (42, 💣)[1] )", "💣"), // tree-walked poison
         ] {
-            let full = format!("{PRELUDE}\n{src}");
             match run(src, "f").unwrap() {
                 Outcome::Poisoned {
                     span: Some(s),
                     reason,
                 } => {
-                    let text = full
+                    // The span indexes the user source directly — the stdlib prelude
+                    // is its own source unit now, not a prepended string.
+                    let text = src
                         .get(s.start as usize..s.end as usize)
                         .unwrap_or_else(|| panic!("{src}: span {s:?} out of bounds"));
                     assert!(

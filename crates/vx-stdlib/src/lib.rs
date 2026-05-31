@@ -22,8 +22,15 @@ const STD_BUILD: StdlibSource = StdlibSource {
     text: include_str!("../std/build.vx"),
 };
 
-pub fn stdlib_sources() -> &'static [StdlibSource; 2] {
-    &[STD_CORE, STD_BUILD]
+/// Ambient bodied helpers (`assert`/`assert_eq`) — pure Vixen, unlike the
+/// declaration-only `core.vx`. Injected as prelude so they resolve un-imported.
+const STD_PRELUDE: StdlibSource = StdlibSource {
+    logical_path: "crates/vx-stdlib/std/prelude.vx",
+    text: include_str!("../std/prelude.vx"),
+};
+
+pub fn stdlib_sources() -> &'static [StdlibSource; 3] {
+    &[STD_CORE, STD_BUILD, STD_PRELUDE]
 }
 
 pub fn source_disk_path(relative: &str) -> PathBuf {
