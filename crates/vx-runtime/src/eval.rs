@@ -18,7 +18,10 @@ use std::collections::HashMap;
 use std::rc::Rc;
 
 use vx_ir::build::VirProgram;
-use vx_ir::expr::{ArrayElement, BinOp, ExprKind, FieldExpr, FieldKey, LitKind, StringPart};
+use vx_ir::expr::{
+    ArrayElement, BinOp, CliArgIr, CliLiteralExpr, ExprKind, FieldExpr, FieldKey, LitKind,
+    StringPart,
+};
 use vx_ir::ids::{BindingId, BodyId, ExprId};
 use vx_ir::item::ItemKind;
 use vx_ir::pattern::PatternKind;
@@ -62,6 +65,9 @@ pub enum Value {
         body: BodyId,
         env: Env,
     },
+    /// A command value — what the leading hole of a CLI literal carries, and what
+    /// `@[ ${cmd} … ]` evaluates to once it projects its grammar against the args.
+    Command(Rc<crate::command::CommandValue>),
 }
 
 /// The outcome of evaluating a test body: clean, or poisoned (with the source
@@ -372,11 +378,74 @@ impl Evaluator<'_> {
             // the arguments bound (lazily) to its parameters.
             ExprKind::Call(c) => self.call(c.callee, c.args.iter().map(|a| a.expr), env),
 
+            // A CLI literal `@[ ${cmd} args… ]`: the leading hole carries the
+            // grammar (a value); project it against the rendered arguments.
+            ExprKind::CliLiteral(cli) => self.eval_cli_literal(cli, env),
+
             other => Err(poison(format!(
                 "unsupported expression: {}",
                 kind_name(other)
             ))),
         }
+    }
+
+    /// Evaluate a grammar-less CLI literal `@[ ${cmd} args… ]`: force the leading
+    /// hole to a [`Value::Command`] (carrying its grammar), render the remaining
+    /// arguments to argv strings, and project — the grammar classifies inputs vs.
+    /// outputs. The result is the command value carrying its projected form.
+    fn eval_cli_literal(&self, cli: &CliLiteralExpr, env: &Env) -> Result<Value, Poison> {
+        let Some((lead, rest)) = cli.args.split_first() else {
+            return Err(poison("empty CLI literal".into()));
+        };
+        // The leading argument must be a single `${command}` hole.
+        let cmd_expr = match lead.pieces.as_slice() {
+            [StringPart::Expr(id)] => *id,
+            _ => {
+                return Err(poison(
+                    "`@[ … ]` must lead with a single `${command}` hole".into(),
+                ));
+            }
+        };
+        let cmd = match self.eval(cmd_expr, env)? {
+            Value::Command(c) => c,
+            other => {
+                return Err(poison(format!(
+                    "the leading hole of `@[ … ]` must be a Command, got {other:?}"
+                )));
+            }
+        };
+        // Render the remaining arguments to argv strings (static text verbatim,
+        // holes forced to a scalar).
+        let mut args = Vec::with_capacity(rest.len());
+        for arg in rest {
+            args.push(self.render_cli_arg(arg, env)?);
+        }
+        match crate::command::apply_args(&cmd, &args) {
+            Some(applied) => Ok(Value::Command(Rc::new(applied))),
+            None => Err(poison(format!(
+                "grammar `{}` is not in the command's grammar set",
+                cmd.grammar
+            ))),
+        }
+    }
+
+    /// Render one CLI-literal argument to a string: static text verbatim, each
+    /// `$x` / `${ … }` hole forced to a scalar.
+    fn render_cli_arg(&self, arg: &CliArgIr, env: &Env) -> Result<String, Poison> {
+        let mut s = String::new();
+        for piece in &arg.pieces {
+            match piece {
+                StringPart::Text(t) => s.push_str(t),
+                StringPart::Expr(id) => match self.eval(*id, env)? {
+                    Value::Str(v) => s.push_str(&v),
+                    Value::U64(n) => s.push_str(&n.to_string()),
+                    other => {
+                        return Err(poison(format!("can't render {other:?} as a CLI argument")));
+                    }
+                },
+            }
+        }
+        Ok(s)
     }
 
     /// Try to run expression `e` (in `env`) as a kernel — the JIT/interpreter path
@@ -852,5 +921,79 @@ mod tests {
                 other => panic!("{src}: expected poisoned-with-span, got {other:?}"),
             }
         }
+    }
+
+    /// The CLI-literal resolver, on the real eval path: `@[ ${cmd} -c x.c -o x.o ]`
+    /// forces the leading hole to a command value (carrying the cc grammar as a
+    /// value), renders the rest to argv, and projects — the grammar classifies
+    /// `x.c` as an input and the `-o` target as an output.
+    #[test]
+    fn cli_literal_projects_the_command_grammar() {
+        use crate::command::CommandValue;
+        use crate::dispatch::Dispatcher;
+        use command_model::examples;
+        use std::cell::{Cell, RefCell};
+        use std::rc::Rc;
+        use vx_ir::item::ItemKind;
+        use vx_ir::pattern::PatternKind;
+
+        let src = "fn t(cmd: Command) -> Command ( @[ ${cmd} -c x.c -o x.o ] )";
+        let (program, tenv) = crate::analyze::front_end(src).expect("front-end");
+
+        // Locate `t`, its body, `cmd`'s binding, and the CLI-literal root expr.
+        let primary = *program.source_units.first().unwrap();
+        let body = program.arena[primary]
+            .items
+            .iter()
+            .find_map(|&id| match &program.arena[id].kind {
+                ItemKind::Function(f) if f.name == "t" => Some(f.body),
+                _ => None,
+            })
+            .expect("fn t");
+        let cmd_bid = match &program.arena[program.arena[body].params[0].pattern].kind {
+            PatternKind::Binding(pb) => pb.binding,
+            other => panic!("cmd must be a binding pattern, got {other:?}"),
+        };
+        let root = program.arena[body].root_expr;
+
+        // Bind `cmd` to a cc command value — the grammar carried as a value.
+        let cmd = Value::Command(Rc::new(CommandValue {
+            grammars: examples(),
+            grammar: "cc".to_string(),
+            binary: "cc".to_string(),
+            projected: None,
+        }));
+        let mut start = Env::new();
+        start.insert(
+            cmd_bid,
+            Thunk(Rc::new(RefCell::new(ThunkState::Done(Ok(cmd))))),
+        );
+
+        let ev = Evaluator {
+            program: &program,
+            env: &tenv,
+            current_body: Cell::new(body),
+            dispatch: Dispatcher::default(),
+            dispatches: Cell::new(0),
+            mode: KernelMode::Off,
+        };
+        let Value::Command(applied) = ev.eval(root, &start).expect("eval cli literal") else {
+            panic!("expected a Command value");
+        };
+        let p = applied
+            .projected
+            .as_ref()
+            .expect("projected after the literal");
+        assert!(
+            p.effective.inputs.iter().any(|i| i.path == "x.c"),
+            "x.c is an input: {:?}",
+            p.effective.inputs
+        );
+        assert!(
+            p.outputs.iter().any(|o| o.path == "x.o"),
+            "the -o target is an output: {:?}",
+            p.outputs
+        );
+        assert_eq!(p.execution_argv, vec!["cc", "-c", "x.c", "-o", "x.o"]);
     }
 }
