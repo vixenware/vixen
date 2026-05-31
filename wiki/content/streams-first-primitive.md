@@ -10,6 +10,11 @@ tags = ["language", "tier-2", "streams"]
 created = "2026-05-26"
 +++
 
+**Model settled** — the stream model (per-item pull + push-ahead, cold-on-miss /
+realized-on-hit, combinator-determinism cacheability, per-item ③ crossing,
+demand-driven backpressure) is defined in [Streams](/streams/); this Task is its
+implementation.
+
 Tier 2 needs several foundational primitives — streams as runtime values, ability-based executor selection / fan-out, closure shipping, TreeEntry, cache-key + sandbox design, HTTP fetch + tarball extract, multi-source dep resolution. Each is independently implementable with its own narrow failing test.
 
 Streams first. Reasons:

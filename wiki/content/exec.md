@@ -358,8 +358,7 @@ fn compile(tc: RustToolchain, name: String, src: Path, out: Path) -> Stream[Arti
 )
 ```
 
-See [Implement streams as the first Tier-2 primitive](/streams-first-primitive/)
-for the stream substrate this leans on.
+See [Streams](/streams/) for the substrate this leans on.
 
 ## 12. Decision ledger (what needs deciding)
 
@@ -425,5 +424,6 @@ escape hatch, `InOut` rewrite inputs.
   cacheability.
 - [Executor abilities](/executor-abilities/) ·
   [Design the executor scheduler](/design-executor-scheduler/) — routing & placement.
-- [Implement streams as the first Tier-2 primitive](/streams-first-primitive/).
+- [Streams](/streams/) — the producing-handle-over-time `run.stream` / `Stream[T]`
+  observers ride on.
 - [Design build-output materialisation](/materialise-build-output/).
