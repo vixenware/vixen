@@ -2,7 +2,7 @@
 //!
 //! Runs the **real** front-end (parse → VIR → type-collect → resolve →
 //! type-check) and walks a body's expression tree, classifying each node
-//! (`runtime-semantics.md` §2). It is a **snapshot** — there is no static analysis
+//! (the demand-driven runtime, wiki). It is a **snapshot** — there is no static analysis
 //! in a JIT'd language (imports resolve, packages download mid-run, `exec` outputs
 //! have runtime shape), so this is one frame of a moving picture, honest about it.
 //!

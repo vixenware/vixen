@@ -1,6 +1,6 @@
 //! Remote handles — values produced on one executor and consumed on another that
 //! resolve **in parts, over time**. This is the build system's spine
-//! (`runtime-semantics.md` §3, §4), not a bolt-on: every cross-executor value
+//! (the demand-driven runtime, wiki), not a bolt-on: every cross-executor value
 //! crosses as a *handle*, the consumer **pulls** parts on demand, forcing an
 //! unproduced part **blocks** until it lands, and a part the producer never makes
 //! **poisons**. Nothing is shipped eagerly or whole.

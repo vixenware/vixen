@@ -1,5 +1,5 @@
 //! Emit a self-contained HTML playground of [`DemandGraph`]s — the inside-out
-//! turn, made visible (`runtime-semantics.md` §2/§8). A dropdown lets you click
+//! turn, made visible (the demand-driven runtime, wiki). A dropdown lets you click
 //! through every function; each renders its demand graph with nodes coloured by
 //! kind and **dim where demand never reaches** (a bomb in the road not taken).
 //!

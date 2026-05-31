@@ -1,6 +1,6 @@
 //! The demand graph — the inside-out turn made data.
 //!
-//! A value is a **reference to a node** (`runtime-semantics.md` §2), so a program
+//! A value is a **reference to a node** (the demand-driven runtime, wiki), so a program
 //! "turned inside out" *is* a graph of nodes: constants, eager **kernels**,
 //! **lazy-data** constructors, projections, **boundaries**, bombs, and the
 //! **unresolved** frontier (imports / runtime-shaped values the static snapshot
@@ -63,7 +63,7 @@ pub enum KernelOp {
     Opaque,
 }
 
-/// What a node *is* — the partition (`runtime-semantics.md` §2) made explicit.
+/// What a node *is* — the partition (the demand-driven runtime, wiki) made explicit.
 ///
 /// The whole point of the inside-out turn is that this classification is visible:
 /// you can look at a program and see what became an eager kernel vs a referenced

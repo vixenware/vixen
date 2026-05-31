@@ -1,4 +1,4 @@
-//! The demand-driven strand scheduler (`runtime-semantics.md` §2, invariants
+//! The demand-driven strand scheduler (the strand-scheduler wiki page, invariants
 //! I1–I7) — **our own**, not tokio tasks. A tokio task races forward; a strand
 //! runs only because something pulled on it, holds a **permit only while actively
 //! running**, releases it the instant it parks, and never parks without a **typed

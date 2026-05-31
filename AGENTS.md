@@ -11,8 +11,12 @@ they are the thing being deleted.
 
 - [`docs/design/runtime-rebuild-plan.md`](docs/design/runtime-rebuild-plan.md) —
   the sequenced rebuild plan. **Start here.**
-- [`docs/design/runtime-semantics.md`](docs/design/runtime-semantics.md) — demand
-  model, value representation, `Tree`/`exec`, two-level caching, the teeth-bomb.
+- The demand-driven runtime, in the **wiki** (`ddc serve vixen/wiki`):
+  [`wiki/content/runtime-semantics.md`](wiki/content/runtime-semantics.md) (demand
+  model, node-reference values, `Tree`, the cost model),
+  [`wiki/content/strand-scheduler.md`](wiki/content/strand-scheduler.md) (the
+  I1–I7 concurrency contract), and [`wiki/content/exec.md`](wiki/content/exec.md)
+  (the `exec` synthesis — the build primitive).
 - [`docs/design/kernel-abi.md`](docs/design/kernel-abi.md) — kernels (eager pure
   islands) + the copy-and-patch JIT / ABI.
 - [`docs/content/spec/language/build.md`](docs/content/spec/language/build.md) —
@@ -35,7 +39,7 @@ they are the thing being deleted.
    evaluated. No bare scalar escapes the orchestrator (`r[eval.forcing]`).
    `Pending(String)` is the canonical mistake. Lazy *data* (struct/tuple fields)
    becomes graph nodes; lazy *control flow* (`if`/`match`) stays inside eager
-   kernels. See `runtime-semantics.md` §2.
+   kernels. See the demand-driven-runtime + strand-scheduler wiki pages.
 3. **No flat instruction set the evaluator matches op-by-op.** The runtime consumes
    a **demand graph**. (The old `KernelOp` is being removed.)
 4. **`💣` detonates when *forced*, not when constructed.** It is a demand tripwire.

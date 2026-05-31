@@ -22,11 +22,11 @@
 //! - [`dispatch`] — decides whether a (sub-)expression runs as a kernel and builds
 //!   the plan; [`eval`] is the tree-walker that consults it.
 //! - [`strand`] — the demand-driven scheduler (our own, **not** tokio tasks; the
-//!   I1–I7 contract in `runtime-semantics.md` §2).
+//!   I1–I7 contract on the strand-scheduler wiki page).
 //! - [`remote`] — cross-executor values as progressive per-part handles over vox.
 //!
-//! Before changing anything here, read `AGENTS.md` and
-//! `docs/design/runtime-semantics.md`. The non-negotiables (no `Pending(String)`,
+//! Before changing anything here, read `AGENTS.md` and the wiki's
+//! demand-driven-runtime + strand-scheduler pages. The non-negotiables (no `Pending(String)`,
 //! no flat ISA, pending-is-a-resolver, bomb-detonates-on-force) are load-bearing.
 
 pub mod analyze;
