@@ -154,12 +154,14 @@ pub fn compile_source_observed(
     )
 }
 
-/// Like [`compile_source_observed`], with an explicit package `resolver` for
-/// `import`s. Pass a [`vx_package::CompositeResolver`] (with a packages root) to
-/// resolve `@scope/name` packages from disk.
-pub fn compile_source_observed_with_resolver(
+/// The **semantic front-end**: source → a fully resolved, type-checked,
+/// capability-checked VIR program + type env, with grammars loaded — *no* entry
+/// check (that's [`compile_source_observed_with_resolver`]). This is the one
+/// pipeline the demand-driven runtime (`vx-runtime::analyze`) drives; vx-lsp and
+/// vx-diagnostics ride the same passes. Pass a [`vx_package::CompositeResolver`]
+/// to resolve `@scope/name` packages (and their grammars) from disk.
+pub fn semantic_front_end(
     source: &str,
-    function_name: &str,
     resolver: &dyn vx_package::PackageResolver,
     observer: &mut dyn CompileObserver,
 ) -> Result<FrontEnd, CompileError> {
@@ -272,24 +274,41 @@ pub fn compile_source_observed_with_resolver(
     observer.capability_checked(t.elapsed());
     analyze_captures(&mut program.arena);
 
-    // Verify the entry exists — a missing entry is still a compile error — then
-    // stop. No lowering: this is the semantic front-end, and the demand-driven
-    // `vx-runtime` is the back-end.
-    let primary_su = program
-        .source_units
-        .first()
-        .copied()
-        .expect("program must have at least one source unit");
-    let entry_exists = program.arena[primary_su].items.iter().any(|&item_id| {
-        matches!(&program.arena[item_id].kind, ItemKind::Function(f) if f.name == function_name)
-    });
-    if !entry_exists {
-        return Err(CompileError::MissingEntry(function_name.to_owned()));
-    }
     Ok(FrontEnd {
         program,
         env: types.env,
     })
+}
+
+/// [`semantic_front_end`] with the bundled resolver and no phase observation —
+/// what the demand-driven runtime's `analyze` (and most callers) want.
+pub fn semantic_front_end_bundled(source: &str) -> Result<FrontEnd, CompileError> {
+    semantic_front_end(source, &vx_package::BundledResolver, &mut NoopObserver)
+}
+
+/// Like [`compile_source_observed`], with an explicit package `resolver`. Runs the
+/// [`semantic_front_end`] and additionally requires that `function_name` names a
+/// function in the primary unit (else [`CompileError::MissingEntry`]).
+pub fn compile_source_observed_with_resolver(
+    source: &str,
+    function_name: &str,
+    resolver: &dyn vx_package::PackageResolver,
+    observer: &mut dyn CompileObserver,
+) -> Result<FrontEnd, CompileError> {
+    let fe = semantic_front_end(source, resolver, observer)?;
+    let primary_su = fe
+        .program
+        .source_units
+        .first()
+        .copied()
+        .expect("program must have at least one source unit");
+    let entry_exists = fe.program.arena[primary_su].items.iter().any(|&item_id| {
+        matches!(&fe.program.arena[item_id].kind, ItemKind::Function(f) if f.name == function_name)
+    });
+    if !entry_exists {
+        return Err(CompileError::MissingEntry(function_name.to_owned()));
+    }
+    Ok(fe)
 }
 
 #[cfg(test)]

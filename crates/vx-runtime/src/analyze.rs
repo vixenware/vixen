@@ -17,20 +17,15 @@
 
 use std::collections::HashMap;
 
-use vx_ir::build::{VirBuilder, VirProgram};
-use vx_ir::compile::inject_implicit_stdlib_imports;
+use vx_ir::build::VirProgram;
 use vx_ir::expr::{
     ArrayElement, BinOp, ExprKind, FieldKey, LitKind, MapElement, PrefixOp, StringPart,
 };
 use vx_ir::ids::{BindingId, BodyId, ExprId, PatternId};
 use vx_ir::item::ItemKind;
 use vx_ir::pattern::PatternKind;
-use vx_ir::resolve::resolve_names;
 use vx_ir::scope::DefTarget;
 use vx_ir::stmt::StmtKind;
-use vx_ir::type_check::type_check_vir;
-use vx_ir::type_collect::collect_types_vir;
-use vx_parser::{SourceId, parse_source_file};
 use vx_types::{TypeEnv, TypeId};
 
 use crate::graph::{BinKind, DemandGraph, KernelOp, Node, NodeId, NodeKind, Span};
@@ -76,24 +71,17 @@ pub fn analyze_all(source: &str) -> Result<Vec<(String, DemandGraph)>, String> {
     Ok(out)
 }
 
-/// Run the real front-end: parse (+ stdlib) → VIR → type-collect → resolve →
-/// type-check. Returns the program and its type environment.
+/// Run the engine's front-end on `source` and return the checked program + its
+/// type environment. This drives the **one** shared semantic pipeline
+/// ([`vx_ir::compile::semantic_front_end`]): parse → VIR → prelude → resolve →
+/// type-check → capability-check, with packages + grammars loaded. vx-runtime is
+/// the engine that owns this entry; vx-lsp and vx-diagnostics ride the same passes.
+///
+/// Strict: a `CompileError` (parse / resolve / type / capability) comes back as a
+/// setup-error string — the demand evaluator only runs a well-formed program.
 pub(crate) fn front_end(source: &str) -> Result<(VirProgram, TypeEnv), String> {
-    let parsed = parse_source_file(source, SourceId(0));
-    if !parsed.errors().is_empty() {
-        return Err(format!("parse errors: {:?}", parsed.errors()));
-    }
-    let mut sources = vec![(SourceId(0), parsed.tree())];
-    for (i, stdlib) in vx_stdlib::stdlib_sources().iter().enumerate() {
-        let id = SourceId(i as u32 + 1);
-        sources.push((id, parse_source_file(stdlib.text, id).tree()));
-    }
-    let mut program = VirBuilder::build_program(&sources);
-    inject_implicit_stdlib_imports(&mut program);
-    let mut types = collect_types_vir(&mut program.arena);
-    let _ = resolve_names(&mut program.arena);
-    let _ = type_check_vir(&mut program.arena, &mut types);
-    Ok((program, types.env))
+    let fe = vx_ir::compile::semantic_front_end_bundled(source).map_err(|e| e.to_string())?;
+    Ok((fe.program, fe.env))
 }
 
 fn find_entry(program: &VirProgram, entry: &str) -> Option<BodyId> {
