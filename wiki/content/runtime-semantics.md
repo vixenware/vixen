@@ -268,10 +268,21 @@ necessary, not an optimization: you frequently can't pre-declare the minimal inp
 forced broad ⇒ the read-set (L2) recovers precision. Soundness rides on
 command-model's impurity marks.
 
-The **sandbox is the instrument that measures the read-set** — no command runs
-outside one, because outside it there is no read-set. Read-set capture and lazy
-materialization are the same VFS interception (Linux/macOS: confident; Windows:
-ProjFS gives the read-set but not fully-lazy transfer — they can decouple). See
+Two distinct mechanisms make a run hermetic and trackable, and they are **not** the
+same thing:
+
+- **The VFS** (FUSE / FSKit) — the process reads and writes *through* it, so it
+  **records** reads/writes to/from **mounts**: that's the **read-set** (L2) and the
+  **write-set** (the output tree). Read-set capture and lazy materialization are the
+  same VFS interception (Linux/macOS: confident; Windows: ProjFS gives the read-set
+  but not fully-lazy transfer — they can decouple).
+- **The sandbox** (landlock-exec / sandbox-exec) — **restricts** which host paths
+  the command may read/write. Enforcement, not observation.
+
+**Exemptions** are the gap: host paths reached *directly, outside the VFS* (a
+discovered system toolchain), so the VFS cannot record them — untrackable by
+construction, hence identified by **fingerprint** (the probe observations),
+never read-tracked. See
 [the cache-key + sandbox coupling](/cache-key-and-sandbox-coupled-design/) and
 [the Windows sandbox direction](/windows-sandbox-direction/).
 

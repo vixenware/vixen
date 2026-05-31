@@ -179,7 +179,10 @@ closure with its resolved captures**, and the verification obligations carried b
 the inputs — and ships it to an executor chosen by type-driven routing (§4). The
 executor:
 
-1. sets up the sandbox (mounts from `inputs`, writable roots from `outputs`, COW),
+1. sets up the **VFS** (FUSE/FSKit — mounts from `inputs`, writable roots from
+   `outputs`, COW; it *records* reads/writes → the read-set + write-set) inside the
+   **sandbox** (landlock-exec/sandbox-exec — *restricts* host access; exemptions are
+   the host paths reached outside the VFS, so they're fingerprinted, not tracked),
 2. runs the process, pulling input bytes from the orchestrator as it reads (②),
 3. evaluates the **observer there** (`i[impl.exec.shipped-closures]` +
    `i[impl.exec.shared-evaluator]` — same evaluator both sides),
