@@ -96,31 +96,38 @@ those identities is **① upfront demand**; serving the bytes is **② progressi
 `LIBRARY_PATH` are `Kind::Input{dir}` — an env-supplied include dir mounts +
 hashes exactly like `-I`. So `env` feeds `inputs`, not just an env map.
 
-## 4. Program resolution & executor routing — the least-pinned piece
+## 4. Program, grammar, routing — all from the capability
 
-**[settled-intent]** The binary is itself an input: the runtime resolves the
-program to a binary identity (host fact: which binary + version/hash; or hermetic:
-a tree id) and folds it into the key.
+**[settled]** This was posed as an open decision; it dissolves once you stop
+splitting the grammar from the capability. **A capability probe package
+(`@vixen/c`) owns the toolchain type, ships the probe, *and* owns its tool
+grammars — and the probed capability exposes its tools as commands already bound
+to their grammar.** So a `CToolchain`'s `cc` is **not** a bare path you pair with a
+separately-imported `@vixen/grammar-cc`; it is a **command-with-grammar**: grammar
++ the concrete probed binary + the toolchain's sandbox needs (exemptions /
+sysroot), one bundle. The capabilities a probe exposes *are*, in this case, the
+commands you can run, already grammar-associated — see
+[Executor abilities](/executor-abilities/).
 
-**[lean / open — the #1 decision]** The grammar's `program` is the *abstract* name
-("cc"). Two jobs hang off resolving it to a concrete binary:
+That collapses what I had wrongly split into three:
 
-1. **Concrete binary.** Supplied by the **program override** — `@cc:${tc.cc}[ … ]`
-   (inline shorthand) or an `exec` kwarg (the primitive: hand `exec` an absolute
-   path or a hermetic tree). Absent an override, a toolchain **ability** in scope
-   resolves the grammar's program name to a binary.
-2. **Executor routing.** Type-driven: a `CToolchain` value routes to a C executor
-   class, `RustToolchain` to a Rust one — by predicate match, no stringly-typed
-   selector. See [Executor abilities](/executor-abilities/) and
-   [Design the executor scheduler](/design-executor-scheduler/).
+1. **Grammar** — comes from the capability's command (its type carries it), not a
+   free import. The args you write are typed by *that* grammar.
+2. **Concrete binary** — bound in the command by the probe (the host fact it
+   detected, or a hermetic tree). It is an input; its identity folds into the key
+   (a different `cc` invalidates).
+3. **Routing** — **falls out of provenance** ([Executor abilities](/executor-abilities/)):
+   the `CToolchain`-derived value flowing into `exec` *is* the routing key; the
+   planner aggregates the ability values an `exec` consumes and picks an executor
+   satisfying their intersection. No `executor:` kwarg, no string that "carries no
+   ability" — the command-with-grammar carries the type.
 
-**The open tension:** a spliced *string* `tc.cc` carries no ability, so `exec`
-cannot route by `CToolchain` *type* from it. The **ability value itself must reach
-`exec`** (a kwarg, or the executor context), as both binary-resolver and routing
-key. My lean: `exec` takes the toolchain ability explicitly; the grammar's program
-name is the lookup key into it. This is the part the command-model layer leaves to
-the runtime — the **first thing to decide**, because the `exec` signature depends
-on it.
+So the program override (`@cc:${path}`) and a separate `exemptions:` kwarg for the
+toolchain's own holes are the **fallback** — for when you hold a free grammar but
+no capability — **not** the main path. The intended path: the capability gives you
+the command; you apply per-invocation args. **[residual detail]** the surface
+syntax for applying args to a capability's command vs the `@grammar[…]` literal for
+a free-imported grammar (§11).
 
 ## 5. `exec` signature & the surviving kwargs
 
@@ -128,16 +135,15 @@ on it.
 
 ```vixen
 fn exec[T](
-  command: Command,                 // from a @grammar[ … ] literal
+  command: Command,   // a capability's command-with-grammar (e.g. tc.cc), or a free @grammar[…] literal
 ) with {
-  // program/routing (§4, open spelling): the toolchain ability that resolves
-  // command.program -> binary AND routes; or the @cc:${…} override.
-  toolchain: <Ability>,             // [open]
-  env: Map[String, ExecInput] = %{},      // value source for declared channels (§5)
+  // No program/routing kwarg: the command carries grammar + binary, and routing
+  // falls out of the ability values' provenance (§4).
+  env: Map[String, ExecInput] = %{},      // value source for grammar-declared channels (§5)
   mounts: Map[Path, TreeEntry] = %{},     // extra content NOT named on argv [lean: narrowed]
   writable: Array[Path] = [],             // outputs the grammar can't classify [lean: supplement]
   create_dirs: Array[Path] = [],          // ditto [lean: supplement]
-  exemptions: Array[SandboxExemption] = [],   // soundness policy overriding `impurities`
+  exemptions: Array[SandboxExemption] = [],   // supplement; a capability command carries its own (§4)
   observer: Fn(Process, Tree) -> T,
 } -> T
 ```
@@ -151,9 +157,10 @@ Per-kwarg verdict (**[settled]** unless noted):
   outputs are authoritative for grammar-covered tokens; these are *additive*.
 - `mounts:` — **survives, narrowed**: only extra content not implied by the
   command. Grammar-covered inputs auto-mount.
-- `exemptions:` — **survives**: soundness policy the grammar can't express
-  (acknowledge an impurity, exempt a host path); overrides the `impurities`
-  checks, so it lives outside the grammar.
+- `exemptions:` — **survives as a supplement**: a capability's command already
+  carries the toolchain's own host holes (§4); this kwarg adds extra ones, or
+  covers the free-grammar-without-a-capability case. It's soundness policy
+  (acknowledge an impurity, exempt a host path) overriding the `impurities` checks.
 
 **[settled]** A `Tree`/`Blob` spliced into a hole (`-I ${some_tree}`) is a
 **first-class `Input`** with the position's role — not tracked separately. Its only
@@ -297,27 +304,29 @@ observer-cacheability rule so nothing here is precluded.
 **1 — gated (`cc` compiles an object; the easy 90%).**
 
 ```vixen
-let { cc } = import "@vixen/grammar-cc"
-
-// $src is a Kind::Input, $obj a Kind::Output — the mount set and the writable
-// root fall out of the grammar. The concrete binary + host holes come from the
-// toolchain ability (§4 — exact wiring open).
+// `@vixen/c`'s probe yields a CToolchain whose `cc` is a command already bound to
+// the cc grammar + the probed binary + the toolchain's sandbox needs — one bundle.
+// No grammar import, no binary override, no exemptions kwarg. Routing falls out of
+// `tc`'s provenance. ($src is Kind::Input, $obj Kind::Output — the mount set and
+// the writable root fall out of the grammar.)
 fn object(tc: CToolchain, src: Path, obj: Path) -> Tree (
-  exec(@cc:${tc.cc}[ -c $src -o $obj ]) with {
-    exemptions: tc.coarse_mounts,                // host read/exec holes the grammar can't express
-    observer: (proc, out) => ( proc.ok; out ),   // default observer, spelled out
+  let { cc } = tc;                                 // the grammar-bound command
+  exec(@cc[ -c $src -o $obj ]) with {
+    observer: (proc, out) => ( proc.ok; out ),     // default observer, spelled out
   }
 )
 
 // run-and-parse: `.ok`'s success value carries captured stdout
 fn cc_version(tc: CToolchain) -> SemVer (
-  let r = exec(@cc:${tc.cc}[ --version ]) with { observer: (proc, _) => proc.ok };
+  let { cc } = tc;
+  let r = exec(@cc[ --version ]) with { observer: (proc, _) => proc.ok };
   parse_semver(r.stdout)
 )
 
 // normalize: exit 7 means "nothing to do" — catch .ok? and decide
 fn run(tc: CToolchain, …) -> Tree (
-  exec(@cc:${tc.cc}[ … ]) with {
+  let { cc } = tc;
+  exec(@cc[ … ]) with {
     observer: (proc, out) => match proc.ok? (
       Ok(_)                          => out,
       Err(e) if e.cause == Exited(7) => out,                  // 7 ≡ success here
@@ -327,20 +336,24 @@ fn run(tc: CToolchain, …) -> Tree (
 )
 ```
 
+Here `@cc[…]` takes its grammar from the capability command `cc` (destructured
+from `tc`), **not** a free `@vixen/grammar-cc` import — that grammar-from-a-value's
+-type binding is the residual syntax detail from §4.
+
 **2 — streaming (`rustc` pipelines `.rmeta` before `.rlib`; mandatory).**
 
 ```vixen
-let { rustc } = import "@vixen/grammar-rustc"
-
 // Each artifact flows the instant rustc finalizes it — the .rmeta event reaches a
 // dependent crate before codegen finishes, and stands even if codegen then fails.
 fn compile(tc: RustToolchain, name: String, src: Path, out: Path) -> Stream[Artifact] (
-  exec(@rustc:${tc.rustc}[ --crate-name $name --edition 2021 --emit metadata,link --out-dir $out $src ]) with {
+  let { rustc } = tc;                              // command-with-grammar from the capability
+  let { parse_artifact } = import "vixen:rust";    // the package owns the --json artifact parser
+  exec(@rustc[ --crate-name $name --edition 2021 --emit metadata,link --out-dir $out $src ]) with {
     observer: (proc, _out) => (
       // finalization isn't knowable from the VFS; rustc announces it on stderr as
-      // JSON. The package owns the parser; we correlate each message to a live handle.
+      // JSON. We correlate each message to a live handle into the write-set.
       proc.stream.stderr.lines()
-        .filter_map(rustc.parse_artifact)                      // line -> Option[ArtifactMsg]
+        .filter_map(parse_artifact)                            // line -> Option[ArtifactMsg]
         .map((m) => Artifact { kind: m.emit, file: proc.stream.file(m.path) })
     ),
   }
@@ -354,16 +367,22 @@ for the stream substrate this leans on.
 
 **[open] — before the canonical pass:**
 
-1. **§4 program/routing wiring** — does `exec` take the toolchain ability
-   explicitly (kwarg / context) as both binary-resolver and routing key? Exact
-   spelling of program-override vs. ability kwarg. *(Blocks the signature.)*
-2. **§7 `.ok` success value** — unit, or the `Exit { duration, stdout, stderr }`
+1. **§7 `.ok` success value** — unit, or the `Exit { duration, stdout, stderr }`
    record?
-3. **§7 `.stream`** — a `Process` accessor, or a distinct observer signature?
-4. **§7 `ProcError` shape** — fields beyond `cause`; is the command/tails in the
+2. **§7 `.stream`** — a `Process` accessor, or a distinct observer signature?
+3. **§7 `ProcError` shape** — fields beyond `cause`; is the command/tails in the
    caught `Err` or only in the uncaught poison?
-5. **§9 poison ↔ `Result` ↔ `?`** — the catchable-failure semantics and the
+4. **§9 poison ↔ `Result` ↔ `?`** — the catchable-failure semantics and the
    `Poison`-type change it forces. *(Generalizes past `exec`.)*
+5. **§4 residual (small)** — the surface syntax for applying per-invocation args to
+   a capability's command (grammar-from-the-value's-type) vs the `@grammar[…]`
+   literal for a free grammar. The *model* is settled; only the spelling is open.
+
+**[settled] — newly resolved:** **§4 program / grammar / routing** — a capability
+provides the command-with-grammar (grammar + binary + the toolchain's sandbox
+needs), and routing falls out of the ability values' provenance. This was the #1
+open decision; it's closed — there is no separate grammar-import + binary-override
++ `exemptions:`-kwarg composition.
 
 **[lean] — confirm or redirect:** the `Command` carries `outputs` + both execution
 and canonical argv (§2); the surviving-kwargs verdict (§5).
