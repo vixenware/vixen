@@ -10,12 +10,10 @@ enum Style { struct Gcc, struct Msvc }   // Gcc: gcc/clang/apple — one CLI; Ms
 
 // Advertising this capability *is* defining its commands. `cc` is a `Command`: it
 // bundles its grammar, the probed binary, how to fingerprint it, and the exemptions
-// it needs — one declaration, never split (see the wiki: "The exec primitive" §4).
-//
-// [open — provider side] the exact inline grammar+command declaration, and folding
-// the standalone @vixen/grammar-cc package into this capability, is still being
-// designed. Here `cc` is just typed `Command`; `c_command(...)` in `probe` stands
-// in for "bind the cc grammar to this binary + exemptions, fingerprinted."
+// it needs — one declaration, never split (see the wiki: "The exec primitive" §4,
+// and "Types are values"). The grammar is a *value* the command carries (imported
+// from @vixen/grammar-cc as a value, or computed from the probe), projected on
+// demand by `@[ ${self.cc} … ]` — never a static type.
 struct CToolchain {
   target: String,    // the triple it builds for — the constraint surface
   style: Style,
@@ -29,9 +27,11 @@ namespace CToolchain (
   // an input and the output target as an output, so the sandbox mounts + the
   // writable root fall out of the command; routing falls out of `self`'s provenance.
   fn object(self, src: Path, obj: Path) -> Blob (
+    // `exec` defaults its observer to `(run) => run.ok.out` — the settled output
+    // tree, success-gated — so we don't spell it out.
     let tree = match self.style (
-      Style.Gcc  => exec(@[ ${self.cc} -c ${src} -o ${obj} ])  with { observer: (run) => run.ok.out },
-      Style.Msvc => exec(@[ ${self.cc} /c ${src} /Fo:${obj} ]) with { observer: (run) => run.ok.out },
+      Style.Gcc  => exec(@[ ${self.cc} -c ${src} -o ${obj} ]),
+      Style.Msvc => exec(@[ ${self.cc} /c ${src} /Fo:${obj} ]),
     );
     tree.file(obj)
   )
@@ -40,8 +40,8 @@ namespace CToolchain (
   // the source list into the grammar's repeatable source position.
   fn executable(self, srcs: Array[Path], out: Path) -> Blob (
     let tree = match self.style (
-      Style.Gcc  => exec(@[ ${self.cc} ${..srcs} -o ${out} ])      with { observer: (run) => run.ok.out },
-      Style.Msvc => exec(@[ ${self.cc} ${..srcs} /Fe:${out}.exe ]) with { observer: (run) => run.ok.out },
+      Style.Gcc  => exec(@[ ${self.cc} ${..srcs} -o ${out} ]),
+      Style.Msvc => exec(@[ ${self.cc} ${..srcs} /Fe:${out}.exe ]),
     );
     tree.file(out)
   )
@@ -51,17 +51,26 @@ namespace CToolchain (
   // by the probe observations (host.which / host.hash) so a different `cc`
   // invalidates the cache.
   fn probe(host: Host) -> Option[CToolchain] (
+    // The cc grammar is a value the package exports — held, not type-imported.
+    let grammars = import "@vixen/grammar-cc";
     match host.which?("cc") (
       None => None,
       Some { value: cc_path } => Some(CToolchain {
         target: `${host.arch()}-unknown-${host.os()}`,
         style:  Style.Gcc,        // TODO: confirm via `cc --version` (clang reports Gcc-style too)
         version: 1.0.0,           // TODO: probe `cc -dumpversion`
-        cc: c_command(cc_path, [  // [open] binds the cc grammar to this binary + exemptions
-          host.exec_subpath("/usr/bin"),
-          host.read_subpath("/usr/include"),
-          host.read_subpath("/usr/lib"),
-        ]),
+        // The Command, bundled — never split. The grammar value travels with it;
+        // `@[ ${self.cc} … ]` projects `cc.grammar` to classify its arguments.
+        cc: Command {
+          grammar:     grammars.cc,          // the cc Grammar value (or computed from the probe)
+          binary:      ExecPath(cc_path),
+          fingerprint: host.hash(cc_path),   // a different cc ⇒ a different cache key
+          exemptions: [                      // host paths it may touch outside the VFS
+            host.exec_subpath("/usr/bin"),
+            host.read_subpath("/usr/include"),
+            host.read_subpath("/usr/lib"),
+          ],
+        },
       }),
     )
   )
