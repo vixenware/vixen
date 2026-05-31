@@ -113,12 +113,13 @@ Each `exec` aggregates the predicate-identified ability values flowing into it a
 let mac = MacToolchain where (xcode >= 14.0 && arch == arch_arm64)
 let rust = RustToolchain where (version >= 1.91)
 
-let bin = exec [
-    rust.rustc,
-    workspace "src/main.rs",
-    "-C", `linker=${mac.linker}`,
-    "-o", "out/app",
-] "app"
+// `rust.rustc` is the command-with-grammar the RustToolchain capability exposes
+// (grammar + binary bundled — see [The exec primitive](/exec/)). The exec consumes
+// `rust` (via the rustc command) and `mac` (via mac.linker), so its provenance
+// names both abilities.
+let { rustc } = rust
+let bin = exec(@rustc[ -C linker=${mac.linker} -o out/app ${workspace "src/main.rs"} ])
+    with { observer: (run) => run.ok.out.file("out/app") }
 // Planner sees bin needs both mac and rust; picks one executor matching both constraints.
 ```
 

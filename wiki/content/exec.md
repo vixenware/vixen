@@ -8,7 +8,7 @@ tags = ["exec", "runtime", "command-model", "sandbox"]
 +++
 
 **Review draft.** This synthesizes three threads — the command-model projection
-layer, the `exec`/`Process` success model, and the demand-driven runtime
+layer, the `exec`/`Run` success model, and the demand-driven runtime
 (`vx-runtime`) execution + handle model — into one place. It is not yet
 normative: once the open decisions (§12) are made, the settled parts land in the
 Tracey spec (`r[exec.*]`), with examples in [Vixen Build](/vixen-build/) and
@@ -144,7 +144,7 @@ fn exec[T](
   writable: Array[Path] = [],             // outputs the grammar can't classify [lean: supplement]
   create_dirs: Array[Path] = [],          // ditto [lean: supplement]
   exemptions: Array[SandboxExemption] = [],   // supplement; a capability command carries its own (§4)
-  observer: Fn(Process, Tree) -> T,
+  observer: Fn(Run) -> T,                     // Run = .ok (settled) / .stream (live), §7
 } -> T
 ```
 
@@ -185,62 +185,67 @@ executor:
 4. rechecks the host obligations on the concrete runner,
 5. returns **only the observer's produced value** `T` across the boundary (③).
 
-**[settled]** The observer's authority is **exactly** the `Process` and the
-sandbox `Tree` — no `Host`, no ambient executor authority. It ships with code
-identity + lowered body + resolved captures; a closure cannot be sent until all
-captures are resolved.
+**[settled]** The observer's authority is **exactly** the `Run` it receives (§7) —
+no `Host`, no ambient executor authority. It ships with code identity + lowered
+body + resolved captures; a closure cannot be sent until all captures are resolved.
 
 **[load-bearing]** This split, closure-shipping, and observer-on-the-executor are
 present **from the first line of real code**, even with an in-process executor over
 vox. A version where the orchestrator runs the command itself, or where there is no
 observer, is a *different thing*, not a thin `exec`.
 
-## 7. `Process` & the success model
+## 7. `Run` & the success model
 
 The chisel: **no bare `exit_code`.** A raw integer invites everyone to write
 `if exit_code == 0 { … } else { fail }` *and* makes the user assemble the failure
 report — duplicated boilerplate, and bad errors because the party with the context
-(the runtime) isn't reporting. See [Decide the process model](/process-as-first-class-value/).
+(the runtime) isn't reporting. So the observer receives a **`Run`**, not a raw
+process, and reaches success through `.ok`. See
+[Decide the process model](/process-as-first-class-value/).
 
-**[settled] `Process` (executor-side, given to the observer):**
+**[settled] `Run` has two faces, each with a `.out: Tree`:**
 
-- `stdout: Stream[Bytes]`, `stderr: Stream[Bytes]` — live; readable before the
-  verdict, independent of it.
-- **`.ok`** — depend on it to gate on success. It **poisons** on failure (nonzero
-  exit *or* signal), and the **runtime** fills that poison with the full context.
-  Chaining output on it is just a **demand edge** (the output depends on `.ok`, so
-  forcing the output forces success first — no `if`; it falls out of the demand
-  graph).
-- **`.ok?`** — `?` reifies the would-be poison into a **`Result`** whose `Err`
-  carries the structured cause; you inspect and normalize (exit `7` ≡ success for
-  some tools).
+- **`run.ok`** — the **settled, success-gated** face: an `Exit { duration, stdout,
+  stderr, out: Tree }` record. Force it and the process exited 0; otherwise it
+  **poisons**. `run.ok.out` is the whole resolved write-set; `run.ok.stdout` /
+  `.stderr` are the captured output (bounded by capture kwargs), for run-and-parse
+  tools. Used purely as a gate it's just a **demand edge** — the output depends on
+  `.ok`, so forcing the output forces success first; no `if`, it falls out of the
+  demand graph.
+- **`run.stream`** — the **live, ungated** face: `{ stdout: Stream[Bytes], stderr:
+  Stream[Bytes], out: Tree }`. `run.stream.out` is the **producing handle**
+  (per-path, resolves as files finalize, **survives a later `.ok` failure**);
+  `run.stream.stderr` is the live feed you parse (rustc `--json`) to know *when* a
+  path finalized — the VFS alone can't tell you.
 
-**[settled] Signals are distinct from exit codes** and modeled as the failure
-*cause*: `Exited(U64) | Signaled(Signal)` (room for `core_dumped`). `.ok` poisons
-on either; `.ok?` exposes which, so a specific signal can be normalized just like a
-specific exit code. The default failure report carries the signal, the command, and
-the **tails** of stdout/stderr.
+So the two ways to the output tree: `run.ok.out` (gated — "the output, if it
+succeeded") and `run.stream.out` (live — "the output as it's produced").
 
-**[settled] `fail` / an uncaught poison** = that same structured error **plus
-source location plus more context** — a strict superset of the caught `Err`.
-Capture is bounded by **keyword args** (max stdout/stderr retained).
+**[settled] Failure is the [failure model](/failure-model/), not a bare code.**
+`run.ok` poisons on **any** non-success — nonzero exit *or* a signal. `run.ok?`
+catches it as `Result[Exit, ProcError]`; you normalize (exit `7` ≡ success) or
+re-`fail`. The domain error:
 
-**[lean] `.ok`'s *success* value** is a small record — `Exit { duration, stdout,
-stderr }` (captured per the limits) — so a run-and-parse tool reads `r.stdout`
-while a compile ignores it (pure gate). (Unit vs. "timing + output" — **decide**.)
+```vixen
+struct ProcError {
+  cause: Exited(U64) | Signaled(Signal),   // exit vs. kill — distinct (room for core_dumped)
+  command: Command,                        // the full effective command that ran
+  stderr_tail: Bytes,                      // bounded by capture kwargs
+  vfs_trace: VfsTrace,                     // the read/write set
+  duration: Duration,
+}
+```
 
-**[lean] `.stream`** is the second way to the VFS: the **live** write-set + live
-stdout/stderr, where *you* decide when a path is finalized — finalization is not
-knowable from the VFS alone; you parse the tool's own notifications (rustc
-`--json`) and emit handles early. Whether `.stream` is a `Process` accessor or a
-second observer signature is **[open]**.
-
-**[lean] `ProcError`** ≈ `{ cause: Exited|Signaled, command, stdout_tail,
-stderr_tail, duration }`. **Decide its exact shape.**
+`ProcError` is **pure domain data**; the span + strand stack + demand-path live in
+the `FailureContext` envelope (`Failure { err: ProcError, context }`), uniform
+across *all* failures — not stuffed into `ProcError` (see
+[the failure model](/failure-model/)). An uncaught `run.ok` is that `Failure`
+propagating (the runtime renders the report); a caught `run.ok?` hands you the same
+`Failure` as data.
 
 The three usage patterns (§11): **gate-and-select** (90%), **stream partial
 events** (rustc metadata before codegen — mandatory), **catch & normalize**
-(`.ok?`).
+(`run.ok?`).
 
 ## 8. Outputs & the write-set `Tree`
 
@@ -253,7 +258,7 @@ remote-part handle in `vx-runtime` implements. See
 [Design build-output materialisation](/materialise-build-output/).
 
 **[settled]** **Success is its own handle, orthogonal to outputs.** `.ok` poisoning
-must **not** poison the whole `Process`: a finalized `out/x.rmeta` or an emitted
+must **not** poison the whole `Run`: a finalized `out/x.rmeta` or an emitted
 stream event resolves on its own timeline and **survives `.ok` failing later**
 (rustc emits `.rmeta`, then codegen fails — the metadata stands). The two ways to
 the VFS:
@@ -271,22 +276,17 @@ executor-local handles), so the executor can be released.
 ## 9. Errors & poison
 
 **[settled]** `exec` itself **poisons** only if the executor can't start / loses
-the process / fails before handing `Process` + `Tree` to the observer (and a
-`Stream[T]` result terminates, its pending values poisoned). **Ordinary process
-failure is observer-visible** — surfaced through `.ok` / `.ok?`, not an automatic
-`exec` poison. Verification drift is its own distinct poison kind.
+the process / fails before handing the `Run` to the observer (and a `Stream[T]`
+result terminates, its pending items poisoned). **Ordinary process failure is
+observer-visible** — surfaced through `run.ok` / `run.ok?`, not an automatic `exec`
+poison. Verification drift is its own distinct poison kind.
 
-**[settled-principle]** Failure reporting is the **runtime's** job, carried by the
-poison (command / cause / tails / sandbox) — the same discipline as I6 source
-fidelity (the poison carries everything to diagnose, pointed at the source; see
-[The demand-driven runtime](/runtime-semantics/)).
-
-**[open] The poison ↔ `Result` ↔ `?` story** is bigger than `exec`: for `.ok?` to
-return an `Err` carrying structured data, a process failure is a **typed value**,
-not a string — uncaught it becomes a (context-rich) poison; `?`-caught it becomes
-`Result[Exit, ProcError]`. This touches the runtime's `Poison` type (today
-`{ reason, span }` — it needs a structured payload) and the language's
-catchable-failure semantics generally. **Pin this** — it generalizes past `exec`.
+**[settled]** Failure reporting is the **runtime's** job, carried by the `Failure`
+envelope (`context`: span / strand stack / demand-path; `err`: the domain
+`ProcError`), never assembled by the user — the [failure model](/failure-model/),
+which is the I6 source-fidelity discipline generalized from "carry a span" to
+"carry a typed `err` + `context`." `run.ok` poisons with a `Failure { err:
+ProcError, context }`; `run.ok?` catches the same value as `Result[Exit, ProcError]`.
 
 ## 10. Caching (deferred; shaped here)
 
@@ -312,25 +312,25 @@ observer-cacheability rule so nothing here is precluded.
 fn object(tc: CToolchain, src: Path, obj: Path) -> Tree (
   let { cc } = tc;                                 // the grammar-bound command
   exec(@cc[ -c $src -o $obj ]) with {
-    observer: (proc, out) => ( proc.ok; out ),     // default observer, spelled out
+    observer: (run) => run.ok.out,                 // gate on success, return the write-set tree
   }
 )
 
-// run-and-parse: `.ok`'s success value carries captured stdout
+// run-and-parse: `run.ok` is the Exit record { duration, stdout, stderr, out }
 fn cc_version(tc: CToolchain) -> SemVer (
   let { cc } = tc;
-  let r = exec(@cc[ --version ]) with { observer: (proc, _) => proc.ok };
-  parse_semver(r.stdout)
+  let exit = exec(@cc[ --version ]) with { observer: (run) => run.ok };
+  parse_semver(exit.stdout)
 )
 
-// normalize: exit 7 means "nothing to do" — catch .ok? and decide
-fn run(tc: CToolchain, …) -> Tree (
+// normalize: exit 7 means "nothing to do" — catch run.ok? and decide
+fn run_cc(tc: CToolchain, …) -> Tree (
   let { cc } = tc;
   exec(@cc[ … ]) with {
-    observer: (proc, out) => match proc.ok? (
-      Ok(_)                          => out,
-      Err(e) if e.cause == Exited(7) => out,                  // 7 ≡ success here
-      Err(e)                         => fail(`cc failed: ${e}`),
+    observer: (run) => match run.ok? (
+      Ok(exit)                                                 => exit.out,
+      Err(Failure { err: ProcError { cause: Exited(7) }, .. }) => run.stream.out,  // 7 ≡ success — take the live output
+      Err(f)                                                   => fail f,
     ),
   }
 )
@@ -349,12 +349,12 @@ fn compile(tc: RustToolchain, name: String, src: Path, out: Path) -> Stream[Arti
   let { rustc } = tc;                              // command-with-grammar from the capability
   let { parse_artifact } = import "vixen:rust";    // the package owns the --json artifact parser
   exec(@rustc[ --crate-name $name --edition 2021 --emit metadata,link --out-dir $out $src ]) with {
-    observer: (proc, _out) => (
+    observer: (run) => (
       // finalization isn't knowable from the VFS; rustc announces it on stderr as
-      // JSON. We correlate each message to a live handle into the write-set.
-      proc.stream.stderr.lines()
+      // JSON. We correlate each message to a live handle into the producing tree.
+      run.stream.stderr.lines()
         .filter_map(parse_artifact)                            // line -> Option[ArtifactMsg]
-        .map((m) => Artifact { kind: m.emit, file: proc.stream.file(m.path) })
+        .map((m) => Artifact { kind: m.emit, file: run.stream.out.file(m.path) })
     ),
   }
 )
@@ -365,24 +365,28 @@ for the stream substrate this leans on.
 
 ## 12. Decision ledger (what needs deciding)
 
-**[open] — before the canonical pass:**
+**[open] — remaining:**
 
-1. **§7 `.ok` success value** — unit, or the `Exit { duration, stdout, stderr }`
-   record?
-2. **§7 `.stream`** — a `Process` accessor, or a distinct observer signature?
-3. **§7 `ProcError` shape** — fields beyond `cause`; is the command/tails in the
-   caught `Err` or only in the uncaught poison?
-4. **§9 poison ↔ `Result` ↔ `?`** — the catchable-failure semantics and the
-   `Poison`-type change it forces. *(Generalizes past `exec`.)*
-5. **§4 residual (small)** — the surface syntax for applying per-invocation args to
+1. **§4 residual (small)** — the surface syntax for applying per-invocation args to
    a capability's command (grammar-from-the-value's-type) vs the `@grammar[…]`
    literal for a free grammar. The *model* is settled; only the spelling is open.
+2. **Streams mechanics** — the per-item ③ wire shape, backpressure, and
+   session/infinite streams. The *model* is sketched (§8, [the streams Task](/streams-first-primitive/));
+   these mechanics are open.
+3. **Closure-shipping** — what an observer may capture, and the exact "resolved
+   captures" boundary. (Still thinking.)
 
-**[settled] — newly resolved:** **§4 program / grammar / routing** — a capability
-provides the command-with-grammar (grammar + binary + the toolchain's sandbox
-needs), and routing falls out of the ability values' provenance. This was the #1
-open decision; it's closed — there is no separate grammar-import + binary-override
-+ `exemptions:`-kwarg composition.
+**[settled] — pinned this round:**
+
+- **§4 program / grammar / routing** — a capability provides the
+  command-with-grammar; routing falls out of provenance. No grammar-import +
+  binary-override + `exemptions:`-kwarg composition.
+- **§7 `Run`** — `.ok` (settled `Exit` record, success-gated) and `.stream` (live),
+  each with a `.out: Tree`; `run.ok?` → `Result[Exit, ProcError]`; `ProcError`
+  slimmed to domain data, span/stack in the `FailureContext` envelope.
+- **The [failure model](/failure-model/)** — one `Failure { err, context }`, poison
+  (propagating) ↔ `Result.Err` (caught via `?`), the inferred error union
+  `E1 | E2 | …` exhaustively matched.
 
 **[lean] — confirm or redirect:** the `Command` carries `outputs` + both execution
 and canonical argv (§2); the surviving-kwargs verdict (§5).
@@ -390,8 +394,7 @@ and canonical argv (§2); the surviving-kwargs verdict (§5).
 **[settled] — building toward:** the projection/runtime boundary (§0); the demand
 triple (§1); identity from content hashes + program identity + env (§3); the
 executor/observer split + closure-shipping (§6); incremental write-set +
-success-orthogonal-to-outputs + auto-commit (§8); ordinary-failure-is-data +
-runtime-owned reporting (§9).
+success-orthogonal-to-outputs + auto-commit (§8).
 
 ## 13. First implementation slice (orientation)
 
@@ -415,6 +418,8 @@ escape hatch, `InOut` rewrite inputs.
   poison, and the producing handle `exec` outputs ride on.
 - [The strand scheduler](/strand-scheduler/) — the demand-driven concurrency that
   parks a strand on a remote part and resumes it.
+- [Failures, poison, and Result](/failure-model/) — `run.ok` / `run.ok?`,
+  `ProcError`, the poison ↔ `Result` model.
 - [Decide the process model](/process-as-first-class-value/) — `.ok` / `.stream`.
 - [Cache and trust](/cache-and-trust/) — the two cache levels and observer
   cacheability.
