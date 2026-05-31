@@ -1,22 +1,21 @@
-//! Shared "source text → ExecutableProgram" compilation pipeline.
+//! The semantic front-end: source text → a checked VIR program + type env.
 //!
-//! Used by vx-daemon to compile Vixen source text through the full VIR semantic
-//! pipeline. (The demand-driven `vx-runtime` has its own front-end.)
+//! Parse → VIR → prelude → type-collect → resolve → type-check → capability-check
+//! → capture analysis. The eager `ExecutableProgram` back-end is gone; the
+//! demand-driven `vx-runtime` is the evaluator. vx-lsp and vx-diagnostics consume
+//! the diagnostics this surfaces.
 
 use std::fmt;
 use std::time::{Duration, Instant};
 
-use crate::exec_types::ExecutableProgram;
 use vx_parser::{AstNode, SourceId};
 use vx_types::TypeEnv;
 
 use crate::build::VirBuilder;
 use crate::cap_check::check_capabilities_vir;
 use crate::capture::analyze_captures;
-use crate::demand::analyze_demand_for_entry;
 use crate::diagnostic::IrDiagnostic;
 use crate::item::ItemKind;
-use crate::lower::{LowerError, lower_vir_program};
 use crate::resolve::resolve_names;
 use crate::scope::{ScopeEntry, ScopeEntryTarget};
 use crate::type_check::type_check_vir;
@@ -39,7 +38,6 @@ pub enum CompileError {
         env: Box<TypeEnv>,
     },
     MissingEntry(String),
-    Lowering(LowerError),
 }
 
 impl fmt::Display for CompileError {
@@ -50,12 +48,20 @@ impl fmt::Display for CompileError {
             Self::Type { errors, .. } => write!(f, "type errors: {errors:?}"),
             Self::Capability { errors, .. } => write!(f, "capability errors: {errors:?}"),
             Self::MissingEntry(name) => write!(f, "entry function `{name}` not found"),
-            Self::Lowering(e) => write!(f, "lowering failed: {e:?}"),
         }
     }
 }
 
 impl std::error::Error for CompileError {}
+
+/// The output of the semantic front-end: a fully name-resolved, type-checked,
+/// capability-checked VIR program and its type environment. No lowering — the
+/// demand-driven `vx-runtime` is the evaluator.
+#[derive(Debug)]
+pub struct FrontEnd {
+    pub program: crate::build::VirProgram,
+    pub env: TypeEnv,
+}
 
 /// Inject the **prelude** — the stdlib units' top-level items — into the module
 /// scope of each `target` unit. The prelude is ambient (available un-imported)
@@ -137,10 +143,7 @@ pub trait CompileObserver {
 pub struct NoopObserver;
 impl CompileObserver for NoopObserver {}
 
-pub fn compile_source(
-    source: &str,
-    function_name: &str,
-) -> Result<ExecutableProgram, CompileError> {
+pub fn compile_source(source: &str, function_name: &str) -> Result<FrontEnd, CompileError> {
     compile_source_observed(source, function_name, &mut NoopObserver)
 }
 
@@ -150,7 +153,7 @@ pub fn compile_source_observed(
     source: &str,
     function_name: &str,
     observer: &mut dyn CompileObserver,
-) -> Result<ExecutableProgram, CompileError> {
+) -> Result<FrontEnd, CompileError> {
     compile_source_observed_with_resolver(
         source,
         function_name,
@@ -167,7 +170,7 @@ pub fn compile_source_observed_with_resolver(
     function_name: &str,
     resolver: &dyn vx_package::PackageResolver,
     observer: &mut dyn CompileObserver,
-) -> Result<ExecutableProgram, CompileError> {
+) -> Result<FrontEnd, CompileError> {
     // Parse user source — short-circuit on errors.
     let t = Instant::now();
     let parsed = vx_parser::parse_source_file(source, SourceId(0));
@@ -277,36 +280,24 @@ pub fn compile_source_observed_with_resolver(
     observer.capability_checked(t.elapsed());
     analyze_captures(&mut program.arena);
 
-    // Find entry body by name in primary source unit (first match by item order).
+    // Verify the entry exists — a missing entry is still a compile error — then
+    // stop. No lowering: this is the semantic front-end, and the demand-driven
+    // `vx-runtime` is the back-end.
     let primary_su = program
         .source_units
         .first()
         .copied()
         .expect("program must have at least one source unit");
-    let su = &program.arena[primary_su];
-    let entry_body = su
-        .items
-        .iter()
-        .find_map(|&item_id| {
-            if let ItemKind::Function(ref f) = program.arena[item_id].kind
-                && f.name == function_name
-            {
-                return Some(f.body);
-            }
-            None
-        })
-        .ok_or_else(|| CompileError::MissingEntry(function_name.to_owned()))?;
-
-    // Demand analysis + lowering.
-    let t = Instant::now();
-    let demand = analyze_demand_for_entry(&program, entry_body);
-    observer.demand_analyzed(t.elapsed());
-
-    let t = Instant::now();
-    let program = lower_vir_program(&program, &demand).map_err(CompileError::Lowering)?;
-    let kernel_ops: u64 = program.bodies.values().map(|b| b.ops.len() as u64).sum();
-    observer.lowered(t.elapsed(), program.bodies.len() as u64, kernel_ops);
-    Ok(program)
+    let entry_exists = program.arena[primary_su].items.iter().any(|&item_id| {
+        matches!(&program.arena[item_id].kind, ItemKind::Function(f) if f.name == function_name)
+    });
+    if !entry_exists {
+        return Err(CompileError::MissingEntry(function_name.to_owned()));
+    }
+    Ok(FrontEnd {
+        program,
+        env: types.env,
+    })
 }
 
 #[cfg(test)]
@@ -314,7 +305,6 @@ mod tests {
     use super::inject_implicit_stdlib_imports;
     use crate::build::VirBuilder;
     use crate::cap_check::check_capabilities_vir;
-    use crate::exec_types::RuntimeBoundaryKind;
     use crate::resolve::resolve_names;
     use crate::type_check::type_check_vir;
     use crate::type_collect::collect_types_vir;
@@ -658,15 +648,8 @@ fn probe() -> Bool (
             cap_result.errors
         );
 
-        let lowered = super::compile_source(SOURCE_DISCOVER_WHICH, "probe")
-            .expect("discover source should now compile through lowering");
-        assert!(
-            lowered
-                .runtime_nodes
-                .values()
-                .any(|node| node.kind == RuntimeBoundaryKind::Discover),
-            "expected discover runtime boundary in lowered program"
-        );
+        super::compile_source(SOURCE_DISCOVER_WHICH, "probe")
+            .expect("discover source should compile through the front-end");
     }
 
     #[test]
@@ -691,49 +674,13 @@ fn probe() -> Bool (
             cap_result.errors
         );
 
-        let lowered = super::compile_source(SOURCE_EXEC_STDOUT, "probe")
-            .expect("exec source should now compile through lowering");
-        assert!(
-            lowered
-                .runtime_nodes
-                .values()
-                .any(|node| node.kind == RuntimeBoundaryKind::Exec),
-            "expected exec runtime boundary in lowered program"
-        );
+        super::compile_source(SOURCE_EXEC_STDOUT, "probe")
+            .expect("exec source should compile through the front-end");
     }
 
     #[test]
     fn semantic_pipeline_resolves_exec_writable_keywords_from_stdlib() {
-        let lowered = super::compile_source(SOURCE_EXEC_WRITABLE, "probe")
-            .expect("exec source with writable keywords should compile through lowering");
-        assert!(
-            lowered
-                .runtime_nodes
-                .values()
-                .any(|node| node.kind == RuntimeBoundaryKind::Exec),
-            "expected exec runtime boundary in lowered program"
-        );
-    }
-
-    #[test]
-    fn semantic_pipeline_eventually_lowers_runtime_boundary_kinds_when_supported() {
-        let lowered = super::compile_source(
-            r#"
-fn probe() #discover -> String (
-  discover(executor_class("default"), (host) => host.which("sh"))
-)
-"#,
-            "probe",
-        );
-
-        if let Ok(program) = lowered {
-            assert!(
-                program
-                    .runtime_nodes
-                    .values()
-                    .any(|node| node.kind == RuntimeBoundaryKind::Discover),
-                "expected discover runtime boundary in lowered program"
-            );
-        }
+        super::compile_source(SOURCE_EXEC_WRITABLE, "probe")
+            .expect("exec source with writable keywords should compile through the front-end");
     }
 }

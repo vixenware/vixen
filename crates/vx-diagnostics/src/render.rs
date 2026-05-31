@@ -59,18 +59,6 @@ fn compile_error_to_reports(err: &CompileError, fallback_env: &TypeEnv) -> Vec<R
                 sections: Vec::new(),
             }]
         }
-        CompileError::Lowering(err) => {
-            vec![Report {
-                severity: Severity::Error,
-                title: "lowering failed".to_string(),
-                annotations: Vec::new(),
-                notes: vec![Note {
-                    kind: NoteKind::Note,
-                    text: format!("{err:?}"),
-                }],
-                sections: Vec::new(),
-            }]
-        }
     }
 }
 
