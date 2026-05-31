@@ -217,8 +217,10 @@ struct Pool {
     /// workers block-recv on it.
     cmd_tx: Vec<mpsc::Sender<Command>>,
     /// Worker→boss reports. A *tokio* channel so the boss can `await` it inside the
-    /// async `run` loop, alongside driving in-flight remote forces.
-    result_rx: RefCell<UnboundedReceiver<WorkerMsg>>,
+    /// async `run` loop, alongside driving in-flight remote forces. `Option` so the
+    /// boss can own the receiver across the loop's awaits (rather than hold a
+    /// `RefCell` borrow across them) and restore it when quiescent.
+    result_rx: RefCell<Option<UnboundedReceiver<WorkerMsg>>>,
     handles: RefCell<Vec<JoinHandle<()>>>,
     /// The boss's current-thread runtime: it drives the remote-part vox `force()`
     /// calls (and owns the vox clients) interleaved with scheduling. `run()` blocks
@@ -273,7 +275,7 @@ impl Scheduler {
             inner,
             Rc::new(Pool {
                 cmd_tx,
-                result_rx: RefCell::new(result_rx),
+                result_rx: RefCell::new(Some(result_rx)),
                 handles: RefCell::new(handles),
                 runtime,
             }),
@@ -352,7 +354,13 @@ impl Scheduler {
     /// admittable strand, then await the next worker report, until quiescent.
     async fn run_async(&self) {
         let pool = &self.1;
-        let mut result_rx = pool.result_rx.borrow_mut();
+        // Own the receiver across the loop (no `RefCell` borrow held over an await);
+        // restore it when quiescent so the next `run()` can take it again.
+        let mut result_rx = pool
+            .result_rx
+            .borrow_mut()
+            .take()
+            .expect("the boss's result receiver is present between runs");
         loop {
             // Dispatch every admittable strand (permit-gated) to its worker. Dispatch
             // *all* of them before blocking on a result, so peers that must run at the
@@ -378,6 +386,7 @@ impl Scheduler {
                 .expect("a result while strands are in flight");
             self.complete(msg);
         }
+        *pool.result_rx.borrow_mut() = Some(result_rx);
     }
 
     /// Admit one ready strand whose resource has a free permit: take the permit,
