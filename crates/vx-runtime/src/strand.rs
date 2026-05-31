@@ -24,6 +24,7 @@ use std::rc::Rc;
 use std::sync::mpsc;
 use std::sync::{Arc, Condvar, Mutex};
 use std::task::{Context, Poll, RawWaker, RawWakerVTable, Waker};
+use std::thread::JoinHandle;
 
 /// A strand's work: a `Send` future (it crosses to a worker thread and back).
 type Fut = Pin<Box<dyn Future<Output = Outcome> + Send>>;
@@ -137,22 +138,69 @@ struct WorkQueue {
 }
 
 /// The scheduler: the boss owns `Inner` (single-threaded); workers only touch the
-/// work queue, the result channel, and `Signal`s.
+/// work queue, the result channel, and `Signal`s. The worker [`Pool`] is spawned
+/// once and reused by every `run()`.
 #[derive(Clone)]
-pub struct Scheduler(Rc<RefCell<Inner>>);
+pub struct Scheduler(Rc<RefCell<Inner>>, Rc<Pool>);
+
+/// A persistent worker pool: spawned at [`Scheduler::new`], reused by every
+/// `run()`, and stopped (queue closed + joined) when the last `Scheduler` handle
+/// drops. Workers idle on the work-queue condvar between runs.
+struct Pool {
+    work: Arc<(Mutex<WorkQueue>, Condvar)>,
+    result_rx: RefCell<mpsc::Receiver<(StrandId, WorkerResult)>>,
+    handles: RefCell<Vec<JoinHandle<()>>>,
+}
+
+impl Drop for Pool {
+    fn drop(&mut self) {
+        self.work.0.lock().unwrap().closed = true;
+        self.work.1.notify_all();
+        for h in self.handles.borrow_mut().drain(..) {
+            let _ = h.join();
+        }
+    }
+}
 
 impl Scheduler {
     /// A scheduler with the given per-resource capacities (`capacities[i]` is the
-    /// permit count of `ResourceId(i)`).
+    /// permit count of `ResourceId(i)`). Spawns the worker pool.
     pub fn new(capacities: &[u32]) -> Scheduler {
-        Scheduler(Rc::new(RefCell::new(Inner {
+        let inner = Rc::new(RefCell::new(Inner {
             resources: capacities.iter().map(|&c| (c, 0)).collect(),
             peak: vec![0; capacities.len()],
             strands: Vec::new(),
             ready: VecDeque::new(),
             events: Vec::new(),
             in_flight: 0,
-        })))
+        }));
+        let n_workers = std::thread::available_parallelism()
+            .map_or(4, |n| n.get())
+            .clamp(1, 16);
+        let work: Arc<(Mutex<WorkQueue>, Condvar)> = Arc::new((
+            Mutex::new(WorkQueue {
+                items: VecDeque::new(),
+                closed: false,
+            }),
+            Condvar::new(),
+        ));
+        let (result_tx, result_rx) = mpsc::channel::<(StrandId, WorkerResult)>();
+        let handles: Vec<_> = (0..n_workers)
+            .map(|_| {
+                let work = Arc::clone(&work);
+                let result_tx = result_tx.clone();
+                std::thread::spawn(move || worker_loop(&work, &result_tx))
+            })
+            .collect();
+        drop(result_tx); // only the workers' clones remain
+        Scheduler(
+            inner,
+            Rc::new(Pool {
+                work,
+                result_rx: RefCell::new(result_rx),
+                handles: RefCell::new(handles),
+            }),
+        )
     }
 
     /// Register a strand on `resource` running `fut`. It does **not** run until
@@ -209,36 +257,19 @@ impl Scheduler {
         }
     }
 
-    /// Drive demanded strands to quiescence on a worker pool: admit ready strands
-    /// up to each resource's capacity, hand their futures to workers that poll them
-    /// in parallel, release permits as they park/finish. Returns when nothing more
-    /// can make progress (all done or all parked).
+    /// Drive demanded strands to quiescence on the persistent worker pool: admit
+    /// ready strands up to each resource's capacity, hand their futures to workers
+    /// that poll them in parallel, release permits as they park/finish. Returns when
+    /// nothing more can make progress (all done or all parked); the workers stay
+    /// alive (idle on the queue condvar) for the next `run()`.
     pub fn run(&self) {
-        let n_workers = std::thread::available_parallelism()
-            .map_or(4, |n| n.get())
-            .clamp(1, 16);
-        let work: Arc<(Mutex<WorkQueue>, Condvar)> = Arc::new((
-            Mutex::new(WorkQueue {
-                items: VecDeque::new(),
-                closed: false,
-            }),
-            Condvar::new(),
-        ));
-        let (result_tx, result_rx) = mpsc::channel::<(StrandId, WorkerResult)>();
-        let handles: Vec<_> = (0..n_workers)
-            .map(|_| {
-                let work = Arc::clone(&work);
-                let result_tx = result_tx.clone();
-                std::thread::spawn(move || worker_loop(&work, &result_tx))
-            })
-            .collect();
-        drop(result_tx); // only the workers' clones remain
-
+        let pool = &self.1;
+        let result_rx = pool.result_rx.borrow();
         loop {
             // Hand every admittable strand to the pool (permit-gated).
             while let Some(item) = self.admit_one() {
-                work.0.lock().unwrap().items.push_back(item);
-                work.1.notify_one();
+                pool.work.0.lock().unwrap().items.push_back(item);
+                pool.work.1.notify_one();
             }
             // Quiescent when nothing is running and nothing more is admittable.
             if self.0.borrow().in_flight == 0 {
@@ -249,16 +280,6 @@ impl Scheduler {
                 .recv()
                 .expect("a result while strands are in flight");
             self.complete(id, res);
-        }
-
-        // Close the queue and join the pool.
-        {
-            let mut q = work.0.lock().unwrap();
-            q.closed = true;
-        }
-        work.1.notify_all();
-        for h in handles {
-            let _ = h.join();
         }
     }
 
