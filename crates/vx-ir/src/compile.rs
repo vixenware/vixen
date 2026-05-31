@@ -117,32 +117,24 @@ pub fn inject_implicit_stdlib_imports(program: &mut crate::build::VirProgram) {
     inject_prelude(program, &stdlib, &[primary]);
 }
 
-/// Compile Vixen source text to an executable program.
-///
-/// Runs the full pipeline: parse → VIR build (with stdlib) → type collection →
-/// name resolution → type checking → capability checking → capture analysis →
-/// entry lookup → demand analysis → lowering.
-///
-/// The returned `ExecutableProgram` has `program.entry` set to the body of
-/// `function_name` in the primary source unit.
-/// Observes compilation-pipeline phases as they complete, with timing and
-/// best-effort counts. This is the *emission seam* on the compiler side: a
-/// deeply-nested phase reports through these callbacks without the compiler
-/// knowing anything about how (or whether) it is surfaced. All methods default
-/// to no-ops, so non-observing callers pay nothing.
+/// Observes semantic-pipeline phases as they complete, with timing and
+/// best-effort counts. The *emission seam* on the compiler side: a deeply-nested
+/// phase reports through these callbacks without the compiler knowing how (or
+/// whether) it is surfaced. All methods default to no-ops.
 pub trait CompileObserver {
     fn parsed(&mut self, _elapsed: Duration, _cst_nodes: u64, _bytes: u64) {}
     fn name_resolved(&mut self, _elapsed: Duration) {}
     fn type_checked(&mut self, _elapsed: Duration) {}
     fn capability_checked(&mut self, _elapsed: Duration) {}
-    fn demand_analyzed(&mut self, _elapsed: Duration) {}
-    fn lowered(&mut self, _elapsed: Duration, _bodies: u64, _kernel_ops: u64) {}
 }
 
 /// A `CompileObserver` that ignores everything.
 pub struct NoopObserver;
 impl CompileObserver for NoopObserver {}
 
+/// Run the semantic front-end on `source`, returning the checked [`FrontEnd`] or
+/// the first [`CompileError`]. `function_name` must name a function in the primary
+/// unit (else [`CompileError::MissingEntry`]).
 pub fn compile_source(source: &str, function_name: &str) -> Result<FrontEnd, CompileError> {
     compile_source_observed(source, function_name, &mut NoopObserver)
 }
