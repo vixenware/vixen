@@ -4034,6 +4034,7 @@ dependencies = [
  "facet",
  "facet-json",
  "tokio",
+ "vox",
  "vx-ir",
  "vx-parser",
  "vx-stdlib",

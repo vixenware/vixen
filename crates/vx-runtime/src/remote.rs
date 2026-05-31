@@ -5,33 +5,38 @@
 //! unproduced part **blocks** until it lands, and a part the producer never makes
 //! **poisons**. Nothing is shipped eagerly or whole.
 //!
-//! This module is the model plus a two-peer harness. The canonical test is **Cargo
-//! pipelining**: a producing tree serves `libA.rmeta` to a consumer on another peer
-//! *while `libA.rlib` is still being produced* — exactly what an atomic / resolve-
-//! at-completion output tree cannot do, and the workload the whole system exists to
-//! serve. The transport here is an in-process async duplex (two tasks + channels);
-//! it is faithful to the *semantics* (locality is incidental — §2), and the real
-//! wire (vox) slots in behind the same [`RemoteHandle`] surface later.
+//! The producer↔consumer exchange runs over **vox** (`transport-local`, an
+//! in-process memory link) — the real RPC wire the rest of the system speaks, not
+//! ad-hoc channels. Locality is incidental (§2): the same [`Producing`] service and
+//! [`ProducingClient`] surface work over TCP/WebSocket to an actual executor.
+//!
+//! The canonical test is **Cargo pipelining**: a producing tree serves
+//! `libA.rmeta` to a consumer while `libA.rlib` is still being produced — exactly
+//! what an atomic / resolve-at-completion output tree cannot do.
 //!
 //! Not yet wired into the evaluator — forcing a [`RemoteHandle`] part is the async
 //! analogue of `eval`'s `force`, and integrating it (a strand suspends on a remote
 //! part) comes after the semantics are pinned here.
 
 use std::collections::HashMap;
+use std::sync::{Arc, Mutex};
 
-use tokio::sync::{mpsc, oneshot};
+use facet::Facet;
+use tokio::sync::Notify;
 
 /// A part of a produced value, addressed by the consumer. Resolution granularity
 /// is per-kind (§3): a tree by **path**; later, a stream by chunk, an observer by
 /// field. Scalars have no parts (they cross resolved).
-#[derive(Debug, Clone, PartialEq, Eq, Hash)]
+#[derive(Facet, Debug, Clone, PartialEq, Eq, Hash)]
+#[repr(u8)]
 pub enum PartKey {
     /// A path within a producing tree — `tree[path]`.
     TreePath(String),
 }
 
 /// The producer's answer for a demanded part.
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Facet, Debug, Clone, PartialEq, Eq)]
+#[repr(u8)]
 pub enum Part {
     /// The part's bytes (a tree path's file content).
     Bytes(Vec<u8>),
@@ -40,40 +45,98 @@ pub enum Part {
     Absent(String),
 }
 
-/// One demand crossing the connection: which part, and a one-shot channel for the
-/// producer's answer.
-struct Demand {
-    key: PartKey,
-    reply: oneshot::Sender<Part>,
+/// The cross-executor RPC surface: the consumer demands a part; the producer holds
+/// the call open until it yields that part (or finishes without it). One blocking
+/// request-response per part — the demand-pull model, over the wire.
+#[vox::service]
+pub trait Producing {
+    /// Force one part. Blocks (server-side) until the producer writes it, then
+    /// returns its bytes; returns [`Part::Absent`] if the producer finishes first.
+    async fn force(&self, part: PartKey) -> Part;
 }
 
-/// What the producer is told to do (driven by the running `exec` / sandbox writes;
-/// in the harness, by the test).
-enum Control {
-    /// A path has been written — its bytes are now available.
-    Write { key: PartKey, bytes: Vec<u8> },
-    /// The producer has finished; no further parts will appear.
-    Finish,
+/// The producer's shared state: written parts + a `Notify` that wakes the blocked
+/// `force` calls whenever a part lands or the producer finishes.
+struct Shared {
+    state: Mutex<ProducerState>,
+    notify: Notify,
 }
 
-/// The **consumer** side of a producing value — a handle to a producer on another
-/// peer. It holds only a demand channel; it cannot see the producer's state and
-/// must request every part. Cloneable, so several strands demand parts concurrently.
+#[derive(Default)]
+struct ProducerState {
+    written: HashMap<PartKey, Vec<u8>>,
+    finished: bool,
+}
+
+/// The **producer side** of the [`Producing`] service — a running exec's output.
+/// Each `force` call awaits the part it wants; the [`Producer`] control writes
+/// parts (waking awaiters) over time.
+#[derive(Clone)]
+pub struct ProducerService(Arc<Shared>);
+
+impl Producing for ProducerService {
+    async fn force(&self, part: PartKey) -> Part {
+        loop {
+            // Register interest *before* checking, so a write between the check and
+            // the await can't be missed (tokio's documented `Notified::enable`).
+            let notified = self.0.notify.notified();
+            tokio::pin!(notified);
+            {
+                let st = self.0.state.lock().unwrap();
+                if let Some(bytes) = st.written.get(&part) {
+                    return Part::Bytes(bytes.clone());
+                }
+                if st.finished {
+                    return Part::Absent(format!("producer finished without {part:?}"));
+                }
+                notified.as_mut().enable();
+            } // lock released before awaiting — the future stays `Send`
+            notified.await;
+        }
+    }
+}
+
+/// The **producer control**: make parts available over time. Shares state with the
+/// served [`ProducerService`]; writing a part wakes any consumer blocked on it.
+#[derive(Clone)]
+pub struct Producer(Arc<Shared>);
+
+impl Producer {
+    /// A path has been produced — its bytes are now available to consumers.
+    pub fn write_path(&self, path: &str, bytes: &[u8]) {
+        self.0
+            .state
+            .lock()
+            .unwrap()
+            .written
+            .insert(PartKey::TreePath(path.to_string()), bytes.to_vec());
+        self.0.notify.notify_waiters();
+    }
+
+    /// The producer is done — no more parts. Any consumer blocked on an unwritten
+    /// part now gets [`Part::Absent`].
+    pub fn finish(&self) {
+        self.0.state.lock().unwrap().finished = true;
+        self.0.notify.notify_waiters();
+    }
+}
+
+/// The **consumer side** — a handle to a producer on another peer, backed by a vox
+/// client. It can only demand parts (it cannot see the producer's state). Cloneable
+/// so several strands demand parts concurrently.
 #[derive(Clone)]
 pub struct RemoteHandle {
-    demands: mpsc::UnboundedSender<Demand>,
+    client: Arc<ProducingClient>,
 }
 
 impl RemoteHandle {
-    /// Force one part: send the demand across the connection and await the answer.
-    /// **Blocks** (suspends this strand) until the producer yields the part or
-    /// declares it [`Part::Absent`]. `Err` only if the connection is gone.
+    /// Force one part: a vox `force` call that blocks until the producer yields it
+    /// or declares it [`Part::Absent`]. `Err` only if the connection is gone.
     pub async fn force(&self, key: PartKey) -> Result<Part, &'static str> {
-        let (reply, rx) = oneshot::channel();
-        self.demands
-            .send(Demand { key, reply })
-            .map_err(|_| "producer connection closed")?;
-        rx.await.map_err(|_| "producer dropped the demand")
+        self.client
+            .force(key)
+            .await
+            .map_err(|_| "producer connection closed")
     }
 
     /// Force a tree path (`tree[path]`).
@@ -82,104 +145,62 @@ impl RemoteHandle {
     }
 }
 
-/// The **producer** side — a running `exec`'s output being written over time. Each
-/// [`write_path`](Self::write_path) makes a part available (fulfilling any blocked
-/// demands for it); [`finish`](Self::finish) poisons every still-blocked demand.
-/// This is the running sandbox's VFS, abstracted to the part level.
-pub struct Producer {
-    control: mpsc::UnboundedSender<Control>,
-}
+/// Stand up a producer and a consumer connected by an in-process vox memory link
+/// (the same `establish` dance the daemon uses for in-process services). Returns
+/// the consumer-side [`RemoteHandle`] and the producer-side [`Producer`]; they
+/// share no memory — only the vox connection.
+pub async fn channel() -> (RemoteHandle, Producer) {
+    let shared = Arc::new(Shared {
+        state: Mutex::new(ProducerState::default()),
+        notify: Notify::new(),
+    });
+    let service = ProducerService(Arc::clone(&shared));
 
-impl Producer {
-    /// A path has been produced — its bytes are now available to consumers.
-    pub fn write_path(&self, path: &str, bytes: &[u8]) {
-        let _ = self.control.send(Control::Write {
-            key: PartKey::TreePath(path.to_string()),
-            bytes: bytes.to_vec(),
-        });
-    }
-
-    /// The producer is done — no more parts. Any demand still blocked on an
-    /// unwritten part now poisons ([`Part::Absent`]).
-    pub fn finish(&self) {
-        let _ = self.control.send(Control::Finish);
-    }
-}
-
-/// Stand up a producer on its own task and return the two ends of the connection:
-/// the consumer-side [`RemoteHandle`] and the producer-side [`Producer`]. They
-/// share no memory — only the demand and control channels, modelling two
-/// executors. The task ends when both ends are dropped.
-pub fn channel() -> (RemoteHandle, Producer) {
-    let (demand_tx, demand_rx) = mpsc::unbounded_channel::<Demand>();
-    let (control_tx, control_rx) = mpsc::unbounded_channel::<Control>();
-    tokio::spawn(serve(demand_rx, control_rx));
-    (
-        RemoteHandle { demands: demand_tx },
-        Producer {
-            control: control_tx,
-        },
-    )
-}
-
-/// The producer task: answer a demand for a written part at once; **park** a demand
-/// for an unwritten part until a `Write` produces it; on `Finish`, poison every
-/// still-parked demand. (The running sandbox VFS, at the part level.)
-async fn serve(
-    mut demands: mpsc::UnboundedReceiver<Demand>,
-    mut control: mpsc::UnboundedReceiver<Control>,
-) {
-    let mut written: HashMap<PartKey, Vec<u8>> = HashMap::new();
-    let mut parked: HashMap<PartKey, Vec<oneshot::Sender<Part>>> = HashMap::new();
-    let mut finished = false;
-
-    loop {
-        tokio::select! {
-            Some(d) = demands.recv() => {
-                if let Some(bytes) = written.get(&d.key) {
-                    let _ = d.reply.send(Part::Bytes(bytes.clone()));
-                } else if finished {
-                    let _ = d.reply.send(Part::Absent(format!("producer finished without {:?}", d.key)));
-                } else {
-                    parked.entry(d.key).or_default().push(d.reply);
-                }
-            }
-            Some(c) = control.recv() => {
-                match c {
-                    Control::Write { key, bytes } => {
-                        if let Some(waiters) = parked.remove(&key) {
-                            for w in waiters {
-                                let _ = w.send(Part::Bytes(bytes.clone()));
-                            }
-                        }
-                        written.insert(key, bytes);
+    let (client_link, server_link) = vox::memory_link_pair(64);
+    tokio::spawn(async move {
+        let acceptor = vox::acceptor_fn(
+            move |request: &vox::ConnectionRequest, connection: vox::PendingConnection| {
+                match request.service() {
+                    "Producing" => {
+                        connection.handle_with(ProducingDispatcher::new(service.clone()));
+                        Ok(())
                     }
-                    Control::Finish => {
-                        finished = true;
-                        for (key, waiters) in parked.drain() {
-                            for w in waiters {
-                                let _ = w.send(Part::Absent(format!("producer finished without {key:?}")));
-                            }
-                        }
-                    }
+                    _ => Err(vec![]),
                 }
-            }
-            else => break, // both ends dropped
+            },
+        );
+        if let Ok(client) = vox::acceptor_on(server_link)
+            .on_connection(acceptor)
+            .establish::<vox::NoopClient>()
+            .await
+        {
+            client.caller.closed().await;
         }
-    }
+    });
+
+    let client = vox::initiator_on(client_link, vox::TransportMode::Bare)
+        .establish::<ProducingClient>()
+        .await
+        .expect("establish in-process Producing client");
+    (
+        RemoteHandle {
+            client: Arc::new(client),
+        },
+        Producer(shared),
+    )
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
 
-    /// The canonical cross-executor test: Cargo pipelining. A producing tree serves
-    /// `libA.rmeta` (end-of-type-check) to a consumer on another peer while
-    /// `libA.rlib` (codegen) is still being produced — and `rlib` blocks until it
-    /// lands. No atomic / resolve-at-completion output tree can pass this.
+    /// The canonical cross-executor test: Cargo pipelining, over vox. A producing
+    /// tree serves `libA.rmeta` (end-of-type-check) to a consumer while `libA.rlib`
+    /// (codegen) is still being produced — and `rlib` blocks until it lands. No
+    /// atomic / resolve-at-completion output tree can pass this.
     #[tokio::test]
     async fn cargo_pipelining_serves_rmeta_before_rlib() {
-        let (handle, producer) = channel();
+        let (handle, producer) = channel().await;
 
         // `rustc` on executor A emits rmeta at end-of-type-check; rlib comes later.
         producer.write_path("libA.rmeta", b"META");
@@ -191,9 +212,8 @@ mod tests {
             "rmeta resolves while rlib is still being produced"
         );
 
-        // Forcing rlib blocks: spawn it, confirm it cannot finish (rlib unwritten —
-        // its reply only fires on the write below, so this is deterministic, not a
-        // timing race).
+        // Forcing rlib blocks (the vox call holds open server-side): spawn it,
+        // confirm it can't finish until the write below, then let it land.
         let h2 = handle.clone();
         let rlib = tokio::spawn(async move { h2.force_path("libA.rlib").await });
         tokio::task::yield_now().await;
@@ -202,7 +222,6 @@ mod tests {
             "rlib blocks while codegen is in flight"
         );
 
-        // Codegen finishes: the blocked force resolves.
         producer.write_path("libA.rlib", b"LIB");
         assert_eq!(
             rlib.await.unwrap().unwrap(),
@@ -211,11 +230,10 @@ mod tests {
         );
     }
 
-    /// Forcing a part the producer never makes poisons once it finishes — the
-    /// strand was blocked, then released as [`Part::Absent`].
+    /// Forcing a part the producer never makes poisons once it finishes.
     #[tokio::test]
     async fn unproduced_part_poisons_when_the_producer_finishes() {
-        let (handle, producer) = channel();
+        let (handle, producer) = channel().await;
         producer.write_path("out", b"ok");
 
         let h2 = handle.clone();
@@ -242,9 +260,8 @@ mod tests {
     /// their own time, not in lockstep.
     #[tokio::test]
     async fn parts_resolve_independently_and_out_of_order() {
-        let (handle, producer) = channel();
+        let (handle, producer) = channel().await;
 
-        // Three consumers block on three different paths before any is written.
         let (a, b, c) = (handle.clone(), handle.clone(), handle.clone());
         let fa = tokio::spawn(async move { a.force_path("a").await });
         let fb = tokio::spawn(async move { b.force_path("b").await });
