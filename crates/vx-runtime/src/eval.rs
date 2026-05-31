@@ -27,7 +27,7 @@ use vx_ir::stmt::StmtKind;
 use vx_types::{TypeEnv, TypeId};
 
 use crate::analyze::build_graph_indexed;
-use crate::graph::{DemandGraph, NodeId};
+use crate::graph::{DemandGraph, NodeId, Span};
 use crate::kernel;
 use crate::lower::lower_node;
 
@@ -43,9 +43,20 @@ fn assert_eq[T](got: T, want: T) -> Bool (
 )
 "#;
 
-/// A poison — a detonation with a reason. Propagates like an error.
+/// A poison — a detonation with a reason and **where in the source** it
+/// originated (I6). Propagates like an error; `eval` attaches the span of the
+/// expression a poison surfaces at (the innermost one wins).
 #[derive(Debug, Clone)]
-pub struct Poison(pub String);
+pub struct Poison {
+    pub reason: String,
+    pub span: Option<Span>,
+}
+
+/// Construct a span-less poison (the span is attached as it bubbles through
+/// [`Evaluator::eval`]).
+fn poison(reason: String) -> Poison {
+    Poison { reason, span: None }
+}
 
 /// A runtime value. Compound fields are [`Thunk`]s, so they stay unforced until
 /// demanded (`r[eval.pending]`/`r[eval.forcing]`).
@@ -60,11 +71,12 @@ pub enum Value {
     Unit,
 }
 
-/// The outcome of evaluating a test body: clean, or poisoned.
+/// The outcome of evaluating a test body: clean, or poisoned (with the source
+/// span the poison originated at — I6).
 #[derive(Debug)]
 pub enum Outcome {
     Clean(Value),
-    Poisoned(String),
+    Poisoned { reason: String, span: Option<Span> },
 }
 
 type Env = HashMap<BindingId, Thunk>;
@@ -141,7 +153,7 @@ impl Evaluator<'_> {
             match &*st {
                 ThunkState::Done(r) => return r.clone(),
                 ThunkState::Forcing => {
-                    return Err(Poison(
+                    return Err(poison(
                         "circular dependency (a value demands itself)".into(),
                     ));
                 }
@@ -159,18 +171,40 @@ impl Evaluator<'_> {
         result
     }
 
+    /// Evaluate an expression, attaching `e`'s source span to any poison that
+    /// surfaces here without one — the innermost expression wins, so a poison
+    /// reports where it originated (I6). Kernel poisons already carry their span
+    /// and are left untouched.
+    fn eval(&self, e: ExprId, env: &Env) -> Result<Value, Poison> {
+        self.eval_inner(e, env).map_err(|mut p| {
+            if p.span.is_none() {
+                p.span = self.expr_span(e);
+            }
+            p
+        })
+    }
+
+    /// The source span (byte range) of an expression.
+    fn expr_span(&self, e: ExprId) -> Option<Span> {
+        let range = self.program.arena[e].span.range;
+        Some(Span {
+            start: range.start().into(),
+            end: range.end().into(),
+        })
+    }
+
     /// Evaluate an expression to a value. Compound construction is lazy (fields
     /// become thunks); only demanded positions are forced. Scalar *compute*
     /// sub-expressions (`+`, `<`, `if`, …) run as kernels when they lower; the
     /// match below is the fallback for everything else.
-    fn eval(&self, e: ExprId, env: &Env) -> Result<Value, Poison> {
+    fn eval_inner(&self, e: ExprId, env: &Env) -> Result<Value, Poison> {
         if let Some(result) = self.dispatch_scalar(e, env) {
             return result;
         }
         let prog = self.program;
         match &prog.arena[e].kind {
             // 💣 — poisons the instant it is evaluated (i.e. forced).
-            ExprKind::Bomb => Err(Poison("💣 forced".into())),
+            ExprKind::Bomb => Err(poison("💣 forced".into())),
 
             // Explicit failure — poisons whenever reached.
             ExprKind::Fail(fx) => {
@@ -181,17 +215,17 @@ impl Evaluator<'_> {
                     },
                     None => "fail".into(),
                 };
-                Err(Poison(msg))
+                Err(poison(msg))
             }
 
             ExprKind::Literal(lit) => match &lit.value {
                 LitKind::Int { raw } => raw
                     .parse::<u64>()
                     .map(Value::U64)
-                    .map_err(|_| Poison(format!("bad int literal `{raw}`"))),
+                    .map_err(|_| poison(format!("bad int literal `{raw}`"))),
                 LitKind::Bool(b) => Ok(Value::Bool(*b)),
                 LitKind::String { raw } => Ok(Value::Str(Rc::from(raw.as_str()))),
-                LitKind::Float { raw } => Err(Poison(format!("floats not yet supported: {raw}"))),
+                LitKind::Float { raw } => Err(poison(format!("floats not yet supported: {raw}"))),
             },
 
             // Lazy data: fields are thunks, NOT forced here.
@@ -224,7 +258,7 @@ impl Evaluator<'_> {
                 let container = self.eval(ix.receiver, env)?;
                 let idx = match self.eval(ix.index, env)? {
                     Value::U64(n) => n as usize,
-                    other => return Err(Poison(format!("non-integer index: {other:?}"))),
+                    other => return Err(poison(format!("non-integer index: {other:?}"))),
                 };
                 self.project_index(&container, idx)
             }
@@ -246,7 +280,7 @@ impl Evaluator<'_> {
                 let v = self.eval(px.operand, env)?;
                 match v {
                     Value::Bool(b) => Ok(Value::Bool(!b)),
-                    other => Err(Poison(format!("unsupported prefix on {other:?}"))),
+                    other => Err(poison(format!("unsupported prefix on {other:?}"))),
                 }
             }
 
@@ -257,7 +291,7 @@ impl Evaluator<'_> {
                     Some(eb) => self.eval(eb, env),
                     None => Ok(Value::Unit),
                 },
-                other => Err(Poison(format!("non-bool condition: {other:?}"))),
+                other => Err(poison(format!("non-bool condition: {other:?}"))),
             },
 
             // Interpolated string: force each part, concatenate.
@@ -270,7 +304,7 @@ impl Evaluator<'_> {
                             Value::Str(s) => out.push_str(&s),
                             Value::U64(n) => out.push_str(&n.to_string()),
                             Value::Bool(b) => out.push_str(&b.to_string()),
-                            other => return Err(Poison(format!("can't interpolate {other:?}"))),
+                            other => return Err(poison(format!("can't interpolate {other:?}"))),
                         },
                     }
                 }
@@ -304,16 +338,16 @@ impl Evaluator<'_> {
             ExprKind::NameRef(n) => match n.resolved {
                 Some(DefTarget::Binding(bid)) => match env.get(&bid) {
                     Some(th) => self.force(th),
-                    None => Err(Poison(format!("unbound `{}`", n.name))),
+                    None => Err(poison(format!("unbound `{}`", n.name))),
                 },
-                _ => Err(Poison(format!("unresolved name `{}`", n.name))),
+                _ => Err(poison(format!("unresolved name `{}`", n.name))),
             },
 
             // A call: resolve the callee to a function body and evaluate it with
             // the arguments bound (lazily) to its parameters.
             ExprKind::Call(c) => self.call(c.callee, c.args.iter().map(|a| a.expr), env),
 
-            other => Err(Poison(format!(
+            other => Err(poison(format!(
                 "unsupported expression: {}",
                 kind_name(other)
             ))),
@@ -362,10 +396,11 @@ impl Evaluator<'_> {
             } else {
                 Value::U64(w)
             }),
-            // The kernel poison carries a source span (I6); eval's `Poison` is a
-            // bare string for now, so take the reason. (Threading the span into
-            // eval's `Outcome` is the follow-up.)
-            Err(p) => Err(Poison(p.reason)),
+            // Propagate the kernel poison's source span (I6) into eval's poison.
+            Err(p) => Err(Poison {
+                reason: p.reason,
+                span: p.span,
+            }),
         })
     }
 
@@ -428,11 +463,11 @@ impl Evaluator<'_> {
             ExprKind::NameRef(n) => match n.resolved {
                 Some(DefTarget::Item(item)) => match &prog.arena[item].kind {
                     ItemKind::Function(f) => f.body,
-                    _ => return Err(Poison(format!("`{}` is not callable", n.name))),
+                    _ => return Err(poison(format!("`{}` is not callable", n.name))),
                 },
-                _ => return Err(Poison(format!("unresolved call `{}`", n.name))),
+                _ => return Err(poison(format!("unresolved call `{}`", n.name))),
             },
-            _ => return Err(Poison("indirect calls not yet supported".into())),
+            _ => return Err(poison("indirect calls not yet supported".into())),
         };
         // Bind params to argument thunks (captured in the *caller's* env + body —
         // lazy). The callee body becomes current while its expressions evaluate;
@@ -457,11 +492,11 @@ impl Evaluator<'_> {
     fn project_index(&self, container: &Value, idx: usize) -> Result<Value, Poison> {
         let slot = match container {
             Value::Tuple(ts) | Value::Array(ts) => ts.get(idx),
-            other => return Err(Poison(format!("can't index {other:?}"))),
+            other => return Err(poison(format!("can't index {other:?}"))),
         };
         match slot {
             Some(th) => self.force(th),
-            None => Err(Poison(format!("index {idx} out of bounds"))),
+            None => Err(poison(format!("index {idx} out of bounds"))),
         }
     }
 
@@ -469,9 +504,9 @@ impl Evaluator<'_> {
         match container {
             Value::Struct(fields) => match fields.iter().find(|(n, _)| n == name) {
                 Some((_, th)) => self.force(th),
-                None => Err(Poison(format!("no field `{name}`"))),
+                None => Err(poison(format!("no field `{name}`"))),
             },
-            other => Err(Poison(format!("can't access `.{name}` on {other:?}"))),
+            other => Err(poison(format!("can't access `.{name}` on {other:?}"))),
         }
     }
 
@@ -486,23 +521,23 @@ impl Evaluator<'_> {
             Neq => Ok(Value::Bool(!self.value_eq(&l, &r)?)),
             And => match (l, r) {
                 (Value::Bool(a), Value::Bool(b)) => Ok(Value::Bool(a && b)),
-                _ => Err(Poison("`&&` wants bools".into())),
+                _ => Err(poison("`&&` wants bools".into())),
             },
             Or => match (l, r) {
                 (Value::Bool(a), Value::Bool(b)) => Ok(Value::Bool(a || b)),
-                _ => Err(Poison("`||` wants bools".into())),
+                _ => Err(poison("`||` wants bools".into())),
             },
             Concat => match (&l, &r) {
                 (Value::Str(a), Value::Str(b)) => {
                     Ok(Value::Str(Rc::from(format!("{a}{b}").as_str())))
                 }
-                _ => Err(Poison("`++` wants strings".into())),
+                _ => Err(poison("`++` wants strings".into())),
             },
             Add | Sub | Mul | Div | Rem | Lt | LtEq | Gt | GtEq => {
                 let (a, b) = match (int(&l), int(&r)) {
                     (Some(a), Some(b)) => (a, b),
                     _ => {
-                        return Err(Poison(format!(
+                        return Err(poison(format!(
                             "`{op:?}` wants integers, got {l:?} / {r:?}"
                         )));
                     }
@@ -511,9 +546,9 @@ impl Evaluator<'_> {
                     Add => Value::U64(a.wrapping_add(b)),
                     Sub => Value::U64(a.wrapping_sub(b)),
                     Mul => Value::U64(a.wrapping_mul(b)),
-                    Div if b == 0 => return Err(Poison("divide by zero".into())),
+                    Div if b == 0 => return Err(poison("divide by zero".into())),
                     Div => Value::U64(a / b),
-                    Rem if b == 0 => return Err(Poison("remainder by zero".into())),
+                    Rem if b == 0 => return Err(poison("remainder by zero".into())),
                     Rem => Value::U64(a % b),
                     Lt => Value::Bool(a < b),
                     LtEq => Value::Bool(a <= b),
@@ -522,7 +557,7 @@ impl Evaluator<'_> {
                     _ => unreachable!(),
                 })
             }
-            Pipe => Err(Poison("`|>` not yet supported".into())),
+            Pipe => Err(poison("`|>` not yet supported".into())),
         }
     }
 
@@ -650,7 +685,10 @@ pub fn run_with_dispatches(source: &str, entry: &str) -> Result<(Outcome, u64), 
     };
     let outcome = match ev.eval(root, &Env::new()) {
         Ok(v) => Outcome::Clean(v),
-        Err(p) => Outcome::Poisoned(p.0),
+        Err(p) => Outcome::Poisoned {
+            reason: p.reason,
+            span: p.span,
+        },
     };
     Ok((outcome, ev.dispatches.get()))
 }
@@ -667,7 +705,7 @@ mod tests {
     }
     fn poisons(src: &str, f: &str) {
         match run(src, f) {
-            Ok(Outcome::Poisoned(_)) => {}
+            Ok(Outcome::Poisoned { .. }) => {}
             other => panic!("{f}: expected poison, got {other:?}"),
         }
     }
@@ -828,5 +866,33 @@ mod tests {
             dispatches, 0,
             "string args must fall back, not run the word kernel"
         );
+    }
+
+    /// I6 at the eval boundary: a poison reaching `Outcome` carries a source span —
+    /// from a dispatched kernel (divide-by-zero) *and* from the tree-walker (a
+    /// forced bomb). The spanned source text is the token that detonated.
+    #[test]
+    fn i6_eval_outcome_carries_the_source_span() {
+        for (src, marker) in [
+            ("fn f() -> U64 ( 10 / 0 )", "/"),       // kernel-dispatched poison
+            ("fn f() -> U64 ( (42, 💣)[1] )", "💣"), // tree-walked poison
+        ] {
+            let full = format!("{PRELUDE}\n{src}");
+            match run(src, "f").unwrap() {
+                Outcome::Poisoned {
+                    span: Some(s),
+                    reason,
+                } => {
+                    let text = full
+                        .get(s.start as usize..s.end as usize)
+                        .unwrap_or_else(|| panic!("{src}: span {s:?} out of bounds"));
+                    assert!(
+                        text.contains(marker),
+                        "{src}: span text {text:?} (reason {reason:?}) should contain {marker:?}"
+                    );
+                }
+                other => panic!("{src}: expected poisoned-with-span, got {other:?}"),
+            }
+        }
     }
 }

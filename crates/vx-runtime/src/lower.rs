@@ -427,7 +427,7 @@ mod tests {
                 Outcome::Clean(Value::U64(n)) => Ok(n),
                 Outcome::Clean(Value::Bool(b)) => Ok(b as Word),
                 Outcome::Clean(other) => panic!("{src}: non-scalar value {other:?}"),
-                Outcome::Poisoned(_) => Err(()),
+                Outcome::Poisoned { .. } => Err(()),
             };
             let lowered = lower_run(src, "f", &[]).map_err(|_| ());
             assert_eq!(
