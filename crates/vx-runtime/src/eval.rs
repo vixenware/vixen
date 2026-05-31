@@ -704,67 +704,17 @@ pub fn run_in_mode(source: &str, entry: &str, mode: KernelMode) -> Result<(Outco
 mod tests {
     use super::*;
 
-    fn clean(src: &str, f: &str) {
-        match run(src, f) {
-            Ok(Outcome::Clean(_)) => {}
-            other => panic!("{f}: expected clean, got {other:?}"),
-        }
-    }
-    fn poisons(src: &str, f: &str) {
-        match run(src, f) {
-            Ok(Outcome::Poisoned { .. }) => {}
-            other => panic!("{f}: expected poison, got {other:?}"),
-        }
-    }
-
-    // The real self-hosting unit tests, run on the demand-driven engine.
-    const DEMAND_BASIS: &str = include_str!("../../vx-rt/tests/lang/demand_basis.vx");
-    const WHICH_FIELD: &str = include_str!("../../vx-rt/tests/lang/which_field_which_graph.vx");
-    const POISONS: &str = include_str!("../../vx-rt/tests/lang/poisons.vx");
-
-    #[test]
-    fn demand_basis_all_clean() {
-        for f in [
-            "unused_tuple_field_never_runs",
-            "unused_struct_field_never_runs",
-            "chained_projection_skips_dead_siblings",
-            "deep_named_field_projection",
-        ] {
-            clean(DEMAND_BASIS, f);
-        }
-    }
-
-    #[test]
-    fn which_field_all_clean() {
-        for f in [
-            "demanding_fast_skips_slow",
-            "each_field_resolves_independently",
-            "demanding_index_selects_branch",
-        ] {
-            clean(WHICH_FIELD, f);
-        }
-    }
-
-    #[test]
-    fn poisons_all_poison() {
-        for f in [
-            "explicit_fail_detonates",
-            "forcing_a_bomb_detonates",
-            "false_assertion_detonates",
-        ] {
-            poisons(POISONS, f);
-        }
-    }
-
-    // ---- kernel dispatch on the real eval path (rebuild-plan step: wire-in) ----
+    // The `.vx` language + demand tests live in `tests/lang/*.vx`, run by the
+    // self-hosting `lang_suite` harness across every `KernelMode`. The tests below
+    // assert engine internals a program can't observe (dispatch counts, the
+    // tree-walk fallback, the I6 span), so they stay in Rust.
 
     #[test]
     fn asserts_dispatch_to_the_kernel() {
-        // The prelude's `assert_eq` is a scalar `if`-kernel; the demand_basis tests
-        // call it with U64 args, so it runs as compiled code on the real path — a
-        // dispatch fires, and the bomb in the dead field still never detonates.
+        // `assert_eq` is a scalar `if`-kernel; called with U64 args it runs as
+        // compiled code on the real eval path — a dispatch fires.
         let (outcome, dispatches) =
-            run_with_dispatches(DEMAND_BASIS, "unused_tuple_field_never_runs").unwrap();
+            run_with_dispatches("fn t() -> Bool ( assert_eq(20 + 22, 42) )", "t").unwrap();
         assert!(
             matches!(outcome, Outcome::Clean(_)),
             "expected clean: {outcome:?}"
@@ -811,12 +761,12 @@ mod tests {
 
     #[test]
     fn sub_expression_dispatches_not_just_whole_bodies() {
-        // `each_field_resolves_independently` is `assert_eq(r.fast + r.slow, 18)`.
         // Two kernels fire: the `r.fast + r.slow` arithmetic SUB-EXPRESSION (the
         // struct projections fold into constants inside one kernel), and the
-        // assert_eq comparison — neither is a whole function body of the caller.
-        let (outcome, dispatches) =
-            run_with_dispatches(WHICH_FIELD, "each_field_resolves_independently").unwrap();
+        // `assert_eq` comparison — neither is a whole function body of the caller.
+        let src = "struct Two { fast: U64, slow: U64 } \
+                   fn t() -> Bool ( let r = Two { fast: 7, slow: 11 }; assert_eq(r.fast + r.slow, 18) )";
+        let (outcome, dispatches) = run_with_dispatches(src, "t").unwrap();
         assert!(
             matches!(outcome, Outcome::Clean(_)),
             "expected clean: {outcome:?}"

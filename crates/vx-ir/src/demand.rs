@@ -152,7 +152,8 @@ pub fn analyze_demand(program: &VirProgram) -> VirDemandResult {
 
 /// Run demand analysis with an explicit entry point (no auto-selection).
 ///
-/// Used by vx-rt where the caller already knows which function to run.
+/// Used where the caller already knows which function to run (the daemon's eager
+/// compile path).
 pub fn analyze_demand_for_entry(program: &VirProgram, entry: BodyId) -> VirDemandResult {
     let arena = &program.arena;
 

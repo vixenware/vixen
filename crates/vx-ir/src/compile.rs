@@ -1,7 +1,7 @@
 //! Shared "source text → ExecutableProgram" compilation pipeline.
 //!
-//! Used by vx-rt and vx-daemon to compile Vixen source text through
-//! the full VIR semantic pipeline.
+//! Used by vx-daemon to compile Vixen source text through the full VIR semantic
+//! pipeline. (The demand-driven `vx-runtime` has its own front-end.)
 
 use std::fmt;
 use std::time::{Duration, Instant};

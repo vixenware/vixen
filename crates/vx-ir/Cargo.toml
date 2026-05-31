@@ -25,4 +25,3 @@ command-grammar-vx = { path = "../../crates-plus/command-grammar-vx" }
 
 [dev-dependencies]
 rowan = "0.16"
-vx-rt = { path = "../vx-rt" }

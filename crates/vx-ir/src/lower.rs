@@ -4,7 +4,7 @@
 //!
 //! This is the VIR replacement for `vx_analysis::exec_slice`. It consumes
 //! a [`VirProgram`] + [`VirDemandResult`] and produces an
-//! [`ExecutableProgram`] that `vx-rt` can evaluate.
+//! [`ExecutableProgram`] that the daemon's eager evaluator can run.
 
 use std::collections::{BTreeMap, BTreeSet, HashMap, HashSet};
 

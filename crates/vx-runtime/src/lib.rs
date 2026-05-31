@@ -5,9 +5,9 @@
 //! by **both** the orchestrator and the executor, so a shipped closure evaluates
 //! the same on either side.
 //!
-//! It **replaces** the eager evaluator (`vx-daemon`'s `runtime_eval` core, the
-//! `vx-ir` back-end `KernelOp`/`lower`/`demand`, and the `vx-rt` crate). Those
-//! are removed at the cutover phase, not before.
+//! It **replaces** the eager evaluator. The standalone `vx-rt` crate is now
+//! removed; `vx-daemon`'s `runtime_eval` core and the `vx-ir` back-end
+//! (`KernelOp`/`lower`/`demand`) remain until the daemon cuts over.
 //!
 //! The pieces, demand-in to value-out:
 //! - [`analyze`] — VIR → the [`graph`] demand graph (with the expr/binding indices
