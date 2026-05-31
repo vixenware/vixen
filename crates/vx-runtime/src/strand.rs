@@ -138,7 +138,7 @@ struct WorkQueue {
 }
 
 /// The scheduler: the boss owns `Inner` (single-threaded); workers only touch the
-/// work queue, the result channel, and `Signal`s. The worker [`Pool`] is spawned
+/// work queue, the result channel, and `Signal`s. The worker `Pool` is spawned
 /// once and reused by every `run()`.
 #[derive(Clone)]
 pub struct Scheduler(Rc<RefCell<Inner>>, Rc<Pool>);

@@ -2,8 +2,8 @@
 //! and building the plan to do so. Carved out of `eval.rs` — this owns the
 //! per-body demand graphs, the per-expression plan cache, the soundness gates, and
 //! the kernel-running. `eval`'s `dispatch_scalar` is the thin hook that, at each
-//! expression, asks for a [`DispatchPlan`], forces the parameter bindings from its
-//! environment, and runs it (see [`run_kernel`]).
+//! expression, asks for a `DispatchPlan`, forces the parameter bindings from its
+//! environment, and runs it (see `run_kernel`).
 //!
 //! This module never depends on `eval` — it speaks VIR, the demand graph, and the
 //! kernel IR. (`scalar_word`, which reads an `eval::Value`, stays in `eval`.)
