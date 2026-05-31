@@ -14,9 +14,12 @@
 //! `libA.rmeta` to a consumer while `libA.rlib` is still being produced — exactly
 //! what an atomic / resolve-at-completion output tree cannot do.
 //!
-//! Not yet wired into the evaluator — forcing a [`RemoteHandle`] part is the async
-//! analogue of `eval`'s `force`, and integrating it (a strand suspends on a remote
-//! part) comes after the semantics are pinned here.
+//! Wired into the scheduler: `strand::force_remote` registers a handle's part,
+//! parks the strand if it isn't resolved, and the boss drives the `force()` here on
+//! its runtime — a strand suspends on a remote part and resumes when it lands (see
+//! `strand.rs` and `tests/remote_parts_on_strands.rs`). What's *not* yet wired is
+//! eval's own `force` calling `force_remote`: eval has no remote values until `exec`
+//! produces a handle, so that join comes with `exec`.
 
 use std::collections::HashMap;
 use std::sync::{Arc, Mutex};

@@ -22,19 +22,28 @@
 //! resumed one back to its home worker; the worker builds/resumes the coroutine in
 //! place and reports done-or-parked.
 //!
+//! The boss also drives **remote parts** (§3): when a strand forces an unresolved
+//! part of a remote handle ([`force_remote`]) it parks, and the boss runs the vox
+//! `force()` on its current-thread runtime, fills the shared registry, and wakes the
+//! strand when the part lands. Sync compute on the workers, async I/O on the boss —
+//! a strand never blocks a worker on the network; it parks and frees its permit.
+//!
 //! Every transition is an [`Event`]; the invariant tests assert over that firehose
 //! — under genuine parallelism. Emit **only what is real** (§8).
 
 use std::backtrace::Backtrace;
 use std::cell::RefCell;
-use std::collections::{HashMap, VecDeque};
+use std::collections::{HashMap, HashSet, VecDeque};
 use std::rc::Rc;
 use std::sync::mpsc;
 use std::sync::{Arc, Mutex};
 use std::thread::JoinHandle;
 
 use corosensei::{Coroutine, CoroutineResult, Yielder};
+use futures_util::stream::{FuturesUnordered, StreamExt};
 use tokio::sync::mpsc::{UnboundedReceiver, UnboundedSender};
+
+use crate::remote::{Part, PartKey, RemoteHandle};
 
 /// What a strand yields when it parks: the typed reason **plus** a backtrace
 /// captured on the strand's own (deep) stack at the park point — the stall report's
@@ -60,14 +69,23 @@ pub struct ResourceId(pub u32);
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub struct StrandId(pub u32);
 
+/// A handle to a producing peer — another executor's output, registered with the
+/// scheduler via [`Scheduler::register_handle`]. eval refers to a remote value only
+/// by this id (never the live vox client); the boss holds the [`RemoteHandle`] and
+/// drives its `force()`s.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub struct HandleId(pub u32);
+
 /// Why a strand is parked — never absent (I7: no silent blocking). The scheduler
 /// derives the wait-for tree from these.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum ParkReason {
     /// Runnable, but waiting for a permit on a saturated resource.
     AwaitingPermit { resource: ResourceId },
-    /// Blocked on a part another strand (a producer) has not yet yielded.
+    /// Blocked on a part another strand (a local producer) has not yet yielded.
     AwaitingPart { producer: StrandId, part: String },
+    /// Blocked on a part of a remote handle the boss is forcing over vox.
+    AwaitingRemotePart { handle: HandleId, part: PartKey },
 }
 
 /// A firehose event — the scheduler's history. Tests assert over the stream; a
@@ -147,6 +165,25 @@ struct Strand {
     admitted: bool,
 }
 
+/// A demanded part, keyed for the registry.
+type PartId = (HandleId, PartKey);
+
+/// The rendezvous between sync eval (which reads resolved parts) and the boss's
+/// async vox forces (which fill them). Shared `Arc<Mutex>`: a worker's
+/// [`force_remote`] checks/creates entries and parks; the boss resolves them.
+#[derive(Default)]
+struct Registry {
+    parts: HashMap<PartId, PartSlot>,
+}
+
+enum PartSlot {
+    /// Being (or about to be) driven; strands park on `signal` until it resolves.
+    Pending(Signal),
+    /// The producer's answer landed (bytes, or `Absent` = poison). Memoised — a
+    /// later demander of the same part reads this without re-forcing.
+    Resolved(Arc<Part>),
+}
+
 struct Inner {
     /// Per-resource `(capacity, in_use)`.
     resources: Vec<(u32, u32)>,
@@ -159,6 +196,12 @@ struct Inner {
     in_flight: u32,
     /// Per-worker outstanding-command count, for least-loaded routing of new strands.
     worker_load: Vec<u32>,
+    /// The boss's clone of the part registry (workers hold their own clones of the
+    /// same `Arc`); the boss writes `Resolved` entries here as forces complete.
+    registry: Arc<Mutex<Registry>>,
+    /// Live remote handles, indexed by [`HandleId`]. Boss-only — the vox clients live
+    /// where they're driven (here), never on a worker.
+    handles: Vec<RemoteHandle>,
 }
 
 /// A boss→worker command on a worker's private channel. Carries only `Send` data —
@@ -246,15 +289,17 @@ impl Scheduler {
         let n_workers = std::thread::available_parallelism()
             .map_or(4, |n| n.get())
             .clamp(1, 16);
+        let registry = Arc::new(Mutex::new(Registry::default()));
         let (result_tx, result_rx) = tokio::sync::mpsc::unbounded_channel::<WorkerMsg>();
         let mut cmd_tx = Vec::with_capacity(n_workers);
-        let mut handles = Vec::with_capacity(n_workers);
+        let mut join_handles = Vec::with_capacity(n_workers);
         for idx in 0..n_workers {
             let (tx, rx) = mpsc::channel::<Command>();
             cmd_tx.push(tx);
             let result_tx = result_tx.clone();
-            handles.push(std::thread::spawn(move || {
-                worker_loop(idx, &rx, &result_tx)
+            let registry = Arc::clone(&registry);
+            join_handles.push(std::thread::spawn(move || {
+                worker_loop(idx, &rx, &result_tx, registry)
             }));
         }
         drop(result_tx); // only the workers' clones remain
@@ -270,13 +315,15 @@ impl Scheduler {
             events: Vec::new(),
             in_flight: 0,
             worker_load: vec![0; n_workers],
+            registry,
+            handles: Vec::new(),
         }));
         Scheduler(
             inner,
             Rc::new(Pool {
                 cmd_tx,
                 result_rx: RefCell::new(Some(result_rx)),
-                handles: RefCell::new(handles),
+                handles: RefCell::new(join_handles),
                 runtime,
             }),
         )
@@ -316,6 +363,25 @@ impl Scheduler {
         inner.ready.push_back(id);
     }
 
+    /// Register a live remote handle (a vox client to a producing peer), returning
+    /// its [`HandleId`]. A strand forces parts of it by id via [`force_remote`]; the
+    /// boss holds the client and drives the `force()`s. Establish the client on this
+    /// scheduler's runtime (see [`block_on`](Self::block_on)) so its connection is
+    /// driven during `run()`.
+    pub fn register_handle(&self, handle: RemoteHandle) -> HandleId {
+        let mut inner = self.0.borrow_mut();
+        let id = HandleId(inner.handles.len() as u32);
+        inner.handles.push(handle);
+        id
+    }
+
+    /// Run a future on the boss's runtime — for async setup (e.g. establishing a vox
+    /// client) that must share the runtime that later drives it. Not callable while
+    /// `run()` is on the stack (it would nest `block_on`).
+    pub fn block_on<F: std::future::Future>(&self, f: F) -> F::Output {
+        self.1.runtime.block_on(f)
+    }
+
     /// A signal a strand can `park_on` and the boss can `fire`.
     pub fn signal(&self) -> Signal {
         Signal::new()
@@ -349,9 +415,10 @@ impl Scheduler {
         self.1.runtime.block_on(self.run_async());
     }
 
-    /// The boss loop, async so it can drive in-flight remote forces (the vox
-    /// `force()` calls) alongside worker reports. Today's body: dispatch every
-    /// admittable strand, then await the next worker report, until quiescent.
+    /// The boss loop, async so it can drive in-flight remote forces (vox `force()`
+    /// calls) concurrently with scheduling. Each iteration: dispatch every admittable
+    /// strand, then await **either** the next worker report **or** a remote force
+    /// completing — until nothing is running and no force is in flight.
     async fn run_async(&self) {
         let pool = &self.1;
         // Own the receiver across the loop (no `RefCell` borrow held over an await);
@@ -361,10 +428,15 @@ impl Scheduler {
             .borrow_mut()
             .take()
             .expect("the boss's result receiver is present between runs");
+        let registry = Arc::clone(&self.0.borrow().registry);
+        // In-flight remote forces, driven on this (boss) thread — no `Send` bound.
+        let mut drives = FuturesUnordered::new();
+        // Parts already being driven, so N strands demanding one part force it once.
+        let mut driving: HashSet<PartId> = HashSet::new();
         loop {
             // Dispatch every admittable strand (permit-gated) to its worker. Dispatch
-            // *all* of them before blocking on a result, so peers that must run at the
-            // same time (a barrier) can.
+            // *all* of them before blocking, so peers that must run at the same time
+            // (a barrier) can.
             while let Some(dispatch) = self.admit_one() {
                 match dispatch {
                     Dispatch::Start { worker, id, body } => {
@@ -375,16 +447,44 @@ impl Scheduler {
                     }
                 }
             }
-            // Quiescent when nothing is running and nothing more is admittable.
-            if self.0.borrow().in_flight == 0 {
+            // Quiescent when nothing is running and no remote force is in flight.
+            if self.0.borrow().in_flight == 0 && drives.is_empty() {
                 break;
             }
-            // A worker will report (something is in flight); record + free its permit.
-            let msg = result_rx
-                .recv()
-                .await
-                .expect("a result while strands are in flight");
-            self.complete(msg);
+            tokio::select! {
+                // A worker reported. If a strand parked on a remote part nobody is
+                // driving yet, start its force; then record done/parked + free permit.
+                msg = result_rx.recv() => {
+                    let msg = msg.expect("a result while strands are in flight");
+                    if let WorkerMsg::Parked {
+                        reason: ParkReason::AwaitingRemotePart { handle, part },
+                        ..
+                    } = &msg
+                    {
+                        let key = (*handle, part.clone());
+                        if driving.insert(key.clone()) {
+                            let client = self.0.borrow().handles[handle.0 as usize].clone();
+                            drives.push(force_part(client, key));
+                        }
+                    }
+                    self.complete(msg);
+                }
+                // A remote force landed: resolve its registry slot and wake every
+                // strand parked on it (each re-reads the now-`Resolved` slot on resume).
+                Some((key, part)) = drives.next(), if !drives.is_empty() => {
+                    let sig = {
+                        let mut reg = registry.lock().unwrap();
+                        match reg.parts.insert(key.clone(), PartSlot::Resolved(Arc::new(part))) {
+                            Some(PartSlot::Pending(sig)) => Some(sig),
+                            _ => None,
+                        }
+                    };
+                    if let Some(sig) = sig {
+                        self.fire(&sig);
+                    }
+                    driving.remove(&key);
+                }
+            }
         }
         *pool.result_rx.borrow_mut() = Some(result_rx);
     }
@@ -506,6 +606,17 @@ impl Scheduler {
     }
 }
 
+/// Drive one remote force to completion on the boss runtime. A connection error
+/// becomes [`Part::Absent`] (a poison), so the consumer always gets a definite
+/// answer. Returns the part's key alongside the result so the boss can resolve it.
+async fn force_part(client: RemoteHandle, key: PartId) -> (PartId, Part) {
+    let resolved = match client.force(key.1.clone()).await {
+        Ok(p) => p,
+        Err(e) => Part::Absent(e.to_string()),
+    };
+    (key, resolved)
+}
+
 /// The least-loaded worker (fewest outstanding commands); ties go to the lowest
 /// index. `worker_load` is never empty (at least one worker is spawned).
 fn least_loaded(worker_load: &[u32]) -> usize {
@@ -521,7 +632,15 @@ fn least_loaded(worker_load: &[u32]) -> usize {
 /// (`Resume`) one, running it on its real stack until it parks or finishes, and
 /// report back. The coroutine never leaves this thread (it is `!Send`). Exits on
 /// `Shutdown` or when the command channel closes.
-fn worker_loop(idx: usize, rx: &mpsc::Receiver<Command>, result_tx: &UnboundedSender<WorkerMsg>) {
+fn worker_loop(
+    idx: usize,
+    rx: &mpsc::Receiver<Command>,
+    result_tx: &UnboundedSender<WorkerMsg>,
+    registry: Arc<Mutex<Registry>>,
+) {
+    // The registry is the same for every strand on this worker — set it once so
+    // `force_remote` (called deep in eval) can reach it without an argument.
+    REGISTRY.with(|r| *r.borrow_mut() = Some(registry));
     let mut coros: HashMap<StrandId, Coro> = HashMap::new();
     while let Ok(cmd) = rx.recv() {
         match cmd {
@@ -572,6 +691,10 @@ thread_local! {
     /// having to thread a yielder argument through every call. Valid only while a
     /// coroutine body is executing on this thread.
     static CURRENT: RefCell<Option<CurCtx>> = const { RefCell::new(None) };
+
+    /// This worker's clone of the part registry, set once at worker start, so
+    /// [`force_remote`] (called deep in eval) reaches it without an argument.
+    static REGISTRY: RefCell<Option<Arc<Mutex<Registry>>>> = const { RefCell::new(None) };
 }
 
 struct CurCtx {
@@ -616,24 +739,67 @@ fn park(reason: ParkReason) {
     put_current(id, y);
 }
 
-/// Park the current strand until `sig` fires: if already fired, return immediately;
-/// else register as a waiter and record the reason (`AwaitingPart`), then suspend.
-/// The fired-check and waiter-registration are atomic under the signal lock, so a
-/// concurrent `fire` either drains this waiter or is seen as fired.
+/// Register the current strand as a waiter on `sig`, atomically with the fired-check
+/// under the signal lock (so a concurrent `fire` either drains this waiter or is
+/// seen as already fired). Returns `true` if it must park, `false` if `sig` already
+/// fired (resume immediately).
+fn register_waiter(sig: &Signal) -> bool {
+    let mut st = sig.0.lock().unwrap();
+    if st.fired {
+        return false;
+    }
+    let (id, _) = current();
+    st.waiters.push(id);
+    true
+}
+
+/// Park the current strand until `sig` fires (a local producer's part): if already
+/// fired, return immediately; else register as a waiter and suspend with
+/// `AwaitingPart`.
 pub fn park_on(sig: Signal, producer: StrandId, part: &str) {
-    let reason = {
-        let mut st = sig.0.lock().unwrap();
-        if st.fired {
-            return;
-        }
-        let (id, _) = current();
-        st.waiters.push(id);
-        ParkReason::AwaitingPart {
+    if register_waiter(&sig) {
+        park(ParkReason::AwaitingPart {
             producer,
             part: part.to_string(),
+        });
+    }
+}
+
+/// Force a part of a remote handle — the demand-pull across executors. Returns the
+/// resolved [`Part`] (`Bytes` or `Absent` = a poison the caller detonates). If the
+/// part isn't resolved yet, the strand **parks** (`AwaitingRemotePart`, freeing its
+/// worker) until the boss's vox `force()` lands it; a part already resolved returns
+/// at once (memoised). eval calls this knowing only the [`HandleId`] — never a vox
+/// client.
+pub fn force_remote(handle: HandleId, part: PartKey) -> Arc<Part> {
+    let registry = REGISTRY
+        .with(|r| r.borrow().clone())
+        .expect("force_remote outside a worker");
+    loop {
+        let key = (handle, part.clone());
+        let signal = {
+            let mut reg = registry.lock().unwrap();
+            match reg.parts.get(&key) {
+                Some(PartSlot::Resolved(p)) => return Arc::clone(p),
+                Some(PartSlot::Pending(sig)) => sig.clone(),
+                None => {
+                    // First demander: create the slot. The boss will see the
+                    // `AwaitingRemotePart` park and drive `handle.force(part)`.
+                    let sig = Signal::new();
+                    reg.parts.insert(key, PartSlot::Pending(sig.clone()));
+                    sig
+                }
+            }
+        }; // registry lock released before parking
+        if register_waiter(&signal) {
+            park(ParkReason::AwaitingRemotePart {
+                handle,
+                part: part.clone(),
+            });
         }
-    }; // lock released before suspending
-    park(reason);
+        // Resumed (or the signal had already fired): loop to re-read the registry,
+        // which is now `Resolved` (or, on a spurious wake, still `Pending`).
+    }
 }
 
 #[cfg(test)]
