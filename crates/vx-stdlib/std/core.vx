@@ -12,6 +12,13 @@ type Range;
 type Tree;
 /// A path-like exec argument carrying implicit mount provenance.
 type ExecPath;
+/// A runnable command — the value a CLI literal `@[ ${cmd} … ]` is built around,
+/// and what `exec` consumes. It bundles its grammar, the resolved binary, how to
+/// fingerprint it, and the exemptions it needs (see the wiki: "The exec
+/// primitive", "Types are values"). The grammar is a *value* carried by the
+/// command, projected on demand — not a static type. A capability constructs
+/// `Command`s (advertising a capability is defining its commands).
+type Command;
 /// Marker namespace for TOML parsing.
 type Toml;
 /// Marker namespace for JSON parsing.
