@@ -1,0 +1,26 @@
+// Closures: lambdas (with and without capture), higher-order functions, and
+// named functions used as values.
+
+fn apply(f: Fn(U64) -> U64, x: U64) -> U64 ( f(x) )
+fn add_one(n: U64) -> U64 ( n + 1 )
+
+#[test]
+fn no_capture() ( let f = (x) => x + 1; assert_eq(f(41), 42) )
+
+#[test]
+fn captures_local() ( let n = 10; let add_n = (x) => x + n; assert_eq(add_n(32), 42) )
+
+#[test]
+fn higher_order() ( let inc = (x) => x + 1; assert_eq(apply(inc, 41), 42) )
+
+#[test]
+fn named_function_as_value() ( assert_eq(apply(add_one, 41), 42) )
+
+// A closure called inside a tuple slot — only the demanded slot is forced.
+#[test]
+fn closure_in_tuple_slot() (
+    let n = 10;
+    let add_n = (x) => x + n;
+    let pair = (add_n(1), add_n(2));
+    assert_eq(pair[1], 12)
+)

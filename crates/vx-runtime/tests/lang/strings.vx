@@ -7,6 +7,12 @@ fn concat() ( assert_eq("hello" ++ " world", "hello world") )
 #[test]
 fn equality() ( assert("hi" == "hi") )
 
-// NOTE: string *methods* (`.len()`, `.slice(…)`) are `ExprKind::Invoke`, which the
-// tree-walker doesn't handle yet ("indirect calls not yet supported"). Those
-// cases from the old suite are parked until the evaluator grows native methods.
+// String methods — native builtins dispatched on the receiver value.
+#[test]
+fn length() ( assert_eq("hello".len(), 5) )
+
+#[test]
+fn empty_length() ( assert_eq("".len(), 0) )
+
+#[test]
+fn slice() ( assert_eq("hello world".slice(0, 5), "hello") )

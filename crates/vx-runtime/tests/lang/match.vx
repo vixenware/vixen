@@ -1,0 +1,23 @@
+// Match: the first arm whose pattern matches wins. Literal patterns compare the
+// scrutinee; `_` is a wildcard catch-all; a bare name binds the scrutinee.
+
+#[test]
+fn match_bool_true() ( assert_eq(match true ( true => 42, false => 0 ), 42) )
+
+#[test]
+fn match_bool_false() ( assert_eq(match false ( true => 0, false => 42 ), 42) )
+
+#[test]
+fn match_int() ( let n = 3; assert_eq(match n ( 1 => 10, 2 => 20, 3 => 42 ), 42) )
+
+#[test]
+fn match_wildcard() ( assert_eq(match 99 ( 1 => 0, _ => 42 ), 42) )
+
+#[test]
+fn match_binding() ( assert_eq(match 42 ( n => n ), 42) )
+
+#[test]
+fn match_binding_with_body() ( assert_eq(match 40 ( n => n + 2 ), 42) )
+
+#[test]
+fn match_string() ( assert_eq(match "b" ( "a" => 1, "b" => 42, _ => 0 ), 42) )

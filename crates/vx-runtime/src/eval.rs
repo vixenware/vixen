@@ -18,7 +18,7 @@ use std::collections::HashMap;
 use std::rc::Rc;
 
 use vx_ir::build::VirProgram;
-use vx_ir::expr::{ArrayElement, BinOp, ExprKind, FieldKey, LitKind, StringPart};
+use vx_ir::expr::{ArrayElement, BinOp, ExprKind, FieldExpr, FieldKey, LitKind, StringPart};
 use vx_ir::ids::{BindingId, BodyId, ExprId};
 use vx_ir::item::ItemKind;
 use vx_ir::pattern::PatternKind;
@@ -55,6 +55,13 @@ pub enum Value {
     Array(Vec<Thunk>),
     Struct(Vec<(String, Thunk)>),
     Unit,
+    /// A callable: a lambda capturing its definition environment, or a named
+    /// function used as a value (with an empty capture). Calling it binds the
+    /// arguments to `body`'s parameters over `env`.
+    Closure {
+        body: BodyId,
+        env: Env,
+    },
 }
 
 /// The outcome of evaluating a test body: clean, or poisoned (with the source
@@ -199,15 +206,7 @@ impl Evaluator<'_> {
                 Err(poison(msg))
             }
 
-            ExprKind::Literal(lit) => match &lit.value {
-                LitKind::Int { raw } => raw
-                    .parse::<u64>()
-                    .map(Value::U64)
-                    .map_err(|_| poison(format!("bad int literal `{raw}`"))),
-                LitKind::Bool(b) => Ok(Value::Bool(*b)),
-                LitKind::String { raw } => Ok(Value::Str(Rc::from(raw.as_str()))),
-                LitKind::Float { raw } => Err(poison(format!("floats not yet supported: {raw}"))),
-            },
+            ExprKind::Literal(lit) => self.lit_value(&lit.value),
 
             // Lazy data: fields are thunks, NOT forced here.
             ExprKind::Tuple(t) => Ok(Value::Tuple(
@@ -275,6 +274,34 @@ impl Evaluator<'_> {
                 other => Err(poison(format!("non-bool condition: {other:?}"))),
             },
 
+            // Match: the first arm whose pattern matches wins. A literal pattern
+            // forces the scrutinee to compare it; a binding/wildcard binds it
+            // lazily (an unread binding never forces it). Mirrors `lower_match`.
+            ExprKind::Match(m) => {
+                let scrutinee = self.thunk(m.scrutinee, env);
+                for arm in &m.arms {
+                    match &self.program.arena[arm.pattern].kind {
+                        PatternKind::Wildcard => return self.eval(arm.body, env),
+                        PatternKind::Binding(b) => {
+                            let mut arm_env = env.clone();
+                            arm_env.insert(b.binding, scrutinee.clone());
+                            return self.eval(arm.body, &arm_env);
+                        }
+                        PatternKind::Literal(lit) => {
+                            let got = self.force(&scrutinee)?;
+                            let want = self.lit_value(&lit.value)?;
+                            if self.value_eq(&got, &want)? {
+                                return self.eval(arm.body, env);
+                            }
+                        }
+                        other => {
+                            return Err(poison(format!("unsupported match pattern: {other:?}")));
+                        }
+                    }
+                }
+                Err(poison("non-exhaustive match".into()))
+            }
+
             // Interpolated string: force each part, concatenate.
             ExprKind::InterpolatedString(s) => {
                 let mut out = String::new();
@@ -315,14 +342,31 @@ impl Evaluator<'_> {
                 }
             }
 
-            // A name: force its bound thunk.
+            // A name: a local binding forces its thunk; a function item used as a
+            // value becomes a closure with an empty capture (a top-level function
+            // closes over nothing local).
             ExprKind::NameRef(n) => match n.resolved {
                 Some(DefTarget::Binding(bid)) => match env.get(&bid) {
                     Some(th) => self.force(th),
                     None => Err(poison(format!("unbound `{}`", n.name))),
                 },
+                Some(DefTarget::Item(item)) => match &self.program.arena[item].kind {
+                    ItemKind::Function(f) => Ok(Value::Closure {
+                        body: f.body,
+                        env: Env::new(),
+                    }),
+                    _ => Err(poison(format!("`{}` is not a value", n.name))),
+                },
                 _ => Err(poison(format!("unresolved name `{}`", n.name))),
             },
+
+            // A lambda: capture the current environment (the body reads only what
+            // it closed over; capturing all in-scope thunks is correct if not
+            // minimal). `call` binds the parameters when it is invoked.
+            ExprKind::Closure(c) => Ok(Value::Closure {
+                body: c.body,
+                env: env.clone(),
+            }),
 
             // A call: resolve the callee to a function body and evaluate it with
             // the arguments bound (lazily) to its parameters.
@@ -391,27 +435,47 @@ impl Evaluator<'_> {
         env: &Env,
     ) -> Result<Value, Poison> {
         let prog = self.program;
-        // Resolve the callee name to a function item.
-        let body = match &prog.arena[callee].kind {
-            ExprKind::NameRef(n) => match n.resolved {
-                Some(DefTarget::Item(item)) => match &prog.arena[item].kind {
-                    ItemKind::Function(f) => f.body,
-                    _ => return Err(poison(format!("`{}` is not callable", n.name))),
-                },
-                _ => return Err(poison(format!("unresolved call `{}`", n.name))),
-            },
-            _ => return Err(poison("indirect calls not yet supported".into())),
-        };
-        // Bind params to argument thunks (captured in the *caller's* env + body —
-        // lazy). The callee body becomes current while its expressions evaluate;
-        // forcing an argument later restores the caller's body (the thunk carries
-        // it). The callee body's own scalar regions dispatch to kernels — so a
-        // scalar function body still runs as compiled code, now via sub-expression
-        // dispatch rather than a special call path.
-        let arg_thunks: Vec<Thunk> = args.map(|a| self.thunk(a, env)).collect();
-        let params = &prog.arena[body].params;
-        let mut callee_env = Env::new();
-        for (param, th) in params.iter().zip(arg_thunks) {
+        // Fast path: a direct call to a named function — bind args over an empty
+        // base env (a top-level function closes over nothing local).
+        if let ExprKind::NameRef(n) = &prog.arena[callee].kind
+            && let Some(DefTarget::Item(item)) = n.resolved
+        {
+            return match &prog.arena[item].kind {
+                ItemKind::Function(f) => self.invoke_body(f.body, args, env, Env::new()),
+                _ => Err(poison(format!("`{}` is not callable", n.name))),
+            };
+        }
+        // `receiver.method(args)` — a native builtin method.
+        if let ExprKind::Field(fx) = &prog.arena[callee].kind {
+            return self.call_method(fx, args, env);
+        }
+        // Otherwise the callee must evaluate to a closure value — a closure-bound
+        // name, a lambda literal, a call result. Invoke it over its captured env.
+        match self.eval(callee, env)? {
+            Value::Closure {
+                body,
+                env: captured,
+            } => self.invoke_body(body, args, env, captured),
+            other => Err(poison(format!("not callable: {other:?}"))),
+        }
+    }
+
+    /// Bind `args` (lazy thunks in the *caller's* `caller_env`) to `body`'s
+    /// parameters over `base` — a closure's captured env, or empty for a top-level
+    /// function — then evaluate `body`. `body` becomes current while it runs;
+    /// forcing an argument later restores the caller's body (the thunk carries it),
+    /// and the body's own scalar regions still dispatch to kernels.
+    fn invoke_body(
+        &self,
+        body: BodyId,
+        args: impl Iterator<Item = ExprId>,
+        caller_env: &Env,
+        base: Env,
+    ) -> Result<Value, Poison> {
+        let prog = self.program;
+        let arg_thunks: Vec<Thunk> = args.map(|a| self.thunk(a, caller_env)).collect();
+        let mut callee_env = base;
+        for (param, th) in prog.arena[body].params.iter().zip(arg_thunks) {
             if let PatternKind::Binding(pb) = &prog.arena[param.pattern].kind {
                 callee_env.insert(pb.binding, th);
             }
@@ -420,6 +484,52 @@ impl Evaluator<'_> {
         let result = self.eval(prog.arena[body].root_expr, &callee_env);
         self.current_body.set(prev);
         result
+    }
+
+    /// Dispatch a native builtin method `receiver.method(args)`. The receiver and
+    /// arguments are forced — these are eager scalar/string ops. The implemented
+    /// set mirrors vx-ir's `try_lower_method_call`; only the string methods the
+    /// language needs so far are wired (the exec-path ones — `collect`/`blob`/
+    /// `which` — land with exec). An unknown method poisons.
+    fn call_method(
+        &self,
+        fx: &FieldExpr,
+        args: impl Iterator<Item = ExprId>,
+        env: &Env,
+    ) -> Result<Value, Poison> {
+        let method = match &fx.field {
+            FieldKey::Name(n) => n.clone(),
+            FieldKey::Index(i) => return Err(poison(format!("cannot call tuple index `{i}`"))),
+        };
+        let recv = self.eval(fx.receiver, env)?;
+        let argv = args
+            .map(|a| self.eval(a, env))
+            .collect::<Result<Vec<_>, _>>()?;
+        match (method.as_str(), &recv) {
+            // Byte length of the string (per core.vx's `String::len`).
+            ("len", Value::Str(s)) => Ok(Value::U64(s.len() as u64)),
+            // Substring `s[start..end]` — two integer args, bounds- and UTF-8
+            // boundary-checked (poisons otherwise, matching the old evaluator).
+            ("slice", Value::Str(s)) => {
+                let (start, end) = match argv.as_slice() {
+                    [Value::U64(a), Value::U64(b)] => (*a as usize, *b as usize),
+                    other => {
+                        return Err(poison(format!(
+                            ".slice() expects two integer args, got {other:?}"
+                        )));
+                    }
+                };
+                s.get(start..end)
+                    .map(|sub| Value::Str(Rc::from(sub)))
+                    .ok_or_else(|| {
+                        poison(format!(
+                            "string slice out of bounds: [{start}..{end}] on string of length {}",
+                            s.len()
+                        ))
+                    })
+            }
+            (m, r) => Err(poison(format!("unknown method `{m}` on {r:?}"))),
+        }
     }
 
     fn project_index(&self, container: &Value, idx: usize) -> Result<Value, Poison> {
@@ -440,6 +550,20 @@ impl Evaluator<'_> {
                 None => Err(poison(format!("no field `{name}`"))),
             },
             other => Err(poison(format!("can't access `.{name}` on {other:?}"))),
+        }
+    }
+
+    /// A literal's runtime value — shared by literal expressions and literal match
+    /// patterns, so both parse identically.
+    fn lit_value(&self, lit: &LitKind) -> Result<Value, Poison> {
+        match lit {
+            LitKind::Int { raw } => raw
+                .parse::<u64>()
+                .map(Value::U64)
+                .map_err(|_| poison(format!("bad int literal `{raw}`"))),
+            LitKind::Bool(b) => Ok(Value::Bool(*b)),
+            LitKind::String { raw } => Ok(Value::Str(Rc::from(raw.as_str()))),
+            LitKind::Float { raw } => Err(poison(format!("floats not yet supported: {raw}"))),
         }
     }
 
