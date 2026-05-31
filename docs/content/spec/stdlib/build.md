@@ -181,52 +181,64 @@ model, but they are not part of the core language syntax.
 > uses ordinary call syntax and can be shadowed by user bindings. It is
 > generic over `T`.
 >
+> Its argument is a **`Command`**, written as a CLI literal
+> `@[ {cmd} args… ]`: the leading interpolated value is the command —
+> advertised by a capability, bundling its grammar, binary, fingerprint,
+> and the exemptions it needs — and the following tokens are checked
+> against that grammar (there is no grammar name after `@`, and no
+> separate grammar to import). The grammar classifies each token's `Kind`,
+> so the sandbox mount set and the cache identity fall out of the command
+> (see `r[exec.arg]`).
+>
 > The orchestrator does not run the process or inspect the sandbox
-> directly. It serializes the full `exec` payload, including the
-> observer closure and any discovery-derived verification obligations
-> referenced by the inputs, and ships that payload to an executor. The
-> executor runs the process, evaluates the observer there, rechecks the
-> relevant host obligations on the concrete runner instance, and returns
-> only the observer's produced values back across the boundary.
+> directly. It serializes the full payload — the command, the observer
+> closure (the canonical AST of everything it closes over), and the
+> verification obligations carried by the inputs — and ships it to an
+> executor. The executor runs the process, evaluates the observer there,
+> rechecks the relevant host obligations on the concrete runner instance,
+> and returns only the observer's produced value back across the boundary.
 >
 > ```vixen
 > fn exec[T](
->   args: Array[ExecInput]
+>   command: Command,                       // a @[ {cmd} args… ] literal
 > ) with {
->   env: Map[String, ExecInput] = %{},
->   mounts: Map[Path, TreeEntry] = %{},
->   exemptions: Array[SandboxExemption] = [],
->   writable: Array[Path] = [],
+>   env: Map[String, ExecInput] = %{},      // values for the grammar's declared env channels
+>   mounts: Map[Path, TreeEntry] = %{},     // extra content not implied by the command
+>   writable: Array[Path] = [],             // output roots the grammar can't classify
 >   create_dirs: Array[Path] = [],
->   observer: Fn(Process, Tree) -> T,
+>   exemptions: Array[SandboxExemption] = [],   // extra host holes (the command carries its own)
+>   observer: Fn(Run) -> T,
 > } -> T
 > ```
 >
 > There is no `executor:` kwarg and no effect annotation on the observer.
-> Routing is type-driven: the runtime chooses an executor from the ability
-> values (e.g. a `RustToolchain`) that flow into `args`, by predicate
-> match — there is no stringly-typed executor selector.
+> Routing is type-driven and **falls out of provenance**: the runtime
+> chooses an executor from the ability values (e.g. a `CToolchain` /
+> `RustToolchain`) flowing into the command, by predicate match — there is
+> no stringly-typed executor selector.
 
 > r[exec.arg]
 >
-> `ExecInput` is the surface type accepted by `exec`:
+> A command is a CLI literal `@[ {cmd} tokens… ]` (`r[exec.signature]`):
+> the leading interpolated value is the command (advertised by a
+> capability), and the grammar it carries classifies every following
+> token's `Kind` — `Input` (mounted read-only, content-hashed into the
+> key), `Output` (writable target), `Text` (never mounted), `InOut`. So the
+> **mount set and the cache identity fall out of the grammar**, with no
+> hand-wired input list.
+>
+> The surface types interpolated into a hole (or passed to the
+> `env` / `mounts` kwargs):
 >
 > ```vixen
 > type ExecInput = String | Path | Blob | Tree | ExecPath
+> type TreeEntry = Blob | Tree   // explicit mounts / tree entries
 > ```
 >
-> Explicit tree-shaped payloads such as VFS mounts use:
->
-> ```vixen
-> type TreeEntry = Blob | Tree
-> ```
->
-> `exec` normalizes each input into an `ExecArg` plus an implicit mount
-> set:
->
-> ```vixen
-> type ExecArg = String | Path | ExecPath
-> ```
+> The detailed classification mechanics below (`ExecPath`, auto-mount,
+> interpolation, spread) are the **command-model layer**, being reconciled
+> with the `@[ {cmd} ]` / no-separate-grammars decision (coordinated with
+> `command-model.md` / `cli-literal.md`).
 >
 > A plain `String` is a literal argument. A plain `Path` names a VFS
 > location directly. `Blob`, `Tree`, and `ExecPath` carry implicit mount
@@ -386,35 +398,43 @@ model, but they are not part of the core language syntax.
 > In authored code, explicit `writable: ["out"]` is preferred because it
 > makes intended outputs obvious and avoids depending on inference.
 
-> r[exec.process]
+> r[exec.run]
 >
-> `Process` has `stdout: Stream[Bytes]`, `stderr: Stream[Bytes]`, and
-> `exit_code: U64` (pending until the process exits). No stdin — processes
-> are not interactive. No signal API. `Process` exists on the executor;
-> the orchestrator observes it only through the shipped observer's
-> return stream.
+> The observer receives a `Run`, not a raw process. `Run` has two faces,
+> each with a `.out: Tree`:
 >
-> A nonzero exit code is not a runtime failure by itself. The process
-> still terminates, the observer still runs, and user code decides what
-> that exit status means.
+> - **`run.ok`** — the settled, success-gated face: an `Exit { duration,
+>   stdout, stderr, out }` record. Forcing it requires the process to have
+>   exited 0; otherwise it **poisons** (`r[exec.errors]`). `run.ok.out` is
+>   the resolved write-set; `run.ok.stdout` / `.stderr` are the captured
+>   output (bounded by capture kwargs), for run-and-parse tools.
+> - **`run.stream`** — the live, ungated face: `{ stdout: Stream[Bytes],
+>   stderr: Stream[Bytes], out: Tree }`. `run.stream.out` is the producing
+>   handle (per-path, resolves as files finalize, survives a later failure
+>   — `r[exec.tree.incremental]`); `run.stream.stderr` is the live feed a
+>   package parses for finalization.
+>
+> There is **no bare exit code**: the exit status / signal is reachable
+> only as the `cause` of a `ProcError`, via `run.ok?` (`r[exec.errors]`).
+> No stdin — processes are not interactive. The `Run` exists on the
+> executor; the orchestrator observes it only through the observer's return.
 
 > r[exec.observer]
 >
-> The observer runs on the executor, not the orchestrator. It is
-> serialized along with its captured values and shipped to the executor.
-> A closure cannot be sent until all its captures are resolved.
+> The observer runs on the executor, not the orchestrator. It is shipped
+> as the **canonical AST of everything it closes over**; a closure cannot
+> be sent until its captures' identities are resolved. Captures are
+> content-addressed **data** (bytes pulled lazily), never a live `Run` or
+> `Stream` — you capture their *resolved outputs* (a `Tree`/value), not the
+> live handle. The executor evaluates that payload with the same language
+> semantics as the orchestrator. The observer receives a `Run`
+> (`r[exec.run]`) and returns `T`.
 >
-> Serialization preserves the observer's code identity, lowered body,
-> and resolved captures. The executor evaluates that payload with the
-> same language semantics as the orchestrator. The observer receives a
-> `Process` and the VFS root as a `Tree`, and returns `T`.
->
-> The observer's authority is exactly the `Process` and sandbox `Tree` it
-> receives — it may inspect the process result and sandbox contents
-> exposed through those arguments, but it holds no `Host` and has no
-> ambient executor-host authority. An observer cannot inspect the
-> unsandboxed host environment; only data already captured into ordinary
-> (content-addressable) values before shipping is available to it.
+> The observer's authority is exactly the `Run` it receives — it may
+> inspect the process result and sandbox contents through it, but it holds
+> no `Host` and has no ambient executor-host authority. Only data already
+> captured into ordinary (content-addressable) values before shipping is
+> available to it.
 
 > r[exec.observer.cacheable]
 >
@@ -435,9 +455,9 @@ model, but they are not part of the core language syntax.
 
 > r[exec.tree.incremental]
 >
-> The sandbox write-set `Tree` an observer receives is **incrementally
+> The producing write-set tree (`run.stream.out`) is **incrementally
 > available**: an entry resolves when the process finalizes that file, not
-> when the process exits. So `tree["out/libC.rmeta"]` can resolve
+> when the process exits. So `run.stream.out["out/libC.rmeta"]` can resolve
 > mid-execution, and a dependent exec demanding it pipelines against the
 > still-running producer. Finalization is a runtime signal (file close /
 > atomic rename); where that is unreliable, the package detects it from the
@@ -466,23 +486,31 @@ model, but they are not part of the core language syntax.
 
 > r[exec.observer.simple]
 >
-> Simple observers reference `exit_code` and VFS paths for output.
-> Everything resolves when the process finishes, even if the process
-> exits nonzero.
+> The simple observer gates on success and takes its output from the
+> settled tree: `(run) => run.ok.out` (or a slice of it). It poisons if the
+> process fails; everything resolves when the process finishes. This is the
+> default observer.
 
 > r[exec.errors]
 >
-> If the executor cannot start the process, loses the process entirely,
-> or otherwise fails before it can hand `Process` and `Tree` to the
-> observer, `exec` poisons. If the observer's result type is
-> `Stream[T]`, that stream terminates and pending values derived from it
-> become poisoned.
+> If the executor cannot start the process, loses it, or otherwise fails
+> before it can hand the `Run` to the observer, `exec` poisons. If the
+> observer's result type is `Stream[T]`, that stream terminates and its
+> pending items become poisoned. Verification drift (`r[exec.verifier]`)
+> is its own distinct poison kind.
 >
-> By contrast, ordinary process failure is observer-visible data. A
-> process that exits nonzero, is terminated by the OS, or writes error
-> output still produces a `Process`; the observer interprets that result.
-> Application-level errors are the observer's responsibility — parse
-> stdout/stderr and call `fail`.
+> Ordinary process failure is **not** an automatic `exec` poison — it is
+> reached through `run.ok`. Forcing `run.ok` on a process that exited
+> nonzero or was killed by a signal **poisons** with a `Failure { err:
+> ProcError, context }`, where `ProcError` carries `cause` (`Exited(U64) |
+> Signaled(Signal)`), the command, the stderr tail, and the vfs trace, and
+> the runtime-filled `context` carries the span, the strand stack, and the
+> demand-path. `run.ok?` catches the same value as `Result[Exit,
+> ProcError]`, so user code can normalize a specific exit/signal (e.g.
+> `Exited(7)` ≡ success) or re-`fail` it. This is the language-wide failure
+> model: a `Failure` either propagates as a poison or is caught via the `?`
+> fallible-variant suffix; `err` is the inferred error union, exhaustively
+> matched.
 
 > r[exec.verifier]
 >
