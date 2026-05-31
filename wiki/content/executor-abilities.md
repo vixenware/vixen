@@ -115,10 +115,10 @@ let rust = RustToolchain where (version >= 1.91)
 
 // `rust.rustc` is the command the RustToolchain capability exposes — grammar +
 // binary + fingerprint + exemptions bundled (see [The exec primitive](/exec/)).
-// `@[ … ]` has no grammar name; the leading {rust.rustc} carries it. The exec
+// `@[ … ]` has no grammar name; the leading ${rust.rustc} carries it. The exec
 // consumes `rust` (via that command) and `mac` (via mac.linker), so its provenance
 // names both abilities.
-let bin = exec(@[ {rust.rustc} -C linker=${mac.linker} -o out/app ${workspace "src/main.rs"} ])
+let bin = exec(@[ ${rust.rustc} -C linker=${mac.linker} -o out/app ${workspace "src/main.rs"} ])
     with { observer: (run) => run.ok.out.file("out/app") }
 // Planner sees bin needs both mac and rust; picks one executor matching both constraints.
 ```

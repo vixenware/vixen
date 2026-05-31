@@ -25,13 +25,13 @@ struct CToolchain {
 
 namespace CToolchain (
   // Compile one source to an object, gated on success. `@[ … ]` has no grammar
-  // name — the leading {self.cc} carries it. The grammar classifies the source as
+  // name — the leading ${self.cc} carries it. The grammar classifies the source as
   // an input and the output target as an output, so the sandbox mounts + the
   // writable root fall out of the command; routing falls out of `self`'s provenance.
   fn object(self, src: Path, obj: Path) -> Blob (
     let tree = match self.style (
-      Style.Gcc  => exec(@[ {self.cc} -c ${src} -o ${obj} ])  with { observer: (run) => run.ok.out },
-      Style.Msvc => exec(@[ {self.cc} /c ${src} /Fo:${obj} ]) with { observer: (run) => run.ok.out },
+      Style.Gcc  => exec(@[ ${self.cc} -c ${src} -o ${obj} ])  with { observer: (run) => run.ok.out },
+      Style.Msvc => exec(@[ ${self.cc} /c ${src} /Fo:${obj} ]) with { observer: (run) => run.ok.out },
     );
     tree.file(obj)
   )
@@ -40,8 +40,8 @@ namespace CToolchain (
   // the source list into the grammar's repeatable source position.
   fn executable(self, srcs: Array[Path], out: Path) -> Blob (
     let tree = match self.style (
-      Style.Gcc  => exec(@[ {self.cc} ${..srcs} -o ${out} ])      with { observer: (run) => run.ok.out },
-      Style.Msvc => exec(@[ {self.cc} ${..srcs} /Fe:${out}.exe ]) with { observer: (run) => run.ok.out },
+      Style.Gcc  => exec(@[ ${self.cc} ${..srcs} -o ${out} ])      with { observer: (run) => run.ok.out },
+      Style.Msvc => exec(@[ ${self.cc} ${..srcs} /Fe:${out}.exe ]) with { observer: (run) => run.ok.out },
     );
     tree.file(out)
   )

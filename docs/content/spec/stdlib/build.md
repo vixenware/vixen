@@ -182,7 +182,7 @@ model, but they are not part of the core language syntax.
 > generic over `T`.
 >
 > Its argument is a **`Command`**, written as a CLI literal
-> `@[ {cmd} args… ]`: the leading interpolated value is the command —
+> `@[ ${cmd} args… ]`: the leading interpolated value is the command —
 > advertised by a capability, bundling its grammar, binary, fingerprint,
 > and the exemptions it needs — and the following tokens are checked
 > against that grammar (there is no grammar name after `@`, and no
@@ -200,7 +200,7 @@ model, but they are not part of the core language syntax.
 >
 > ```vixen
 > fn exec[T](
->   command: Command,                       // a @[ {cmd} args… ] literal
+>   command: Command,                       // a @[ ${cmd} args… ] literal
 > ) with {
 >   env: Map[String, ExecInput] = %{},      // values for the grammar's declared env channels
 >   mounts: Map[Path, TreeEntry] = %{},     // extra content not implied by the command
@@ -219,7 +219,7 @@ model, but they are not part of the core language syntax.
 
 > r[exec.arg]
 >
-> A command is a CLI literal `@[ {cmd} tokens… ]` (`r[exec.signature]`):
+> A command is a CLI literal `@[ ${cmd} tokens… ]` (`r[exec.signature]`):
 > the leading interpolated value is the command (advertised by a
 > capability), and the grammar it carries classifies every following
 > token's `Kind` — `Input` (mounted read-only, content-hashed into the
@@ -237,7 +237,7 @@ model, but they are not part of the core language syntax.
 >
 > The detailed classification mechanics below (`ExecPath`, auto-mount,
 > interpolation, spread) are the **command-model layer**, being reconciled
-> with the `@[ {cmd} ]` / no-separate-grammars decision (coordinated with
+> with the `@[ ${cmd} ]` / no-separate-grammars decision (coordinated with
 > `command-model.md` / `cli-literal.md`).
 >
 > A plain `String` is a literal argument. A plain `Path` names a VFS

@@ -6,10 +6,10 @@ let { parse_artifact } = import "rust"   // @vixen/rust owns the --json artifact
 // fails — so a dependent crate can pipeline against it. A streaming observer
 // returns Stream[T], so exec returns Stream[T].
 //
-// `@[ … ]` has no grammar name — the leading {tc.rustc} (the command the
+// `@[ … ]` has no grammar name — the leading ${tc.rustc} (the command the
 // RustToolchain capability advertises) carries it; routing falls out of `tc`.
 fn compile(tc: RustToolchain, name: String, src: Path, out: Path) -> Stream[Artifact] (
-  exec(@[ {tc.rustc} --crate-name ${name} --edition 2021 --emit metadata,link --out-dir ${out} ${src} ]) with {
+  exec(@[ ${tc.rustc} --crate-name ${name} --edition 2021 --emit metadata,link --out-dir ${out} ${src} ]) with {
     observer: (run) => (
       // finalization isn't knowable from the VFS; rustc announces it on stderr as
       // JSON. We correlate each message to a live handle into the producing tree

@@ -109,13 +109,13 @@ You **import the capability *type*, query it, and make a command:**
 
 ```vixen
 let tc = CToolchain where (provider == Clang)   // import the type, query → a routed value
-exec(@[ {tc.cc} -c main.c -o out/main ]) with { observer: (run) => run.ok.out }
+exec(@[ ${tc.cc} -c main.c -o out/main ]) with { observer: (run) => run.ok.out }
 ```
 
 `@[ … ]` is the CLI literal with **no grammar name** — the **command interpolated
-as the leading element** (`{tc.cc}`) carries the grammar, and the following tokens
+as the leading element** (`${tc.cc}`) carries the grammar, and the following tokens
 are checked against it. The three things I'd wrongly split apart all flow from
-`{tc.cc}`:
+`${tc.cc}`:
 
 - **grammar** — from the command's type (it *is* the grammar, declared with the
   capability);
@@ -136,7 +136,7 @@ there is no free-standing grammar to import, so there is no grammar name after `
 
 ```vixen
 fn exec[T](
-  command: Command,   // a @[ {tc.cc} args… ] literal — leading command carries the grammar (§4)
+  command: Command,   // a @[ ${tc.cc} args… ] literal — leading command carries the grammar (§4)
 ) with {
   // No program/routing kwarg: the command carries grammar + binary, and routing
   // falls out of the ability values' provenance (§4).
@@ -313,23 +313,23 @@ observer-cacheability rule so nothing here is precluded.
 ```vixen
 // `@vixen/c`'s probe yields a CToolchain whose `cc` is a command — grammar + probed
 // binary + fingerprint + exemptions in one. `@[ … ]` has no grammar name; the
-// leading {tc.cc} carries it. `${src}` is a Kind::Input, `${obj}` a Kind::Output —
+// leading ${tc.cc} carries it. `${src}` is a Kind::Input, `${obj}` a Kind::Output —
 // the mount set and writable root fall out of the command's grammar.
 fn object(tc: CToolchain, src: Path, obj: Path) -> Tree (
-  exec(@[ {tc.cc} -c ${src} -o ${obj} ]) with {
+  exec(@[ ${tc.cc} -c ${src} -o ${obj} ]) with {
     observer: (run) => run.ok.out,                 // gate on success, return the write-set tree
   }
 )
 
 // run-and-parse: `run.ok` is the Exit record { duration, stdout, stderr, out }
 fn cc_version(tc: CToolchain) -> SemVer (
-  let exit = exec(@[ {tc.cc} --version ]) with { observer: (run) => run.ok };
+  let exit = exec(@[ ${tc.cc} --version ]) with { observer: (run) => run.ok };
   parse_semver(exit.stdout)
 )
 
 // normalize: exit 7 means "nothing to do" — catch run.ok? and decide
 fn run_cc(tc: CToolchain, …) -> Tree (
-  exec(@[ {tc.cc} … ]) with {
+  exec(@[ ${tc.cc} … ]) with {
     observer: (run) => match run.ok? (
       Ok(exit)                                                 => exit.out,
       Err(Failure { err: ProcError { cause: Exited(7) }, .. }) => run.stream.out,  // 7 ≡ success — take the live output
@@ -339,7 +339,7 @@ fn run_cc(tc: CToolchain, …) -> Tree (
 )
 ```
 
-`@[ … ]` has no grammar name — the leading interpolated command `{tc.cc}` supplies
+`@[ … ]` has no grammar name — the leading interpolated command `${tc.cc}` supplies
 it, and `${src}` / `${obj}` are value holes typed by the command's grammar (§4).
 
 **2 — streaming (`rustc` pipelines `.rmeta` before `.rlib`; mandatory).**
@@ -349,7 +349,7 @@ it, and `${src}` / `${obj}` are value holes typed by the command's grammar (§4)
 // dependent crate before codegen finishes, and stands even if codegen then fails.
 fn compile(tc: RustToolchain, name: String, src: Path, out: Path) -> Stream[Artifact] (
   let { parse_artifact } = import "vixen:rust";    // the package owns the --json artifact parser
-  exec(@[ {tc.rustc} --crate-name ${name} --edition 2021 --emit metadata,link --out-dir ${out} ${src} ]) with {
+  exec(@[ ${tc.rustc} --crate-name ${name} --edition 2021 --emit metadata,link --out-dir ${out} ${src} ]) with {
     observer: (run) => (
       // finalization isn't knowable from the VFS; rustc announces it on stderr as
       // JSON. We correlate each message to a live handle into the producing tree.
@@ -377,7 +377,7 @@ See [Streams](/streams/) for the substrate this leans on.
 **[settled] — pinned:**
 
 - **§4** — a capability *is* its command(s); a command bundles grammar + binary +
-  fingerprint + exemptions; written `@[ {cmd} args ]` (no grammar name, no separate
+  fingerprint + exemptions; written `@[ ${cmd} args ]` (no grammar name, no separate
   grammar import); routing falls out of provenance.
 - **§7 `Run`** — `.ok` (settled `Exit`, success-gated) / `.stream` (live), each
   with a `.out: Tree` and live/captured `stdout`/`stderr`; `run.ok?` →
