@@ -201,6 +201,65 @@ host facts come from the control plane, see
 (cached because expensive, not because non-deterministic). The partition rides on
 the **async** axis alone; caching is the separate (still-open) axis.
 
+### The strand scheduler — the demand-driven contract (I1–I7)
+
+Strands run on **our own demand-driven scheduler over a thread pool — not tokio
+tasks.** A tokio task *races forward*: once spawned it pushes to completion whether
+or not its result is still wanted — the eager push-model we are tearing out
+everywhere, and importing it through the scheduler would reintroduce it. A strand
+runs **only because something pulled on it**; absent demand it does not run and
+consumes nothing. (tokio still carries the *I/O a strand awaits* — the vox
+transport, the process spawn, socket reads — but that is not the strand.)
+
+**A permit gates active compute, not a strand's existence.** Finite compute is
+finite compute, local or remote: a local-pool slot, a remote executor's advertised
+capacity, one host's tolerance for concurrent HTTP — **one permit mechanism over
+all of them** (the per-executor capacity is what the control plane advertises). A
+strand acquires a permit against the resource it needs, **holds it only while
+running, releases it the instant it parks, re-acquires on resume** — so many
+strands can be alive while few run; and being demand-driven, it reaches for the
+permit only when its result is actually demanded.
+
+**No strand parks without a typed reason** — `AwaitingPart { producer, part }`,
+`AwaitingPermit { resource }`, `RunningExec { exec, since, last_activity }`, …. From
+those plus the demand edges the scheduler derives, at any instant, the
+root→blocked-leaves **wait-for tree** — *why* a build is not progressing, the thing
+tokio cannot tell you (a parked tokio task is an opaque `Pending`). The event
+**firehose** is the history; the **stall report** is the live snapshot; both come
+from the same instrumented scheduler, emitting **only what is real** (§8 — a missing
+event is honest "not built," a zero-filled one is a lie).
+
+The scheduler is held to seven invariants, each with an early test asserted over
+the firehose. The minimal scheduler is green on all seven from its first commit and
+grows only while they stay green:
+
+- **I1 — Demand-driven.** A strand runs only if transitively demanded from the root;
+  no demand → no execution, no permit, no effect. *Test:* the bomb lifted to strands
+  — an undemanded exec that would poison leaves the run clean.
+- **I2 — Capacity respected.** On a resource with N permits, never more than N
+  strands run concurrently. *Test:* demand M>N on one resource; observed
+  max-concurrency ≤ N.
+- **I3 — Single execution.** One content-identity → one run, shared by all demanders.
+  *Test:* two demanders of the same exec → run-count 1.
+- **I4 — Schedule-independent results.** Outcome (values *and* poisons) is identical
+  under any capacity or fork order. *Test:* the same graph at capacity 1 vs. ∞ and
+  varied orders → identical outcome (the differential oracle, over schedules).
+- **I5 — Progress.** Parked work never starves runnable work; demanded work whose
+  inputs resolve and whose permits can free always completes. *Test:* 16 strands,
+  capacity 2, 8 parked-forever **awaiting** a never-fired signal (parked → permit
+  released) — assert the other 8 complete and max-concurrency stayed 2. (Parked, not
+  busy: a busy-forever strand legitimately holds its permit — finite compute working,
+  not an I5 violation.)
+- **I6 — Source fidelity.** Every poison maps to its originating source span, through
+  every IR layer and across executors. *Test:* a forced `💣`/`fail`/divide-by-zero,
+  local and inside a remote exec, reports the right source location and the producing
+  exec. *(Gap to close: `lower` drops the span `graph` nodes carry, and `Poison` is a
+  bare string — spans must ride whichever IR crosses.)*
+- **I7 — No silent blocking.** A strand may never park without a typed, inspectable
+  reason; at any instant the scheduler produces the root→blocked-leaves wait-for
+  tree. *Test:* the I5 stall — the report names exactly the blocked strands and their
+  reasons.
+
 ### Values are node references (the inside-out turn)
 
 A value is **not** "resolved or pending" — it is a **reference to a node** in the
@@ -777,7 +836,10 @@ pending by default; eager only inside kernels.
 4. **Sandbox platform feasibility (the fork).** Per-platform interception; L1-only
    fallback; lazy→eager degradation.
 5. **Demand-graph granularity.** What a node/edge/annotation is; coalescing pure
-   regions; where strands split exactly.
+   regions. *Where strands split is settled:* pure forks coalesce, async forks
+   split (§2 async criterion), under the demand-driven scheduler contract (§2
+   I1–I7) — our own thread-pool scheduler, **not** tokio tasks, permits gating
+   active compute, no park without a typed reason.
 6. **`demand.rs` fate** — gated on whether the type-level partition holds.
 7. **Spec work — landed and remaining.** *Landed:* the `r[eval.demand]` redraft;
    `r[eval.readset]` (read-set is rerun-validity, never the key); the corrected
