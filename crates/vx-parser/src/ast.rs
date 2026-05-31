@@ -1383,11 +1383,15 @@ impl PathLiteralExpr {
 }
 
 impl CliLiteralExpr {
-    /// The grammar name after `@` — the tool whose grammar types this command.
+    /// The grammar name in `@grammar[ … ]`, or `None` for the grammar-less
+    /// `@[ ${cmd} … ]` form. Only an identifier *before* `CLI_OPEN` counts — idents
+    /// inside the body (e.g. a `${cmd}` hole) are arguments, not the grammar name.
     pub fn grammar(&self) -> Option<SyntaxToken> {
-        first_token(self.syntax(), |kind| {
-            matches!(kind, SyntaxKind::LOWER_IDENT | SyntaxKind::UPPER_IDENT)
-        })
+        self.syntax()
+            .children_with_tokens()
+            .take_while(|el| el.kind() != SyntaxKind::CLI_OPEN)
+            .filter_map(|el| el.into_token())
+            .find(|t| matches!(t.kind(), SyntaxKind::LOWER_IDENT | SyntaxKind::UPPER_IDENT))
     }
 
     /// The command's arguments, in order (each a whitespace-delimited run).

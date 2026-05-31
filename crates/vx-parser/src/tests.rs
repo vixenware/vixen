@@ -1147,6 +1147,26 @@ fn cli_literal_parses_into_grammar_and_args() {
 }
 
 #[test]
+fn cli_literal_without_grammar_parses() {
+    // The `@[ ${cmd} … ]` form: `[` follows `@` directly, no grammar name; the
+    // leading `${cmd}` hole carries the grammar.
+    let (_p, lit) = only_cli_literal("let o = @[ ${cmd} -c main.c ]\n");
+    assert_eq!(
+        lit.grammar().map(|t| t.text().to_string()),
+        None,
+        "the `@[ … ]` form has no grammar name"
+    );
+    let args: Vec<String> = lit.args().map(|a| a.text().trim().to_string()).collect();
+    assert_eq!(args, ["${cmd}", "-c", "main.c"]);
+    let holes: Vec<Expr> = lit
+        .args()
+        .flat_map(|a| a.interpolations())
+        .filter_map(|h| h.expr())
+        .collect();
+    assert_eq!(holes.len(), 1, "the leading ${{cmd}} is the only hole");
+}
+
+#[test]
 fn cli_literal_handles_quotes_and_interpolation() {
     // A quoted value with a space stays one argument; `$out` is a short
     // interpolation; `${ … }` splices a full Vixen expression.

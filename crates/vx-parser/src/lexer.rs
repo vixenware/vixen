@@ -100,12 +100,16 @@ impl<'a> Lexer<'a> {
         self.pos = end;
     }
 
-    // r[lex.cli-literal] — does `@` at the cursor open a CLI literal, i.e.
-    // `@<ident>[` with no gaps? Distinguishes it from a path literal / bare `@`.
+    // r[lex.cli-literal] — does `@` at the cursor open a CLI literal? Either
+    // `@[` (grammar-less; the grammar comes from the leading hole) or `@<ident>[`
+    // (named grammar), with no gaps. Distinguishes it from a path literal / bare `@`.
     fn is_cli_opener(&self) -> bool {
         let Some(after_at) = self.source[self.pos..].strip_prefix('@') else {
             return false;
         };
+        if after_at.starts_with('[') {
+            return true;
+        }
         if !matches!(after_at.chars().next(), Some(c) if is_ident_start(c)) {
             return false;
         }
@@ -176,11 +180,18 @@ impl<'a> Lexer<'a> {
     }
 
     fn normal_token(&mut self) -> Option<SyntaxKind> {
-        // r[lex.cli-literal] — drive the contiguous `@ ident [` opener: after a
-        // recognised `@`, the next token is the grammar name, then `[` becomes
-        // CLI_OPEN and the body enters command mode. (is_cli_opener guarantees the
+        // r[lex.cli-literal] — drive the contiguous `@ [` / `@ ident [` opener:
+        // after a recognised `@`, either `[` opens the body directly (grammar-less
+        // `@[`), or the grammar name comes first and then `[` becomes CLI_OPEN.
+        // Either way the body enters command mode. (is_cli_opener guarantees the
         // sequence, so this always completes.)
         match self.cli {
+            CliOpen::AfterAt if self.current_char() == Some('[') => {
+                self.cli = CliOpen::None;
+                self.bump_char();
+                self.modes.push(Mode::Command);
+                return Some(SyntaxKind::CLI_OPEN);
+            }
             CliOpen::AfterAt if matches!(self.current_char(), Some(c) if is_ident_start(c)) => {
                 self.cli = CliOpen::AfterIdent;
                 return Some(self.ident_or_keyword());

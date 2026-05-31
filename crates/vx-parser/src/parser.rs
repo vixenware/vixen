@@ -1214,8 +1214,11 @@ fn multiplicative_expr(p: &mut Parser<'_>) -> CompletedMarker {
 
 fn prefix_expr(p: &mut Parser<'_>) -> CompletedMarker {
     match p.current() {
-        // `@grammar[ … ]` (the opener `[` lexes to CLI_OPEN) vs an `@path` literal.
-        SyntaxKind::AT if p.nth(2) == SyntaxKind::CLI_OPEN => cli_literal_expr(p),
+        // `@[ … ]` (CLI_OPEN at 1, no grammar) or `@grammar[ … ]` (CLI_OPEN at 2)
+        // vs an `@path` literal.
+        SyntaxKind::AT if p.nth(1) == SyntaxKind::CLI_OPEN || p.nth(2) == SyntaxKind::CLI_OPEN => {
+            cli_literal_expr(p)
+        }
         SyntaxKind::AT => path_literal_expr(p),
         SyntaxKind::BANG | SyntaxKind::MINUS => {
             let marker = p.start();
@@ -1259,15 +1262,15 @@ fn path_literal_expr(p: &mut Parser<'_>) -> CompletedMarker {
     marker.complete(p, SyntaxKind::PATH_LITERAL_EXPR)
 }
 
-// r[expr.cli-literal] — `@grammar[ … ]`: a tool command typed by its grammar.
-// The body is lexed in command mode; here we just group its tokens into args.
+// r[expr.cli-literal] — `@[ ${cmd} … ]` (the leading hole carries the grammar) or
+// `@grammar[ … ]` (named grammar). The body is lexed in command mode; here we just
+// group its tokens into args.
 fn cli_literal_expr(p: &mut Parser<'_>) -> CompletedMarker {
     let marker = p.start();
     p.expect(SyntaxKind::AT);
+    // Optional grammar name: `@grammar[ … ]` names it; `@[ … ]` omits it.
     if p.at(SyntaxKind::LOWER_IDENT) || p.at(SyntaxKind::UPPER_IDENT) {
-        p.bump(); // the grammar name
-    } else {
-        p.diagnose_at(ExpectedKind::Identifier);
+        p.bump();
     }
     p.expect(SyntaxKind::CLI_OPEN);
     while !p.at(SyntaxKind::R_BRACKET) && !p.at(SyntaxKind::EOF) {

@@ -97,19 +97,24 @@ pub(crate) fn infer_cli_literal(
     // owned so the borrow releases before we type-check holes / push.
     let mut diags: Vec<(SourceSpan, CliDiagnosticKind)> = Vec::new();
     let mut hole_reqs: Vec<(usize, HoleReq)> = Vec::new();
-    match resolve_grammar_set(tc.arena, &cli.grammar, scope) {
-        Some(set) if set.get(&cli.grammar).is_some() => {
-            let grammar = set.get(&cli.grammar).unwrap();
-            check_structural(set, grammar, &cli.grammar, &argv, cli, &mut diags);
-            hole_reqs = collect_hole_reqs(grammar, &argv);
-        }
-        _ => {
-            diags.push((
-                cli.grammar_span,
-                CliDiagnosticKind::UnknownGrammar {
-                    name: cli.grammar.clone(),
-                },
-            ));
+    // The `@[ ${cmd} … ]` form carries no grammar name — its grammar comes from the
+    // leading hole's type, resolved in a later pass (the holes are still inferred
+    // above). Only the named `@grammar[ … ]` form validates against a named grammar.
+    if !cli.grammar.is_empty() {
+        match resolve_grammar_set(tc.arena, &cli.grammar, scope) {
+            Some(set) if set.get(&cli.grammar).is_some() => {
+                let grammar = set.get(&cli.grammar).unwrap();
+                check_structural(set, grammar, &cli.grammar, &argv, cli, &mut diags);
+                hole_reqs = collect_hole_reqs(grammar, &argv);
+            }
+            _ => {
+                diags.push((
+                    cli.grammar_span,
+                    CliDiagnosticKind::UnknownGrammar {
+                        name: cli.grammar.clone(),
+                    },
+                ));
+            }
         }
     }
 
