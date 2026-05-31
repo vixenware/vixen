@@ -34,6 +34,9 @@ margin.workspace = true
 vx-store = { path = "../vx-store" }
 vx-runner = { path = "../vx-runner" }
 vx-vfsd = { path = "../vx-vfsd" }
+# The demand-driven runtime: the daemon's test surface runs .vx tests through it
+# (the eager runtime_eval is gone). The sole evaluator entry point.
+vx-runtime = { path = "../vx-runtime" }
 
 [lints]
 workspace = true

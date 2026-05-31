@@ -1,55 +1,41 @@
 //! Daemon-side test runner.
 //!
-//! Discovers the annotated test functions in the shipped sources, runs each
-//! through the **real** evaluation path (the same `evaluate_source_text_function`
-//! that `vx eval` uses, so a test that drives `exec` exercises the actual
-//! sandbox), schedules them concurrently, and pushes the firehose of `Event`s
-//! onto the caller's `Tx`. See `docs/design/test-runner.md`.
+//! Discovers the annotated test functions in the shipped sources and runs each
+//! through **vx-runtime** — the demand-driven evaluator, the daemon's sole
+//! evaluation entry point now that the eager `runtime_eval` is gone. Pushes the
+//! firehose of `Event`s onto the caller's `Tx`.
 //!
-//! This is the lifecycle slice of the firehose: it emits `RunStarted`,
-//! `CaseStarted`, `CaseFinished` (with the raw outcome + the computed verdict),
-//! and `RunFinished`. The richer bodies (per-phase timings, assertions as typed
-//! claims, multi-executor) hang off the same stream as the emission seam lands.
+//! Emits `RunStarted`, `CaseStarted`, `CaseFinished` (raw outcome + the computed
+//! verdict), and `RunFinished`. (Per-phase compile timings rode the old eager
+//! compiler's `CompileObserver`; vx-runtime's phases differ, so they return when
+//! it exposes them. `assert`/`assert_eq` are stdlib now, so no prelude is
+//! prepended.)
 
 use std::sync::Arc;
 use std::sync::atomic::{AtomicU64, Ordering};
-use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
+use std::time::{Instant, SystemTime, UNIX_EPOCH};
 
 use futures_util::StreamExt;
 use tokio::sync::mpsc::UnboundedSender;
 use vox::Tx;
 use vx_parser::{Item, SourceId, parse_source_file};
+use vx_runtime::eval::{Outcome, Value};
 use vx_services::{
-    EvalOutcome, Event, EventBody, ExecutorId, Expectation, HostInfo, Phase, PhaseDetail,
-    RunSummary, RunTestsRequest, RuntimeValue, SpanId, TestId, TestRunner, TestSource, TypedValue,
-    Verdict,
+    EvalOutcome, Event, EventBody, ExecutorId, Expectation, HostInfo, RunSummary, RunTestsRequest,
+    RuntimeValue, SpanId, TestId, TestRunner, TestSource, TypedValue, Verdict,
 };
 
-use crate::orchestrator::OrchestratorService;
-use crate::runtime_eval::{RuntimeEvalError, runtime_error_to_diagnostics};
-
-/// Prepended to every source so assertions are themselves Vixen.
-const PRELUDE: &str = r#"
-fn assert(cond: Bool) -> Bool (
-    if cond ( true ) else ( fail "assertion failed" )
-)
-
-fn assert_eq[T](got: T, want: T) -> Bool (
-    if got == want ( true ) else ( fail "not equal" )
-)
-"#;
-
-/// Bounded concurrency for case evaluation. The daemon owns scheduling.
+/// Bounded concurrency for case evaluation. (vx-runtime's evaluator is
+/// synchronous and `!Send`, so cases currently run to completion in turn; the
+/// bound is retained for when strand-scheduled concurrency lands.)
 const MAX_CONCURRENCY: usize = 16;
 
-#[derive(Clone)]
-pub struct TestRunnerService {
-    orchestrator: OrchestratorService,
-}
+#[derive(Clone, Default)]
+pub struct TestRunnerService;
 
 impl TestRunnerService {
-    pub fn new(orchestrator: OrchestratorService) -> Self {
-        Self { orchestrator }
+    pub fn new() -> Self {
+        Self
     }
 }
 
@@ -57,7 +43,7 @@ impl TestRunnerService {
 struct Case {
     id: TestId,
     expectation: Expectation,
-    /// Prelude + the file's full source — the closure the test runs over.
+    /// The file's full source — the closure the test runs over.
     source: String,
     function: String,
 }
@@ -69,8 +55,6 @@ fn discover(sources: &[TestSource]) -> Vec<Case> {
         let parsed = parse_source_file(&source.text, SourceId(0));
         if !parsed.errors().is_empty() {
             // A file that doesn't even parse can't host tests; skip discovery.
-            // (It will surface as zero cases — a louder signal lands with the
-            // file-level error event in a later pass.)
             continue;
         }
         for item in parsed.tree().items() {
@@ -87,7 +71,7 @@ fn discover(sources: &[TestSource]) -> Vec<Case> {
                     function: function.clone(),
                 },
                 expectation,
-                source: format!("{PRELUDE}\n{}", source.text),
+                source: source.text.clone(),
                 function,
             });
         }
@@ -122,23 +106,19 @@ fn test_kind(func: &vx_parser::FnDecl) -> Option<Expectation> {
     })
 }
 
-/// Classify a raw eval result into the structured outcome.
-fn outcome_of(result: Result<RuntimeValue, RuntimeEvalError>, source: &str) -> EvalOutcome {
+/// Map a vx-runtime evaluation to the structured outcome. Clean → the value; a
+/// poison (a `fail`, a forced `💣`, a failed assert) → Poisoned; a setup failure
+/// (parse / resolve / type error, missing entry) → Errored.
+fn outcome_of(result: Result<Outcome, String>, source: &str) -> EvalOutcome {
     match result {
-        Ok(value) => EvalOutcome::Clean {
-            value: typed_value(value),
+        Ok(Outcome::Clean(value)) => EvalOutcome::Clean {
+            value: typed_value(map_value(value)),
         },
-        // A `fail` or a forced `💣` (which surfaces as a pending value) is a
-        // poison: the program ran and detonated.
-        Err(
-            err @ (RuntimeEvalError::FailureResult { .. } | RuntimeEvalError::PendingResult { .. }),
-        ) => EvalOutcome::Poisoned {
-            diagnostics: runtime_error_to_diagnostics(&err, source, None),
+        Ok(Outcome::Poisoned { reason, .. }) => EvalOutcome::Poisoned {
+            diagnostics: one_note("test poisoned", &reason, source),
         },
-        // Anything else (compile/parse/type/unsupported) means the test never
-        // ran cleanly — it errored.
-        Err(err) => EvalOutcome::Errored {
-            diagnostics: runtime_error_to_diagnostics(&err, source, None),
+        Err(setup) => EvalOutcome::Errored {
+            diagnostics: one_note("compile error", &setup, source),
         },
     }
 }
@@ -148,8 +128,50 @@ fn verdict_of(expectation: Expectation, outcome: &EvalOutcome) -> Verdict {
     match (expectation, outcome) {
         (Expectation::Clean, EvalOutcome::Clean { .. }) => Verdict::Pass,
         (Expectation::Poisons, EvalOutcome::Poisoned { .. }) => Verdict::Pass,
-        // Clean-but-poisoned, poisons-but-clean, and any compile error all fail.
+        // Clean-but-poisoned, poisons-but-clean, and any error all fail.
         _ => Verdict::Fail,
+    }
+}
+
+/// A vx-runtime value mapped onto the RPC value model (for display). Scalars map
+/// directly; a compound renders to a placeholder — a well-formed test ends in
+/// `assert_eq`, so its result is a `Bool`, and the verdict is clean-vs-poison
+/// regardless of the value.
+fn map_value(value: Value) -> RuntimeValue {
+    match value {
+        Value::U64(n) => RuntimeValue::U64(n),
+        Value::Bool(b) => RuntimeValue::Bool(b),
+        Value::Str(s) => RuntimeValue::String(s.to_string()),
+        Value::Unit => RuntimeValue::String("()".to_string()),
+        Value::Tuple(_) => RuntimeValue::String("(…)".to_string()),
+        Value::Array(_) => RuntimeValue::String("[…]".to_string()),
+        Value::Struct(_) => RuntimeValue::String("{…}".to_string()),
+        Value::Closure { .. } => RuntimeValue::String("<closure>".to_string()),
+    }
+}
+
+/// A one-note error diagnostic over `source` — the simple form for a poison
+/// reason or a setup-error string. (Rich compile-error rendering returns when
+/// vx-runtime's front-end exposes structured errors rather than a `String`.)
+fn one_note(title: &str, detail: &str, source: &str) -> margin::Diagnostics {
+    use margin::{Diagnostics, Note, NoteKind, Report, Severity, Source, SourceId};
+    Diagnostics {
+        sources: vec![Source {
+            id: SourceId("0".to_string()),
+            name: "input.vx".to_string(),
+            hyperlink: None,
+            text: source.to_string(),
+        }],
+        reports: vec![Report {
+            severity: Severity::Error,
+            title: title.to_string(),
+            annotations: Vec::new(),
+            notes: vec![Note {
+                kind: NoteKind::Note,
+                text: detail.to_string(),
+            }],
+            sections: Vec::new(),
+        }],
     }
 }
 
@@ -199,10 +221,9 @@ fn local_host() -> HostInfo {
     }
 }
 
-/// A synchronous, cloneable event sink. Events born deep in synchronous code
-/// (compile phases) can't `.await` a vox `Tx`, so everything funnels through an
-/// unbounded channel here; a single async forwarder drains it to the wire. This
-/// is the daemon side of the emission seam: one push point, sync, shareable.
+/// A synchronous, cloneable event sink. Everything funnels through an unbounded
+/// channel; a single async forwarder drains it to the wire. One push point,
+/// sync, shareable.
 #[derive(Clone)]
 struct EventSink {
     tx: UnboundedSender<Event>,
@@ -228,92 +249,12 @@ impl EventSink {
     }
 }
 
-/// Bridges the compiler's `CompileObserver` callbacks onto the firehose, tagging
-/// every phase event with the case's span so reporters can attribute them.
-struct PhaseEmitter {
-    sink: EventSink,
-    span: SpanId,
-}
-
-impl PhaseEmitter {
-    fn finish(&self, phase: Phase, elapsed: Duration, detail: PhaseDetail) {
-        self.sink.emit(self.span, EventBody::PhaseStarted { phase });
-        self.sink.emit(
-            self.span,
-            EventBody::PhaseFinished {
-                phase,
-                duration_ns: elapsed.as_nanos() as u64,
-                detail,
-            },
-        );
-    }
-}
-
-impl vx_ir::compile::CompileObserver for PhaseEmitter {
-    fn parsed(&mut self, elapsed: Duration, cst_nodes: u64, _bytes: u64) {
-        self.finish(
-            Phase::Parse,
-            elapsed,
-            PhaseDetail::Parse {
-                cst_nodes,
-                errors: 0,
-            },
-        );
-    }
-    fn name_resolved(&mut self, elapsed: Duration) {
-        self.finish(
-            Phase::NameResolve,
-            elapsed,
-            PhaseDetail::NameResolve {
-                bindings: 0,
-                unresolved: 0,
-            },
-        );
-    }
-    fn type_checked(&mut self, elapsed: Duration) {
-        self.finish(
-            Phase::TypeCheck,
-            elapsed,
-            PhaseDetail::TypeCheck {
-                inferences: 0,
-                errors: 0,
-            },
-        );
-    }
-    fn capability_checked(&mut self, elapsed: Duration) {
-        self.finish(
-            Phase::CapabilityCheck,
-            elapsed,
-            PhaseDetail::CapabilityCheck { required: vec![] },
-        );
-    }
-    fn demand_analyzed(&mut self, elapsed: Duration) {
-        self.finish(
-            Phase::DemandGraph,
-            elapsed,
-            PhaseDetail::DemandGraph {
-                nodes: 0,
-                edges: 0,
-                lazy_fields: 0,
-                reachable_bodies: 0,
-            },
-        );
-    }
-    fn lowered(&mut self, elapsed: Duration, bodies: u64, kernel_ops: u64) {
-        self.finish(
-            Phase::Lower,
-            elapsed,
-            PhaseDetail::Lower { bodies, kernel_ops },
-        );
-    }
-}
-
 impl TestRunner for TestRunnerService {
     async fn run_tests(&self, request: RunTestsRequest, events: Tx<Event>) -> RunSummary {
         let start = Instant::now();
 
-        // The emission seam: synchronous code pushes onto this unbounded
-        // channel; one async forwarder drains it to the vox `Tx`.
+        // The emission seam: synchronous code pushes onto this unbounded channel;
+        // one async forwarder drains it to the vox `Tx`.
         let (raw_tx, mut raw_rx) = tokio::sync::mpsc::unbounded_channel::<Event>();
         let forwarder = tokio::spawn(async move {
             while let Some(event) = raw_rx.recv().await {
@@ -339,19 +280,15 @@ impl TestRunner for TestRunnerService {
 
         let verdicts: Vec<Verdict> = futures_util::stream::iter(cases.into_iter().enumerate())
             .map(|(index, case)| {
-                // Per-case span (1-based; 0 is the run itself) ties every phase
-                // event for this case back to it, even under interleaving.
+                // Per-case span (1-based; 0 is the run itself) ties events back.
                 let span = SpanId(index as u64 + 1);
                 let sink = sink.clone();
-                let this = self.clone();
                 async move {
                     sink.emit(
                         span,
                         EventBody::CaseStarted {
                             id: case.id.clone(),
                             expectation: case.expectation,
-                            // Content-addressed source closure lands with the
-                            // store-backed seam; omitted here.
                             closure: None,
                             topology: vx_services::Topology {
                                 executors: vec![vx_services::ExecutorSpec {
@@ -363,16 +300,12 @@ impl TestRunner for TestRunnerService {
                     );
 
                     let case_start = Instant::now();
-                    let mut emitter = PhaseEmitter {
-                        sink: sink.clone(),
-                        span,
-                    };
-                    let result = this
-                        .orchestrator
-                        .eval_raw_observed(&case.source, &case.function, &[], &mut emitter)
-                        .await
-                        .map(|out| out.value);
-                    let outcome = outcome_of(result, &case.source);
+                    // Evaluate on vx-runtime. The result is consumed into the
+                    // (Send) `EvalOutcome` here, before any emission.
+                    let outcome = outcome_of(
+                        vx_runtime::eval::run(&case.source, &case.function),
+                        &case.source,
+                    );
                     let verdict = verdict_of(case.expectation, &outcome);
 
                     sink.emit(

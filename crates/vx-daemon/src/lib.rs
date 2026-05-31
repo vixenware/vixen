@@ -10,17 +10,13 @@ use tokio::sync::watch;
 use vox::{ConnectionAcceptor, Metadata, TransportMode};
 use vx_runner::RunnerService;
 use vx_services::{
-    DAEMON_SOCK, DaemonDispatcher, OrchestratorDispatcher, RunnerDispatcher, StoreDispatcher,
-    TestRunnerDispatcher,
+    DAEMON_SOCK, DaemonDispatcher, RunnerDispatcher, StoreDispatcher, TestRunnerDispatcher,
 };
 use vx_store::StoreService;
 use vx_vfsd::{VfsdDispatcher, VfsdService};
 
-mod orchestrator;
-mod runtime_eval;
 mod service;
 mod test_runner;
-pub use orchestrator::{OrchestratorService, OrchestratorWiring};
 pub use service::DaemonService;
 pub use test_runner::TestRunnerService;
 
@@ -210,7 +206,6 @@ pub async fn serve(config: DaemonConfig) -> Result<()> {
         return Err(eyre::eyre!("no listen addresses configured"));
     }
 
-    let local_addr = config.listen[0].clone();
     let listen_addrs = config.listen.clone();
     let services = config.services;
 
@@ -259,33 +254,12 @@ pub async fn serve(config: DaemonConfig) -> Result<()> {
         None
     };
 
-    let orchestrator_store = if let Some(cfg) = services.orchestrator.as_ref() {
-        resolve_optional_store_client(cfg.store.as_ref(), store_service.as_ref()).await?
-    } else {
-        None
-    };
-    let orchestrator_wiring = services
-        .orchestrator
-        .as_ref()
-        .map(|cfg| {
-            resolve_orchestrator_wiring(
-                cfg,
-                store_service.is_some(),
-                runner_service.is_some(),
-                vfsd_service.is_some(),
-                &local_addr,
-            )
-        })
-        .transpose()?;
-    let orchestrator_service = orchestrator_wiring.map(|wiring| {
-        OrchestratorService::with_runtime(wiring, orchestrator_store, vfsd_service.clone())
-    });
-    // The test runner rides the same evaluation path as the orchestrator, so it
-    // is hosted exactly when the orchestrator is.
-    let test_runner_service = orchestrator_service.clone().map(TestRunnerService::new);
+    // Eval is gone — the eager runtime is deleted. The `orchestrator` config slot
+    // now gates only the test surface, which runs on vx-runtime and needs no
+    // store/runner/vfsd wiring of its own.
+    let test_runner_service = services.orchestrator.is_some().then(TestRunnerService::new);
     let mut hosted_services = vec!["Daemon".to_owned()];
-    if orchestrator_service.is_some() {
-        hosted_services.push("Orchestrator".to_owned());
+    if test_runner_service.is_some() {
         hosted_services.push("TestRunner".to_owned());
     }
     if store_service.is_some() {
@@ -302,7 +276,6 @@ pub async fn serve(config: DaemonConfig) -> Result<()> {
 
     let acceptor = DaemonAcceptor {
         service,
-        orchestrator_service,
         test_runner_service,
         store_service,
         runner_service,
@@ -367,21 +340,6 @@ async fn resolve_required_store_client(
     }
 }
 
-async fn resolve_optional_store_client(
-    configured: Option<&ServiceRef>,
-    local_store: Option<&StoreService>,
-) -> Result<Option<vx_services::StoreClient>> {
-    match configured {
-        Some(_) => Ok(Some(
-            resolve_required_store_client(configured, local_store, "orchestrator.store").await?,
-        )),
-        None if local_store.is_some() => Ok(Some(
-            resolve_required_store_client(None, local_store, "orchestrator.store").await?,
-        )),
-        None => Ok(None),
-    }
-}
-
 async fn connect_in_process_store(service: StoreService) -> Result<vx_services::StoreClient> {
     let (client_link, server_link) = vox::memory_link_pair(64);
     tokio::spawn(async move {
@@ -416,108 +374,11 @@ async fn connect_in_process_store(service: StoreService) -> Result<vx_services::
         .await?)
 }
 
-fn resolve_optional_dependency(
-    configured: Option<&ServiceRef>,
-    local_available: bool,
-    local_addr: &str,
-    label: &str,
-) -> Result<Option<String>> {
-    match configured {
-        Some(ServiceRef::InProcess) => {
-            if local_available {
-                Ok(Some(local_addr.to_owned()))
-            } else {
-                bail!("{label} is configured as @in_process, but no local service is hosted")
-            }
-        }
-        Some(ServiceRef::Rpc { address }) => Ok(Some(address.clone())),
-        None => {
-            if local_available {
-                Ok(Some(local_addr.to_owned()))
-            } else {
-                Ok(None)
-            }
-        }
-    }
-}
-
-fn resolve_required_dependency(
-    configured: Option<&ServiceRef>,
-    local_available: bool,
-    local_addr: &str,
-    label: &str,
-) -> Result<String> {
-    match resolve_optional_dependency(configured, local_available, local_addr, label)? {
-        Some(addr) => Ok(addr),
-        None => bail!(
-            "{label} is required, but no local service is hosted and no remote dependency was configured"
-        ),
-    }
-}
-
-fn resolve_orchestrator_wiring(
-    config: &OrchestratorConfig,
-    store_available: bool,
-    runner_available: bool,
-    vfsd_available: bool,
-    local_addr: &str,
-) -> Result<OrchestratorWiring> {
-    Ok(OrchestratorWiring {
-        store_addr: resolve_optional_dependency(
-            config.store.as_ref(),
-            store_available,
-            local_addr,
-            "orchestrator.store",
-        )?,
-        runner_addrs: resolve_many_dependencies(
-            &config.runners,
-            runner_available,
-            local_addr,
-            "orchestrator.runners",
-        )?,
-        vfsd_addr: resolve_optional_dependency(
-            config.vfsd.as_ref(),
-            vfsd_available,
-            local_addr,
-            "orchestrator.vfsd",
-        )?,
-    })
-}
-
-fn resolve_many_dependencies(
-    configured: &[ServiceRef],
-    local_available: bool,
-    local_addr: &str,
-    label: &str,
-) -> Result<Vec<String>> {
-    if configured.is_empty() {
-        return if local_available {
-            Ok(vec![local_addr.to_owned()])
-        } else {
-            Ok(vec![])
-        };
-    }
-
-    configured
-        .iter()
-        .enumerate()
-        .map(|(index, reference)| {
-            resolve_required_dependency(
-                Some(reference),
-                local_available,
-                local_addr,
-                &format!("{label}[{index}]"),
-            )
-        })
-        .collect()
-}
-
 /// A connection acceptor that can serve multiple sub-services:
 /// store, runner, vfs, etc.
 #[derive(Clone)]
 struct DaemonAcceptor {
     service: DaemonService,
-    orchestrator_service: Option<OrchestratorService>,
     test_runner_service: Option<TestRunnerService>,
     store_service: Option<StoreService>,
     runner_service: Option<RunnerService>,
@@ -533,13 +394,6 @@ impl ConnectionAcceptor for DaemonAcceptor {
         tracing::info!("daemon got request for service: {}", request.service());
         match request.service() {
             "Daemon" => connection.handle_with(DaemonDispatcher::new(self.service.clone())),
-            "Orchestrator" => {
-                let Some(service) = &self.orchestrator_service else {
-                    tracing::warn!("orchestrator service requested but not hosted");
-                    return Err(vec![]);
-                };
-                connection.handle_with(OrchestratorDispatcher::new(service.clone()));
-            }
             "TestRunner" => {
                 let Some(service) = &self.test_runner_service else {
                     tracing::warn!("test runner service requested but not hosted");

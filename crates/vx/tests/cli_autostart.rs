@@ -71,6 +71,7 @@ fn write_simple_build_file(temp_dir: &TempDir) -> PathBuf {
 }
 
 #[test]
+#[ignore = "drives the daemon's eval RPC, killed in the eager-runtime purge; unignore at the vx-runtime cutover"]
 fn eval_auto_starts_daemon_and_runs_rustc_hello() {
     let temp_dir = TempDir::new().expect("temp dir should exist");
     let config_path = write_daemon_config_without_vfsd(&temp_dir);
@@ -99,6 +100,7 @@ fn eval_auto_starts_daemon_and_runs_rustc_hello() {
 }
 
 #[test]
+#[ignore = "drives the daemon's eval RPC, killed in the eager-runtime purge; unignore at the vx-runtime cutover"]
 fn eval_fresh_daemon_replaces_running_daemon_and_runs_rustc_hello() {
     let temp_dir = TempDir::new().expect("temp dir should exist");
     let config_path = write_daemon_config_without_vfsd(&temp_dir);
@@ -129,6 +131,7 @@ fn eval_fresh_daemon_replaces_running_daemon_and_runs_rustc_hello() {
 }
 
 #[test]
+#[ignore = "drives the daemon's eval RPC, killed in the eager-runtime purge; unignore at the vx-runtime cutover"]
 fn vx_alias_runs_vixen_run_build() {
     let temp_dir = TempDir::new().expect("temp dir should exist");
     let config_path = write_daemon_config_without_vfsd(&temp_dir);
