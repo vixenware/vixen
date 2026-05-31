@@ -30,6 +30,7 @@
 //! no flat ISA, pending-is-a-resolver, bomb-detonates-on-force) are load-bearing.
 
 pub mod analyze;
+pub mod command;
 pub mod dispatch;
 pub mod eval;
 pub mod graph;

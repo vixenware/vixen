@@ -4043,6 +4043,7 @@ dependencies = [
 name = "vx-runtime"
 version = "0.1.0"
 dependencies = [
+ "command-model",
  "copypatch",
  "corosensei",
  "facet",

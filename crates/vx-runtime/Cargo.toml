@@ -22,6 +22,10 @@ vx-ir = { workspace = true }
 vx-parser = { workspace = true }
 vx-stdlib = { workspace = true }
 vx-types = { workspace = true }
+# command-model is pure projection (grammar + argv -> classified I/O + canonical
+# form, no I/O). The runtime Command value (what a CLI literal evaluates to and exec
+# consumes) wraps its EffectiveCommand with the execution argv + the outputs.
+command-model = { path = "../../crates-plus/command-model" }
 # The copy-and-patch JIT substrate (executable memory + AArch64 relocation
 # patching). Only the runtime surface (ExecBuf, patch_branch26) — the smoke test,
 # arithmetic stencils, and kernel→stencil-chain lowering stay in this crate.
