@@ -254,7 +254,6 @@ fn edit_distance(a: &str, b: &str) -> u32 {
 fn namespace_name_for_receiver(receiver_ty: &Ty, env: &TypeEnv) -> Option<String> {
     match receiver_ty {
         Ty::Scalar(vx_types::Scalar::String) => Some("String".to_string()),
-        Ty::Optional(_) => Some("Option".to_string()),
         Ty::Array(_) => Some("Array".to_string()),
         Ty::Map(_) => Some("Map".to_string()),
         Ty::Stream(_) => Some("Stream".to_string()),

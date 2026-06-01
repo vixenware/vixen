@@ -644,11 +644,6 @@ pub fn resolve_type_ref(
                 env,
             )
         }
-        TypeRefKind::Optional(opt) => {
-            let inner_ref = opt.inner;
-            let inner = resolve_type_ref(arena, inner_ref, name_to_id, type_params, self_ty, env);
-            env.intern_optional(inner)
-        }
         TypeRefKind::Tuple(tup) => {
             let elem_refs = tup.elements.clone();
             let elements: Vec<TypeId> = elem_refs
@@ -746,13 +741,6 @@ fn resolve_named_type(
         "Bool" => return Some(env.intern_scalar(Scalar::Bool)),
         "String" => return Some(env.intern_scalar(Scalar::String)),
         "Unit" => return Some(env.intern_unit()),
-        "Option" => {
-            let inner = type_args
-                .into_iter()
-                .next()
-                .unwrap_or_else(|| env.intern_poison());
-            return Some(env.intern_optional(inner));
-        }
         "Array" => {
             let inner = type_args
                 .into_iter()

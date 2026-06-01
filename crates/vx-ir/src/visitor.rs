@@ -411,9 +411,6 @@ pub fn walk_type_ref<V: VirVisitor + ?Sized>(v: &mut V, arena: &VirArena, id: Ty
                 v.visit_type_ref(arena, elem);
             }
         }
-        TypeRefKind::Optional(o) => {
-            v.visit_type_ref(arena, o.inner);
-        }
         TypeRefKind::Sum(s) => {
             for &alt in &s.alternatives {
                 v.visit_type_ref(arena, alt);

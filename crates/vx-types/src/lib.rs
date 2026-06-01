@@ -40,7 +40,7 @@ pub struct InferVar(pub u32);
 /// The core type representation.
 ///
 /// Every type in a Vixen program is represented as a `Ty`. Types are structural
-/// where possible (tuples, functions, optionals) and nominal where the language
+/// where possible (tuples, functions) and nominal where the language
 /// requires it (structs, enums, newtypes, opaque declarations).
 ///
 /// Sub-types are stored as [`TypeId`]s referring back into the [`TypeEnv`]
@@ -78,9 +78,6 @@ pub enum Ty {
 
     /// A function type: `Fn(A, B) -> C` with optional capability tags.
     Function(FunctionTy),
-
-    /// `Option[T]` — sugar `T?` desugars to this.
-    Optional(OptionalTy),
 
     /// `Array[T]`.
     Array(ArrayTy),
@@ -183,10 +180,6 @@ pub struct MapTy {
 /// `Stream[T]`.
 #[derive(Clone, PartialEq, Eq, Hash, Debug)]
 pub struct StreamTy(pub TypeId);
-
-/// `Option[T]` / `T?`.
-#[derive(Clone, PartialEq, Eq, Hash, Debug)]
-pub struct OptionalTy(pub TypeId);
 
 /// A capability tag on a function type (e.g. `#fs`, `#discover`).
 #[derive(Clone, PartialEq, Eq, Hash, Debug)]
@@ -467,10 +460,6 @@ impl TypeEnv {
         }))
     }
 
-    pub fn intern_optional(&mut self, inner: TypeId) -> TypeId {
-        self.intern(Ty::Optional(OptionalTy(inner)))
-    }
-
     pub fn intern_map(&mut self, key: TypeId, value: TypeId) -> TypeId {
         self.intern(Ty::Map(MapTy { key, value }))
     }
@@ -571,9 +560,9 @@ impl Ty {
                 f.params.iter().any(|id| env[*id].has_infer_vars(env))
                     || env[f.ret].has_infer_vars(env)
             }
-            Ty::Optional(OptionalTy(inner))
-            | Ty::Array(ArrayTy(inner))
-            | Ty::Stream(StreamTy(inner)) => env[*inner].has_infer_vars(env),
+            Ty::Array(ArrayTy(inner)) | Ty::Stream(StreamTy(inner)) => {
+                env[*inner].has_infer_vars(env)
+            }
             Ty::Map(m) => env[m.key].has_infer_vars(env) || env[m.value].has_infer_vars(env),
         }
     }
@@ -593,9 +582,7 @@ impl Ty {
             Ty::Function(f) => {
                 f.params.iter().any(|id| env[*id].has_params(env)) || env[f.ret].has_params(env)
             }
-            Ty::Optional(OptionalTy(inner))
-            | Ty::Array(ArrayTy(inner))
-            | Ty::Stream(StreamTy(inner)) => env[*inner].has_params(env),
+            Ty::Array(ArrayTy(inner)) | Ty::Stream(StreamTy(inner)) => env[*inner].has_params(env),
             Ty::Map(m) => env[m.key].has_params(env) || env[m.value].has_params(env),
         }
     }
@@ -657,9 +644,6 @@ impl<'a> std::fmt::Display for TyDisplay<'a> {
                     " -> {}",
                     self.env[function.ret].display_with_env(self.env)
                 )
-            }
-            Ty::Optional(OptionalTy(inner)) => {
-                write!(f, "{}?", self.env[*inner].display_with_env(self.env))
             }
             Ty::Array(ArrayTy(inner)) => {
                 write!(f, "Array[{}]", self.env[*inner].display_with_env(self.env))
@@ -766,17 +750,6 @@ mod tests {
         assert_eq!(
             env.get_ty(f_id).display_with_env(&env).to_string(),
             "Fn(String) #fs -> String"
-        );
-    }
-
-    #[test]
-    fn optional_display() {
-        let mut env = TypeEnv::new();
-        let u64_id = env.intern_scalar(Scalar::U64);
-        let opt_id = env.intern_optional(u64_id);
-        assert_eq!(
-            env.get_ty(opt_id).display_with_env(&env).to_string(),
-            "U64?"
         );
     }
 

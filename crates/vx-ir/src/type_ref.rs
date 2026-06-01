@@ -35,9 +35,6 @@ pub enum TypeRefKind {
     /// A tuple type: `(A, B, C)`.
     Tuple(TupleTypeRef),
 
-    /// An optional type: `T?`.
-    Optional(OptionalTypeRef),
-
     /// A sum type: `A | B | C`.
     Sum(SumTypeRef),
 
@@ -73,13 +70,6 @@ pub struct FunctionTypeRef {
 pub struct TupleTypeRef {
     /// The element types.
     pub elements: Vec<TypeRefId>,
-}
-
-/// An optional type reference: `T?`.
-#[derive(Debug, Clone)]
-pub struct OptionalTypeRef {
-    /// The inner type.
-    pub inner: TypeRefId,
 }
 
 /// A sum type reference: `A | B | C`.

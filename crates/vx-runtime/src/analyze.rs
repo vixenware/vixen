@@ -321,11 +321,11 @@ impl Builder<'_> {
                 self.emit(NodeKind::Kernel(KernelOp::If), "if".into(), span, inputs)
             }
 
-            // Explicit failure — poisons when reached. Its message is an input. The
-            // scalar kernel's `Fail` op can't carry the typed `err` value, but that
-            // only matters when the failure is *caught*: `?` tree-walks its inner so
-            // a caught fail keeps its `err` (see the `Fallible` eval arm). Uncaught,
-            // both modes simply poison, so the kernel stays correct here.
+            // Explicit failure — poisons when reached. Its message is an input so
+            // lowering can reconstruct it: a `fail e` carries `e`'s value to the
+            // kernel through the value-pool side table (`lower::const_value` →
+            // `Kernel::value_pool`), so a caught `?` gets the same typed `err` on the
+            // kernel path as on the tree-walk.
             ExprKind::Fail(fx) => {
                 let inputs = match fx.message {
                     Some(m) => vec![self.walk(m)],

@@ -54,7 +54,7 @@ use crate::stmt::{
     AssignStmt, CompoundUpdateStmt, FieldAssignStmt, LetStmt, ReturnStmt, Stmt, StmtKind,
 };
 use crate::type_ref::{
-    FunctionTypeRef, OptionalTypeRef, PathTypeRef, SumTypeRef, TupleTypeRef, TypeRef, TypeRefKind,
+    FunctionTypeRef, PathTypeRef, SumTypeRef, TupleTypeRef, TypeRef, TypeRefKind,
 };
 use crate::{BodyId, ExprId, ItemId, ScopeId, SourceUnitId, TypeRefId};
 use vx_parser::{self, AstNode, SourceId, SourceSpan, SyntaxKind};
@@ -3361,9 +3361,15 @@ impl VirBuilder {
             .map(|t| self.build_type_ref(&t))
             .unwrap_or_else(|| self.error_type_ref(type_span));
 
+        // `T?` is pure sugar for `Option[T]` — a normal enum path, not a dedicated
+        // optional type. Desugaring here means the rest of the pipeline sees one
+        // representation of optionality (the `Option` enum), no special-casing.
         self.arena.alloc_type_ref(TypeRef {
             span: type_span,
-            kind: TypeRefKind::Optional(OptionalTypeRef { inner }),
+            kind: TypeRefKind::Path(PathTypeRef {
+                segments: vec!["Option".to_string()],
+                type_args: vec![inner],
+            }),
         })
     }
 

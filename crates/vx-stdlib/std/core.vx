@@ -35,10 +35,8 @@ newtype ExecutorClass of String;
 type Host;
 
 enum Option[T] {
-  struct Some {
-    value: T,
-  },
-  struct None,
+  Some(T),
+  None,
 }
 
 namespace Option[T] {

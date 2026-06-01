@@ -2303,14 +2303,7 @@ pub(crate) fn completions_for_type(
     state: &DocumentState,
     offset: rowan::TextSize,
 ) -> Option<Vec<CompletionItem>> {
-    match ty {
-        vx_types::Ty::Optional(opt) => {
-            let inner = state.types.env.get_ty(opt.0).clone();
-            completions_for_type(&inner, state, offset)
-        }
-        _ => struct_fields_from_ty(ty, state),
-    }
-    .or_else(|| {
+    struct_fields_from_ty(ty, state).or_else(|| {
         let items: Vec<CompletionItem> = visible_members_for_receiver(state, offset, ty)
             .into_iter()
             .filter(|def| def.kind == DefKind::Function)
@@ -2357,10 +2350,6 @@ fn struct_fields_from_ty(ty: &vx_types::Ty, state: &DocumentState) -> Option<Vec
             } else {
                 None
             }
-        }
-        vx_types::Ty::Optional(opt) => {
-            let inner = state.types.env.get_ty(opt.0).clone();
-            struct_fields_from_ty(&inner, state)
         }
         _ => None,
     }
@@ -2926,7 +2915,6 @@ fn namespace_name_for_receiver(
     use vx_types::{Scalar, Ty};
     match receiver_ty {
         Ty::Scalar(Scalar::String) => Some("String".to_string()),
-        Ty::Optional(_) => Some("Option".to_string()),
         Ty::Array(_) => Some("Array".to_string()),
         Ty::Map(_) => Some("Map".to_string()),
         Ty::Stream(_) => Some("Stream".to_string()),

@@ -3,7 +3,7 @@
 //! Operate over interned [`TypeId`]s, fetching `Ty` shapes from the
 //! [`TypeEnv`] and re-interning rewritten types.
 
-use vx_types::{ArrayTy, FunctionTy, MapTy, OptionalTy, StreamTy, TupleTy, Ty, TypeEnv, TypeId};
+use vx_types::{ArrayTy, FunctionTy, MapTy, StreamTy, TupleTy, Ty, TypeEnv, TypeId};
 
 /// Replace `Ty::Param(index)` with the concrete type at that index in `substitutions`.
 /// Used after all type params have been resolved to concrete types.
@@ -13,10 +13,6 @@ pub fn substitute_type_params(ty: TypeId, substitutions: &[TypeId], env: &mut Ty
             .get(param.index as usize)
             .copied()
             .unwrap_or(ty),
-        Ty::Optional(OptionalTy(inner)) => {
-            let inner = substitute_type_params(inner, substitutions, env);
-            env.intern_optional(inner)
-        }
         Ty::Array(ArrayTy(inner)) => {
             let inner = substitute_type_params(inner, substitutions, env);
             env.intern_array(inner)
@@ -105,10 +101,6 @@ pub fn substitute_bound_type_params(
             .get(param.index as usize)
             .and_then(|x| *x)
             .unwrap_or(ty),
-        Ty::Optional(OptionalTy(inner)) => {
-            let inner = substitute_bound_type_params(inner, substitutions, env);
-            env.intern_optional(inner)
-        }
         Ty::Array(ArrayTy(inner)) => {
             let inner = substitute_bound_type_params(inner, substitutions, env);
             env.intern_array(inner)
@@ -201,11 +193,6 @@ pub fn bind_type_params(
                 && slot.is_none()
             {
                 *slot = Some(actual);
-            }
-        }
-        Ty::Optional(OptionalTy(inner)) => {
-            if let Ty::Optional(OptionalTy(actual_inner)) = actual_ty {
-                bind_type_params(inner, actual_inner, substitutions, env);
             }
         }
         Ty::Array(ArrayTy(inner)) => {

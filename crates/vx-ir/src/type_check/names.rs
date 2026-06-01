@@ -1,6 +1,6 @@
 //! Name reference inference and definition type lookup.
 
-use vx_types::{FnSig, InferVar, ParamDef, TypeId};
+use vx_types::{FnSig, ParamDef, TypeId};
 
 use crate::binding::BindingKind;
 use crate::expr::NameRefExpr;
@@ -144,14 +144,14 @@ pub(crate) fn type_of_variant(
         return tc.poison();
     };
 
-    let (variant_def_id, enum_name) = {
+    let variant_def_id = {
         let vx_types::TypeDef::Enum(ref enum_def) = tc.types.env[enum_def_id] else {
             return tc.poison();
         };
         let Some(&v) = enum_def.variants.get(variant_index as usize) else {
             return tc.poison();
         };
-        (v, enum_def.name.clone())
+        v
     };
 
     // Snapshot variant struct fields.
@@ -166,29 +166,40 @@ pub(crate) fn type_of_variant(
             .collect()
     };
 
-    // Unit variant (no fields) → value type.
+    // The variant's enum type, generic over the enum's own type params (e.g.
+    // `Option[T]`, `Result[T, E]`). A leftover `Ty::Param` is wildcard-compatible
+    // (unifies with anything), so a unit variant used as a value (`None`) just
+    // works; a `Variant(args)` *call* resolves the params via `instantiate_call_sig`.
+    let ret = enum_self_type(tc, enum_def_id);
+
+    // Unit variant (no fields) → the enum value itself.
     if fields_snapshot.is_empty() {
-        if enum_name == "Option" {
-            let infer = tc.types.env.intern_infer(InferVar(0));
-            return tc.types.env.intern_optional(infer);
-        }
-        return tc.types.env.intern_enum(enum_def_id, vec![]);
+        return ret;
     }
-
-    // Variant with fields → constructor function type.
-    let ret = if enum_name == "Option" {
-        let inner = fields_snapshot
-            .iter()
-            .find(|(n, _)| n == "value")
-            .map(|(_, t)| *t)
-            .unwrap_or_else(|| tc.types.env.intern_infer(InferVar(0)));
-        tc.types.env.intern_optional(inner)
-    } else {
-        tc.types.env.intern_enum(enum_def_id, vec![])
-    };
-
+    // Variant with fields → its constructor function type.
     let params: Vec<TypeId> = fields_snapshot.iter().map(|(_, t)| *t).collect();
     tc.types.env.intern_function(params, ret, vec![])
+}
+
+/// The enum's own generic type — `intern_enum(def, [Param(0), Param(1), …])` — used
+/// as a variant value/constructor's result. The params stay abstract (wildcards)
+/// until a call site or a usage unifies them.
+fn enum_self_type(tc: &mut TypeChecker, enum_def_id: vx_types::TypeDefId) -> TypeId {
+    let type_params: Vec<String> = match &tc.types.env[enum_def_id] {
+        vx_types::TypeDef::Enum(e) => e.type_params.clone(),
+        _ => Vec::new(),
+    };
+    let args: Vec<TypeId> = type_params
+        .iter()
+        .enumerate()
+        .map(|(i, name)| {
+            tc.types.env.intern_param(vx_types::TypeParam {
+                name: name.clone(),
+                index: i as u32,
+            })
+        })
+        .collect();
+    tc.types.env.intern_enum(enum_def_id, args)
 }
 
 /// Get the FnSig for a name ref, considering function/variant/namespace overloads.
@@ -233,12 +244,12 @@ pub(crate) fn variant_sig(
     let variant = enum_item_data.variants.get(variant_index as usize)?.clone();
     let enum_name_span = enum_item_data.name_span;
     let &enum_def_id = tc.types.def_to_type.get(&enum_name_span)?;
-    let (variant_def_id, enum_name, type_params) = {
+    let (variant_def_id, type_params) = {
         let vx_types::TypeDef::Enum(ref enum_def) = tc.types.env[enum_def_id] else {
             return None;
         };
         let &v = enum_def.variants.get(variant_index as usize)?;
-        (v, enum_def.name.clone(), enum_def.type_params.clone())
+        (v, enum_def.type_params.clone())
     };
     let fields_snapshot: Vec<vx_types::FieldDef> = {
         let vx_types::TypeDef::Struct(ref variant_struct) = tc.types.env[variant_def_id] else {
@@ -247,16 +258,9 @@ pub(crate) fn variant_sig(
         variant_struct.fields.clone()
     };
 
-    let ret = if enum_name == "Option" {
-        let inner = fields_snapshot
-            .iter()
-            .find(|f| f.name == "value")
-            .map(|f| f.ty)
-            .unwrap_or_else(|| tc.types.env.intern_infer(InferVar(0)));
-        tc.types.env.intern_optional(inner)
-    } else {
-        tc.types.env.intern_enum(enum_def_id, vec![])
-    };
+    // The constructor returns the enum generic over its own params; the call site
+    // resolves them from the args (`instantiate_call_sig`).
+    let ret = enum_self_type(tc, enum_def_id);
 
     Some(FnSig {
         name: variant.name.clone(),

@@ -277,7 +277,6 @@ impl<'a> TypeChecker<'a> {
         let actual_ty = self.types.env.get_ty(actual).clone();
         let expected_ty = self.types.env.get_ty(expected).clone();
         match (actual_ty, expected_ty) {
-            (Ty::Optional(a), Ty::Optional(e)) => self.types_compatible(a.0, e.0),
             (Ty::Array(a), Ty::Array(e)) => self.types_compatible(a.0, e.0),
             (Ty::Map(a), Ty::Map(e)) => {
                 self.types_compatible(a.key, e.key) && self.types_compatible(a.value, e.value)
