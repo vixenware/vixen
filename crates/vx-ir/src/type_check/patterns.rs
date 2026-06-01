@@ -139,16 +139,37 @@ fn resolve_variant_fields(
         return Some(fields);
     }
 
-    // Enum variants.
-    if let Ty::Enum(enum_ty) = scrutinee
-        && let vx_types::TypeDef::Enum(ref edef) = tc.types.env[enum_ty.def]
-    {
-        let variants = edef.variants.clone();
+    // Enum variants — substitute the enum's type args so a generic enum's payload
+    // resolves concretely (`Result[U64, String]` → `Err`'s field is `String`, not
+    // the bare param `E`), mirroring the Optional path above.
+    if let Ty::Enum(enum_ty) = scrutinee {
+        let args = enum_ty.type_args.clone();
+        let variants = match tc.types.env[enum_ty.def] {
+            vx_types::TypeDef::Enum(ref edef) => edef.variants.clone(),
+            _ => Vec::new(),
+        };
         for variant_id in variants {
-            if let vx_types::TypeDef::Struct(ref sdef) = tc.types.env[variant_id]
-                && sdef.name == variant_name
-            {
-                return Some(sdef.fields.iter().map(|f| (f.name.clone(), f.ty)).collect());
+            let fields_snapshot: Option<Vec<(String, TypeId)>> =
+                if let vx_types::TypeDef::Struct(ref sdef) = tc.types.env[variant_id]
+                    && sdef.name == variant_name
+                {
+                    Some(sdef.fields.iter().map(|f| (f.name.clone(), f.ty)).collect())
+                } else {
+                    None
+                };
+            if let Some(fields_snapshot) = fields_snapshot {
+                let fields = fields_snapshot
+                    .into_iter()
+                    .map(|(name, ty)| {
+                        let substituted = if args.is_empty() {
+                            ty
+                        } else {
+                            substitute_type_params(ty, &args, &mut tc.types.env)
+                        };
+                        (name, substituted)
+                    })
+                    .collect();
+                return Some(fields);
             }
         }
     }

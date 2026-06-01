@@ -321,7 +321,11 @@ impl Builder<'_> {
                 self.emit(NodeKind::Kernel(KernelOp::If), "if".into(), span, inputs)
             }
 
-            // Explicit failure — poisons when reached. Its message is an input.
+            // Explicit failure — poisons when reached. Its message is an input. The
+            // scalar kernel's `Fail` op can't carry the typed `err` value, but that
+            // only matters when the failure is *caught*: `?` tree-walks its inner so
+            // a caught fail keeps its `err` (see the `Fallible` eval arm). Uncaught,
+            // both modes simply poison, so the kernel stays correct here.
             ExprKind::Fail(fx) => {
                 let inputs = match fx.message {
                     Some(m) => vec![self.walk(m)],

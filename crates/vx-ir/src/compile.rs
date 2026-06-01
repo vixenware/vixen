@@ -78,6 +78,18 @@ pub fn inject_prelude(
         .flat_map(|&su_id| program.arena[su_id].items.iter().copied())
         .collect();
 
+    // The stdlib enums' promoted variants (`Option`'s `Some`/`None`, `Result`'s
+    // `Ok`/`Err`, …) must be ambient too — bare `Ok(v)` resolves un-imported just
+    // like the items above. (Promotion lands them in each declaring unit's own
+    // module scope; the prelude carries them across to user units.)
+    let prelude_variants: Vec<crate::scope::PromotedVariant> = stdlib_su_ids
+        .iter()
+        .flat_map(|&su_id| {
+            let scope = program.arena[program.arena[su_id].top_level_body].scope;
+            program.arena[scope].promoted_variants.clone()
+        })
+        .collect();
+
     // When the prelude exposes both an opaque type alias (`type Toml;`) and a
     // namespace with the same name (`namespace Toml { ... }`), the namespace
     // wins so `Toml.parse(...)` resolves to it.
@@ -101,6 +113,11 @@ pub fn inject_prelude(
                 target: ScopeEntryTarget::Item(item_id),
                 decl_order: 0,
             });
+        }
+        for pv in &prelude_variants {
+            program.arena[module_scope]
+                .promoted_variants
+                .push(pv.clone());
         }
     }
 }

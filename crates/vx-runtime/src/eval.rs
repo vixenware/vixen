@@ -32,19 +32,46 @@ use vx_types::TypeEnv;
 use crate::dispatch::{self, Dispatcher};
 use crate::graph::Span;
 
-/// A poison — a detonation with a reason and **where in the source** it
-/// originated (I6). Propagates like an error; `eval` attaches the span of the
-/// expression a poison surfaces at (the innermost one wins).
+/// A poison — a detonation carrying a typed **domain error** value and **where in
+/// the source** it originated (I6). This is the runtime form of the failure model's
+/// `Failure`: `fail e` carries `e` as [`err`](Poison::err) (a `Value::Str` for a
+/// bare message, a structured value for a domain error); the human report is
+/// *derived* from it, never a stored string. `?` catches it as data. Propagates
+/// like an error; `eval` attaches the span a poison surfaces at (innermost wins).
 #[derive(Debug, Clone)]
 pub struct Poison {
-    pub reason: String,
+    /// The domain error value (the failure model's `err`).
+    pub err: Value,
     pub span: Option<Span>,
 }
 
-/// Construct a span-less poison (the span is attached as it bubbles through
-/// [`Evaluator::eval`]).
+impl Poison {
+    /// Render the domain error to a human string — `Value::Str` is itself, a
+    /// variant shows its tag, anything else is debug-formatted. (The rich report
+    /// derived from `err` + context is the failure model's job; this is the
+    /// fallback used by the test harness's `Outcome`.)
+    fn message(&self) -> String {
+        match &self.err {
+            Value::Str(s) => s.to_string(),
+            Value::Variant { tag, .. } => tag.clone(),
+            other => format!("{other:?}"),
+        }
+    }
+}
+
+/// Construct a span-less poison from a bare message (the internal-error path —
+/// type mismatches, unhandled forms). The message becomes a `Value::Str` `err`.
 fn poison(reason: String) -> Poison {
-    Poison { reason, span: None }
+    Poison {
+        err: Value::Str(Rc::from(reason.as_str())),
+        span: None,
+    }
+}
+
+/// A thunk already resolved to `value` — reifies a computed value back into a
+/// thunk-bearing position (e.g. a `Result` variant field built by `?`).
+fn done(value: Value) -> Thunk {
+    Thunk(Rc::new(RefCell::new(ThunkState::Done(Ok(value)))))
 }
 
 /// Resolve `name` against the host `PATH` (first match that is a file) — the
@@ -230,16 +257,30 @@ impl Evaluator<'_> {
             // 💣 — poisons the instant it is evaluated (i.e. forced).
             ExprKind::Bomb => Err(poison("💣 forced".into())),
 
-            // Explicit failure — poisons whenever reached.
+            // Explicit failure — poisons whenever reached, carrying the failed
+            // value as the domain `err` (a String, or a structured error value).
             ExprKind::Fail(fx) => {
-                let msg = match fx.message {
-                    Some(m) => match self.eval(m, env)? {
-                        Value::Str(s) => s.to_string(),
-                        other => format!("{other:?}"),
-                    },
-                    None => "fail".into(),
+                let err = match fx.message {
+                    Some(m) => self.eval(m, env)?,
+                    None => Value::Str(Rc::from("fail")),
                 };
-                Err(poison(msg))
+                Err(Poison { err, span: None })
+            }
+
+            // `expr?` — a catching force: evaluate `expr` and reify the outcome as a
+            // `Result` value instead of propagating a poison. Success → `Ok(v)`; a
+            // poison → `Err(e)` carrying its domain `err` (the failure model's catch).
+            // The inner may dispatch to the kernel — a `fail`'s `err` survives via the
+            // kernel's value-pool side table, so both modes catch the same value.
+            ExprKind::Fallible(fb) => {
+                let (tag, value) = match self.eval(fb.expr, env) {
+                    Ok(v) => ("Ok", v),
+                    Err(p) => ("Err", p.err),
+                };
+                Ok(Value::Variant {
+                    tag: tag.to_string(),
+                    fields: vec![("0".to_string(), done(value))],
+                })
             }
 
             ExprKind::Literal(lit) => self.lit_value(&lit.value),
@@ -636,9 +677,11 @@ impl Evaluator<'_> {
                 } else {
                     Value::U64(w)
                 }),
-                // Propagate the kernel poison's source span (I6) into eval's poison.
+                // Propagate the kernel poison whole — it already carries the typed
+                // `err` (a `fail`'s pooled value, or a `Value::Str` for an internal
+                // fault) and the source span (I6).
                 Err(p) => Err(Poison {
-                    reason: p.reason,
+                    err: p.err,
                     span: p.span,
                 }),
             },
@@ -1047,7 +1090,7 @@ pub fn run_in_mode(source: &str, entry: &str, mode: KernelMode) -> Result<(Outco
     let outcome = match ev.eval(root, &Env::new()) {
         Ok(v) => Outcome::Clean(v),
         Err(p) => Outcome::Poisoned {
-            reason: p.reason,
+            reason: p.message(),
             span: p.span,
         },
     };

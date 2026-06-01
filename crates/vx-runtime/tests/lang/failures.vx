@@ -1,0 +1,29 @@
+// The failure model: `fail e` raises a typed error; `expr?` catches it as a
+// `Result` value (`Ok(v)` / `Err(e)`) instead of propagating. A bare `fail "…"`
+// carries a `String` error. Cross-mode parity (Off/Interp/Jit) is the oracle.
+
+fn checked(x: U64) -> U64 (
+  if x > 0 ( x ) else ( fail "non-positive" )
+)
+
+#[test]
+fn catch_ok_yields_the_value() (
+  assert_eq(match checked(42)? ( Ok(v) => v, Err(e) => 0 ), 42)
+)
+
+#[test]
+fn catch_err_takes_the_err_arm() (
+  assert_eq(match checked(0)? ( Ok(v) => v, Err(e) => 7 ), 7)
+)
+
+#[test]
+fn caught_err_is_the_failed_value() (
+  // The caught error is the `fail`ed String — 12 chars of "non-positive".
+  assert_eq(match checked(0)? ( Ok(v) => v, Err(e) => e.len() ), 12)
+)
+
+#[test(poisons)]
+fn an_uncaught_failure_poisons() (
+  // No `?` — the failure propagates and poisons the whole evaluation.
+  checked(0)
+)

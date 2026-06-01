@@ -223,16 +223,32 @@ fn array_type() {
 // =========================================================================
 
 #[test]
-fn fallible_wraps_in_optional() {
-    let (arena, tc, _) = check_source("42?");
-    let id = find_expr(&arena, |k| matches!(k, vx_ir::expr::ExprKind::Fallible(_))).unwrap();
-    let ty_id = arena[id].ty.unwrap();
-    let ty = tc.env.get_ty(ty_id);
-    if let Ty::Optional(opt) = ty {
-        assert_eq!(tc.env.get_ty(opt.0), &Ty::Scalar(Scalar::U64));
-    } else {
-        panic!("expected Optional, got {:?}", ty);
-    }
+fn fallible_wraps_in_result() {
+    // `expr? : Result[T, E]` — the failure model's catch (was `Option[T]`). E is the
+    // error union, `String` until the call-graph union inference lands. `Result` is
+    // a stdlib enum, so go through the bundled front-end that loads it.
+    let fe = vx_ir::compile::semantic_front_end_bundled("fn f() ( 42? )").expect("front-end");
+    let id = find_expr(&fe.program.arena, |k| {
+        matches!(k, vx_ir::expr::ExprKind::Fallible(_))
+    })
+    .unwrap();
+    let ty_id = fe.program.arena[id].ty.unwrap();
+    let ty = fe.env.get_ty(ty_id).clone();
+    let Ty::Enum(enum_ty) = ty else {
+        panic!("expected Result enum, got {ty:?}");
+    };
+    assert!(
+        matches!(fe.env.get_def(enum_ty.def), vx_types::TypeDef::Enum(e) if e.name == "Result"),
+        "expected the Result enum"
+    );
+    assert_eq!(
+        fe.env.get_ty(enum_ty.type_args[0]),
+        &Ty::Scalar(Scalar::U64)
+    );
+    assert_eq!(
+        fe.env.get_ty(enum_ty.type_args[1]),
+        &Ty::Scalar(Scalar::String)
+    );
 }
 
 // =========================================================================

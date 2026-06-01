@@ -68,6 +68,9 @@ pub fn jit_run(k: &Kernel, args: &[Word]) -> Option<Result<Word, Poison>> {
     // Per-op source spans in lay order. A poisoning op reports its index in
     // `ctx.fault`, mapped back to its span here (I6 — per-op on the native path).
     let mut op_spans: Vec<Option<Span>> = Vec::new();
+    // The ops in the same lay order, so a fault can resolve the faulting op's typed
+    // `err` (a `fail`'s pooled value, a div-by-zero message) — not just its span.
+    let mut ops_flat: Vec<&Op> = Vec::new();
     // Each block's start offset in `code` / `prog`, for resolving cross-block
     // branches and terminator cursor resets once every block is laid out.
     let mut block_code = vec![0usize; k.blocks.len()];
@@ -89,6 +92,7 @@ pub fn jit_run(k: &Kernel, args: &[Word]) -> Option<Result<Word, Poison>> {
             code.extend_from_slice(stencil_bytes(op.kind));
             let op_index = op_spans.len() as u64;
             op_spans.push(op.span);
+            ops_flat.push(op);
             push_imms(&mut prog, op, op_index);
         }
 
@@ -163,17 +167,18 @@ pub fn jit_run(k: &Kernel, args: &[Word]) -> Option<Result<Word, Poison>> {
     entry(&mut ctx);
 
     Some(if ctx.status != 0 {
-        // Map the faulting op to its source span (I6), falling back to the
-        // kernel's region span if it's unattributed or spanless.
+        // Map the faulting op to its source span (I6) and its typed `err`, falling
+        // back to the kernel's region span / a generic poison if unattributed.
         let span = op_spans
             .get(ctx.fault as usize)
             .copied()
             .flatten()
             .or(k.span);
-        Err(Poison {
-            reason: "kernel poisoned".into(),
-            span,
-        })
+        let err = ops_flat
+            .get(ctx.fault as usize)
+            .map(|op| crate::kernel::op_err(k, op))
+            .unwrap_or_else(|| crate::eval::Value::Str(std::rc::Rc::from("kernel poisoned")));
+        Err(Poison { err, span })
     } else {
         Ok(ctx.ret)
     })

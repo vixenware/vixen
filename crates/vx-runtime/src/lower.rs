@@ -20,7 +20,9 @@
 //! equals `eval::run` — the test at the bottom asserts exactly that.
 
 use std::collections::HashSet;
+use std::rc::Rc;
 
+use crate::eval::Value;
 use crate::graph::{BinKind, DemandGraph, KernelOp, Node, NodeId, NodeKind};
 use crate::kernel::{Block, Kernel, Op, OpKind, Slot, Term, Word};
 
@@ -48,6 +50,7 @@ pub fn lower_node(g: &DemandGraph, root: NodeId) -> Result<(Kernel, Vec<NodeId>)
         n_slots: 0,
         blocks: Vec::new(),
         cur: Vec::new(),
+        value_pool: Vec::new(),
     };
     // Phase 1: discover the parameter nodes (region inputs) and give them the
     // first slots — the kernel ABI binds args to slots `0..n_params`.
@@ -64,6 +67,7 @@ pub fn lower_node(g: &DemandGraph, root: NodeId) -> Result<(Kernel, Vec<NodeId>)
             n_params: lo.params.len() as u32,
             blocks: lo.blocks,
             span,
+            value_pool: lo.value_pool,
         },
         lo.params,
     ))
@@ -78,6 +82,9 @@ struct Lowerer<'g> {
     blocks: Vec<Block>,
     /// The block currently being built (not yet pushed to `blocks`).
     cur: Vec<Op>,
+    /// Non-scalar `fail` payload values, in the order their `Fail` ops reference
+    /// them (`imm` = the pool index) — the kernel's [`Kernel::value_pool`].
+    value_pool: Vec<Value>,
 }
 
 impl<'g> Lowerer<'g> {
@@ -178,14 +185,27 @@ impl<'g> Lowerer<'g> {
 
             // 💣 forced in a live region, or explicit `fail`: poison. The Fail op
             // aborts the run, so the slot it "returns" is never actually read.
+            // `fail e` carries its message via the side table: reconstruct the
+            // literal `e` from its message node, pool it, and point `imm` at it. A
+            // bare `fail`/`💣` (no message, or a non-literal one) gets the no-value
+            // sentinel `u64::MAX` → a generic poison.
             NodeKind::Bomb | NodeKind::Fail => {
                 let dst = self.alloc();
+                let imm = node
+                    .inputs
+                    .first()
+                    .and_then(|&m| const_value(&self.node(m).label))
+                    .map(|v| {
+                        self.value_pool.push(v);
+                        (self.value_pool.len() - 1) as Word
+                    })
+                    .unwrap_or(u64::MAX);
                 self.cur.push(Op {
                     kind: OpKind::Fail,
                     dst,
                     a: 0,
                     b: 0,
-                    imm: 0,
+                    imm,
                     span: node.span,
                 });
                 Ok(dst)
@@ -298,6 +318,47 @@ fn const_word(label: &str) -> Result<Word, NotLowerable> {
     }
 }
 
+/// Reconstruct the runtime [`Value`] of a literal `Const` node from its graph
+/// label — the inverse of analyze's labelling — so a `fail`'s message can be
+/// pooled into the kernel's side table. `None` for a non-literal label (a name, a
+/// computed value), which falls back to a generic poison.
+fn const_value(label: &str) -> Option<Value> {
+    if let Ok(n) = label.parse::<u64>() {
+        return Some(Value::U64(n));
+    }
+    match label {
+        "true" => Some(Value::Bool(true)),
+        "false" => Some(Value::Bool(false)),
+        // A string literal is debug-quoted by analyze (`format!("{raw:?}")`).
+        _ if label.len() >= 2 && label.starts_with('"') && label.ends_with('"') => Some(
+            Value::Str(Rc::from(unquote(&label[1..label.len() - 1]).as_str())),
+        ),
+        _ => None,
+    }
+}
+
+/// Undo the escapes a debug-quoted string label carries, recovering the literal's
+/// actual text.
+fn unquote(inner: &str) -> String {
+    let mut out = String::with_capacity(inner.len());
+    let mut chars = inner.chars();
+    while let Some(c) = chars.next() {
+        if c != '\\' {
+            out.push(c);
+            continue;
+        }
+        match chars.next() {
+            Some('n') => out.push('\n'),
+            Some('t') => out.push('\t'),
+            Some('r') => out.push('\r'),
+            Some('0') => out.push('\0'),
+            Some(other) => out.push(other), // `\"`, `\\`, and any other escape
+            None => {}
+        }
+    }
+    out
+}
+
 /// Map the graph's scalar [`BinKind`] to the executable [`OpKind`].
 fn bin_op(b: BinKind) -> OpKind {
     match b {
@@ -327,7 +388,10 @@ mod tests {
     fn lower_run(src: &str, entry: &str, args: &[Word]) -> Result<Word, String> {
         let g = analyze_source(src, entry).map_err(|e| format!("analyze: {e}"))?;
         let k = lower_root(&g).map_err(|e| format!("lower: {e:?}"))?;
-        kernel::run(&k, args).map_err(|p| format!("poison: {}", p.reason))
+        kernel::run(&k, args).map_err(|p| match p.err {
+            Value::Str(s) => format!("poison: {s}"),
+            other => format!("poison: {other:?}"),
+        })
     }
 
     #[test]

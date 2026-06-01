@@ -20,9 +20,12 @@
 //! block runs), which the native backend chains by **relocation** (phon's
 //! `patch_branch26`), never by evaluating both sides.
 
+use crate::eval::Value;
 use crate::graph::Span;
 
-/// One ABI word. Scalars are unboxed into it; wider values span several.
+/// One ABI word. Scalars are unboxed into it; wider values are carried by
+/// **handle** — a word that indexes the kernel's [`value_pool`](Kernel::value_pool)
+/// side table (the width-1 alternative to flattening a string/struct across slots).
 pub type Word = u64;
 
 /// An SSA register index into the kernel's slot array (params first).
@@ -34,7 +37,10 @@ pub type Slot = u32;
 /// host over still points at the original line.
 #[derive(Debug, Clone)]
 pub struct Poison {
-    pub reason: String,
+    /// The typed domain error (the failure model's `err`). A `fail e` in the
+    /// kernel carries `e`'s value via the [`value_pool`](Kernel::value_pool);
+    /// internal faults (divide-by-zero) carry a `Value::Str`.
+    pub err: Value,
     pub span: Option<Span>,
 }
 
@@ -120,6 +126,31 @@ pub struct Kernel {
     /// fallback a poison reports when the precise op isn't attributable (the
     /// native JIT path, until per-op fault attribution lands).
     pub span: Option<Span>,
+    /// The **side table** of non-scalar values a `Fail` op can carry as its `err`
+    /// (the failure model). A `Fail` op's `imm` indexes here; an out-of-range `imm`
+    /// (e.g. a bare `fail`) means no payload → a generic `"fail"`.
+    pub value_pool: Vec<Value>,
+}
+
+/// The `err` value a reached `Fail` op detonates with — its pooled payload, or a
+/// generic `"fail"` when it carries none (bare `fail`, or a hand-built kernel).
+fn fail_err(k: &Kernel, op: &Op) -> Value {
+    k.value_pool
+        .get(op.imm as usize)
+        .cloned()
+        .unwrap_or_else(|| Value::Str(std::rc::Rc::from("fail")))
+}
+
+/// The typed `err` the faulting `op` detonates with — the single source of truth
+/// for both the interpreter run loop and the JIT driver, so the two modes report
+/// identical errors (the cross-mode-parity oracle depends on it).
+pub(crate) fn op_err(k: &Kernel, op: &Op) -> Value {
+    match op.kind {
+        OpKind::Fail => fail_err(k, op),
+        OpKind::Div => str_err("divide by zero"),
+        OpKind::Rem => str_err("remainder by zero"),
+        _ => str_err("kernel poisoned"),
+    }
 }
 
 /// A stencil: the per-op fragment. The interpreter calls it through this pointer;
@@ -165,7 +196,7 @@ fn st_div(s: &mut [Word], op: &Op) -> Result<(), Poison> {
     let b = s[op.b as usize];
     if b == 0 {
         return Err(Poison {
-            reason: "divide by zero".into(),
+            err: str_err("divide by zero"),
             span: op.span,
         });
     }
@@ -176,18 +207,25 @@ fn st_rem(s: &mut [Word], op: &Op) -> Result<(), Poison> {
     let b = s[op.b as usize];
     if b == 0 {
         return Err(Poison {
-            reason: "remainder by zero".into(),
+            err: str_err("remainder by zero"),
             span: op.span,
         });
     }
     s[op.dst as usize] = s[op.a as usize] % b;
     Ok(())
 }
+/// Bare-fallback stencil — the run loop resolves a `Fail`'s pooled `err` (it has
+/// the `Kernel`); this is only reached for a hand-threaded call without one.
 fn st_fail(_: &mut [Word], op: &Op) -> Result<(), Poison> {
     Err(Poison {
-        reason: "fail".into(),
+        err: str_err("fail"),
         span: op.span,
     })
+}
+
+/// An internal kernel fault (not a user `fail`) → a `Value::Str` err.
+fn str_err(msg: &str) -> Value {
+    Value::Str(std::rc::Rc::from(msg))
 }
 
 /// The stencil for an op kind — the function-pointer table the interpreter
@@ -228,6 +266,14 @@ pub fn run(k: &Kernel, args: &[Word]) -> Result<Word, Poison> {
     for _ in 0..1_000_000 {
         let block = &k.blocks[blk];
         for op in &block.ops {
+            // `Fail` resolves its `err` from the value pool (needs `k`); every other
+            // op is a pure slot transform via its stencil.
+            if op.kind == OpKind::Fail {
+                return Err(Poison {
+                    err: fail_err(k, op),
+                    span: op.span,
+                });
+            }
             stencil_for(op.kind)(&mut slots, op)?;
         }
         match &block.term {
@@ -247,7 +293,7 @@ pub fn run(k: &Kernel, args: &[Word]) -> Result<Word, Poison> {
         }
     }
     Err(Poison {
-        reason: "kernel step budget exhausted (cyclic blocks?)".into(),
+        err: str_err("kernel step budget exhausted (cyclic blocks?)"),
         span: None,
     })
 }
@@ -294,6 +340,7 @@ mod tests {
                 term: Term::Return(4),
             }],
             span: None,
+            value_pool: vec![],
         };
         assert_eq!(run(&k, &[]).unwrap(), 9);
     }
@@ -326,6 +373,7 @@ mod tests {
                 },
             ],
             span: None,
+            value_pool: vec![],
         }
     }
 
@@ -348,6 +396,7 @@ mod tests {
                 term: Term::Return(2),
             }],
             span: None,
+            value_pool: vec![],
         };
         assert_eq!(run(&k, &[10, 2]).unwrap(), 5);
         assert!(run(&k, &[10, 0]).is_err()); // no panic across the stencil boundary

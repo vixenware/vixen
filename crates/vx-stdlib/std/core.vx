@@ -46,6 +46,14 @@ namespace Option[T] {
   fn unwrap_or(self, default: T) -> T;
 }
 
+/// The result of a fallible computation — what the `?` suffix yields (the failure
+/// model). `Ok(v)` on success; `Err(e)` carries the caught domain error. `fail e`
+/// raises; `expr?` catches it here as data instead of propagating.
+enum Result[T, E] {
+  Ok(T),
+  Err(E),
+}
+
 /// Surface values accepted by `exec` arguments and environment entries.
 type ExecInput = String | Path | Blob | Tree | ExecPath;
 /// Values that can occupy a tree entry or explicit exec mount.
