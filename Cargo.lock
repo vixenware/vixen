@@ -4130,6 +4130,7 @@ dependencies = [
  "tracing",
  "vox",
  "vx-fskit-types",
+ "vx-management",
  "vx-services",
  "vx-vfs-types",
  "windows-projfs",

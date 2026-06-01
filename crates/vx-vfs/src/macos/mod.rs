@@ -6,7 +6,7 @@
 //! `vx-vfs` mounts the extension, resolves the socket path from status.json,
 //! then connects to that listener and serves `Vfs` on one root connection.
 
-use std::{io::ErrorKind, time::Duration};
+use std::time::Duration;
 
 use camino::Utf8Path;
 use moire::process::Command;
@@ -93,48 +93,37 @@ where
     })
 }
 
-async fn do_mount(mount_path: &Utf8Path) -> Result<(), String> {
-    ensure_mount_directory(mount_path).await?;
+/// Bring up the block-backed `/Volumes/Vixen` volume by firing the Vixen Management
+/// daemon's `mount` button — mounting a block device needs root, which the user-level
+/// daemon doesn't have. Waits, bounded, for the volume to appear. A missing queue
+/// directory means the management daemon isn't installed/approved, surfaced as the
+/// failure reason. (When the volume is already mounted, `mount()` reuses it via
+/// `read_status` and never calls this.)
+async fn do_mount(_mount_path: &Utf8Path) -> Result<(), String> {
+    use std::time::Instant;
 
-    let source = "vixen://session";
-    let output = Command::new("/sbin/mount")
-        .args(["-F", "-t", "vixenfs", source, mount_path.as_str()])
-        .output()
-        .await
-        .map_err(|e| format!("failed to run /sbin/mount: {e}"))?;
+    use vx_management::{Button, mount as block, queue};
 
-    if !output.status.success() {
-        let stderr = String::from_utf8_lossy(&output.stderr);
-        return Err(format!(
-            "mount failed (exit {}): {}",
-            output
-                .status
-                .code()
-                .map_or("?".to_string(), |c| c.to_string()),
-            stderr.trim()
-        ));
-    }
-    Ok(())
-}
+    queue::fire(Button::Mount).map_err(|e| {
+        format!("could not fire Vixen Management mount (is it installed and approved?): {e:#}")
+    })?;
 
-async fn ensure_mount_directory(mount_path: &Utf8Path) -> Result<(), String> {
-    if let Some(parent) = mount_path
-        .parent()
-        .filter(|parent| !parent.as_str().is_empty())
-    {
-        moire::fs::create_dir_all(parent.as_std_path())
+    let deadline = Instant::now() + Duration::from_secs(20);
+    loop {
+        let mounted = tokio::task::spawn_blocking(block::is_mounted)
             .await
-            .map_err(|e| format!("failed to create mount parent directory {parent}: {e}"))?;
-    }
-
-    // `mkdir` on the final mountpoint is a safe probe for FSKit ghost mounts:
-    // it returns EEXIST/EBUSY without issuing I/O through the mounted filesystem.
-    match std::fs::create_dir(mount_path.as_std_path()) {
-        Ok(()) => Ok(()),
-        Err(error) if error.kind() == ErrorKind::AlreadyExists => Ok(()),
-        Err(error) => Err(format!(
-            "failed to create mount directory {mount_path}: {error}"
-        )),
+            .map_err(|e| format!("mount-table check task failed: {e}"))?
+            .map_err(|e| format!("reading the mount table: {e:#}"))?;
+        if mounted {
+            return Ok(());
+        }
+        if Instant::now() >= deadline {
+            return Err(format!(
+                "timed out waiting for {} to mount via Vixen Management",
+                block::MOUNT_POINT
+            ));
+        }
+        tokio::time::sleep(Duration::from_millis(250)).await;
     }
 }
 

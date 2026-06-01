@@ -23,6 +23,7 @@ vx-fskit-types = { version = "0.1.0", path = "../vx-fskit-types" }
 
 [target.'cfg(target_os = "macos")'.dependencies]
 facet-json = { workspace = true }
+vx-management = { path = "../vx-management" }
 
 [target.'cfg(target_os = "windows")'.dependencies]
 windows-projfs = { workspace = true }
