@@ -43,7 +43,23 @@
 			<string>v</string>
 		</dict>
 		<key>FSMediaTypes</key>
-		<dict />
+		<dict>
+			<!-- The mock backing is a raw, partitionless whole disk (mkfile + hdiutil
+			     attach -nomount), so we offer vixenfs for whole/leaf media. A block FS
+			     is identified to the system by its media types the way a URL FS is by
+			     its schemes; without this the extension registers but never surfaces as
+			     enableable. Pure FSKit — no FSProbeExecutable; FSKit calls probeResource. -->
+			<key>Partitionless</key>
+			<dict>
+				<key>FSMediaProperties</key>
+				<dict>
+					<key>Leaf</key>
+					<true/>
+					<key>Whole</key>
+					<true/>
+				</dict>
+			</dict>
+		</dict>
 		<key>FSPersonalities</key>
 		<dict>
 			<key>VixenPersonality</key>
