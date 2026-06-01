@@ -57,23 +57,32 @@ fn metadata(path: String) #fs -> Map[String, String];
 
 /// Run a sandboxed process on an executor and return the observer result.
 ///
-/// If the observer returns `Stream[T]`, then `exec` itself returns
-/// `Stream[T]`. Otherwise it returns an ordinary value.
+/// `exec` takes a **`Command`** — a `@[ ${cmd} args… ]` CLI literal whose leading
+/// interpolated command carries the grammar (there is no grammar name and no
+/// separate grammar import; see the wiki: "The exec primitive" §4). The grammar
+/// classifies each argument's `Kind`, so the VFS mount set (inputs) and the
+/// writable roots (outputs) fall out of the command. There is **no `executor:`
+/// kwarg**: routing falls out of the provenance of the ability values the command
+/// consumes (§4–5).
+///
+/// The observer is evaluated **executor-side** against the `Run` (§6–7); its
+/// authority is exactly that `Run`. The default — `(run) => run.ok.out` — gates on
+/// success and returns the whole write-set tree. If the observer returns
+/// `Stream[T]`, `exec` itself returns `Stream[T]`.
 fn exec[T](
-  args: Array[ExecInput]
+  command: Command,
 ) where {
-  /// Additional environment variables for the sandboxed process.
+  /// Value source for grammar-declared environment channels.
   env: Map[String, ExecInput] = %{},
-  /// Explicit VFS mounts, in addition to implicit mounts from args/env.
+  /// Extra VFS mounts not already implied by the command's classified inputs.
   mounts: Map[Path, TreeEntry] = %{},
-  /// Writable sandbox-relative roots to create before launch.
+  /// Writable roots supplementing the grammar-derived outputs.
   writable: Array[Path] = [],
   /// Additional directories to create under writable roots before launch.
   create_dirs: Array[Path] = [],
-  /// Executor class on which to run the process.
-  executor: ExecutorClass = executor_class("default"),
-  /// Executor-side observer evaluated with sandbox authority.
-  observer: Fn(Process, Tree) #sandbox -> T,
+  /// Executor-side observer evaluated with sandbox authority — defaults to the
+  /// success-gated write-set tree.
+  observer: Fn(Run) #sandbox -> T = (run) => run.ok.out,
 } -> T;
 
 /// Persist and reuse a chosen result across builds.

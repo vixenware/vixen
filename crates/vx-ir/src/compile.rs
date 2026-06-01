@@ -329,21 +329,19 @@ fn probe() #discover -> String (
 "#;
 
     const SOURCE_EXEC_STDOUT: &str = r#"
-fn probe() #discover -> String (
-  let sh = discover(executor_class("default"), (host) => host.which("sh"));
-  exec [sh, "-c", "printf hello"] where {
-    observer: (proc, _vfs) => proc.stdout.collect()
+fn probe(cmd: Command) -> Bytes (
+  exec(cmd) where {
+    observer: (run) => run.ok.stdout
   }
 )
 "#;
 
     const SOURCE_EXEC_WRITABLE: &str = r#"
-fn probe() #discover -> String (
-  let sh = discover(executor_class("default"), (host) => host.which("sh"));
-  exec [sh, "-c", "printf hello > out/greeting.txt"] where {
+fn probe(cmd: Command) -> Tree (
+  exec(cmd) where {
     writable: [@out],
     create_dirs: [@out],
-    observer: (proc, _vfs) => proc.stdout.collect()
+    observer: (run) => run.ok.out
   }
 )
 "#;

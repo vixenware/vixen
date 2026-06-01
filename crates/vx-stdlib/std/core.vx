@@ -8,6 +8,8 @@ type Blob;
 type Bytes;
 /// A slice/range descriptor for collection and string operations.
 type Range;
+/// An opaque wall-clock duration.
+type Duration;
 /// Opaque directory content.
 type Tree;
 /// A path-like exec argument carrying implicit mount provenance.
@@ -49,14 +51,47 @@ type ExecInput = String | Path | Blob | Tree | ExecPath;
 /// Values that can occupy a tree entry or explicit exec mount.
 type TreeEntry = Blob | Tree;
 
-/// Process result visible to an `exec` observer.
-struct Process {
-  /// Standard output as a stream of raw bytes.
+/// The settled outcome of a *successful* run — what `run.ok` yields. Forcing
+/// `run.ok` poisons (with the failure model's report) on **any** non-success
+/// (nonzero exit or a signal); reaching this record at all means the process
+/// exited 0. `run.ok.out` is the whole resolved write-set tree. (See the wiki:
+/// "The exec primitive" §7. `run.ok?` → `Result[Exit, ProcError]` joins when the
+/// failure model's `Result` + tuple-payload variants land.)
+struct Exit {
+  /// Wall-clock duration of the run.
+  duration: Duration,
+  /// Captured standard output (bounded by the capture kwargs).
+  stdout: Bytes,
+  /// Captured standard error (bounded by the capture kwargs).
+  stderr: Bytes,
+  /// The settled write-set — every output the run finalized.
+  out: Tree,
+}
+
+/// The **live**, ungated face of a `Run` (`run.stream`) — available *as the
+/// process runs* and surviving a later `.ok` failure: `run.stream.out` is the
+/// producing write-set tree (entries resolve as files finalize), and the streams
+/// are the live feeds you parse to learn *when* a path finalized.
+struct Live {
+  /// Standard output as it is produced.
   stdout: Stream[Bytes],
-  /// Standard error as a stream of raw bytes.
+  /// Standard error as it is produced.
   stderr: Stream[Bytes],
-  /// Exit status once the process finishes.
-  exit_code: U64,
+  /// The producing write-set tree — entries resolve as files finalize.
+  out: Tree,
+}
+
+/// What an `exec` observer receives — **never a bare exit code**. Success is
+/// reached through `.ok` (settled, success-gated: forcing it poisons on any
+/// non-success), and the live face is `.stream`. The two ways to the output tree:
+/// `run.ok.out` (gated — "the output, if it succeeded") and `run.stream.out`
+/// (live — "the output as it's produced"). `.ok` is a demand edge, not a stored
+/// field: forcing it runs the success gate.
+struct Run {
+  /// The settled, success-gated face.
+  ok: Exit,
+  /// The live, ungated face.
+  stream: Live,
 }
 
 struct KeyedContext[K, J] {

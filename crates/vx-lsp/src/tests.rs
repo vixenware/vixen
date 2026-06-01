@@ -126,45 +126,34 @@ fn build(ws: Path) -> Tree {
 #[test]
 fn inferred_def_type_uses_closure_parameter_types() {
     let text = r#"
-fn build() {
-  exec(["echo"]) where {
-    observer: (proc, tree) => {
-      proc.exit_code
-    },
+fn build(cmd: Command) {
+  exec(cmd) where {
+    observer: (run) => run.ok.out,
   };
 }
 "#;
 
     let state = DocumentState::new_with_uri(text.to_string(), None);
-    let proc = definition_named(&state, "proc");
-    let tree = definition_named(&state, "tree");
+    let run = definition_named(&state, "run");
 
+    // The observer's single parameter is typed from exec's signature: `Fn(Run) -> T`.
     assert_eq!(
-        state.inferred_def_type(proc).map(|ty| state
+        state.inferred_def_type(run).map(|ty| state
             .types()
             .env
             .get_ty(ty)
             .display_with_env(&state.types().env)
             .to_string()),
-        Some(String::from("Process"))
-    );
-    assert_eq!(
-        state.inferred_def_type(tree).map(|ty| state
-            .types()
-            .env
-            .get_ty(ty)
-            .display_with_env(&state.types().env)
-            .to_string()),
-        Some(String::from("Tree"))
+        Some(String::from("Run"))
     );
 }
 
 #[test]
 fn inferred_def_type_uses_specialized_exec_return_type() {
     let text = r#"
-fn build() {
-  let output = exec(["echo"]) where {
-    observer: (proc, tree) => tree.subtree(@out),
+fn build(cmd: Command) {
+  let output = exec(cmd) where {
+    observer: (run) => run.ok.out,
   };
 
   output
@@ -190,7 +179,7 @@ fn inferred_def_type_uses_specialized_partial_exec_return_type() {
     let text = r#"
 fn build() {
   let common = {
-    observer: (proc, tree) => tree.subtree(@out),
+    observer: (run) => run.ok.out,
   };
   let cexec = partial exec where common;
 
@@ -208,32 +197,27 @@ fn build() {
             .get_ty(ty)
             .display_with_env(&state.types().env)
             .to_string()),
-        Some(String::from("Fn(Array[ExecInput]) -> Tree"))
+        Some(String::from("Fn(Command) -> Tree"))
     );
 }
 
 #[test]
 fn documentation_for_uses_callback_slot_docs() {
     let text = r#"
-fn build() {
-  exec(["echo"]) where {
-    observer: (proc, tree) => {
-      proc.exit_code
-    },
+fn build(cmd: Command) {
+  exec(cmd) where {
+    observer: (run) => run.ok.out,
   };
 }
 "#;
 
     let state = DocumentState::new_with_uri(text.to_string(), None);
-    let proc = definition_named(&state, "proc");
-    let tree = definition_named(&state, "tree");
+    let run = definition_named(&state, "run");
 
-    let proc_doc = state.documentation_for(proc).unwrap();
-    let tree_doc = state.documentation_for(tree).unwrap();
+    let run_doc = state.documentation_for(run).unwrap();
 
-    assert!(proc_doc.contains("`observer` callback slot."));
-    assert!(proc_doc.contains("Executor-side observer evaluated with sandbox authority."));
-    assert_eq!(proc_doc, tree_doc);
+    assert!(run_doc.contains("`observer` callback slot."));
+    assert!(run_doc.contains("Executor-side observer evaluated with sandbox authority"));
 }
 
 #[test]
