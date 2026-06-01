@@ -4043,6 +4043,7 @@ dependencies = [
  "tokio",
  "vox",
  "vx-ir",
+ "vx-package",
  "vx-parser",
  "vx-stdlib",
  "vx-types",

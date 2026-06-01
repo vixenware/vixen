@@ -148,6 +148,8 @@ fn map_value(value: Value) -> RuntimeValue {
         Value::Struct(_) => RuntimeValue::String("{…}".to_string()),
         Value::Closure { .. } => RuntimeValue::String("<closure>".to_string()),
         Value::Command(_) => RuntimeValue::String("<command>".to_string()),
+        Value::Grammars(_) => RuntimeValue::String("<grammars>".to_string()),
+        Value::Grammar { .. } => RuntimeValue::String("<grammar>".to_string()),
     }
 }
 

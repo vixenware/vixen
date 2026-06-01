@@ -68,6 +68,15 @@ pub enum Value {
     /// A command value — what the leading hole of a CLI literal carries, and what
     /// `@[ ${cmd} … ]` evaluates to once it projects its grammar against the args.
     Command(Rc<crate::command::CommandValue>),
+    /// An imported grammar package — `import "@vixen/grammar-cc"` as a *value*
+    /// (per "Types are values"). Field access selects one of its grammars.
+    Grammars(Rc<command_model::GrammarSet>),
+    /// One grammar selected from a set (`grammars.cc`) — a value a `Command`
+    /// carries and a CLI literal projects.
+    Grammar {
+        set: Rc<command_model::GrammarSet>,
+        name: String,
+    },
 }
 
 /// The outcome of evaluating a test body: clean, or poisoned (with the source
@@ -382,6 +391,17 @@ impl Evaluator<'_> {
             // grammar (a value); project it against the rendered arguments.
             ExprKind::CliLiteral(cli) => self.eval_cli_literal(cli, env),
 
+            // `import "@vixen/grammar-cc"` as a value: the package's grammar set,
+            // loaded by the front-end. Field access (`.cc`) selects one grammar.
+            // (Non-grammar package imports aren't modeled as values yet.)
+            ExprKind::Import(imp) => match self.program.arena.grammars.get(&imp.path) {
+                Some(set) => Ok(Value::Grammars(Rc::new(set.clone()))),
+                None => Err(poison(format!(
+                    "import `{}` is not a grammar package (only grammar imports are values yet)",
+                    imp.path
+                ))),
+            },
+
             other => Err(poison(format!(
                 "unsupported expression: {}",
                 kind_name(other)
@@ -406,25 +426,62 @@ impl Evaluator<'_> {
                 ));
             }
         };
-        let cmd = match self.eval(cmd_expr, env)? {
-            Value::Command(c) => c,
-            other => {
-                return Err(poison(format!(
-                    "the leading hole of `@[ … ]` must be a Command, got {other:?}"
-                )));
-            }
-        };
+        // Extract the bundle (grammar value + program) from the leading hole.
+        let bundle = self.command_bundle(&self.eval(cmd_expr, env)?)?;
         // Render the remaining arguments to argv strings (static text verbatim,
         // holes forced to a scalar).
         let mut args = Vec::with_capacity(rest.len());
         for arg in rest {
             args.push(self.render_cli_arg(arg, env)?);
         }
-        match crate::command::apply_args(&cmd, &args) {
+        match crate::command::apply_args(&bundle, &args) {
             Some(applied) => Ok(Value::Command(Rc::new(applied))),
             None => Err(poison(format!(
                 "grammar `{}` is not in the command's grammar set",
-                cmd.grammar
+                bundle.grammar
+            ))),
+        }
+    }
+
+    /// Extract a command bundle (grammar set + grammar name + program) from the
+    /// leading hole of a CLI literal — either a command value, or a record
+    /// `{ grammar: <Grammar>, binary: <String>, … }` (the shape a capability builds
+    /// from `import`ed grammars + a probed binary).
+    fn command_bundle(&self, val: &Value) -> Result<crate::command::CommandValue, Poison> {
+        use crate::command::CommandValue;
+        match val {
+            Value::Command(c) => Ok((**c).clone()),
+            Value::Struct(fields) => {
+                let field = |want: &str| -> Result<Value, Poison> {
+                    fields
+                        .iter()
+                        .find(|(n, _)| n == want)
+                        .ok_or_else(|| poison(format!("command record has no `{want}` field")))
+                        .and_then(|(_, th)| self.force(th))
+                };
+                let (set, name) = match field("grammar")? {
+                    Value::Grammar { set, name } => (set, name),
+                    other => {
+                        return Err(poison(format!(
+                            "`grammar` must be a Grammar, got {other:?}"
+                        )));
+                    }
+                };
+                let binary = match field("binary")? {
+                    Value::Str(s) => s.to_string(),
+                    other => {
+                        return Err(poison(format!("`binary` must be a String, got {other:?}")));
+                    }
+                };
+                Ok(CommandValue {
+                    grammars: (*set).clone(),
+                    grammar: name,
+                    binary,
+                    projected: None,
+                })
+            }
+            other => Err(poison(format!(
+                "the leading hole of `@[ … ]` must be a command, got {other:?}"
             ))),
         }
     }
@@ -618,6 +675,14 @@ impl Evaluator<'_> {
                 Some((_, th)) => self.force(th),
                 None => Err(poison(format!("no field `{name}`"))),
             },
+            // Selecting a grammar from an imported grammar package (`grammars.cc`).
+            Value::Grammars(set) if set.get(name).is_some() => Ok(Value::Grammar {
+                set: set.clone(),
+                name: name.to_string(),
+            }),
+            Value::Grammars(_) => Err(poison(format!(
+                "grammar `{name}` is not in the imported package"
+            ))),
             other => Err(poison(format!("can't access `.{name}` on {other:?}"))),
         }
     }
@@ -992,6 +1057,105 @@ mod tests {
         assert!(
             p.outputs.iter().any(|o| o.path == "x.o"),
             "the -o target is an output: {:?}",
+            p.outputs
+        );
+        assert_eq!(p.execution_argv, vec!["cc", "-c", "x.c", "-o", "x.o"]);
+    }
+
+    /// `import "@vixen/grammar-cc"` evaluates to a grammar-set value, and `.cc`
+    /// selects one grammar — the grammar-as-value path on the real eval, against
+    /// the on-disk package (resolved via a CompositeResolver over packages/).
+    #[test]
+    fn import_grammar_package_selects_a_grammar_value() {
+        use crate::dispatch::Dispatcher;
+        use std::cell::Cell;
+        use vx_ir::compile::{NoopObserver, semantic_front_end};
+        use vx_ir::item::ItemKind;
+        use vx_package::CompositeResolver;
+
+        let root = concat!(env!("CARGO_MANIFEST_DIR"), "/../../packages");
+        let resolver = CompositeResolver::new(root);
+        let src = "fn t() ( let g = import \"@vixen/grammar-cc\"; g.cc )";
+        let fe = semantic_front_end(src, &resolver, &mut NoopObserver).expect("front-end");
+
+        let primary = *fe.program.source_units.first().unwrap();
+        let body = fe.program.arena[primary]
+            .items
+            .iter()
+            .find_map(|&id| match &fe.program.arena[id].kind {
+                ItemKind::Function(f) if f.name == "t" => Some(f.body),
+                _ => None,
+            })
+            .expect("fn t");
+        let root_expr = fe.program.arena[body].root_expr;
+
+        let ev = Evaluator {
+            program: &fe.program,
+            env: &fe.env,
+            current_body: Cell::new(body),
+            dispatch: Dispatcher::default(),
+            dispatches: Cell::new(0),
+            mode: KernelMode::Off,
+        };
+        match ev
+            .eval(root_expr, &Env::new())
+            .expect("eval grammar import")
+        {
+            Value::Grammar { name, .. } => assert_eq!(name, "cc"),
+            other => panic!("expected a Grammar value, got {other:?}"),
+        }
+    }
+
+    /// The whole grammar-as-value path from real `.vx`: import a grammar, build a
+    /// command record `{ grammar: g.cc, binary: "cc" }`, and have `@[ ${cmd} … ]`
+    /// project it — no test-injected value, no grammar name in the syntax.
+    #[test]
+    fn cli_literal_from_imported_grammar_projects() {
+        use crate::dispatch::Dispatcher;
+        use std::cell::Cell;
+        use vx_ir::compile::{NoopObserver, semantic_front_end};
+        use vx_ir::item::ItemKind;
+        use vx_package::CompositeResolver;
+
+        let root = concat!(env!("CARGO_MANIFEST_DIR"), "/../../packages");
+        let resolver = CompositeResolver::new(root);
+        let src = "fn t() ( \
+                   let g = import \"@vixen/grammar-cc\"; \
+                   let cmd = { grammar: g.cc, binary: \"cc\" }; \
+                   @[ ${cmd} -c x.c -o x.o ] )";
+        let fe = semantic_front_end(src, &resolver, &mut NoopObserver).expect("front-end");
+
+        let primary = *fe.program.source_units.first().unwrap();
+        let body = fe.program.arena[primary]
+            .items
+            .iter()
+            .find_map(|&id| match &fe.program.arena[id].kind {
+                ItemKind::Function(f) if f.name == "t" => Some(f.body),
+                _ => None,
+            })
+            .expect("fn t");
+        let root_expr = fe.program.arena[body].root_expr;
+
+        let ev = Evaluator {
+            program: &fe.program,
+            env: &fe.env,
+            current_body: Cell::new(body),
+            dispatch: Dispatcher::default(),
+            dispatches: Cell::new(0),
+            mode: KernelMode::Off,
+        };
+        let Value::Command(applied) = ev.eval(root_expr, &Env::new()).expect("eval") else {
+            panic!("expected a Command value");
+        };
+        let p = applied.projected.as_ref().expect("projected");
+        assert!(
+            p.effective.inputs.iter().any(|i| i.path == "x.c"),
+            "x.c is an input: {:?}",
+            p.effective.inputs
+        );
+        assert!(
+            p.outputs.iter().any(|o| o.path == "x.o"),
+            "x.o is an output: {:?}",
             p.outputs
         );
         assert_eq!(p.execution_argv, vec!["cc", "-c", "x.c", "-o", "x.o"]);
