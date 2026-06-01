@@ -133,6 +133,20 @@ pub(crate) fn intern_result_in(
     Some(env.intern_enum(def, vec![ok, err]))
 }
 
+/// Intern `Failure[E]` from the stdlib `Failure` struct, or `None` if it is not in
+/// scope (it always is — declared in `core.vx`). The caught `Err` payload of a `?`
+/// is `Failure[E]` (the failure model's envelope around the domain error `E`), so
+/// matching `Err(Failure { err: x })` binds `x: E`. Shared with
+/// `type_check::special` so the placeholder and the real union wrap the same way.
+pub(crate) fn intern_failure_in(env: &mut vx_types::TypeEnv, err: TypeId) -> Option<TypeId> {
+    let def = env
+        .lookup_def("Failure")
+        .iter()
+        .copied()
+        .find(|&id| matches!(env.get_def(id), TypeDef::Struct(_)))?;
+    Some(env.intern_struct(def, vec![err]))
+}
+
 struct ErrorUnionPass<'a> {
     arena: &'a mut VirArena,
     types: &'a mut TypeCollection,
@@ -526,8 +540,11 @@ impl ErrorUnionPass<'_> {
         }
     }
 
-    /// Overwrite a `Fallible` node's type with `Result[inner, E]`, rebuilding
-    /// through the function-type shape when the inner is itself a function.
+    /// Overwrite a `Fallible` node's type with `Result[inner, Failure[E]]`, where
+    /// `E` is the inferred error union — the caught `Err` payload is the `Failure`
+    /// envelope around `E`, so the failure's context survives the catch (matching
+    /// `Err(Failure { err: x })` binds `x: E`). Rebuilds through the function-type
+    /// shape when the inner is itself a function.
     fn overwrite_fallible_ty(
         &mut self,
         fallible_id: ExprId,
@@ -541,7 +558,11 @@ impl ErrorUnionPass<'_> {
             return;
         }
         let alts: Vec<TypeId> = error_set.into_iter().collect();
-        let err_ty = self.types.mint_union(alts);
+        let domain_err = self.types.mint_union(alts);
+        // Wrap the domain error union `E` in `Failure[E]` — the caught `Err` payload.
+        let Some(err_ty) = intern_failure_in(&mut self.types.env, domain_err) else {
+            return;
+        };
         let inner_clone = self.types.env.get_ty(inner_ty).clone();
         let new_ty = match inner_clone {
             Ty::Function(fn_ty) => {

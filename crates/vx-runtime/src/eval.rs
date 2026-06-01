@@ -32,17 +32,39 @@ use vx_types::TypeEnv;
 use crate::dispatch::{self, Dispatcher};
 use crate::graph::Span;
 
-/// A poison — a detonation carrying a typed **domain error** value and **where in
-/// the source** it originated (I6). This is the runtime form of the failure model's
-/// `Failure`: `fail e` carries `e` as [`err`](Poison::err) (a `Value::Str` for a
-/// bare message, a structured value for a domain error); the human report is
-/// *derived* from it, never a stored string. `?` catches it as data. Propagates
-/// like an error; `eval` attaches the span a poison surfaces at (innermost wins).
+/// The uniform runtime envelope of a failure (the failure model's `context`) —
+/// identical for every failure regardless of the domain error type `E`. Carried by
+/// a [`Poison`] as it propagates and reified into a `Value::FailureContext` when a
+/// `?` catches it, so the context survives the catch (a poison and the caught
+/// `Err(Failure { .. })` are the *same* failure).
+///
+/// This cut is `span` + `demand_path`; the strand stack and timing fields are
+/// deferred (see the failure model's `FailureContext`).
+#[derive(Debug, Clone, Default)]
+pub struct FailureContext {
+    /// The innermost origin — where in the source the failure detonated (I6, what
+    /// `Poison.span` used to be). The innermost expression wins.
+    pub span: Option<Span>,
+    /// The Vixen call-chain the poison crossed, innermost call first. Each `Call`
+    /// frame the poison bubbles through pushes its span (not every expression), so
+    /// this is the Vixen call stack, not the whole expression spine.
+    pub demand_path: Vec<Span>,
+}
+
+/// A poison — a detonation carrying a typed **domain error** value and the failure
+/// model's [`context`](Poison::context) (origin span + demand-path). This is the
+/// runtime form of the failure model's `Failure`: `fail e` carries `e` as
+/// [`err`](Poison::err) (a `Value::Str` for a bare message, a structured value for a
+/// domain error); the human report is *derived* from `err` + `context`, never a
+/// stored string. `?` catches it as a `Failure { err, context }` value. Propagates
+/// like an error; `eval` attaches the span a poison surfaces at (innermost wins)
+/// and accumulates the demand-path across `Call` frames.
 #[derive(Debug, Clone)]
 pub struct Poison {
     /// The domain error value (the failure model's `err`).
     pub err: Value,
-    pub span: Option<Span>,
+    /// The uniform envelope (the failure model's `context`).
+    pub context: FailureContext,
 }
 
 impl Poison {
@@ -59,12 +81,12 @@ impl Poison {
     }
 }
 
-/// Construct a span-less poison from a bare message (the internal-error path —
+/// Construct a context-less poison from a bare message (the internal-error path —
 /// type mismatches, unhandled forms). The message becomes a `Value::Str` `err`.
 fn poison(reason: String) -> Poison {
     Poison {
         err: Value::Str(Rc::from(reason.as_str())),
-        span: None,
+        context: FailureContext::default(),
     }
 }
 
@@ -125,6 +147,12 @@ pub enum Value {
     /// The executor-local host-inspection capability — `discover` hands one to a
     /// probe, which reads `os`/`arch`/`which`/`hash` to build a command.
     Host,
+    /// The opaque runtime envelope of a caught failure (the failure model's
+    /// `FailureContext`). Reified by `?` into the `context` field of a `Failure`
+    /// struct value, so a caught error carries the same span + demand-path the
+    /// propagating poison did. Authors carry it through but do not inspect it
+    /// (compared by identity, never structurally equal across distinct failures).
+    FailureContext(Rc<FailureContext>),
 }
 
 /// The outcome of evaluating a test body: clean, or poisoned (with the source
@@ -222,14 +250,22 @@ impl Evaluator<'_> {
         result
     }
 
-    /// Evaluate an expression, attaching `e`'s source span to any poison that
-    /// surfaces here without one — the innermost expression wins, so a poison
-    /// reports where it originated (I6). Kernel poisons already carry their span
-    /// and are left untouched.
+    /// Evaluate an expression, maintaining the poison's failure context as it
+    /// bubbles: attach `e`'s source span as the origin if none is set yet (the
+    /// innermost expression wins — I6), and push `e`'s span onto the demand-path
+    /// when `e` is a `Call` (so the path is the Vixen call stack, innermost call
+    /// first). Kernel poisons already carry their origin span and keep it.
     fn eval(&self, e: ExprId, env: &Env) -> Result<Value, Poison> {
         self.eval_inner(e, env).map_err(|mut p| {
-            if p.span.is_none() {
-                p.span = self.expr_span(e);
+            if p.context.span.is_none() {
+                p.context.span = self.expr_span(e);
+            }
+            // Only `Call` frames extend the demand-path, so it tracks the Vixen
+            // call chain a poison crossed rather than every expression it passed.
+            if matches!(self.program.arena[e].kind, ExprKind::Call(_))
+                && let Some(span) = self.expr_span(e)
+            {
+                p.context.demand_path.push(span);
             }
             p
         })
@@ -259,29 +295,53 @@ impl Evaluator<'_> {
 
             // Explicit failure — poisons whenever reached, carrying the failed
             // value as the domain `err` (a String, or a structured error value).
+            // `fail f` re-raises a *caught* `Failure` (a struct carrying both an
+            // `err` and a `Value::FailureContext`): unwrap it so we re-raise the
+            // inner `err` with the carried context intact, never a Failure-in-a-
+            // Failure. A fresh domain error gets a default context (its span fills
+            // in as it bubbles).
             ExprKind::Fail(fx) => {
-                let err = match fx.message {
+                let raised = match fx.message {
                     Some(m) => self.eval(m, env)?,
                     None => Value::Str(Rc::from("fail")),
                 };
-                Err(Poison { err, span: None })
+                match self.as_caught_failure(&raised)? {
+                    // Re-raise: preserve the caught failure's err + context.
+                    Some((err, context)) => Err(Poison { err, context }),
+                    // A fresh domain error: span fills in as the poison bubbles.
+                    None => Err(Poison {
+                        err: raised,
+                        context: FailureContext::default(),
+                    }),
+                }
             }
 
             // `expr?` — a catching force: evaluate `expr` and reify the outcome as a
             // `Result` value instead of propagating a poison. Success → `Ok(v)`; a
-            // poison → `Err(e)` carrying its domain `err` (the failure model's catch).
-            // The inner may dispatch to the kernel — a `fail`'s `err` survives via the
-            // kernel's value-pool side table, so both modes catch the same value.
-            ExprKind::Fallible(fb) => {
-                let (tag, value) = match self.eval(fb.expr, env) {
-                    Ok(v) => ("Ok", v),
-                    Err(p) => ("Err", p.err),
-                };
-                Ok(Value::Variant {
-                    tag: tag.to_string(),
-                    fields: vec![("0".to_string(), done(value))],
-                })
-            }
+            // poison → `Err(Failure { err, context })` — the *same* failure as the
+            // poison, so its context (origin span + demand-path) survives the catch
+            // (the failure model's "one value, two modes"). The inner may dispatch to
+            // the kernel — a `fail`'s `err` survives via the kernel's value-pool side
+            // table, so both modes catch the same value.
+            ExprKind::Fallible(fb) => match self.eval(fb.expr, env) {
+                Ok(v) => Ok(Value::Variant {
+                    tag: "Ok".to_string(),
+                    fields: vec![("0".to_string(), done(v))],
+                }),
+                Err(p) => {
+                    let failure = Value::Struct(vec![
+                        ("err".to_string(), done(p.err)),
+                        (
+                            "context".to_string(),
+                            done(Value::FailureContext(Rc::new(p.context))),
+                        ),
+                    ]);
+                    Ok(Value::Variant {
+                        tag: "Err".to_string(),
+                        fields: vec![("0".to_string(), done(failure))],
+                    })
+                }
+            },
 
             ExprKind::Literal(lit) => self.lit_value(&lit.value),
 
@@ -484,6 +544,30 @@ impl Evaluator<'_> {
         }
     }
 
+    /// Recognise a *caught* `Failure` value — a `Value::Struct` carrying both an
+    /// `err` field and a `context` field that is a `Value::FailureContext`. Returns
+    /// `(err, context)` so `fail f` can re-raise it with the context intact (the
+    /// failure model's "fail f preserves err + context"); `None` for any other value
+    /// (a fresh domain error). Forcing the two fields to inspect them may itself
+    /// poison, which propagates.
+    fn as_caught_failure(&self, value: &Value) -> Result<Option<(Value, FailureContext)>, Poison> {
+        let Value::Struct(fields) = value else {
+            return Ok(None);
+        };
+        let (Some(err_th), Some(ctx_th)) = (
+            fields.iter().find(|(n, _)| n == "err").map(|(_, t)| t),
+            fields.iter().find(|(n, _)| n == "context").map(|(_, t)| t),
+        ) else {
+            return Ok(None);
+        };
+        // A `context` field that forces to a FailureContext marks this as a caught
+        // Failure (a plain struct that merely has an `err` field is not one).
+        let Value::FailureContext(ctx) = self.force(ctx_th)? else {
+            return Ok(None);
+        };
+        Ok(Some((self.force(err_th)?, (*ctx).clone())))
+    }
+
     /// Try to match `scrutinee` against `pattern`, returning the environment
     /// extended with the pattern's bindings on success, or `None` on a tag/shape/
     /// literal mismatch (the caller tries the next arm). Forcing the scrutinee to
@@ -510,18 +594,28 @@ impl Evaluator<'_> {
                 let want = self.lit_value(&lit.value)?;
                 Ok(self.value_eq(&got, &want)?.then(|| env.clone()))
             }
-            // A variant: force, compare the tag (last `.`-segment), then match each
-            // field sub-pattern against the variant's like-named field. A unit
-            // pattern (`None`, no fields) matches on the tag alone.
+            // A variant pattern, in either of the two shapes the parser produces for
+            // an `UpperIdent { … }` / `UpperIdent(…)` pattern:
+            //   - over a `Value::Variant`: compare the tag (last `.`-segment), then
+            //     match each field sub-pattern against the variant's like-named field.
+            //     A unit pattern (`None`, no fields) matches on the tag alone.
+            //   - over a `Value::Struct`: the name is a *struct* (e.g. `Failure`),
+            //     written in variant syntax — there is no tag, so match its field
+            //     sub-patterns against the struct's like-named fields.
             PatternKind::Variant(vp) => {
                 let got = self.force(scrutinee)?;
-                let Value::Variant { tag, fields } = &got else {
-                    return Ok(None);
+                let fields = match &got {
+                    Value::Variant { tag, fields } => {
+                        let want = vp.name.rsplit('.').next().unwrap_or(vp.name.as_str());
+                        if tag.as_str() != want {
+                            return Ok(None);
+                        }
+                        fields
+                    }
+                    // A struct destructure (`Failure { err: e }`): no tag to check.
+                    Value::Struct(fields) => fields,
+                    _ => return Ok(None),
                 };
-                let want = vp.name.rsplit('.').next().unwrap_or(vp.name.as_str());
-                if tag.as_str() != want {
-                    return Ok(None);
-                }
                 let mut e = env.clone();
                 if let Some(pat_fields) = &vp.fields {
                     for pf in pat_fields {
@@ -677,12 +771,17 @@ impl Evaluator<'_> {
                 } else {
                     Value::U64(w)
                 }),
-                // Propagate the kernel poison whole — it already carries the typed
-                // `err` (a `fail`'s pooled value, or a `Value::Str` for an internal
-                // fault) and the source span (I6).
+                // Lift the kernel poison into an eval poison — it already carries the
+                // typed `err` (a `fail`'s pooled value, or a `Value::Str` for an
+                // internal fault) and the origin span (I6), which becomes the failure
+                // context's `span`. The kernel has no Vixen call stack of its own, so
+                // the demand-path starts empty and accumulates as this bubbles.
                 Err(p) => Err(Poison {
                     err: p.err,
-                    span: p.span,
+                    context: FailureContext {
+                        span: p.span,
+                        demand_path: Vec::new(),
+                    },
                 }),
             },
         )
@@ -1011,6 +1110,10 @@ impl Evaluator<'_> {
                 },
             ) => ta == tb && self.fields_eq(fa, fb)?,
             (Value::Struct(fa), Value::Struct(fb)) => self.fields_eq(fa, fb)?,
+            // The opaque failure envelope compares by identity (the same `Rc`):
+            // distinct failures are never structurally equal — authors carry it
+            // through, they do not compare it.
+            (Value::FailureContext(a), Value::FailureContext(b)) => Rc::ptr_eq(a, b),
             _ => false,
         })
     }
@@ -1091,7 +1194,7 @@ pub fn run_in_mode(source: &str, entry: &str, mode: KernelMode) -> Result<(Outco
         Ok(v) => Outcome::Clean(v),
         Err(p) => Outcome::Poisoned {
             reason: p.message(),
-            span: p.span,
+            span: p.context.span,
         },
     };
     Ok((outcome, ev.dispatches.get()))
@@ -1249,6 +1352,77 @@ mod tests {
                 other => panic!("{src}: expected poisoned-with-span, got {other:?}"),
             }
         }
+    }
+
+    /// Evaluate `entry` in `source` on the pure tree-walk path and return the raw
+    /// [`Poison`] it detonates with — so a test can inspect the failure context
+    /// (`demand_path`, `span`) that `Outcome` flattens away. Panics if it evaluates
+    /// clean (the caller expects a failure).
+    fn poison_of(source: &str, entry: &str) -> Poison {
+        let (program, env) = crate::analyze::front_end(source).expect("front-end");
+        let primary = *program.source_units.first().expect("source unit");
+        let body = program.arena[primary]
+            .items
+            .iter()
+            .copied()
+            .find_map(|id| match &program.arena[id].kind {
+                ItemKind::Function(f) if f.name == entry => Some(f.body),
+                _ => None,
+            })
+            .unwrap_or_else(|| panic!("function `{entry}` not found"));
+        let root = program.arena[body].root_expr;
+        let ev = Evaluator {
+            program: &program,
+            env: &env,
+            current_body: Cell::new(body),
+            dispatch: Dispatcher::default(),
+            dispatches: Cell::new(0),
+            mode: KernelMode::Off,
+        };
+        match ev.eval(root, &Env::new()) {
+            Ok(v) => panic!("expected a poison, evaluated clean: {v:?}"),
+            Err(p) => p,
+        }
+    }
+
+    /// The failure model's demand-path: a poison crossing the Vixen call chain
+    /// accumulates each `Call` frame's span as it bubbles, innermost call first.
+    /// Entering `c` evaluates its body `b()`, which calls `a()`, and `a` `fail`s —
+    /// so as the poison climbs it crosses the `a()` call (pushed first = innermost)
+    /// then the `b()` call, giving the path `[a(), b()]`, each span indexing one
+    /// call's source text. (Only `Call` frames are pushed, so the path is the Vixen
+    /// call stack, not the whole expression spine — the `fail` and the `if`/block
+    /// scaffolding contribute nothing.) Inspected directly off the `Poison`, which
+    /// is where the demand-path lives — `Outcome` keeps only the origin span.
+    #[test]
+    fn demand_path_accumulates_the_call_chain() {
+        let src = "fn a() -> U64 ( fail \"boom\" )\n\
+                   fn b() -> U64 ( a() )\n\
+                   fn c() -> U64 ( b() )";
+        let p = poison_of(src, "c");
+
+        // The origin span is the `fail`'s message, not a call.
+        let origin = p.context.span.expect("origin span");
+        let origin_text = &src[origin.start as usize..origin.end as usize];
+        assert!(
+            origin_text.contains("boom"),
+            "origin should be the failed value, got {origin_text:?}"
+        );
+
+        // The demand-path is the two call sites the poison crossed, innermost first:
+        // a() (the call that detonated) then b() (its caller). The span can include
+        // leading trivia, so compare on the trimmed text.
+        let path_texts: Vec<String> = p
+            .context
+            .demand_path
+            .iter()
+            .map(|s| src[s.start as usize..s.end as usize].trim().to_string())
+            .collect();
+        assert_eq!(
+            path_texts,
+            vec!["a()".to_string(), "b()".to_string()],
+            "demand-path should be the call chain innermost-first, got {path_texts:?}"
+        );
     }
 
     /// The CLI-literal resolver, on the real eval path: `@[ ${cmd} -c x.c -o x.o ]`

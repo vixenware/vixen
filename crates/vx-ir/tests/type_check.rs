@@ -44,6 +44,24 @@ fn assert_expr_ty(arena: &VirArena, tc: &TypeCollection, id: ExprId, expected: &
     assert_eq!(tc.env.get_ty(ty_id), expected);
 }
 
+/// Unwrap a `Failure[E]` struct type to its single domain-error type-arg `E`. The
+/// caught `Err` payload of a `?` is `Failure[E]` (the failure model's envelope), so
+/// the inferred-union tests read `E` from inside the `Failure`.
+fn failure_domain_err(env: &vx_types::TypeEnv, err_payload: vx_types::TypeId) -> vx_types::TypeId {
+    let Ty::Struct(failure_ty) = env.get_ty(err_payload).clone() else {
+        panic!(
+            "expected the Err payload to be a Failure struct, got {:?}",
+            env.get_ty(err_payload)
+        );
+    };
+    assert!(
+        matches!(env.get_def(failure_ty.def), vx_types::TypeDef::Struct(s) if s.name == "Failure"),
+        "the Err payload should be the Failure struct, got def {:?}",
+        env.get_def(failure_ty.def)
+    );
+    failure_ty.type_args[0]
+}
+
 // =========================================================================
 // 1. Literal types
 // =========================================================================
@@ -225,12 +243,13 @@ fn array_type() {
 // =========================================================================
 
 #[test]
-fn fallible_over_infallible_wraps_in_result_never() {
-    // `expr? : Result[T, E]` — the failure model's catch (was `Option[T]`). E is the
-    // inferred error union. `42` can never fail (no reachable `fail`/fallible callee),
-    // so `E` is the zero-variant `Never` enum: `42? : Result[U64, Never]`. `Result` is
-    // a stdlib enum, so go through the bundled front-end that loads it (and runs the
-    // error-union pass).
+fn fallible_over_infallible_wraps_in_result_failure_never() {
+    // `expr? : Result[T, Failure[E]]` — the failure model's catch (was `Option[T]`).
+    // The caught `Err` payload is the `Failure` envelope around the inferred error
+    // union `E`. `42` can never fail (no reachable `fail`/fallible callee), so `E` is
+    // the zero-variant `Never` enum: `42? : Result[U64, Failure[Never]]`. `Result`
+    // and `Failure` are stdlib types, so go through the bundled front-end that loads
+    // them (and runs the error-union pass).
     let fe = vx_ir::compile::semantic_front_end_bundled("fn f() ( 42? )").expect("front-end");
     let id = find_expr(&fe.program.arena, |k| {
         matches!(k, vx_ir::expr::ExprKind::Fallible(_))
@@ -249,11 +268,22 @@ fn fallible_over_infallible_wraps_in_result_never() {
         fe.env.get_ty(enum_ty.type_args[0]),
         &Ty::Scalar(Scalar::U64)
     );
-    // The error type is the synthetic zero-variant `Never` enum.
-    let Ty::Enum(err_enum) = fe.env.get_ty(enum_ty.type_args[1]).clone() else {
+    // The Err payload is `Failure[Never]` — the Failure struct wrapping the
+    // synthetic zero-variant `Never` enum as its single domain-error type arg.
+    let Ty::Struct(failure_ty) = fe.env.get_ty(enum_ty.type_args[1]).clone() else {
         panic!(
-            "expected Never enum as E, got {:?}",
+            "expected Failure[Never] struct as the Err payload, got {:?}",
             fe.env.get_ty(enum_ty.type_args[1])
+        );
+    };
+    assert!(
+        matches!(fe.env.get_def(failure_ty.def), vx_types::TypeDef::Struct(s) if s.name == "Failure"),
+        "the Err payload should be the Failure struct"
+    );
+    let Ty::Enum(err_enum) = fe.env.get_ty(failure_ty.type_args[0]).clone() else {
+        panic!(
+            "expected Never enum as Failure's E, got {:?}",
+            fe.env.get_ty(failure_ty.type_args[0])
         );
     };
     let vx_types::TypeDef::Enum(err_def) = fe.env.get_def(err_enum.def) else {
@@ -269,7 +299,7 @@ fn fallible_over_infallible_wraps_in_result_never() {
 #[test]
 fn fallible_infers_string_from_single_fail() {
     // A function whose only failure is `fail "…"` infers `E = String` (computed,
-    // not hardcoded): `f()? : Result[U64, String]`.
+    // not hardcoded): `f()? : Result[U64, Failure[String]]`.
     let src =
         "fn f(x: U64) -> U64 ( if x > 0 ( x ) else ( fail \"neg\" ) )\nfn g(x: U64) ( f(x)? )";
     let fe = vx_ir::compile::semantic_front_end_bundled(src).expect("front-end");
@@ -281,10 +311,11 @@ fn fallible_infers_string_from_single_fail() {
     let Ty::Enum(enum_ty) = fe.env.get_ty(ty_id).clone() else {
         panic!("expected Result enum");
     };
+    let e_ty = failure_domain_err(&fe.env, enum_ty.type_args[1]);
     assert_eq!(
-        fe.env.get_ty(enum_ty.type_args[1]),
+        fe.env.get_ty(e_ty),
         &Ty::Scalar(Scalar::String),
-        "single `fail \"…\"` should infer E = String"
+        "single `fail \"…\"` should infer Failure[E] with E = String"
     );
 }
 
@@ -305,7 +336,10 @@ fn fallible_infers_non_string_error_type() {
     let Ty::Enum(enum_ty) = fe.env.get_ty(ty_id).clone() else {
         panic!("expected Result enum");
     };
-    let e_ty = fe.env.get_ty(enum_ty.type_args[1]).clone();
+    let e_ty = fe
+        .env
+        .get_ty(failure_domain_err(&fe.env, enum_ty.type_args[1]))
+        .clone();
     assert!(
         !matches!(e_ty, Ty::Scalar(Scalar::String)),
         "E must NOT be String when the fail value is a custom enum, got {e_ty:?}"
@@ -353,8 +387,9 @@ fn fallible_infers_heterogeneous_two_element_union() {
     let Ty::Enum(enum_ty) = fe.env.get_ty(ty_id).clone() else {
         panic!("expected Result enum");
     };
-    let e_ty = enum_ty.type_args[1];
-    // E is a synthetic anonymous alias whose alternatives are {String, MyErr}.
+    // The Err payload is `Failure[E]`; E is a synthetic anonymous alias whose
+    // alternatives are {String, MyErr}.
+    let e_ty = failure_domain_err(&fe.env, enum_ty.type_args[1]);
     let Ty::Alias(alias_ty) = fe.env.get_ty(e_ty).clone() else {
         panic!("expected union alias as E, got {:?}", fe.env.get_ty(e_ty));
     };
@@ -387,10 +422,11 @@ fn fallible_union_propagates_through_call_chain() {
     let Ty::Enum(enum_ty) = fe.env.get_ty(ty_id).clone() else {
         panic!("expected Result enum");
     };
+    let e_ty = failure_domain_err(&fe.env, enum_ty.type_args[1]);
     assert_eq!(
-        fe.env.get_ty(enum_ty.type_args[1]),
+        fe.env.get_ty(e_ty),
         &Ty::Scalar(Scalar::String),
-        "the String error should propagate through f→g→h"
+        "the String error should propagate through f→g→h (as Failure[String])"
     );
 }
 
@@ -410,9 +446,11 @@ fn fallible_union_terminates_on_mutual_recursion() {
     let Ty::Enum(enum_ty) = fe.env.get_ty(ty_id).clone() else {
         panic!("expected Result enum");
     };
-    // Both fails are String, so the union collapses to a single String.
+    // Both fails are String, so the union collapses to a single String inside the
+    // Failure envelope: Failure[String].
+    let e_ty = failure_domain_err(&fe.env, enum_ty.type_args[1]);
     assert_eq!(
-        fe.env.get_ty(enum_ty.type_args[1]),
+        fe.env.get_ty(e_ty),
         &Ty::Scalar(Scalar::String),
         "mutual recursion should terminate with E = String"
     );

@@ -33,14 +33,17 @@ pub(crate) fn infer_fallible(tc: &mut TypeChecker, f: &FallibleExpr) -> TypeId {
     if tc.types.env.get_ty(inner_ty).is_poison() {
         return tc.poison();
     }
-    // `expr? : Result[T, E]` — the failure model's catch (was the old `Option[T]`).
-    // E is the inferred union of error types reachable at this `?`. The real
-    // union is a whole-call-graph fixpoint, computed by the post-pass
-    // `error_union::infer_error_unions`, which OVERWRITES this node's type. Here
-    // in the single source-order sweep we can't yet know it, so we leave a
-    // well-formed placeholder `Result[T, String]` (String is the common case — a
-    // bare `fail "…"`); the post-pass replaces it with the inferred `E`.
-    let err_ty = tc.types.env.intern_scalar(vx_types::Scalar::String);
+    // `expr? : Result[T, Failure[E]]` — the failure model's catch (was the old
+    // `Option[T]`). The caught `Err` payload is a `Failure[E]` wrapping the domain
+    // error `E`, so the failure's context survives the catch. `E` is the inferred
+    // union of error types reachable at this `?`. The real union is a whole-call-
+    // graph fixpoint, computed by the post-pass `error_union::infer_error_unions`,
+    // which OVERWRITES this node's type. Here in the single source-order sweep we
+    // can't yet know it, so we leave a well-formed placeholder
+    // `Result[T, Failure[String]]` (String is the common case — a bare
+    // `fail "…"`); the post-pass replaces the inner `E` with the inferred union.
+    let domain_err = tc.types.env.intern_scalar(vx_types::Scalar::String);
+    let err_ty = intern_failure(tc, domain_err);
     let inner_clone = tc.types.env.get_ty(inner_ty).clone();
     match inner_clone {
         Ty::Function(fn_ty) => {
@@ -57,6 +60,12 @@ pub(crate) fn infer_fallible(tc: &mut TypeChecker, f: &FallibleExpr) -> TypeId {
 /// isn't in scope (it is — it's declared in `core.vx`).
 fn intern_result(tc: &mut TypeChecker, ok: TypeId, err: TypeId) -> TypeId {
     crate::error_union::intern_result_in(&mut tc.types.env, ok, err).unwrap_or_else(|| tc.poison())
+}
+
+/// Intern `Failure[err]` from the stdlib `Failure` struct (the caught-`Err`
+/// envelope). Poisons if `Failure` isn't in scope (it is — declared in `core.vx`).
+fn intern_failure(tc: &mut TypeChecker, err: TypeId) -> TypeId {
+    crate::error_union::intern_failure_in(&mut tc.types.env, err).unwrap_or_else(|| tc.poison())
 }
 
 pub(crate) fn infer_fail(tc: &mut TypeChecker, f: &FailExpr) -> TypeId {

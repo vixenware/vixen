@@ -68,11 +68,23 @@ fn type_pattern_raw(
                 // Snapshot to release the immutable borrow.
                 let fields_snapshot: Vec<(String, TypeId)> =
                     sdef.fields.iter().map(|f| (f.name.clone(), f.ty)).collect();
+                // Substitute the struct's type args so a generic struct's field
+                // types resolve concretely (`Failure[U64]` → `err`'s field is `U64`,
+                // not the bare param `E`), mirroring the `Ty::Enum` substitution in
+                // `resolve_variant_fields`.
+                let args = struct_ty.type_args.clone();
                 for field in &sp.fields {
                     let field_ty = fields_snapshot
                         .iter()
                         .find(|(n, _)| *n == field.name)
                         .map(|(_, t)| *t)
+                        .map(|t| {
+                            if args.is_empty() {
+                                t
+                            } else {
+                                substitute_type_params(t, &args, &mut types.env)
+                            }
+                        })
                         .unwrap_or_else(|| types.env.intern_poison());
                     type_pattern_raw(arena, types, field.pattern, field_ty);
                 }
@@ -130,6 +142,34 @@ fn resolve_variant_fields(
     scrutinee_ty: TypeId,
 ) -> Option<Vec<(String, TypeId)>> {
     let scrutinee = types.env.get_ty(scrutinee_ty).clone();
+
+    // A struct destructure written in variant syntax (`Failure { err: x }`, the
+    // parser emits a `VariantPattern` for any `UpperIdent { … }`). The scrutinee is
+    // a `Ty::Struct`; substitute its type args so a generic struct's fields resolve
+    // concretely (`Failure[U64]` → `err`'s field is `U64`, not the bare param `E`).
+    if let Ty::Struct(struct_ty) = &scrutinee {
+        let args = struct_ty.type_args.clone();
+        return match types.env[struct_ty.def] {
+            vx_types::TypeDef::Struct(ref sdef) => {
+                let fields_snapshot: Vec<(String, TypeId)> =
+                    sdef.fields.iter().map(|f| (f.name.clone(), f.ty)).collect();
+                Some(
+                    fields_snapshot
+                        .into_iter()
+                        .map(|(name, ty)| {
+                            let substituted = if args.is_empty() {
+                                ty
+                            } else {
+                                substitute_type_params(ty, &args, &mut types.env)
+                            };
+                            (name, substituted)
+                        })
+                        .collect(),
+                )
+            }
+            _ => None,
+        };
+    }
 
     // Enum variants — substitute the enum's type args so a generic enum's payload
     // resolves concretely (`Result[U64, String]` → `Err`'s field is `String`, not

@@ -824,11 +824,21 @@ fn resolve_variant_pattern(
             }
         }
         Some(DefTarget::Item(item_id)) => {
+            // `Enum.Variant { … }` / a bare enum-variant name: resolve to the enum.
+            // A struct name written in the same `UpperIdent { … }` syntax *with
+            // fields* (e.g. `Failure { err: e }`) is a struct destructure, not a
+            // variant — accept it without resolving to an enum (there is none); the
+            // type checker binds its fields from the struct scrutinee type. A *bare*
+            // struct name (no `{ … }`) is not a meaningful pattern (you destructure a
+            // struct, you do not match it by name), and anything else (a newtype, an
+            // opaque) is likewise an invalid pattern target.
+            let is_struct_destructure = matches!(arena[item_id].kind, ItemKind::Struct(_))
+                && matches!(&arena[pat_id].kind, PatternKind::Variant(vp) if vp.fields.is_some());
             if matches!(arena[item_id].kind, ItemKind::Enum(_)) {
                 if let PatternKind::Variant(ref mut vp) = arena[pat_id].kind {
                     vp.resolved = Some(item_id);
                 }
-            } else {
+            } else if !is_struct_destructure {
                 errors.push(IrDiagnostic::InvalidTarget {
                     name: span,
                     found: DefTarget::Item(item_id),

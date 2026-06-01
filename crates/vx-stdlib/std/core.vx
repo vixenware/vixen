@@ -46,10 +46,28 @@ namespace Option[T] {
 
 /// The result of a fallible computation — what the `?` suffix yields (the failure
 /// model). `Ok(v)` on success; `Err(e)` carries the caught domain error. `fail e`
-/// raises; `expr?` catches it here as data instead of propagating.
+/// raises; `expr?` catches it here as data instead of propagating. The caught
+/// `Err` payload is a `Failure[E]`, so the failure's context survives the catch.
 enum Result[T, E] {
   Ok(T),
   Err(E),
+}
+
+/// The uniform runtime envelope of a failure (the failure model's `context`):
+/// the source span where the failure originated, the demand-path the poison
+/// crossed, and — later — the strand stack + timing. Opaque: authors carry it
+/// through (`Err(Failure { err: e, .. })`) but do not inspect it deeply; the
+/// runtime derives the human report from it.
+type FailureContext;
+
+/// The single failure value (the failure model's `Failure { err, context }`): the
+/// *same* value whether it propagates as a poison or is caught as `Result.Err`.
+/// `err` is the domain error (the inferred union `E`); `context` is the uniform
+/// envelope. `?` catches a poison into `Err(Failure { err, context })`, preserving
+/// the context, and `fail f` re-raises a caught `Failure` with its context intact.
+struct Failure[E] {
+  err: E,
+  context: FailureContext,
 }
 
 /// Surface values accepted by `exec` arguments and environment entries.
