@@ -19,6 +19,10 @@ pub(super) const VIXENFS_DIR_ID: u64 = 0xFFFF_FFFF_FFFE_0001;
 pub(super) const STATUS_JSON_ID: u64 = 0xFFFF_FFFF_FFFE_0002;
 pub(super) const ROUTED_ITEM_ID_START: u64 = ROOT_LOCAL_ID + 1;
 pub(super) const VOLUME_NAME: &str = "Vixen";
+/// Stable container/volume identity for the block-backed volume. A *recognized*
+/// FSKit probe result must carry a non-nil `containerID` (`FSResource` probe docs);
+/// a fixed UUID gives the volume a durable identity across remounts.
+pub(super) const CONTAINER_UUID: &str = "F1A5B0C0-1234-4567-89AB-CDEF01234567";
 pub(super) const VIXENFS_DIR_NAME: &str = ".vixenfs";
 pub(super) const STATUS_JSON_NAME: &str = "status.json";
 

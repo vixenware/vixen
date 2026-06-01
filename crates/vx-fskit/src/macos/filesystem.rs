@@ -4,15 +4,15 @@ use std::ptr;
 
 use objc2::rc::Retained;
 use objc2::{AnyThread, ClassType, define_class, msg_send};
-use objc2_foundation::NSObjectProtocol;
+use objc2_foundation::{NSObjectProtocol, NSString, NSUUID};
 use objc2_fs_kit::{
-    FSContainerStatus, FSFileSystemBase, FSProbeResult, FSResource, FSTaskOptions,
-    FSUnaryFileSystem, FSUnaryFileSystemOperations, FSVolume,
+    FSContainerIdentifier, FSContainerStatus, FSFileSystemBase, FSProbeResult, FSResource,
+    FSTaskOptions, FSUnaryFileSystem, FSUnaryFileSystemOperations, FSVolume,
 };
 
 use super::log_event;
 use super::root_peer::root_peer_state;
-use super::support::posix_error;
+use super::support::{CONTAINER_UUID, VOLUME_NAME, posix_error};
 use super::volume::RustVolume;
 
 define_class!(
@@ -31,7 +31,21 @@ define_class!(
         ) {
             root_peer_state();
             log_event("info", "vixen-fskit probeResource");
-            let result = unsafe { FSProbeResult::usableButLimitedProbeResult() };
+            // Block-resource FSes return a *recognized* result carrying a name + a
+            // stable container identity (name/containerID must be non-nil). The mock
+            // device's bytes are never read — `mount -F -t vixenfs <dev>` selects us
+            // explicitly, so the probe unconditionally claims it (cf. KhaosT/FSKitSample).
+            let result = unsafe {
+                let name = NSString::from_str(VOLUME_NAME);
+                let uuid = NSUUID::initWithUUIDString(
+                    NSUUID::alloc(),
+                    &NSString::from_str(CONTAINER_UUID),
+                )
+                .expect("CONTAINER_UUID is a valid UUID string");
+                let container_id =
+                    FSContainerIdentifier::initWithUUID(FSContainerIdentifier::alloc(), &uuid);
+                FSProbeResult::recognizedProbeResultWithName_containerID(&name, &container_id)
+            };
             reply.call((Retained::into_raw(result), ptr::null_mut()));
         }
 

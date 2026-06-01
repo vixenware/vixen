@@ -59,13 +59,9 @@
 		<key>FSShortName</key>
 		<string>vixenfs</string>
 		<key>FSSupportsBlockResources</key>
-		<false />
-		<key>FSSupportsGenericURLResources</key>
 		<true />
-		<key>FSSupportedSchemes</key>
-		<array>
-			<string>vixen</string>
-		</array>
+		<key>FSSupportsGenericURLResources</key>
+		<false />
 		<key>FSSupportsPathURLs</key>
 		<false />
 		<key>FSSupportsServerURLs</key>
