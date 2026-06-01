@@ -19,6 +19,7 @@ rustdoc-args = ["--html-in-header", "arborium-header.html"]
 vox = { workspace = true }
 tracing = { workspace = true }
 vx-services.workspace = true
+vx-vfsd.workspace = true
 moire = { workspace = true }
 
 [lints]

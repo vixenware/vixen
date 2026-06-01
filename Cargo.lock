@@ -4028,6 +4028,7 @@ dependencies = [
  "tracing",
  "vox",
  "vx-services",
+ "vx-vfsd",
 ]
 
 [[package]]

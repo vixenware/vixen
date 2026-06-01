@@ -225,20 +225,8 @@ pub async fn serve(config: DaemonConfig) -> Result<()> {
         None
     };
 
-    let runner_service = if let Some(runner_cfg) = services.runner.clone() {
-        let store = std::sync::Arc::new(
-            resolve_required_store_client(
-                runner_cfg.store.as_ref(),
-                store_service.as_ref(),
-                "runner.store",
-            )
-            .await?,
-        );
-        Some(RunnerService::new(Some(store)))
-    } else {
-        None
-    };
-
+    // Boot the CAS-VFS first so the runner can mount actions into it (the in-process
+    // executor drives its local VFS directly — see `RunnerService::with_vfsd`).
     let vfsd_service = if let Some(vfsd_cfg) = services.vfsd.clone() {
         let store = std::sync::Arc::new(
             resolve_required_store_client(
@@ -250,6 +238,24 @@ pub async fn serve(config: DaemonConfig) -> Result<()> {
         );
         let vfs_mount = vx_vfsd::effective_mount_path(&vfsd_cfg.mount);
         Some(vx_vfsd::boot_with_store(store, &vfs_mount).await?)
+    } else {
+        None
+    };
+
+    let runner_service = if let Some(runner_cfg) = services.runner.clone() {
+        let store = std::sync::Arc::new(
+            resolve_required_store_client(
+                runner_cfg.store.as_ref(),
+                store_service.as_ref(),
+                "runner.store",
+            )
+            .await?,
+        );
+        let mut runner = RunnerService::new(Some(store));
+        if let Some(vfsd) = &vfsd_service {
+            runner = runner.with_vfsd(vfsd.clone());
+        }
+        Some(runner)
     } else {
         None
     };
