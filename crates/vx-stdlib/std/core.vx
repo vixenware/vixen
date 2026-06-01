@@ -118,6 +118,38 @@ struct Run {
   stream: Live,
 }
 
+/// A process-termination signal — the signal number a kill delivered (room for
+/// richer detail like core-dumped later).
+newtype Signal of U64;
+
+/// How a process ended when it did *not* exit 0: a nonzero exit code, or a signal.
+/// `run.ok` poisons on either; `run.ok?` surfaces it as the `ProcError`'s `cause`.
+enum ProcCause {
+  Exited(U64),
+  Signaled(Signal),
+}
+
+/// The recorded read/write set of a run — the cache key's other half (which inputs
+/// were read, which outputs written). Opaque domain data carried through a failure.
+type VfsTrace;
+
+/// The domain error of a failed `exec` — what `run.ok?` yields as
+/// `Result[Exit, ProcError]`. **Pure data**: the span + strand stack + demand-path
+/// live in the `FailureContext` envelope (`Failure { err: ProcError, context }`),
+/// uniform across all failures, not stuffed in here. (Wiki: "The exec primitive" §7.)
+struct ProcError {
+  /// Exit vs. kill — distinct, so a normalizer can match e.g. `Exited(7)` precisely.
+  cause: ProcCause,
+  /// The full effective command that ran.
+  command: Command,
+  /// Captured tail of stderr (bounded by the capture kwargs).
+  stderr_tail: Bytes,
+  /// The read/write set the run recorded.
+  vfs_trace: VfsTrace,
+  /// Wall-clock duration of the run.
+  duration: Duration,
+}
+
 struct KeyedContext[K, J] {
   key: K,
   joined: J,
