@@ -70,8 +70,21 @@ async fn run_exec_inner(vfsd: &VfsdService, req: &ExecRequest) -> Result<ExecRes
         .map_err(|e| format!("vfs access path: {e}"))?;
     let cwd = format!("{}{}", access.trim_end_matches('/'), prefix);
 
-    let output = moire::process::Command::new(&req.program)
-        .args(&req.args)
+    // The real (canonicalized) output directories — the sandbox confines writes to
+    // these (macOS resolves symlinks before the seatbelt check, so the unresolved
+    // path would never match).
+    let write_roots: Vec<String> = req
+        .outputs
+        .iter()
+        .map(|out| {
+            let dir = format!("{cwd}/{}", out.trim_matches('/'));
+            std::fs::canonicalize(&dir)
+                .map(|p| p.to_string_lossy().into_owned())
+                .unwrap_or(dir)
+        })
+        .collect();
+
+    let output = crate::sandbox::make_command(&req.program, &req.args, &write_roots)
         .envs(req.env.iter().map(|e| (e.key.clone(), e.value.clone())))
         .current_dir(&cwd)
         .output()

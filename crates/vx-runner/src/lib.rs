@@ -3,6 +3,7 @@
 //! Exposes [`RunnerService`] and [`RunnerAcceptor`] for use by the daemon (in-process).
 
 pub(crate) mod exec;
+pub(crate) mod sandbox;
 pub(crate) mod service;
 
 use std::sync::Arc;
