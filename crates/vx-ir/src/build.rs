@@ -174,15 +174,17 @@ impl VirBuilder {
         id
     }
 
-    /// Legacy compatibility: promote Option enum variants to the parent scope.
-    ///
-    /// This is a **hardcoded special case**, not a general enum scoping rule.
-    /// When/if Vixen gets a proper prelude or import system, this should be
-    /// replaced with explicit imports.
+    /// Promote an enum's variants into the scope it is declared in, so they
+    /// resolve **bare** (`Some`, `None`, `Ok`, `Err`, a user enum's `On`/`Off`) as
+    /// well as qualified (`Enum.Variant`). The spec writes variants bare throughout
+    /// (the failure model's `Ok`/`Err`, exec's `Exited`/`Signaled`); promotion is
+    /// what makes that resolve. Regular bindings/items still win over a promoted
+    /// variant (see `scope::lookup_at`); same-named variants in one scope are a
+    /// latent ambiguity (first wins) until a real import system lands.
     fn maybe_promote_enum_variants_for(&mut self, scope: ScopeId, item_id: ItemId) {
         // Extract variant data first to avoid borrow conflict.
         let variants: Vec<(String, SourceSpan)> = match &self.arena[item_id].kind {
-            ItemKind::Enum(e) if e.name == "Option" => e
+            ItemKind::Enum(e) => e
                 .variants
                 .iter()
                 .map(|v| (v.name.clone(), v.name_span))

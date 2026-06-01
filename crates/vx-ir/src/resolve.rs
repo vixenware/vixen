@@ -766,6 +766,20 @@ fn resolve_struct_literal(
                 }
             }
         }
+        // Bare variant construction `Variant { … }` — the variant is promoted into
+        // scope, so the name resolves straight to the variant (no `Enum.` prefix).
+        (
+            Some(DefTarget::Variant {
+                enum_item,
+                variant_index,
+            }),
+            None,
+        ) => {
+            if let ExprKind::StructLiteral(ref mut sl) = arena[expr_id].kind {
+                sl.resolved = Some(enum_item);
+                sl.resolved_variant = Some(variant_index);
+            }
+        }
         (Some(found), _) => {
             errors.push(IrDiagnostic::InvalidTarget { name: span, found });
         }

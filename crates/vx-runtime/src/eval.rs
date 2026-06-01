@@ -22,7 +22,7 @@ use vx_ir::expr::{
     ArrayElement, BinOp, CliArgIr, CliLiteralExpr, ExprKind, FieldExpr, FieldKey, LitKind,
     StringPart,
 };
-use vx_ir::ids::{BindingId, BodyId, ExprId};
+use vx_ir::ids::{BindingId, BodyId, ExprId, PatternId};
 use vx_ir::item::ItemKind;
 use vx_ir::pattern::PatternKind;
 use vx_ir::scope::DefTarget;
@@ -67,6 +67,14 @@ pub enum Value {
     Tuple(Vec<Thunk>),
     Array(Vec<Thunk>),
     Struct(Vec<(String, Thunk)>),
+    /// An enum variant value: the variant `tag` plus its payload fields. Struct-form
+    /// variants (`Some { value: x }`) carry named fields; tuple-form variants
+    /// (`Ok(v)`) carry positional fields named `"0"`, `"1"`, …; unit variants
+    /// (`None`) carry none. The tag is what a `match` arm compares.
+    Variant {
+        tag: String,
+        fields: Vec<(String, Thunk)>,
+    },
     Unit,
     /// A callable: a lambda capturing its definition environment, or a named
     /// function used as a value (with an empty capture). Calling it binds the
@@ -248,12 +256,21 @@ impl Evaluator<'_> {
                     })
                     .collect(),
             )),
-            ExprKind::StructLiteral(s) => Ok(Value::Struct(
-                s.fields
+            ExprKind::StructLiteral(s) => {
+                let fields: Vec<(String, Thunk)> = s
+                    .fields
                     .iter()
                     .map(|f| (f.name.clone(), self.thunk(f.value, env)))
-                    .collect(),
-            )),
+                    .collect();
+                // A resolved variant index marks `Enum.Variant { … }` (or bare
+                // `Variant { … }`) — a tagged value, not a plain struct.
+                Ok(if s.resolved_variant.is_some() {
+                    let tag = s.variant.clone().unwrap_or_else(|| s.name.clone());
+                    Value::Variant { tag, fields }
+                } else {
+                    Value::Struct(fields)
+                })
+            }
             ExprKind::Record(r) => Ok(Value::Struct(
                 r.fields
                     .iter()
@@ -308,23 +325,8 @@ impl Evaluator<'_> {
             ExprKind::Match(m) => {
                 let scrutinee = self.thunk(m.scrutinee, env);
                 for arm in &m.arms {
-                    match &self.program.arena[arm.pattern].kind {
-                        PatternKind::Wildcard => return self.eval(arm.body, env),
-                        PatternKind::Binding(b) => {
-                            let mut arm_env = env.clone();
-                            arm_env.insert(b.binding, scrutinee.clone());
-                            return self.eval(arm.body, &arm_env);
-                        }
-                        PatternKind::Literal(lit) => {
-                            let got = self.force(&scrutinee)?;
-                            let want = self.lit_value(&lit.value)?;
-                            if self.value_eq(&got, &want)? {
-                                return self.eval(arm.body, env);
-                            }
-                        }
-                        other => {
-                            return Err(poison(format!("unsupported match pattern: {other:?}")));
-                        }
+                    if let Some(arm_env) = self.match_pattern(arm.pattern, &scrutinee, env)? {
+                        return self.eval(arm.body, &arm_env);
                     }
                 }
                 Err(poison("non-exhaustive match".into()))
@@ -385,6 +387,25 @@ impl Evaluator<'_> {
                     }),
                     _ => Err(poison(format!("`{}` is not a value", n.name))),
                 },
+                // A bare variant name in value position — a unit variant (`None`).
+                // (A fielded variant referenced bare is a constructor value, handled
+                // through `Call` for `Ok(v)`; this is the no-payload case.)
+                Some(DefTarget::Variant {
+                    enum_item,
+                    variant_index,
+                }) => match &self.program.arena[enum_item].kind {
+                    ItemKind::Enum(e) => match e.variants.get(variant_index as usize) {
+                        Some(v) => Ok(Value::Variant {
+                            tag: v.name.clone(),
+                            fields: vec![],
+                        }),
+                        None => Err(poison(format!(
+                            "variant index out of range for `{}`",
+                            n.name
+                        ))),
+                    },
+                    _ => Err(poison(format!("`{}` is not an enum variant", n.name))),
+                },
                 _ => Err(poison(format!("unresolved name `{}`", n.name))),
             },
 
@@ -419,6 +440,63 @@ impl Evaluator<'_> {
                 "unsupported expression: {}",
                 kind_name(other)
             ))),
+        }
+    }
+
+    /// Try to match `scrutinee` against `pattern`, returning the environment
+    /// extended with the pattern's bindings on success, or `None` on a tag/shape/
+    /// literal mismatch (the caller tries the next arm). Forcing the scrutinee to
+    /// inspect it may poison, which propagates. Recursive: a variant pattern checks
+    /// its tag, then matches each sub-pattern against the variant's fields.
+    fn match_pattern(
+        &self,
+        pattern: PatternId,
+        scrutinee: &Thunk,
+        env: &Env,
+    ) -> Result<Option<Env>, Poison> {
+        match &self.program.arena[pattern].kind {
+            // Irrefutable: match anything / bind the whole value (lazily — an unread
+            // binding never forces the scrutinee).
+            PatternKind::Wildcard => Ok(Some(env.clone())),
+            PatternKind::Binding(b) => {
+                let mut e = env.clone();
+                e.insert(b.binding, scrutinee.clone());
+                Ok(Some(e))
+            }
+            // Refutable scalar: force and compare.
+            PatternKind::Literal(lit) => {
+                let got = self.force(scrutinee)?;
+                let want = self.lit_value(&lit.value)?;
+                Ok(self.value_eq(&got, &want)?.then(|| env.clone()))
+            }
+            // A variant: force, compare the tag (last `.`-segment), then match each
+            // field sub-pattern against the variant's like-named field. A unit
+            // pattern (`None`, no fields) matches on the tag alone.
+            PatternKind::Variant(vp) => {
+                let got = self.force(scrutinee)?;
+                let Value::Variant { tag, fields } = &got else {
+                    return Ok(None);
+                };
+                let want = vp.name.rsplit('.').next().unwrap_or(vp.name.as_str());
+                if tag.as_str() != want {
+                    return Ok(None);
+                }
+                let mut e = env.clone();
+                if let Some(pat_fields) = &vp.fields {
+                    for pf in pat_fields {
+                        let Some((_, field_thunk)) = fields.iter().find(|(n, _)| n == &pf.name)
+                        else {
+                            return Ok(None);
+                        };
+                        match self.match_pattern(pf.pattern, field_thunk, &e)? {
+                            Some(ext) => e = ext,
+                            None => return Ok(None),
+                        }
+                    }
+                }
+                Ok(Some(e))
+            }
+            other => Err(poison(format!("unsupported match pattern: {other:?}"))),
         }
     }
 
@@ -848,8 +926,39 @@ impl Evaluator<'_> {
                         Ok(acc && self.value_eq(&self.force(x)?, &self.force(y)?)?)
                     })?
             }
+            // Same tag and field-wise equal (matched by name — construction order is
+            // stable, but a by-name compare is robust to it). A plain struct is the
+            // tagless case of the same shape.
+            (
+                Value::Variant {
+                    tag: ta,
+                    fields: fa,
+                },
+                Value::Variant {
+                    tag: tb,
+                    fields: fb,
+                },
+            ) => ta == tb && self.fields_eq(fa, fb)?,
+            (Value::Struct(fa), Value::Struct(fb)) => self.fields_eq(fa, fb)?,
             _ => false,
         })
+    }
+
+    /// Field-wise equality of two named-field sequences (struct fields or variant
+    /// payloads): same length, and every name in `a` has an equal-valued match in `b`.
+    fn fields_eq(&self, a: &[(String, Thunk)], b: &[(String, Thunk)]) -> Result<bool, Poison> {
+        if a.len() != b.len() {
+            return Ok(false);
+        }
+        for (name, x) in a {
+            let Some((_, y)) = b.iter().find(|(m, _)| m == name) else {
+                return Ok(false);
+            };
+            if !self.value_eq(&self.force(x)?, &self.force(y)?)? {
+                return Ok(false);
+            }
+        }
+        Ok(true)
     }
 }
 

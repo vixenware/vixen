@@ -1,0 +1,28 @@
+// Enum variants in the runtime: construction (struct-form + unit) and pattern
+// matching. The value carries its tag; `match` compares the tag and binds the
+// payload. A non-generic enum keeps the focus on eval, not type inference.
+// Cross-mode parity (Off/Interp/Jit) is the oracle.
+
+enum Light {
+  struct On { level: U64 },
+  struct Off,
+}
+
+#[test]
+fn match_binds_a_fielded_variant() (
+  let l = On { level: 5 };
+  assert_eq(match l ( On { level: x } => x, Off => 0 ), 5)
+)
+
+#[test]
+fn unit_variant_matches_on_its_tag() (
+  let l = Off;
+  assert_eq(match l ( On { level: x } => x, Off => 42 ), 42)
+)
+
+#[test]
+fn the_tag_selects_the_arm_not_the_fields() (
+  // The tag decides which arm fires; the wildcard ignores the payload.
+  let l = On { level: 1 };
+  assert_eq(match l ( Off => 0, On { level: _ } => 7 ), 7)
+)
