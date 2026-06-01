@@ -39,6 +39,7 @@ pub mod compile;
 pub mod def;
 pub mod diagnostic;
 pub mod diagnostic_report;
+pub mod error_union;
 pub mod expr;
 pub mod item;
 pub mod pattern;

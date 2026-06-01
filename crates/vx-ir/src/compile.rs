@@ -15,6 +15,7 @@ use crate::build::VirBuilder;
 use crate::cap_check::check_capabilities_vir;
 use crate::capture::analyze_captures;
 use crate::diagnostic::IrDiagnostic;
+use crate::error_union::infer_error_unions;
 use crate::item::ItemKind;
 use crate::resolve::resolve_names;
 use crate::scope::{ScopeEntry, ScopeEntryTarget};
@@ -33,6 +34,11 @@ pub enum CompileError {
         errors: Vec<IrDiagnostic>,
         env: Box<TypeEnv>,
     },
+    /// Diagnostics from the inferred-error-union pass (`?` exhaustiveness).
+    ErrorUnion {
+        errors: Vec<IrDiagnostic>,
+        env: Box<TypeEnv>,
+    },
     Capability {
         errors: Vec<IrDiagnostic>,
         env: Box<TypeEnv>,
@@ -46,6 +52,7 @@ impl fmt::Display for CompileError {
             Self::Parse(e) => write!(f, "parse errors: {e:?}"),
             Self::Resolve { errors, .. } => write!(f, "resolve errors: {errors:?}"),
             Self::Type { errors, .. } => write!(f, "type errors: {errors:?}"),
+            Self::ErrorUnion { errors, .. } => write!(f, "error-union errors: {errors:?}"),
             Self::Capability { errors, .. } => write!(f, "capability errors: {errors:?}"),
             Self::MissingEntry(name) => write!(f, "entry function `{name}` not found"),
         }
@@ -275,6 +282,17 @@ pub fn semantic_front_end(
     if !tc_result.errors.is_empty() {
         return Err(CompileError::Type {
             errors: tc_result.errors.clone(),
+            env: Box::new(types.env),
+        });
+    }
+    // Replace the `?` operator's interim `Result[_, String]` with the real
+    // inferred error union (a whole-call-graph fixpoint), re-type any `match`
+    // that observes a `?`, and flag non-exhaustive `Ok`/`Err`. Runs here so the
+    // demand-driven runtime, vx-lsp, and vx-diagnostics all see inferred unions.
+    let eu_errors = infer_error_unions(&mut program.arena, &mut types, &tc_result);
+    if !eu_errors.is_empty() {
+        return Err(CompileError::ErrorUnion {
+            errors: eu_errors,
             env: Box::new(types.env),
         });
     }
@@ -571,7 +589,10 @@ fn probe(cmd: Command) -> Tree (
             .map(|e| format!("{e:?}"))
             .collect();
         let tc_result = type_check_vir(&mut program.arena, &mut types);
-        let tc_errors = tc_result.errors.iter().map(|e| format!("{e:?}")).collect();
+        let mut tc_errors: Vec<String> =
+            tc_result.errors.iter().map(|e| format!("{e:?}")).collect();
+        let eu_errors = super::infer_error_unions(&mut program.arena, &mut types, &tc_result);
+        tc_errors.extend(eu_errors.iter().map(|e| format!("{e:?}")));
         (program, resolve_errors, tc_errors)
     }
 

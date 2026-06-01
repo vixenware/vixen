@@ -114,6 +114,21 @@ pub enum IrDiagnostic {
     },
 
     // -----------------------------------------------------------------
+    // Error-union pass (failure-model `?` inference)
+    // -----------------------------------------------------------------
+    /// A `match` over a `?` result (`Result[_, E]`) is not exhaustive: some
+    /// top-level variant is neither matched nor covered by an irrefutable arm.
+    /// v1 only checks the top-level `Ok`/`Err` shape; a downstream `fail` of a
+    /// new error type that adds an `Err` alternative does *not* by itself make a
+    /// `match` non-exhaustive (a bare `Err(e)` binding covers all of `Err`).
+    NonExhaustiveMatch {
+        /// Span of the match scrutinee — where the missing cases surface.
+        match_span: SourceSpan,
+        /// The unmatched variant names (e.g. `["Err"]`).
+        missing: Vec<String>,
+    },
+
+    // -----------------------------------------------------------------
     // CLI-literal grammar check (`@grammar[ … ]`)
     // -----------------------------------------------------------------
     /// A CLI literal failed validation against its tool grammar. The span
@@ -188,6 +203,7 @@ impl IrDiagnostic {
             IrDiagnostic::UnusedExprStatement { expr } => *expr,
             IrDiagnostic::CapabilityViolation { closure, .. } => *closure,
             IrDiagnostic::UnknownCapability { name } => *name,
+            IrDiagnostic::NonExhaustiveMatch { match_span, .. } => *match_span,
             IrDiagnostic::Cli { span, .. } => *span,
         }
     }
@@ -200,6 +216,7 @@ impl IrDiagnostic {
             IrDiagnostic::Unresolved { .. } => Vec::new(),
             IrDiagnostic::UnusedExprStatement { .. } => Vec::new(),
             IrDiagnostic::UnknownCapability { .. } => Vec::new(),
+            IrDiagnostic::NonExhaustiveMatch { .. } => Vec::new(),
             IrDiagnostic::InvalidTarget { .. } => Vec::new(),
             IrDiagnostic::ArgTypeMismatch { param, .. } => vec![RelatedSpan {
                 span: *param,

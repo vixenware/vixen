@@ -394,6 +394,33 @@ fn unknown_capability_basic() {
 }
 
 // ---------------------------------------------------------------------------
+// NonExhaustiveMatch
+// ---------------------------------------------------------------------------
+
+#[test]
+fn non_exhaustive_match_lists_missing_cases() {
+    let env = TypeEnv::new();
+    let diag = IrDiagnostic::NonExhaustiveMatch {
+        match_span: span(3, 12),
+        missing: vec!["Err".to_string()],
+    };
+
+    let report = diag.to_report(&env);
+
+    assert_eq!(report.severity, Severity::Error);
+    assert_eq!(report.title, "non-exhaustive match");
+    assert_eq!(report.annotations.len(), 1);
+    assert_eq!(report.annotations[0].role, AnnotationRole::PrimaryLabel);
+    assert_eq!(report.annotations[0].spans, vec![margin_span(3, 12)]);
+    assert_eq!(
+        report.annotations[0].message.as_deref(),
+        Some("missing case(s): Err")
+    );
+    // A help note suggests adding the arm or a wildcard.
+    assert!(report.notes.iter().any(|n| n.text.contains("Err")));
+}
+
+// ---------------------------------------------------------------------------
 // Source ID mapping
 // ---------------------------------------------------------------------------
 

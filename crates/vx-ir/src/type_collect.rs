@@ -125,6 +125,8 @@ pub fn collect_types_vir(arena: &mut VirArena) -> TypeCollection {
         def_to_fn_sig,
         name_to_id,
         alias_sum_alternatives,
+        error_union_cache: HashMap::new(),
+        never_enum: None,
     }
 }
 

@@ -196,6 +196,30 @@ impl IrDiagnostic {
                 sections: Vec::new(),
             },
 
+            IrDiagnostic::NonExhaustiveMatch {
+                match_span,
+                missing,
+            } => Report {
+                severity: Severity::Error,
+                title: "non-exhaustive match".to_string(),
+                annotations: vec![primary(
+                    *match_span,
+                    Some(format!("missing case(s): {}", missing.join(", "))),
+                )],
+                notes: vec![Note {
+                    kind: NoteKind::Help,
+                    text: format!(
+                        "add an arm for {} or a wildcard `_`",
+                        missing
+                            .iter()
+                            .map(|v| format!("`{v}`"))
+                            .collect::<Vec<_>>()
+                            .join(", ")
+                    ),
+                }],
+                sections: Vec::new(),
+            },
+
             IrDiagnostic::Cli { span, kind } => {
                 use crate::diagnostic::{CliDiagnosticKind as K, CliHoleExpect};
                 let (title, message, notes) = match kind {

@@ -19,6 +19,8 @@ fn cap_check_source(source: &str) -> Vec<(IrDiagnostic, String)> {
     let mut tc = collect_types_vir(&mut program.arena);
     let _resolve_errors = resolve_names(&mut program.arena);
     let tc_result = type_check_vir(&mut program.arena, &mut tc);
+    let _eu_errors =
+        vx_ir::error_union::infer_error_unions(&mut program.arena, &mut tc, &tc_result);
     let cap_result = check_capabilities_vir(&program.arena, &tc, &tc_result);
     cap_result
         .errors

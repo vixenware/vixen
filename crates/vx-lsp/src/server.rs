@@ -33,6 +33,8 @@ pub(crate) struct DocumentState {
     type_check: TypeCheckVirResult,
     cap_check: CapCheckResult,
     resolve_errors: Vec<vx_ir::IrDiagnostic>,
+    /// Diagnostics from the inferred-error-union pass (non-exhaustive `?` matches).
+    error_union_errors: Vec<vx_ir::IrDiagnostic>,
     /// Cached materialized Definitions for `all_definitions_in` queries.
     /// Keyed by source so workspace_symbol can scan all loaded docs.
     all_defs: Vec<Definition>,
@@ -109,6 +111,10 @@ impl DocumentState {
         let mut types = vx_ir::type_collect::collect_types_vir(&mut program.arena);
         let resolve_errors = vx_ir::resolve::resolve_names(&mut program.arena);
         let type_check = vx_ir::type_check::type_check_vir(&mut program.arena, &mut types);
+        // Infer `?` error unions (re-types Fallible nodes + match arms in place)
+        // before cap-check, mirroring the front-end pipeline order.
+        let error_union_errors =
+            vx_ir::error_union::infer_error_unions(&mut program.arena, &mut types, &type_check);
         let cap_check =
             vx_ir::cap_check::check_capabilities_vir(&program.arena, &types, &type_check);
 
@@ -128,6 +134,7 @@ impl DocumentState {
             type_check,
             cap_check,
             resolve_errors,
+            error_union_errors,
             all_defs,
         }
     }
@@ -1714,6 +1721,23 @@ impl VxLanguageServer {
             });
         }
 
+        // Inferred-error-union diagnostics (non-exhaustive `?` matches).
+        for err in &state.error_union_errors {
+            let primary = err.primary_span();
+            if primary.source != state.current_source {
+                continue;
+            }
+            let (message, source_tag) = format_ir_diagnostic(state, err);
+            diagnostics.push(Diagnostic {
+                range: state.to_lsp_range_span(primary),
+                severity: Some(DiagnosticSeverity::ERROR),
+                source: Some(source_tag.to_string()),
+                message,
+                related_information: related_info_for(state, err),
+                ..Default::default()
+            });
+        }
+
         self.client
             .publish_diagnostics(uri.clone(), diagnostics, None)
             .await;
@@ -1900,6 +1924,10 @@ fn format_ir_diagnostic(
         IrDiagnostic::UnknownCapability { name } => (
             format!("unknown capability `#{}`", state.text_at(*name)),
             "vx-cap",
+        ),
+        IrDiagnostic::NonExhaustiveMatch { missing, .. } => (
+            format!("non-exhaustive match — missing {}", missing.join(", ")),
+            "vx-type",
         ),
         IrDiagnostic::Cli { kind, .. } => {
             use vx_ir::{CliDiagnosticKind as K, CliHoleExpect};

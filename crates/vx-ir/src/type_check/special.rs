@@ -34,10 +34,12 @@ pub(crate) fn infer_fallible(tc: &mut TypeChecker, f: &FallibleExpr) -> TypeId {
         return tc.poison();
     }
     // `expr? : Result[T, E]` — the failure model's catch (was the old `Option[T]`).
-    // E is the inferred union of error types reachable at this `?`; until the
-    // call-graph union inference lands it is `String`, the type of a bare
-    // `fail "…"` (the common case).
-    // TODO(union-inference): replace `String` with the inferred error union.
+    // E is the inferred union of error types reachable at this `?`. The real
+    // union is a whole-call-graph fixpoint, computed by the post-pass
+    // `error_union::infer_error_unions`, which OVERWRITES this node's type. Here
+    // in the single source-order sweep we can't yet know it, so we leave a
+    // well-formed placeholder `Result[T, String]` (String is the common case — a
+    // bare `fail "…"`); the post-pass replaces it with the inferred `E`.
     let err_ty = tc.types.env.intern_scalar(vx_types::Scalar::String);
     let inner_clone = tc.types.env.get_ty(inner_ty).clone();
     match inner_clone {
@@ -54,17 +56,7 @@ pub(crate) fn infer_fallible(tc: &mut TypeChecker, f: &FallibleExpr) -> TypeId {
 /// Intern `Result[ok, err]` from the stdlib `Result` enum. Poisons if `Result`
 /// isn't in scope (it is — it's declared in `core.vx`).
 fn intern_result(tc: &mut TypeChecker, ok: TypeId, err: TypeId) -> TypeId {
-    let result_def = tc
-        .types
-        .env
-        .lookup_def("Result")
-        .iter()
-        .copied()
-        .find(|&id| matches!(tc.types.env.get_def(id), vx_types::TypeDef::Enum(_)));
-    match result_def {
-        Some(def_id) => tc.types.env.intern_enum(def_id, vec![ok, err]),
-        None => tc.poison(),
-    }
+    crate::error_union::intern_result_in(&mut tc.types.env, ok, err).unwrap_or_else(|| tc.poison())
 }
 
 pub(crate) fn infer_fail(tc: &mut TypeChecker, f: &FailExpr) -> TypeId {

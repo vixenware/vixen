@@ -12,7 +12,8 @@ use vx_ir::{ExprId, VirArena};
 use vx_parser::{SourceId, parse_source_file};
 use vx_types::{Scalar, Ty};
 
-/// Helper: build VIR, resolve names, collect types, run type checker.
+/// Helper: build VIR, resolve names, collect types, run type checker, then run
+/// the inferred-error-union pass (so `?` types reflect the real `E`).
 fn check_source(source: &str) -> (VirArena, TypeCollection, TypeCheckVirResult) {
     let parsed = parse_source_file(source, SourceId(0));
     let file = parsed.tree();
@@ -20,6 +21,7 @@ fn check_source(source: &str) -> (VirArena, TypeCollection, TypeCheckVirResult) 
     let mut tc = collect_types_vir(&mut program.arena);
     let _resolve_errors = resolve_names(&mut program.arena);
     let result = type_check_vir(&mut program.arena, &mut tc);
+    let _eu_errors = vx_ir::error_union::infer_error_unions(&mut program.arena, &mut tc, &result);
     (program.arena, tc, result)
 }
 
@@ -223,10 +225,12 @@ fn array_type() {
 // =========================================================================
 
 #[test]
-fn fallible_wraps_in_result() {
+fn fallible_over_infallible_wraps_in_result_never() {
     // `expr? : Result[T, E]` — the failure model's catch (was `Option[T]`). E is the
-    // error union, `String` until the call-graph union inference lands. `Result` is
-    // a stdlib enum, so go through the bundled front-end that loads it.
+    // inferred error union. `42` can never fail (no reachable `fail`/fallible callee),
+    // so `E` is the zero-variant `Never` enum: `42? : Result[U64, Never]`. `Result` is
+    // a stdlib enum, so go through the bundled front-end that loads it (and runs the
+    // error-union pass).
     let fe = vx_ir::compile::semantic_front_end_bundled("fn f() ( 42? )").expect("front-end");
     let id = find_expr(&fe.program.arena, |k| {
         matches!(k, vx_ir::expr::ExprKind::Fallible(_))
@@ -245,9 +249,210 @@ fn fallible_wraps_in_result() {
         fe.env.get_ty(enum_ty.type_args[0]),
         &Ty::Scalar(Scalar::U64)
     );
+    // The error type is the synthetic zero-variant `Never` enum.
+    let Ty::Enum(err_enum) = fe.env.get_ty(enum_ty.type_args[1]).clone() else {
+        panic!(
+            "expected Never enum as E, got {:?}",
+            fe.env.get_ty(enum_ty.type_args[1])
+        );
+    };
+    let vx_types::TypeDef::Enum(err_def) = fe.env.get_def(err_enum.def) else {
+        panic!("E def should be an enum");
+    };
+    assert!(
+        err_def.variants.is_empty(),
+        "E should be the zero-variant Never enum, got variants {:?}",
+        err_def.variants
+    );
+}
+
+#[test]
+fn fallible_infers_string_from_single_fail() {
+    // A function whose only failure is `fail "…"` infers `E = String` (computed,
+    // not hardcoded): `f()? : Result[U64, String]`.
+    let src =
+        "fn f(x: U64) -> U64 ( if x > 0 ( x ) else ( fail \"neg\" ) )\nfn g(x: U64) ( f(x)? )";
+    let fe = vx_ir::compile::semantic_front_end_bundled(src).expect("front-end");
+    let id = find_expr(&fe.program.arena, |k| {
+        matches!(k, vx_ir::expr::ExprKind::Fallible(_))
+    })
+    .unwrap();
+    let ty_id = fe.program.arena[id].ty.unwrap();
+    let Ty::Enum(enum_ty) = fe.env.get_ty(ty_id).clone() else {
+        panic!("expected Result enum");
+    };
     assert_eq!(
         fe.env.get_ty(enum_ty.type_args[1]),
-        &Ty::Scalar(Scalar::String)
+        &Ty::Scalar(Scalar::String),
+        "single `fail \"…\"` should infer E = String"
+    );
+}
+
+#[test]
+fn fallible_infers_non_string_error_type() {
+    // A function that fails with a NON-String value (a custom enum variant) infers
+    // that enum as `E` — proving the union is computed from the failed value's type,
+    // not hardcoded to String.
+    let src = "enum MyErr { Bad, Worse }\n\
+               fn f(x: U64) -> U64 ( if x > 0 ( x ) else ( fail Bad ) )\n\
+               fn g(x: U64) ( f(x)? )";
+    let fe = vx_ir::compile::semantic_front_end_bundled(src).expect("front-end");
+    let id = find_expr(&fe.program.arena, |k| {
+        matches!(k, vx_ir::expr::ExprKind::Fallible(_))
+    })
+    .unwrap();
+    let ty_id = fe.program.arena[id].ty.unwrap();
+    let Ty::Enum(enum_ty) = fe.env.get_ty(ty_id).clone() else {
+        panic!("expected Result enum");
+    };
+    let e_ty = fe.env.get_ty(enum_ty.type_args[1]).clone();
+    assert!(
+        !matches!(e_ty, Ty::Scalar(Scalar::String)),
+        "E must NOT be String when the fail value is a custom enum, got {e_ty:?}"
+    );
+    let Ty::Enum(err_enum) = e_ty else {
+        panic!("expected MyErr enum as E, got {e_ty:?}");
+    };
+    assert!(
+        matches!(fe.env.get_def(err_enum.def), vx_types::TypeDef::Enum(e) if e.name == "MyErr"),
+        "E should be the MyErr enum"
+    );
+}
+
+/// Compile `src` through the bundled front-end and return any
+/// `NonExhaustiveMatch` diagnostics (as `(missing-variant-list)`), or an empty
+/// vec if it compiled clean / failed elsewhere.
+fn non_exhaustive_diags(src: &str) -> Vec<Vec<String>> {
+    match vx_ir::compile::semantic_front_end_bundled(src) {
+        Ok(_) => Vec::new(),
+        Err(vx_ir::compile::CompileError::ErrorUnion { errors, .. }) => errors
+            .into_iter()
+            .filter_map(|d| match d {
+                vx_ir::IrDiagnostic::NonExhaustiveMatch { missing, .. } => Some(missing),
+                _ => None,
+            })
+            .collect(),
+        Err(other) => panic!("expected clean or ErrorUnion, got {other:?}"),
+    }
+}
+
+#[test]
+fn fallible_infers_heterogeneous_two_element_union() {
+    // A `?` whose inner subtree reaches a String-fail AND an enum-fail infers
+    // `E` as a 2-element union alias `String | MyErr`.
+    let src = "enum MyErr { Bad }\n\
+               fn fs(x: U64) -> U64 ( if x > 0 ( x ) else ( fail \"s\" ) )\n\
+               fn fe(x: U64) -> U64 ( if x > 0 ( x ) else ( fail Bad ) )\n\
+               fn g(a: U64, b: U64) ( (fs(a) + fe(b))? )";
+    let fe = vx_ir::compile::semantic_front_end_bundled(src).expect("front-end");
+    let id = find_expr(&fe.program.arena, |k| {
+        matches!(k, vx_ir::expr::ExprKind::Fallible(_))
+    })
+    .unwrap();
+    let ty_id = fe.program.arena[id].ty.unwrap();
+    let Ty::Enum(enum_ty) = fe.env.get_ty(ty_id).clone() else {
+        panic!("expected Result enum");
+    };
+    let e_ty = enum_ty.type_args[1];
+    // E is a synthetic anonymous alias whose alternatives are {String, MyErr}.
+    let Ty::Alias(alias_ty) = fe.env.get_ty(e_ty).clone() else {
+        panic!("expected union alias as E, got {:?}", fe.env.get_ty(e_ty));
+    };
+    // The alias resolves to a sum (its alternatives are recorded). We can't read
+    // the side table off `FrontEnd`, but we can confirm both member types appear
+    // among the env's interned types and that the alias name is the synthetic one.
+    let vx_types::TypeDef::Alias(adef) = fe.env.get_def(alias_ty.def) else {
+        panic!("E def should be an alias");
+    };
+    assert_eq!(
+        adef.name, "<error union>",
+        "E should be the synthetic union alias"
+    );
+}
+
+#[test]
+fn fallible_union_propagates_through_call_chain() {
+    // `h` calls `g` calls `f` (which fails with a String). The error union must
+    // propagate two hops: `h(x)? : Result[_, String]`.
+    let src = "fn f(x: U64) -> U64 ( if x > 0 ( x ) else ( fail \"e\" ) )\n\
+               fn g(x: U64) -> U64 ( f(x) )\n\
+               fn h(x: U64) -> U64 ( g(x) )\n\
+               fn top(x: U64) ( h(x)? )";
+    let fe = vx_ir::compile::semantic_front_end_bundled(src).expect("front-end");
+    let id = find_expr(&fe.program.arena, |k| {
+        matches!(k, vx_ir::expr::ExprKind::Fallible(_))
+    })
+    .unwrap();
+    let ty_id = fe.program.arena[id].ty.unwrap();
+    let Ty::Enum(enum_ty) = fe.env.get_ty(ty_id).clone() else {
+        panic!("expected Result enum");
+    };
+    assert_eq!(
+        fe.env.get_ty(enum_ty.type_args[1]),
+        &Ty::Scalar(Scalar::String),
+        "the String error should propagate through f→g→h"
+    );
+}
+
+#[test]
+fn fallible_union_terminates_on_mutual_recursion() {
+    // Mutually recursive `a`/`b` (each calls the other and can `fail`). The
+    // fixpoint must terminate and infer the String union for `a(x)?`.
+    let src = "fn a(x: U64) -> U64 ( if x > 0 ( b(x) ) else ( fail \"ae\" ) )\n\
+               fn b(x: U64) -> U64 ( if x > 1 ( a(x) ) else ( fail \"be\" ) )\n\
+               fn top(x: U64) ( a(x)? )";
+    let fe = vx_ir::compile::semantic_front_end_bundled(src).expect("front-end");
+    let id = find_expr(&fe.program.arena, |k| {
+        matches!(k, vx_ir::expr::ExprKind::Fallible(_))
+    })
+    .unwrap();
+    let ty_id = fe.program.arena[id].ty.unwrap();
+    let Ty::Enum(enum_ty) = fe.env.get_ty(ty_id).clone() else {
+        panic!("expected Result enum");
+    };
+    // Both fails are String, so the union collapses to a single String.
+    assert_eq!(
+        fe.env.get_ty(enum_ty.type_args[1]),
+        &Ty::Scalar(Scalar::String),
+        "mutual recursion should terminate with E = String"
+    );
+}
+
+#[test]
+fn match_over_fallible_missing_err_is_non_exhaustive() {
+    // `match checked(0)? ( Ok(v) => v )` omits the `Err` arm → non-exhaustive.
+    let src = "fn checked(x: U64) -> U64 ( if x > 0 ( x ) else ( fail \"e\" ) )\n\
+               fn g(x: U64) -> U64 ( match checked(x)? ( Ok(v) => v ) )";
+    let diags = non_exhaustive_diags(src);
+    assert!(
+        diags
+            .iter()
+            .any(|missing| missing.iter().any(|m| m == "Err")),
+        "expected NonExhaustiveMatch missing `Err`, got {diags:?}"
+    );
+}
+
+#[test]
+fn match_over_fallible_with_wildcard_is_exhaustive() {
+    // A `_` arm covers everything → no NonExhaustiveMatch.
+    let src = "fn checked(x: U64) -> U64 ( if x > 0 ( x ) else ( fail \"e\" ) )\n\
+               fn g(x: U64) -> U64 ( match checked(x)? ( Ok(v) => v, _ => 0 ) )";
+    let diags = non_exhaustive_diags(src);
+    assert!(
+        diags.is_empty(),
+        "a wildcard arm should suppress NonExhaustiveMatch, got {diags:?}"
+    );
+}
+
+#[test]
+fn match_over_fallible_with_both_arms_is_exhaustive() {
+    // `Ok` + `Err` covers the whole `Result` → exhaustive.
+    let src = "fn checked(x: U64) -> U64 ( if x > 0 ( x ) else ( fail \"e\" ) )\n\
+               fn g(x: U64) -> U64 ( match checked(x)? ( Ok(v) => v, Err(e) => 0 ) )";
+    let diags = non_exhaustive_diags(src);
+    assert!(
+        diags.is_empty(),
+        "Ok + Err arms should be exhaustive, got {diags:?}"
     );
 }
 

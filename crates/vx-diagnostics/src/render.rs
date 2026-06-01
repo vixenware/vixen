@@ -43,6 +43,7 @@ fn compile_error_to_reports(err: &CompileError, fallback_env: &TypeEnv) -> Vec<R
         CompileError::Parse(diags) => diags.iter().map(|d| d.to_report()).collect(),
         CompileError::Resolve { errors, env }
         | CompileError::Type { errors, env }
+        | CompileError::ErrorUnion { errors, env }
         | CompileError::Capability { errors, env } => {
             errors.iter().map(|d| d.to_report(env.as_ref())).collect()
         }

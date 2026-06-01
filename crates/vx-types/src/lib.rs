@@ -30,7 +30,10 @@ pub struct TypeDefId(pub u32);
 /// Every type (scalar, unit, struct instantiation, function, tuple, array,
 /// inference variable, …) is interned and addressable by `TypeId`. Two
 /// `TypeId`s compare equal iff they refer to the same structural type.
-#[derive(Clone, Copy, PartialEq, Eq, Hash, Debug)]
+///
+/// `Ord` is by interning order (the raw `u32`) — a stable, arbitrary total
+/// order used to canonicalize inferred error unions deterministically.
+#[derive(Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Debug)]
 pub struct TypeId(pub u32);
 
 /// A unique identifier for a type variable introduced during inference.
