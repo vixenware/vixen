@@ -4004,6 +4004,16 @@ dependencies = [
 ]
 
 [[package]]
+name = "vx-management"
+version = "0.1.0"
+dependencies = [
+ "eyre",
+ "libc",
+ "tracing",
+ "tracing-subscriber",
+]
+
+[[package]]
 name = "vx-package"
 version = "0.1.0"
 dependencies = [

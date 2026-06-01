@@ -1,0 +1,25 @@
+[package]
+name = "vx-management"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+
+[package.metadata]
+
+[package.metadata."docs.rs"]
+rustdoc-args = ["--html-in-header", "arborium-header.html"]
+
+[lints]
+workspace = true
+
+[dependencies]
+libc.workspace = true
+eyre.workspace = true
+tracing.workspace = true
+tracing-subscriber.workspace = true
+
+# The privileged daemon installed in the app bundle as `Contents/MacOS/vixen-management`.
+[[bin]]
+name = "vixen-management"
+path = "src/main.rs"

@@ -33,6 +33,8 @@ members = [
   "crates/vx-vfs",
   "crates/vx-fskit",
   "crates/vx-fskit-types",
+  ## privileged macOS management daemon (block-device mount + fskitd kill-switch)
+  "crates/vx-management",
 
   "xtask",
 ]
