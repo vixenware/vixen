@@ -21,9 +21,9 @@ pub const MOUNT_POINT: &str = "/Volumes/Vixen";
 pub const FS_TYPE: &str = "vixenfs";
 /// The mock backing image: sparse, root-owned, and never holds file data.
 pub const IMAGE_PATH: &str = "/Library/Application Support/Vixen/vixen-volume.img";
-/// Nominal size of the mock image. `mkfile -n` keeps it sparse (~0 real bytes); the
-/// volume's reported size comes from the extension's statfs, not from this.
-pub const IMAGE_SIZE: &str = "100m";
+/// Size of the mock image in bytes. Created sparse (`set_len`), so it costs ~0 real
+/// bytes; the volume's reported size comes from the extension's statfs, not from this.
+pub const IMAGE_SIZE_BYTES: u64 = 100 * 1024 * 1024;
 
 /// Establish the mount if it isn't already up: provision the device, then mount it.
 /// Idempotent — a healthy existing mount is a no-op. **Requires root** (the mount).
@@ -91,7 +91,9 @@ pub fn provision_device() -> Result<String> {
         .ok_or_else(|| eyre::eyre!("no whole-disk /dev/disk node in hdiutil output: {stdout:?}"))
 }
 
-/// Create the sparse mock image if it doesn't exist yet.
+/// Create the sparse mock image if it doesn't exist yet. `set_len` extends the file
+/// without allocating blocks (a hole on APFS) — exactly what `mkfile -n` does, with no
+/// dependency on an external tool (`mkfile` isn't present at a fixed path on macOS 26).
 fn ensure_image() -> Result<()> {
     let path = std::path::Path::new(IMAGE_PATH);
     if path.exists() {
@@ -100,16 +102,9 @@ fn ensure_image() -> Result<()> {
     if let Some(parent) = path.parent() {
         std::fs::create_dir_all(parent).wrap_err("creating image support dir")?;
     }
-    let out = Command::new("/usr/bin/mkfile")
-        .args(["-n", IMAGE_SIZE, IMAGE_PATH])
-        .output()
-        .wrap_err("running mkfile")?;
-    if !out.status.success() {
-        bail!(
-            "mkfile {IMAGE_PATH} failed: {}",
-            String::from_utf8_lossy(&out.stderr).trim()
-        );
-    }
+    let file = std::fs::File::create(path).wrap_err("creating mock image file")?;
+    file.set_len(IMAGE_SIZE_BYTES)
+        .wrap_err("sizing mock image (sparse)")?;
     Ok(())
 }
 
