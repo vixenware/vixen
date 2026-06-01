@@ -29,12 +29,12 @@ where
     //    If not, attempt a mount and read again.
     let status = match read_status(mount_path).await {
         Ok(status) => status,
-        Err(_) => {
-            // Not mounted yet — try mounting
+        Err(read_err) => {
+            // No live mount to reuse — bring it up via the Management daemon.
             do_mount(mount_path)
                 .await
                 .map_err(|msg| VfsError::MountFailed {
-                    message: msg.clone(),
+                    message: format!("{msg} (read_status first returned: {read_err})"),
                     _diagnostics: vec![],
                 })?;
 

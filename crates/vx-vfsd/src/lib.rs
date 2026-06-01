@@ -27,7 +27,10 @@ use crate::vfs::CasVfs;
 /// Canary item ID — must be high enough to never collide with real CAS item IDs.
 const CANARY_ITEM_ID: ItemId = 0xFFFF_FFFF_FFFD_0001;
 const ROOT_ITEM_ID: ItemId = 1;
-const MACOS_GLOBAL_MOUNT_PATH: &str = "/tmp/vx/vfs";
+/// The single global mount on macOS — the configured `vfsd.mount` is ignored there;
+/// there is exactly one Vixen volume. Block era: a real `/Volumes` volume (must match
+/// `vx_management::mount::MOUNT_POINT`).
+const MACOS_GLOBAL_MOUNT_PATH: &str = "/Volumes/Vixen";
 
 pub fn effective_mount_path(configured_mount: &Utf8PathBuf) -> Utf8PathBuf {
     if cfg!(target_os = "macos") {
