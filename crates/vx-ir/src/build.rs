@@ -966,31 +966,54 @@ impl VirBuilder {
             .map(|t| self.token_span(&t))
             .unwrap_or_else(|| self.span(v.syntax()));
         let attributes = self.build_attributes(v.attributes());
-        // Iterate raw STRUCT_BODY children for recovery of malformed fields.
-        let fields: Vec<FieldDecl> = {
-            let body_node = v
-                .syntax()
-                .children()
-                .find(|c| c.kind() == SyntaxKind::STRUCT_BODY);
+        // A variant body is one of: a `{ … }` STRUCT_BODY (named fields), a `( … )`
+        // VARIANT_TUPLE (positional fields named "0","1",…), or nothing (unit).
+        let struct_body = v
+            .syntax()
+            .children()
+            .find(|c| c.kind() == SyntaxKind::STRUCT_BODY);
+        let tuple_body = v
+            .syntax()
+            .children()
+            .find(|c| c.kind() == SyntaxKind::VARIANT_TUPLE);
+        let fields: Vec<FieldDecl> = if let Some(body_node) = struct_body {
+            // Iterate raw STRUCT_BODY children for recovery of malformed fields.
             let mut fields = Vec::new();
-            if let Some(body_node) = body_node {
-                for child in body_node.children() {
-                    if let Some(fd) = vx_parser::FieldDecl::cast(child.clone()) {
-                        fields.push(self.build_field_decl(&fd));
-                    } else {
-                        let child_span = self.span(&child);
-                        fields.push(FieldDecl {
-                            name: String::new(),
-                            name_span: child_span,
-                            ty: None,
-                            has_default: false,
-                            default_value: None,
-                            attributes: vec![],
-                        });
-                    }
+            for child in body_node.children() {
+                if let Some(fd) = vx_parser::FieldDecl::cast(child.clone()) {
+                    fields.push(self.build_field_decl(&fd));
+                } else {
+                    let child_span = self.span(&child);
+                    fields.push(FieldDecl {
+                        name: String::new(),
+                        name_span: child_span,
+                        ty: None,
+                        has_default: false,
+                        default_value: None,
+                        attributes: vec![],
+                    });
                 }
             }
             fields
+        } else if let Some(tuple_node) = tuple_body {
+            // Positional payload: each element type becomes a field named by its
+            // index, so the rest of the pipeline treats tuple and struct variants
+            // uniformly (a tuple variant is a struct with "0","1",… field names).
+            tuple_node
+                .children()
+                .filter_map(vx_parser::Type::cast)
+                .enumerate()
+                .map(|(i, ty)| FieldDecl {
+                    name: i.to_string(),
+                    name_span: self.span(ty.syntax()),
+                    ty: Some(self.build_type_ref(&ty)),
+                    has_default: false,
+                    default_value: None,
+                    attributes: vec![],
+                })
+                .collect()
+        } else {
+            Vec::new()
         };
 
         VirVariantDecl {
@@ -3058,7 +3081,7 @@ impl VirBuilder {
             .map(|t| self.token_span(&t))
             .unwrap_or(pat_span);
 
-        let fields = v.fields().map(|sp| {
+        let fields = if let Some(sp) = v.fields() {
             let mut result = Vec::new();
             for child in sp.syntax().children() {
                 if let Some(f) = vx_parser::StructPatternField::cast(child.clone()) {
@@ -3114,8 +3137,33 @@ impl VirBuilder {
                     });
                 }
             }
-            result
-        });
+            Some(result)
+        } else if let Some(tuple_node) = v
+            .syntax()
+            .children()
+            .find(|c| c.kind() == SyntaxKind::TUPLE_PATTERN)
+        {
+            // Tuple-form destructure `Variant(p1, …)`: positional sub-patterns bound
+            // to the variant's "0","1",… fields (the same names the build gives a
+            // tuple variant's payload), so matching is uniform with struct-form.
+            let mut result = Vec::new();
+            for (i, pat) in tuple_node
+                .children()
+                .filter_map(vx_parser::Pattern::cast)
+                .enumerate()
+            {
+                let span = self.span(pat.syntax());
+                let pattern = self.build_pattern(&pat);
+                result.push(VirStructPatternField {
+                    name: i.to_string(),
+                    name_span: span,
+                    pattern,
+                });
+            }
+            Some(result)
+        } else {
+            None
+        };
 
         self.arena.alloc_pattern(Pattern {
             span: pat_span,

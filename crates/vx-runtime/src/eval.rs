@@ -654,17 +654,45 @@ impl Evaluator<'_> {
         let prog = self.program;
         // Fast path: a direct call to a named function — bind args over an empty
         // base env (a top-level function closes over nothing local).
-        if let ExprKind::NameRef(n) = &prog.arena[callee].kind
-            && let Some(DefTarget::Item(item)) = n.resolved
-        {
-            // Native stdlib free functions dispatch by name; others run their body.
-            if n.name == "discover" {
-                return self.native_discover(args, env);
+        if let ExprKind::NameRef(n) = &prog.arena[callee].kind {
+            match n.resolved {
+                Some(DefTarget::Item(item)) => {
+                    // Native stdlib free functions dispatch by name; others run their body.
+                    if n.name == "discover" {
+                        return self.native_discover(args, env);
+                    }
+                    return match &prog.arena[item].kind {
+                        ItemKind::Function(f) => self.invoke_body(f.body, args, env, Env::new()),
+                        _ => Err(poison(format!("`{}` is not callable", n.name))),
+                    };
+                }
+                // Tuple-variant construction `Ok(v)` — bind the args to the variant's
+                // positional "0","1",… fields (the names a tuple variant's payload
+                // carries), so a tuple variant is a struct variant with index names.
+                Some(DefTarget::Variant {
+                    enum_item,
+                    variant_index,
+                }) => {
+                    let tag = match &prog.arena[enum_item].kind {
+                        ItemKind::Enum(e) => match e.variants.get(variant_index as usize) {
+                            Some(v) => v.name.clone(),
+                            None => {
+                                return Err(poison(format!(
+                                    "variant index out of range for `{}`",
+                                    n.name
+                                )));
+                            }
+                        },
+                        _ => return Err(poison(format!("`{}` is not an enum variant", n.name))),
+                    };
+                    let fields = args
+                        .enumerate()
+                        .map(|(i, a)| (i.to_string(), self.thunk(a, env)))
+                        .collect();
+                    return Ok(Value::Variant { tag, fields });
+                }
+                _ => {}
             }
-            return match &prog.arena[item].kind {
-                ItemKind::Function(f) => self.invoke_body(f.body, args, env, Env::new()),
-                _ => Err(poison(format!("`{}` is not callable", n.name))),
-            };
         }
         // `receiver.method(args)` — a native builtin method.
         if let ExprKind::Field(fx) = &prog.arena[callee].kind {

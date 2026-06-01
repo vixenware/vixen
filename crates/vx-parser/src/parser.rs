@@ -576,7 +576,10 @@ fn enum_body(p: &mut Parser<'_>) {
     while !p.at(SyntaxKind::R_CURLY) && !p.at(SyntaxKind::EOF) {
         let variant = p.start();
         attributes(p);
-        p.expect(SyntaxKind::STRUCT_KW);
+        // Three variant forms: `struct Name { … }` (struct-body), `Name(T1, …)`
+        // (tuple payload), and bare `Name` (unit). The leading `struct` keyword is
+        // optional — only the struct-body form uses it.
+        p.eat(SyntaxKind::STRUCT_KW);
         if p.at(SyntaxKind::UPPER_IDENT) {
             p.bump();
         } else {
@@ -584,6 +587,8 @@ fn enum_body(p: &mut Parser<'_>) {
         }
         if p.at(SyntaxKind::L_CURLY) {
             struct_body(p);
+        } else if p.at(SyntaxKind::L_PAREN) {
+            variant_tuple(p);
         }
         variant.complete(p, SyntaxKind::VARIANT_DECL);
         if !p.eat(SyntaxKind::COMMA) {
@@ -592,6 +597,21 @@ fn enum_body(p: &mut Parser<'_>) {
     }
     p.expect(SyntaxKind::R_CURLY);
     marker.complete(p, SyntaxKind::ENUM_BODY);
+}
+
+/// A tuple-variant payload `(T1, T2, …)` — a parenthesized list of element types,
+/// the positional analog of a struct body.
+fn variant_tuple(p: &mut Parser<'_>) {
+    let marker = p.start();
+    p.expect(SyntaxKind::L_PAREN);
+    while !p.at(SyntaxKind::R_PAREN) && !p.at(SyntaxKind::EOF) {
+        type_expr(p);
+        if !p.eat(SyntaxKind::COMMA) {
+            break;
+        }
+    }
+    p.expect(SyntaxKind::R_PAREN);
+    marker.complete(p, SyntaxKind::VARIANT_TUPLE);
 }
 
 fn namespace_body(p: &mut Parser<'_>) {
@@ -1869,10 +1889,29 @@ fn variant_pattern(p: &mut Parser<'_>) -> CompletedMarker {
         p.bump();
         p.bump();
     }
+    // `Variant { … }` (struct-form destructure) or `Variant(p1, …)` (tuple-form,
+    // positional). A bare `Variant` matches on the tag alone.
     if p.at(SyntaxKind::L_CURLY) {
         general_struct_pattern(p);
+    } else if p.at(SyntaxKind::L_PAREN) {
+        variant_tuple_pattern(p);
     }
     marker.complete(p, SyntaxKind::VARIANT_PATTERN)
+}
+
+/// A tuple-variant destructure `(p1, p2, …)` — positional sub-patterns, bound to
+/// the variant's `"0"`, `"1"`, … fields during the IR build.
+fn variant_tuple_pattern(p: &mut Parser<'_>) -> CompletedMarker {
+    let marker = p.start();
+    p.expect(SyntaxKind::L_PAREN);
+    while !p.at(SyntaxKind::R_PAREN) && !p.at(SyntaxKind::EOF) {
+        pattern(p);
+        if !p.eat(SyntaxKind::COMMA) {
+            break;
+        }
+    }
+    p.expect(SyntaxKind::R_PAREN);
+    marker.complete(p, SyntaxKind::TUPLE_PATTERN)
 }
 
 // r[pattern.tuple]
