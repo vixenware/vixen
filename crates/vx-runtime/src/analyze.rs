@@ -180,7 +180,7 @@ impl Builder<'_> {
         let p = &prog.arena[pat];
         if let PatternKind::Binding(pb) = &p.kind {
             let (name, binding) = (pb.name.clone(), pb.binding);
-            let span = to_span(p.span.range);
+            let span = to_span(p.span);
             let node = self.emit(NodeKind::Param, name, span, vec![]);
             self.bindings.insert(binding, node);
         }
@@ -194,7 +194,7 @@ impl Builder<'_> {
         // to `&self` — lets us recurse (`&mut self`) while reading the expr.
         let prog = self.program;
         let expr = &prog.arena[e];
-        let span = to_span(expr.span.range);
+        let span = to_span(expr.span);
         let ty_str = self.render_ty(expr.ty);
 
         let id = match &expr.kind {
@@ -594,10 +594,10 @@ fn bin_kind(op: BinOp) -> KernelOp {
     }
 }
 
-fn to_span(range: vx_parser::TextRange) -> Span {
+fn to_span(span: vx_parser::SourceSpan) -> Span {
     Span {
-        start: range.start().into(),
-        end: range.end().into(),
+        start: span.start().into(),
+        end: span.end().into(),
     }
 }
 

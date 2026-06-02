@@ -273,10 +273,10 @@ impl Evaluator<'_> {
 
     /// The source span (byte range) of an expression.
     fn expr_span(&self, e: ExprId) -> Option<Span> {
-        let range = self.program.arena[e].span.range;
+        let span = self.program.arena[e].span;
         Some(Span {
-            start: range.start().into(),
-            end: range.end().into(),
+            start: span.start().into(),
+            end: span.end().into(),
         })
     }
 

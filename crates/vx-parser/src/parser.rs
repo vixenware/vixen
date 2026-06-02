@@ -189,7 +189,7 @@ impl<'a> Parser<'a> {
     }
 
     fn current_span(&self) -> SourceSpan {
-        SourceSpan::new(self.source_id, self.current_range())
+        crate::source::span_from_range(self.source_id, self.current_range())
     }
 
     fn has_significant_gap_before_current(&self) -> bool {

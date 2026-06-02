@@ -13,4 +13,5 @@ rustdoc-args = ["--html-in-header", "arborium-header.html"]
 [dependencies]
 margin = { workspace = true }
 rowan = "0.16.1"
+vx-span = { workspace = true }
 

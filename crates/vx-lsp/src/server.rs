@@ -1,7 +1,7 @@
 use std::collections::HashMap;
 use std::sync::Mutex;
 
-use rowan::TextRange;
+use rowan::{TextRange, TextSize};
 use tower_lsp::jsonrpc::Result;
 use tower_lsp::lsp_types::*;
 use tower_lsp::{Client, LanguageServer};
@@ -16,6 +16,14 @@ use vx_parser::{self as vx, AstNode, FnDecl, Parsed, SourceFile, SyntaxKind, tri
 
 use vx_ir::{CapCheckResult, DefId, DefKind, Definition};
 use vx_parser::{SourceId, SourceSpan};
+
+/// Reconstruct a rowan `TextRange` from a (rowan-free) [`SourceSpan`]. The LSP is the
+/// bridge layer: it carries VIR spans back into CST offsets for line-index math, node
+/// lookup, and token positioning.
+fn text_range(span: SourceSpan) -> TextRange {
+    TextRange::new(TextSize::from(span.start()), TextSize::from(span.end()))
+}
+
 pub struct VxLanguageServer {
     client: Client,
     documents: Mutex<HashMap<Url, DocumentState>>,
@@ -315,8 +323,11 @@ impl DocumentState {
             return span;
         };
         let root = doc.parsed.tree().syntax().clone();
-        if let Some(node) = root.descendants().find(|n| n.text_range() == span.range) {
-            SourceSpan::new(span.source, trimmed_range(&node))
+        if let Some(node) = root
+            .descendants()
+            .find(|n| n.text_range() == text_range(span))
+        {
+            vx::source::span_from_range(span.source, trimmed_range(&node))
         } else {
             span
         }
@@ -341,8 +352,8 @@ impl DocumentState {
                 None => return "",
             }
         };
-        let start = u32::from(span.range.start()) as usize;
-        let end = u32::from(span.range.end()) as usize;
+        let start = span.start() as usize;
+        let end = span.end() as usize;
         text.get(start..end).unwrap_or("")
     }
 
@@ -403,7 +414,9 @@ impl DocumentState {
             .tree()
             .syntax()
             .descendants()
-            .find(|node| node.kind() == expected_kind && node.text_range() == def.full_span.range)
+            .find(|node| {
+                node.kind() == expected_kind && node.text_range() == text_range(def.full_span)
+            })
     }
 
     fn fn_decl_for(&self, def: &Definition) -> Option<FnDecl> {
@@ -444,7 +457,7 @@ impl DocumentState {
     }
 
     pub(crate) fn to_lsp_range(&self, range: TextRange) -> Range {
-        self.to_lsp_range_span(SourceSpan::new(self.current_source, range))
+        self.to_lsp_range_span(vx::source::span_from_range(self.current_source, range))
     }
 
     /// Convert a vx-ir SourceSpan into a full LSP `Location` (URI + range).
@@ -462,8 +475,9 @@ impl DocumentState {
             .source_doc(span.source)
             .map(|doc| &doc.line_index)
             .unwrap_or(&self.line_index);
-        let start = line_index.position(span.range.start());
-        let end = line_index.position(span.range.end());
+        let r = text_range(span);
+        let start = line_index.position(r.start());
+        let end = line_index.position(r.end());
         Range {
             start: Position::new(start.line, start.col),
             end: Position::new(end.line, end.col),
@@ -471,7 +485,7 @@ impl DocumentState {
     }
 
     fn current_span(&self, range: TextRange) -> SourceSpan {
-        SourceSpan::new(self.current_source, range)
+        vx::source::span_from_range(self.current_source, range)
     }
 
     /// Enumerate all materialized definitions in the current source.
@@ -658,12 +672,12 @@ impl LanguageServer for VxLanguageServer {
                 };
                 if def.source() != state.current_source && expr.span.source == state.current_source
                 {
-                    builtin_ranges.insert(expr.span.range);
+                    builtin_ranges.insert(text_range(expr.span));
                 }
             }
             for (span, def) in &state.type_check.member_defs {
                 if def.source() != state.current_source && span.source == state.current_source {
-                    builtin_ranges.insert(span.range);
+                    builtin_ranges.insert(text_range(*span));
                 }
             }
             encode_semantic_tokens(&tokens, &state.line_index, &builtin_ranges)
@@ -1438,7 +1452,9 @@ impl LanguageServer for VxLanguageServer {
                 if def.id != target_def.id || expr.span.source != state.current_source {
                     continue;
                 }
-                let token = root.token_at_offset(expr.span.range.start()).right_biased();
+                let token = root
+                    .token_at_offset(TextSize::from(expr.span.start()))
+                    .right_biased();
                 if !token.as_ref().is_some_and(is_root_callee_ref) {
                     continue;
                 }
@@ -1448,7 +1464,9 @@ impl LanguageServer for VxLanguageServer {
             // Group by enclosing function
             let mut by_caller: HashMap<DefId, (Definition, Vec<TextRange>)> = HashMap::new();
             for span in &call_spans {
-                let token = root.token_at_offset(span.range.start()).right_biased()?;
+                let token = root
+                    .token_at_offset(TextSize::from(span.start()))
+                    .right_biased()?;
                 // Walk up to find the enclosing FN_DECL
                 let fn_node = token.parent_ancestors().find_map(FnDecl::cast)?;
                 let caller_name_token = fn_node.name()?;
@@ -1462,7 +1480,7 @@ impl LanguageServer for VxLanguageServer {
                     .entry(caller_def.id)
                     .or_insert_with(|| (caller_def.clone(), Vec::new()))
                     .1
-                    .push(span.range);
+                    .push(text_range(*span));
             }
 
             let calls: Vec<_> = by_caller
@@ -1609,7 +1627,7 @@ impl VxLanguageServer {
             .errors()
             .iter()
             .map(|err| Diagnostic {
-                range: state.to_lsp_range(err.primary_span().range),
+                range: state.to_lsp_range_span(err.primary_span()),
                 severity: Some(DiagnosticSeverity::ERROR),
                 source: Some("vx-parser".to_string()),
                 message: format_parse_diagnostic(err),
@@ -2815,21 +2833,22 @@ fn materialize_all_definitions(arena: &VirArena, source: SourceId) -> Vec<Defini
 fn innermost_scope_at(arena: &VirArena, source: SourceId, offset: rowan::TextSize) -> ScopeId {
     let mut best: Option<(ScopeId, rowan::TextRange)> = None;
     for (i, scope) in arena.scopes.iter().enumerate() {
-        let range = scope_text_range(arena, scope);
-        if range.source != source {
+        let sspan = scope_text_range(arena, scope);
+        if sspan.source != source {
             continue;
         }
-        if !range.range.contains_inclusive(offset) {
+        let range = text_range(sspan);
+        if !range.contains_inclusive(offset) {
             continue;
         }
         // Pick the smallest enclosing range.
-        let candidate_len = range.range.len();
+        let candidate_len = range.len();
         if let Some((_, best_range)) = best {
             if candidate_len < best_range.len() {
-                best = Some((ScopeId::from_index(i), range.range));
+                best = Some((ScopeId::from_index(i), range));
             }
         } else {
-            best = Some((ScopeId::from_index(i), range.range));
+            best = Some((ScopeId::from_index(i), range));
         }
     }
     // Fallback to scope 0 (module root of first source unit) if nothing matched.
@@ -2881,7 +2900,9 @@ fn visible_definitions_at(
                     None => continue,
                 },
             };
-            if matches!(scope.owner, ScopeOwner::Block(_)) && name_span.range.start() >= offset {
+            if matches!(scope.owner, ScopeOwner::Block(_))
+                && TextSize::from(name_span.start()) >= offset
+            {
                 continue;
             }
             let name = entry.name(arena).to_string();

@@ -113,11 +113,11 @@ impl VirBuilder {
     }
 
     fn span(&self, node: &vx_parser::SyntaxNode) -> SourceSpan {
-        SourceSpan::new(self.source_id, node.text_range())
+        vx_parser::source::span_from_range(self.source_id, node.text_range())
     }
 
     fn token_span(&self, token: &vx_parser::SyntaxToken) -> SourceSpan {
-        SourceSpan::new(self.source_id, token.text_range())
+        vx_parser::source::span_from_range(self.source_id, token.text_range())
     }
 
     /// Register a binding in its scope.

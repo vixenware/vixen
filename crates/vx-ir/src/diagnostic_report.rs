@@ -327,8 +327,8 @@ fn candidate_annotation(candidate: &MethodCandidate) -> Annotation {
 fn to_margin_span(s: SourceSpan) -> Span {
     Span {
         source_id: margin::SourceId(s.source.0.to_string()),
-        start: u32::from(s.range.start()) as usize,
-        end: u32::from(s.range.end()) as usize,
+        start: s.start() as usize,
+        end: s.end() as usize,
     }
 }
 

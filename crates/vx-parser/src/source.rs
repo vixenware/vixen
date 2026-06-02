@@ -2,35 +2,18 @@
 
 use std::collections::HashMap;
 
-use rowan::{TextRange, TextSize};
+use rowan::TextRange;
 
 use crate::SourceFile;
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Default)]
-pub struct SourceId(pub u32);
+/// Re-exported from `vx-span` so existing `vx_parser::{SourceId, SourceSpan}` paths keep
+/// resolving. Now rowan-free (u32 byte offsets); build one from a rowan range with
+/// [`span_from_range`].
+pub use vx_span::{SourceId, SourceSpan};
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Default)]
-pub struct SourceSpan {
-    pub source: SourceId,
-    pub range: TextRange,
-}
-
-impl SourceSpan {
-    pub fn new(source: SourceId, range: TextRange) -> Self {
-        Self { source, range }
-    }
-
-    pub fn start(self) -> TextSize {
-        self.range.start()
-    }
-
-    pub fn end(self) -> TextSize {
-        self.range.end()
-    }
-
-    pub fn contains_inclusive(self, offset: TextSize) -> bool {
-        self.range.contains_inclusive(offset)
-    }
+/// Convert a rowan `TextRange` into a [`SourceSpan`] — the CST→span boundary conversion.
+pub fn span_from_range(source: SourceId, range: TextRange) -> SourceSpan {
+    SourceSpan::new(source, range.start().into(), range.end().into())
 }
 
 #[derive(Debug, Clone)]
