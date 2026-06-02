@@ -157,6 +157,12 @@ pub enum Value {
     /// the producer yields it. The consumer half of `remote.rs`, reached from the
     /// language — the genuinely-remote leaf of an exec's outputs.
     Tree(HandleId),
+    /// The **executor-side** output tree of the running exec — what `run.ok.out` /
+    /// `run.stream.out` evaluate to *on the executor*, before crossing. It is local
+    /// there (the executor produced it); `to_wire` marks it [`WireValue::Tree`] so it
+    /// crosses back as a handle (the orchestrator never sees this variant — it gets a
+    /// [`Value::Tree`]). Parameterless for now (one output tree per run).
+    OutputTree,
     /// The opaque runtime envelope of a caught failure (the failure model's
     /// `FailureContext`). Reified by `?` into the `context` field of a `Failure`
     /// struct value, so a caught error carries the same span + demand-path the
@@ -1049,7 +1055,7 @@ impl Evaluator<'_> {
         // `run.stream.*`, the producing tree — cross as handles, not inline; that join
         // is its own piece.)
         match &*observed {
-            Observed::Value(wire) => Ok(from_wire(wire)),
+            Observed::Value(wire) => from_wire(wire),
             Observed::Poisoned(reason) => Err(poison(reason.clone())),
         }
     }
@@ -1115,6 +1121,11 @@ impl Evaluator<'_> {
                 tag: tag.clone(),
                 fields: self.wire_fields(fields)?,
             },
+            // The run's output tree is a genuinely-remote leaf — it crosses as a
+            // handle, not inline. Mark it; the executor serves its parts over a
+            // `Producing` virtual connection the orchestrator opens (the producer +
+            // boss-side `register_handle` are the next pieces).
+            Value::OutputTree => WireValue::Tree,
             other => {
                 return Err(poison(format!(
                     "`exec` observer returned a value that cannot cross back: {other:?}"
@@ -1543,28 +1554,44 @@ pub fn eval_body_wire(
 /// Reconstruct a [`Value`] from a [`WireValue`] — the orchestrator side of the value
 /// crossing. The wire form is already fully forced, so every field is a resolved
 /// (`done`) thunk.
-pub fn from_wire(wire: &WireValue) -> Value {
-    match wire {
+pub fn from_wire(wire: &WireValue) -> Result<Value, Poison> {
+    Ok(match wire {
         WireValue::U64(n) => Value::U64(*n),
         WireValue::Bool(b) => Value::Bool(*b),
         WireValue::Str(s) => Value::Str(Rc::from(s.as_str())),
         WireValue::Unit => Value::Unit,
-        WireValue::Tuple(ws) => Value::Tuple(ws.iter().map(|w| done(from_wire(w))).collect()),
-        WireValue::Array(ws) => Value::Array(ws.iter().map(|w| done(from_wire(w))).collect()),
-        WireValue::Struct(fields) => Value::Struct(
-            fields
-                .iter()
-                .map(|(n, w)| (n.clone(), done(from_wire(w))))
-                .collect(),
-        ),
+        WireValue::Tuple(ws) => Value::Tuple(from_wire_thunks(ws)?),
+        WireValue::Array(ws) => Value::Array(from_wire_thunks(ws)?),
+        WireValue::Struct(fields) => Value::Struct(from_wire_fields(fields)?),
         WireValue::Variant { tag, fields } => Value::Variant {
             tag: tag.clone(),
-            fields: fields
-                .iter()
-                .map(|(n, w)| (n.clone(), done(from_wire(w))))
-                .collect(),
+            fields: from_wire_fields(fields)?,
         },
-    }
+        // A producing tree crosses as a handle, but resolving it into a
+        // `Value::Tree(HandleId)` means opening a `Producing` virtual connection to the
+        // executor and `register_handle` — async, boss-side, during `dispatch_observe`.
+        // That join is the next piece; until then a returned tree poisons honestly
+        // rather than pretending to resolve.
+        WireValue::Tree => {
+            return Err(poison(
+                "`exec` returned a producing tree — the handle crossing (open a \
+                 Producing vconn + register) is not wired yet"
+                    .into(),
+            ));
+        }
+    })
+}
+
+/// Force-free reconstruction of wire elements into resolved (`done`) thunks.
+fn from_wire_thunks(ws: &[WireValue]) -> Result<Vec<Thunk>, Poison> {
+    ws.iter().map(|w| Ok(done(from_wire(w)?))).collect()
+}
+
+fn from_wire_fields(fields: &[(String, WireValue)]) -> Result<Vec<(String, Thunk)>, Poison> {
+    fields
+        .iter()
+        .map(|(n, w)| Ok((n.clone(), done(from_wire(w)?))))
+        .collect()
 }
 
 #[cfg(test)]

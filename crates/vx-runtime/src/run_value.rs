@@ -70,9 +70,11 @@ fn proc_error_value(o: &ProcOutcome) -> Value {
 }
 
 fn live_face() -> Value {
-    // The live face (`stdout`/`stderr` streams + the producing `out` tree) is the
-    // streaming work; an empty struct stands in until then.
-    Value::Struct(Vec::new())
+    // The live face: `stdout`/`stderr` streams are the streaming work (still absent);
+    // `out` is the producing write-set tree — a remote handle leaf (`Value::OutputTree`),
+    // which `to_wire` crosses back as a `Producing` handle. So `run.stream.out` resolves
+    // to the output tree now; `run.stream.stdout`/`.stderr` land with streams.
+    Value::Struct(vec![("out".to_string(), Thunk::done(Value::OutputTree))])
 }
 
 /// Bytes as a value — provisional, rendered lossily as a string until a real `Bytes`

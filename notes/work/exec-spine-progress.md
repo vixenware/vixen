@@ -40,7 +40,7 @@ tree) cross back as remote handles.
   the strand (`AwaitingObserve`), the **boss** drives the vox `observe()` on its runtime,
   resolves, wakes the strand. No `block_on` cheat. **Built + tested.**
 
-## What's DONE (23 commits this session, all green, see `git log`)
+## What's DONE (24 commits this session, all green, see `git log`)
 
 Foundation (shippable typed IR):
 - `c02dcb9c`..`8e8c9a1b` — `vx-span` (rowan-free `SourceId`/`SourceSpan`), re-point all
@@ -149,15 +149,26 @@ Over vox:
 Both halves of the **tree** crossing exist in isolation — eval pulls a `Value::Tree` via
 `force_remote` (consumer), and `force_remote` pulls over a `Producing` vconn (producer
 connection). What's left is to **join them through `exec`**, then streams + the failure crossing:
-- **Wire `exec` to produce the tree handle.** The executor (in `observe`) runs the command,
-  builds its outputs into a `remote::producer()` (`write_path` per finalized output), and serves
-  that `ProducerService` on inbound `Producing` vconns (extend `local_observer`'s acceptor). The
-  observer's result tree (`run.ok.out`) becomes a `Value::Tree`; `to_wire` (today poisons on it)
-  emits a tree-handle marker. **The friction to design:** `from_wire` runs sync on a strand
-  worker, but opening the vconn + `register_handle` is async + boss-side — so the **boss** should
-  open the vconn and register during `dispatch_observe`'s resolution (the `Observed` carries the
-  marker), handing eval back a `Value::Tree(HandleId)`. Also needs `run_value` to build
-  `run.ok.out`/`run.stream.out` as real handles (today `.stream` = empty struct, `Exit.out` unbuilt).
+- **Value-model layer — DONE.** `run.stream.out` is now a real value: `run_value`'s `live_face`
+  builds `out: Value::OutputTree` (the executor-side output tree); `to_wire` marks it
+  `WireValue::Tree` (a genuinely-remote leaf, crosses as a handle, not inline); `from_wire` is
+  now fallible and `WireValue::Tree` poisons honestly until the crossing is wired. Tested:
+  `observe::tests::observe_crosses_the_output_tree_as_a_handle_marker` (`(run) => run.stream.out`
+  over vox → `Observed::Value(WireValue::Tree)`). (`Exit.out` left unbuilt so `(run) => run.ok`
+  keeps crossing as a plain struct — adding `out` there couples the whole-Exit crossing to this.)
+- **Wire `exec` to actually serve + register the tree handle (two remaining pieces).**
+  1. *Producer/serving (executor):* in `observe`, build the run's outputs into a `remote::producer()`
+     and serve that `ProducerService` on inbound `Producing` vconns (extend `local_observer`'s
+     acceptor — keep the producer in a slot the acceptor reads). **OPEN DECISION (Amos):** what is
+     the output *content*? Faithfully it's the **grammar-declared outputs** (the command's
+     `Kind::Output` paths — `Command.outputs`, which `ExecCommand` currently drops), run under the
+     VFS sandbox (the deferred `run_exec` piece). A `tempdir`-and-walk-all-files is a cheap
+     approximation but **not** the real model — confirm which before building the content.
+  2. *Crossing (boss):* `from_wire` runs sync on a strand worker, but opening the vconn +
+     `register_handle` is async + boss-side — so the **boss** opens the `Producing` vconn (on the
+     observe client's session) and registers it during `dispatch_observe`'s resolution (the
+     `Observed`/`WireValue::Tree` carries the marker), handing eval back a `Value::Tree(HandleId)`
+     that `force_remote` pulls. This is the delicate strand-loop integration.
 - **Streams** (the *push* side, uses a `Tx`, not a vconn). `observe` grows a `Tx<…>` arg for a
   streaming observer result (`-> Stream[Artifact]`); the executor pushes items, the orchestrator's
   `Rx` feeds them in. `Value::Stream` + `PartKey::StreamItem(n)` + eval stream ops

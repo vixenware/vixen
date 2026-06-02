@@ -50,6 +50,12 @@ pub enum WireValue {
     Unit,
     Tuple(Vec<WireValue>),
     Array(Vec<WireValue>),
+    /// A **producing tree** the observer returned (`run.ok.out`/`run.stream.out`) —
+    /// a genuinely-remote leaf, *not* inline data. It crosses as a handle: the
+    /// orchestrator opens a `Producing` virtual connection to the executor and forces
+    /// its paths on demand (`force_remote`). Parameterless for now (one output tree
+    /// per run); it carries a tree id once a run exposes several.
+    Tree,
     /// A struct's named fields, in construction order.
     Struct(Vec<(String, WireValue)>),
     /// An enum variant: its `tag` plus its (named or positional-`"0"`/`"1"`/…) fields.
@@ -217,6 +223,41 @@ mod tests {
         assert!(
             matches!(bad, Observed::Poisoned(_)),
             "exit 1 → run.ok poisons, got {bad:?}"
+        );
+    }
+
+    /// An observer that returns the producing tree (`run.stream.out`) crosses back as
+    /// a tree **handle marker** — the genuinely-remote leaf does not travel inline.
+    /// (Turning the marker into a forceable handle — the orchestrator opens a
+    /// `Producing` virtual connection + `register_handle` — is the next piece.)
+    #[tokio::test]
+    async fn observe_crosses_the_output_tree_as_a_handle_marker() {
+        let fe = compile_source("fn observe(run: Run) -> Tree ( run.stream.out )", "observe")
+            .expect("front-end compiles");
+        let entry = fe
+            .program
+            .arena
+            .items
+            .iter()
+            .find_map(|it| match &it.kind {
+                ItemKind::Function(f) if f.name == "observe" => Some(f.body),
+                _ => None,
+            })
+            .expect("observe fn");
+        let bundle = reachable(&fe.program.arena, &fe.env, entry);
+
+        let client = local_observer().await;
+        let observed = client
+            .observe(ObserveRequest {
+                bundle,
+                command: cmd("true"),
+            })
+            .await
+            .expect("observe over vox");
+        assert_eq!(
+            observed,
+            Observed::Value(WireValue::Tree),
+            "the output tree crosses back as a handle marker, got {observed:?}"
         );
     }
 }
