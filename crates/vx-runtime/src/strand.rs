@@ -43,6 +43,7 @@ use corosensei::{Coroutine, CoroutineResult, Yielder};
 use futures_util::stream::{FuturesUnordered, StreamExt};
 use tokio::sync::mpsc::{UnboundedReceiver, UnboundedSender};
 
+use crate::observe::{ObserveClient, ObserveRequest, Observed};
 use crate::remote::{Part, PartKey, RemoteHandle};
 
 /// What a strand yields when it parks: the typed reason **plus** a backtrace
@@ -86,6 +87,9 @@ pub enum ParkReason {
     AwaitingPart { producer: StrandId, part: String },
     /// Blocked on a part of a remote handle the boss is forcing over vox.
     AwaitingRemotePart { handle: HandleId, part: PartKey },
+    /// Blocked on an `observe` RPC the boss is driving over vox — the orchestrator
+    /// shipped an observer to an executor and awaits its result.
+    AwaitingObserve { req: ObserveReqId },
 }
 
 /// A firehose event — the scheduler's history. Tests assert over the stream; a
@@ -174,6 +178,9 @@ type PartId = (HandleId, PartKey);
 #[derive(Default)]
 struct Registry {
     parts: HashMap<PartId, PartSlot>,
+    /// In-flight `observe` demands, keyed by a monotonically-allocated id.
+    observes: HashMap<ObserveReqId, ObserveSlot>,
+    next_observe: ObserveReqId,
 }
 
 enum PartSlot {
@@ -182,6 +189,24 @@ enum PartSlot {
     /// The producer's answer landed (bytes, or `Absent` = poison). Memoised — a
     /// later demander of the same part reads this without re-forcing.
     Resolved(Arc<Part>),
+}
+
+/// Identifies one in-flight `observe` demand. Unlike a [`PartId`], an observe is
+/// one-shot (no dedup) — each `exec` dispatches a distinct one.
+type ObserveReqId = u32;
+
+/// Identifies a registered [`ObserveClient`] (a boss-held vox client to an executor).
+type ObserveClientId = u32;
+
+/// The rendezvous slot for one `observe` demand: the request (read by the boss to
+/// drive the call) until it resolves to the executor's [`Observed`] result.
+enum ObserveSlot {
+    Pending {
+        client: ObserveClientId,
+        request: ObserveRequest,
+        signal: Signal,
+    },
+    Resolved(Arc<Observed>),
 }
 
 struct Inner {
@@ -202,6 +227,9 @@ struct Inner {
     /// Live remote handles, indexed by [`HandleId`]. Boss-only — the vox clients live
     /// where they're driven (here), never on a worker.
     handles: Vec<RemoteHandle>,
+    /// Live observe clients (vox clients to executors), indexed by [`ObserveClientId`].
+    /// Boss-only, same reasoning as `handles`.
+    observe_clients: Vec<Arc<ObserveClient>>,
 }
 
 /// A boss→worker command on a worker's private channel. Carries only `Send` data —
@@ -317,6 +345,7 @@ impl Scheduler {
             worker_load: vec![0; n_workers],
             registry,
             handles: Vec::new(),
+            observe_clients: Vec::new(),
         }));
         Scheduler(
             inner,
@@ -372,6 +401,17 @@ impl Scheduler {
         let mut inner = self.0.borrow_mut();
         let id = HandleId(inner.handles.len() as u32);
         inner.handles.push(handle);
+        id
+    }
+
+    /// Register a live [`ObserveClient`] (a vox client to an executor), returning its
+    /// id. eval dispatches observes by id via [`dispatch_observe`]; the boss holds the
+    /// client and drives the RPC. Establish the client on this scheduler's runtime
+    /// (see [`block_on`](Self::block_on)) so its connection is driven during `run()`.
+    pub fn register_observe_client(&self, client: ObserveClient) -> ObserveClientId {
+        let mut inner = self.0.borrow_mut();
+        let id = inner.observe_clients.len() as ObserveClientId;
+        inner.observe_clients.push(Arc::new(client));
         id
     }
 
@@ -433,6 +473,9 @@ impl Scheduler {
         let mut drives = FuturesUnordered::new();
         // Parts already being driven, so N strands demanding one part force it once.
         let mut driving: HashSet<PartId> = HashSet::new();
+        // In-flight observe RPCs, driven on the boss thread (one-shot per `exec`).
+        let mut observe_drives = FuturesUnordered::new();
+        let mut observe_driving: HashSet<ObserveReqId> = HashSet::new();
         loop {
             // Dispatch every admittable strand (permit-gated) to its worker. Dispatch
             // *all* of them before blocking, so peers that must run at the same time
@@ -447,8 +490,8 @@ impl Scheduler {
                     }
                 }
             }
-            // Quiescent when nothing is running and no remote force is in flight.
-            if self.0.borrow().in_flight == 0 && drives.is_empty() {
+            // Quiescent when nothing is running and no remote force or observe is in flight.
+            if self.0.borrow().in_flight == 0 && drives.is_empty() && observe_drives.is_empty() {
                 break;
             }
             tokio::select! {
@@ -467,6 +510,26 @@ impl Scheduler {
                             drives.push(force_part(client, key));
                         }
                     }
+                    if let WorkerMsg::Parked {
+                        reason: ParkReason::AwaitingObserve { req },
+                        ..
+                    } = &msg
+                    {
+                        if observe_driving.insert(*req) {
+                            let (client_id, request) = {
+                                let reg = registry.lock().unwrap();
+                                match reg.observes.get(req) {
+                                    Some(ObserveSlot::Pending { client, request, .. }) => {
+                                        (*client, request.clone())
+                                    }
+                                    _ => unreachable!("an observe park without a pending slot"),
+                                }
+                            };
+                            let client =
+                                self.0.borrow().observe_clients[client_id as usize].clone();
+                            observe_drives.push(drive_observe(client, *req, request));
+                        }
+                    }
                     self.complete(msg);
                 }
                 // A remote force landed: resolve its registry slot and wake every
@@ -483,6 +546,25 @@ impl Scheduler {
                         self.fire(&sig);
                     }
                     driving.remove(&key);
+                }
+                // An observe RPC landed: resolve its slot and wake the strand on it.
+                Some((req, observed)) = observe_drives.next(), if !observe_drives.is_empty() => {
+                    let sig = {
+                        let mut reg = registry.lock().unwrap();
+                        match reg.observes.get(&req) {
+                            Some(ObserveSlot::Pending { signal, .. }) => {
+                                let sig = signal.clone();
+                                reg.observes
+                                    .insert(req, ObserveSlot::Resolved(Arc::new(observed)));
+                                Some(sig)
+                            }
+                            _ => None,
+                        }
+                    };
+                    if let Some(sig) = sig {
+                        self.fire(&sig);
+                    }
+                    observe_driving.remove(&req);
                 }
             }
         }
@@ -615,6 +697,20 @@ async fn force_part(client: RemoteHandle, key: PartId) -> (PartId, Part) {
         Err(e) => Part::Absent(e.to_string()),
     };
     (key, resolved)
+}
+
+/// Drive one `observe` RPC to completion on the boss runtime. A connection error
+/// becomes a poisoned [`Observed`], so the consumer always gets a definite answer.
+async fn drive_observe(
+    client: Arc<ObserveClient>,
+    req: ObserveReqId,
+    request: ObserveRequest,
+) -> (ObserveReqId, Observed) {
+    let observed = match client.observe(request).await {
+        Ok(o) => o,
+        Err(e) => Observed::Poisoned(format!("observe RPC failed: {e:?}")),
+    };
+    (req, observed)
 }
 
 /// The least-loaded worker (fewest outstanding commands); ties go to the lowest
@@ -799,6 +895,43 @@ pub fn force_remote(handle: HandleId, part: PartKey) -> Arc<Part> {
         }
         // Resumed (or the signal had already fired): loop to re-read the registry,
         // which is now `Resolved` (or, on a spurious wake, still `Pending`).
+    }
+}
+
+/// Dispatch an `observe` RPC and block (park) until the executor returns its result —
+/// the eval-side entry for `exec(cmd) where { observer }`. Registers the request in the
+/// boss's registry, parks (`AwaitingObserve`, freeing the worker) until the boss drives
+/// the vox `observe()` and resolves it. eval knows only the [`ObserveClientId`], never
+/// the live vox client. One-shot: each call is a distinct demand (no dedup).
+pub fn dispatch_observe(client: ObserveClientId, request: ObserveRequest) -> Arc<Observed> {
+    let registry = REGISTRY
+        .with(|r| r.borrow().clone())
+        .expect("dispatch_observe outside a worker");
+    let (req, signal) = {
+        let mut reg = registry.lock().unwrap();
+        let req = reg.next_observe;
+        reg.next_observe += 1;
+        let signal = Signal::new();
+        reg.observes.insert(
+            req,
+            ObserveSlot::Pending {
+                client,
+                request,
+                signal: signal.clone(),
+            },
+        );
+        (req, signal)
+    };
+    loop {
+        {
+            let reg = registry.lock().unwrap();
+            if let Some(ObserveSlot::Resolved(o)) = reg.observes.get(&req) {
+                return Arc::clone(o);
+            }
+        }
+        if register_waiter(&signal) {
+            park(ParkReason::AwaitingObserve { req });
+        }
     }
 }
 
