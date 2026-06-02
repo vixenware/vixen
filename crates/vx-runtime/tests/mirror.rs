@@ -27,12 +27,12 @@ fn mirror_installs_and_evaluates_a_body() {
         .expect("answer fn");
 
     // Oracle: evaluate the body in the original program.
-    let local = eval_body(&fe.program, &fe.env, entry, KernelMode::Off);
+    let local = eval_body(&fe.program, &fe.env, entry, vec![], KernelMode::Off);
 
     // Mirror: bundle the body → install into a fresh program → evaluate there.
     let bundle = reachable(&fe.program.arena, &fe.env, entry);
     let (mprog, menv) = bundle.install();
-    let mirror = eval_body(&mprog, &menv, entry, KernelMode::Off);
+    let mirror = eval_body(&mprog, &menv, entry, vec![], KernelMode::Off);
 
     assert!(
         matches!(local, Outcome::Clean(Value::U64(42))),
@@ -41,5 +41,34 @@ fn mirror_installs_and_evaluates_a_body() {
     assert!(
         matches!(mirror, Outcome::Clean(Value::U64(42))),
         "mirror eval of the installed bundle = {mirror:?}"
+    );
+}
+
+fn fn_body(arena: &vx_ir::VirArena, name: &str) -> vx_ir::BodyId {
+    arena
+        .items
+        .iter()
+        .find_map(|it| match &it.kind {
+            ItemKind::Function(f) if f.name == name => Some(f.body),
+            _ => None,
+        })
+        .unwrap_or_else(|| panic!("function `{name}` not found"))
+}
+
+/// The mirror binds the observer's argument the same way the `Run` will arrive:
+/// install `double`, then evaluate it with `U64(21)` bound to its parameter.
+#[test]
+fn mirror_evaluates_a_body_with_an_argument() {
+    let fe =
+        compile_source("fn double(n: U64) -> U64 ( n + n )", "double").expect("front-end compiles");
+    let entry = fn_body(&fe.program.arena, "double");
+
+    let bundle = reachable(&fe.program.arena, &fe.env, entry);
+    let (mprog, menv) = bundle.install();
+
+    let mirror = eval_body(&mprog, &menv, entry, vec![Value::U64(21)], KernelMode::Off);
+    assert!(
+        matches!(mirror, Outcome::Clean(Value::U64(42))),
+        "mirror double(21) = {mirror:?}"
     );
 }
