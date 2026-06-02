@@ -38,6 +38,7 @@ pub mod kernel;
 pub mod lower;
 pub mod observe;
 pub mod remote;
+pub mod run_value;
 pub mod strand;
 
 /// Stencil machine code extracted from rustc's object output at build time
