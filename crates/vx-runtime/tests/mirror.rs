@@ -11,6 +11,13 @@ use vx_ir::item::ItemKind;
 use vx_ir::reachable;
 use vx_runtime::eval::{KernelMode, Outcome, Value, eval_body};
 
+/// Serialize the bundle and read it back through postcard — the mirror eval proof
+/// must cross the *wire format*, not just pass an in-memory struct around.
+fn roundtrip(bundle: vx_ir::Bundle) -> vx_ir::Bundle {
+    let bytes = facet_postcard::to_vec(&bundle).expect("bundle serializes");
+    facet_postcard::from_slice(&bytes).expect("bundle deserializes")
+}
+
 #[test]
 fn mirror_installs_and_evaluates_a_body() {
     let fe =
@@ -30,7 +37,7 @@ fn mirror_installs_and_evaluates_a_body() {
     let local = eval_body(&fe.program, &fe.env, entry, vec![], KernelMode::Off);
 
     // Mirror: bundle the body → install into a fresh program → evaluate there.
-    let bundle = reachable(&fe.program.arena, &fe.env, entry);
+    let bundle = roundtrip(reachable(&fe.program.arena, &fe.env, entry));
     let (mprog, menv) = bundle.install();
     let mirror = eval_body(&mprog, &menv, entry, vec![], KernelMode::Off);
 
@@ -63,7 +70,7 @@ fn mirror_evaluates_a_body_with_an_argument() {
         compile_source("fn double(n: U64) -> U64 ( n + n )", "double").expect("front-end compiles");
     let entry = fn_body(&fe.program.arena, "double");
 
-    let bundle = reachable(&fe.program.arena, &fe.env, entry);
+    let bundle = roundtrip(reachable(&fe.program.arena, &fe.env, entry));
     let (mprog, menv) = bundle.install();
 
     let mirror = eval_body(&mprog, &menv, entry, vec![Value::U64(21)], KernelMode::Off);

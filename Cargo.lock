@@ -4053,6 +4053,7 @@ dependencies = [
  "corosensei",
  "facet",
  "facet-json",
+ "facet-postcard",
  "futures-util",
  "tokio",
  "vox",
