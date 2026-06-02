@@ -1200,6 +1200,30 @@ pub fn run_in_mode(source: &str, entry: &str, mode: KernelMode) -> Result<(Outco
     Ok((outcome, ev.dispatches.get()))
 }
 
+/// Evaluate `body` (no arguments) in an already-built `program` + `env` — the exec
+/// **mirror** entry. Unlike [`run_in_mode`] it skips the front-end entirely: the
+/// mirror installs a bundle (`vx_ir::Bundle::install`) and runs its observer body
+/// here, never compiling and never allocating an id. (Argument binding — the
+/// observer's `Run` — lands with the value model.)
+pub fn eval_body(program: &VirProgram, env: &TypeEnv, body: BodyId, mode: KernelMode) -> Outcome {
+    let root = program.arena[body].root_expr;
+    let ev = Evaluator {
+        program,
+        env,
+        current_body: Cell::new(body),
+        dispatch: Dispatcher::default(),
+        dispatches: Cell::new(0),
+        mode,
+    };
+    match ev.eval(root, &Env::new()) {
+        Ok(v) => Outcome::Clean(v),
+        Err(p) => Outcome::Poisoned {
+            reason: p.message(),
+            span: p.context.span,
+        },
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
