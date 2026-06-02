@@ -130,15 +130,20 @@ Over vox:
 The eval *consumer* of a remote handle is real; what's left is the executor *producing* one,
 plus streams and the structured failure crossing. Assemble one by one:
 - **Make `exec` produce the handle (the other half of the crossing).** Today `to_wire`
-  poisons on `Value::Tree` (honest seam) — the executor doesn't yet serve its outputs. The
-  executor must, when the observer's result contains a tree/stream, stand up a producer
-  (`remote::ProducerService` / the `Producing` service, *already built*) over **vox** and put
-  a reference in the result the orchestrator turns into a `RemoteHandle` + `register_handle` →
-  `Value::Tree(HandleId)`. vox has first-class **channels** (`Tx`/`Rx`/`Conduit`,
-  `shape_contains_channel`) and virtual connections — that's almost certainly how the handle
-  reference rides back in the `observe` response (verify the idiom before building). This is
-  the architectural piece; it also needs `run_value` to build `run.ok.out`/`run.stream.out`
-  as real tree handles (today `.stream` = empty struct, `Exit.out` unbuilt).
+  poisons on `Value::Tree` (honest seam) — the executor doesn't yet serve its outputs.
+  **Vox mechanics (settled with Amos — do not relitigate):** a vox service method returns
+  plain data and **cannot return a channel**; channels are **passed as arguments**. So to
+  hand the outputs *back*, `observe` does **not** return them — it grows a **channel-end
+  parameter**, the executor writes output parts into it, and the orchestrator holds the
+  receiving end. **Conduits are a different mechanism — not this.** Per 0.8.2 `channel.rs`,
+  method-arg directionality is: `Tx<T>` ⇒ handler sends → caller; `Rx<T>` ⇒ handler
+  receives ← caller — **verify with a minimal `memory_link_pair` round-trip before wiring
+  `observe`**, so the stream can't point the wrong way. The orchestrator's receiving end
+  becomes the `Value::Tree`/`Value::Stream` handle (`register_handle` → `HandleId`) that
+  `force_remote` already pulls. Also needs `run_value` to build `run.ok.out`/`run.stream.out`
+  as real handles (today `.stream` = empty struct, `Exit.out` unbuilt).
+  **Do NOT read or compile against `~/vox`** — it's a divergent, different-codec version;
+  the contract is the published **vox 0.8.2** the workspace locks.
 - **Streams.** `Value::Stream` + forcing `PartKey::StreamItem(n)` + the eval stream ops
   (`.lines()`/`.map()`/`.filter_map()`/`.collect()`), behind streaming observers
   (`-> Stream[Artifact]`, cf. `zoo/rustc-hello.vx`).
