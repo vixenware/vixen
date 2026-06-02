@@ -35,6 +35,10 @@ use tokio::sync::Notify;
 pub enum PartKey {
     /// A path within a producing tree — `tree[path]`.
     TreePath(String),
+    /// An item of a producing stream, by 0-based position. A consumer walks
+    /// `0, 1, 2, …` until [`Part::Absent`] marks the end — the streaming dual of
+    /// `TreePath` (a `run.stream.stdout` chunk; an observer's nth emitted value).
+    StreamItem(u64),
 }
 
 /// The producer's answer for a demanded part.
@@ -105,15 +109,25 @@ impl Producing for ProducerService {
 pub struct Producer(Arc<Shared>);
 
 impl Producer {
-    /// A path has been produced — its bytes are now available to consumers.
-    pub fn write_path(&self, path: &str, bytes: &[u8]) {
+    /// Make one part available, waking any consumer blocked on it.
+    fn write(&self, key: PartKey, bytes: &[u8]) {
         self.0
             .state
             .lock()
             .unwrap()
             .written
-            .insert(PartKey::TreePath(path.to_string()), bytes.to_vec());
+            .insert(key, bytes.to_vec());
         self.0.notify.notify_waiters();
+    }
+
+    /// A path has been produced — its bytes are now available to consumers.
+    pub fn write_path(&self, path: &str, bytes: &[u8]) {
+        self.write(PartKey::TreePath(path.to_string()), bytes);
+    }
+
+    /// A stream item has been produced — item `index` (0-based) is now available.
+    pub fn write_item(&self, index: u64, bytes: &[u8]) {
+        self.write(PartKey::StreamItem(index), bytes);
     }
 
     /// The producer is done — no more parts. Any consumer blocked on an unwritten
@@ -145,6 +159,11 @@ impl RemoteHandle {
     /// Force a tree path (`tree[path]`).
     pub async fn force_path(&self, path: &str) -> Result<Part, &'static str> {
         self.force(PartKey::TreePath(path.to_string())).await
+    }
+
+    /// Force a stream item (`stream[index]`) — the consumer walks `0, 1, 2, …`.
+    pub async fn force_item(&self, index: u64) -> Result<Part, &'static str> {
+        self.force(PartKey::StreamItem(index)).await
     }
 }
 
@@ -279,5 +298,43 @@ mod tests {
         assert_eq!(fa.await.unwrap().unwrap(), Part::Bytes(b"A".to_vec()));
         assert_eq!(fb.await.unwrap().unwrap(), Part::Bytes(b"B".to_vec()));
         assert_eq!(fc.await.unwrap().unwrap(), Part::Bytes(b"C".to_vec()));
+    }
+
+    /// The streaming dual: a producing stream whose items resolve over time and out
+    /// of order, a consumer that walks `0, 1, 2, …`, and the first item the producer
+    /// never makes poisoning at `finish` — the end-of-stream terminator. This is the
+    /// `run.stream.stdout` invariant the same handle serves for chunks.
+    #[tokio::test]
+    async fn stream_items_resolve_over_time_then_end() {
+        let (handle, producer) = channel().await;
+
+        // A consumer walking the stream blocks on item 0 until it lands.
+        let h0 = handle.clone();
+        let item0 = tokio::spawn(async move { h0.force_item(0).await });
+        tokio::task::yield_now().await;
+        assert!(!item0.is_finished(), "item 0 blocks until produced");
+
+        // Items produced out of order; each blocked force resolves to its own item.
+        producer.write_item(1, b"one");
+        producer.write_item(0, b"zero");
+        assert_eq!(item0.await.unwrap().unwrap(), Part::Bytes(b"zero".to_vec()));
+        assert_eq!(
+            handle.force_item(1).await.unwrap(),
+            Part::Bytes(b"one".to_vec())
+        );
+
+        // The stream ends after item 1: forcing item 2 blocks, then poisons at finish.
+        let h2 = handle.clone();
+        let item2 = tokio::spawn(async move { h2.force_item(2).await });
+        tokio::task::yield_now().await;
+        assert!(
+            !item2.is_finished(),
+            "the tail blocks until the stream ends"
+        );
+        producer.finish();
+        assert!(
+            matches!(item2.await.unwrap().unwrap(), Part::Absent(_)),
+            "the item past the end poisons — the stream terminator"
+        );
     }
 }
