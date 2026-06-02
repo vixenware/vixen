@@ -185,6 +185,35 @@ type Env = HashMap<BindingId, Thunk>;
 #[derive(Debug, Clone)]
 pub struct Thunk(Rc<RefCell<ThunkState>>);
 
+impl Thunk {
+    /// A **native (intrinsic) thunk**: a value computed by Rust, lazily, memoised
+    /// like any thunk. This is the mechanism behind native-backed struct fields —
+    /// e.g. a `Run` value whose `ok` field forces a success gate, or whose `out`
+    /// field is a producing handle. The closure runs at most once, on first force.
+    pub fn native(f: impl Fn() -> Result<Value, Poison> + 'static) -> Thunk {
+        Thunk(Rc::new(RefCell::new(ThunkState::Native(Intrinsic(
+            Rc::new(f),
+        )))))
+    }
+
+    /// An already-resolved thunk holding `value` — for the non-lazy fields of a
+    /// natively-built struct value.
+    pub fn done(value: Value) -> Thunk {
+        done(value)
+    }
+}
+
+/// A native (Rust) intrinsic backing a thunk — produces the value on force, rather
+/// than evaluating a Vixen expression. Not `Debug` on its own, so we render a stub.
+#[derive(Clone)]
+struct Intrinsic(Rc<dyn Fn() -> Result<Value, Poison>>);
+
+impl std::fmt::Debug for Intrinsic {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str("<intrinsic>")
+    }
+}
+
 #[derive(Debug)]
 enum ThunkState {
     /// The captured `body` travels with the thunk so that forcing it re-enters the
@@ -194,6 +223,8 @@ enum ThunkState {
         env: Env,
         body: BodyId,
     },
+    /// A native intrinsic — Rust code producing the value lazily, on force.
+    Native(Intrinsic),
     Forcing,
     Done(Result<Value, Poison>),
 }
@@ -227,6 +258,10 @@ impl Evaluator<'_> {
     /// built in another body dispatches against *that* body's graph.
     fn force(&self, t: &Thunk) -> Result<Value, Poison> {
         // Extract the work without holding the borrow across the recursive eval.
+        enum Work {
+            Expr(ExprId, Env, BodyId),
+            Native(Intrinsic),
+        }
         let work = {
             let mut st = t.0.borrow_mut();
             match &*st {
@@ -237,15 +272,27 @@ impl Evaluator<'_> {
                     ));
                 }
                 ThunkState::Unforced { expr, env, body } => {
-                    let work = (*expr, env.clone(), *body);
+                    let work = Work::Expr(*expr, env.clone(), *body);
+                    *st = ThunkState::Forcing;
+                    work
+                }
+                ThunkState::Native(intrinsic) => {
+                    let work = Work::Native(intrinsic.clone());
                     *st = ThunkState::Forcing;
                     work
                 }
             }
         };
-        let prev = self.current_body.replace(work.2);
-        let result = self.eval(work.0, &work.1);
-        self.current_body.set(prev);
+        let result = match work {
+            Work::Expr(expr, env, body) => {
+                let prev = self.current_body.replace(body);
+                let r = self.eval(expr, &env);
+                self.current_body.set(prev);
+                r
+            }
+            // A native intrinsic runs its Rust closure — no body/graph to enter.
+            Work::Native(intrinsic) => (intrinsic.0)(),
+        };
         *t.0.borrow_mut() = ThunkState::Done(result.clone());
         result
     }
