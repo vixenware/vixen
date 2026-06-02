@@ -32,7 +32,8 @@ use vx_types::TypeEnv;
 use crate::dispatch::{self, Dispatcher};
 use crate::graph::Span;
 use crate::observe::{ExecCommand, ObserveRequest, Observed, WireValue};
-use crate::strand::{ObserveClientId, dispatch_observe};
+use crate::remote::{Part, PartKey};
+use crate::strand::{HandleId, ObserveClientId, dispatch_observe, force_remote};
 
 /// The uniform runtime envelope of a failure (the failure model's `context`) —
 /// identical for every failure regardless of the domain error type `E`. Carried by
@@ -149,6 +150,13 @@ pub enum Value {
     /// The executor-local host-inspection capability — `discover` hands one to a
     /// probe, which reads `os`/`arch`/`which`/`hash` to build a command.
     Host,
+    /// A **remote producing tree** — a value produced on another executor that
+    /// resolves in parts (per path) over vox. eval holds only the scheduler-registered
+    /// [`HandleId`](crate::strand::HandleId), never the vox client; forcing a path
+    /// (`tree.file(@p)`) pulls that part via [`force_remote`], parking the strand until
+    /// the producer yields it. The consumer half of `remote.rs`, reached from the
+    /// language — the genuinely-remote leaf of an exec's outputs.
+    Tree(HandleId),
     /// The opaque runtime envelope of a caught failure (the failure model's
     /// `FailureContext`). Reified by `?` into the `context` field of a `Failure`
     /// struct value, so a caught error carries the same span + demand-path the
@@ -399,6 +407,28 @@ impl Evaluator<'_> {
             },
 
             ExprKind::Literal(lit) => self.lit_value(&lit.value),
+
+            // A path literal `@some/path` (or interpolated `@{x}/path`): render to a
+            // string — paths are strings to eval, the same shape `render_cli_arg`
+            // produces. (A real `Path`/`ExecPath` value lands with input handling.)
+            ExprKind::PathLiteral(p) => {
+                let mut out = String::new();
+                for part in &p.parts {
+                    match part {
+                        StringPart::Text(t) => out.push_str(t),
+                        StringPart::Expr(x) => match self.eval(*x, env)? {
+                            Value::Str(s) => out.push_str(&s),
+                            Value::U64(n) => out.push_str(&n.to_string()),
+                            other => {
+                                return Err(poison(format!(
+                                    "can't interpolate {other:?} into a path"
+                                )));
+                            }
+                        },
+                    }
+                }
+                Ok(Value::Str(Rc::from(out.as_str())))
+            }
 
             // Lazy data: fields are thunks, NOT forced here.
             ExprKind::Tuple(t) => Ok(Value::Tuple(
@@ -1191,6 +1221,23 @@ impl Evaluator<'_> {
                 which_on_path(name)
                     .map(|p| Value::Str(Rc::from(p.as_str())))
                     .ok_or_else(|| poison(format!("`{name}` not found on the host PATH")))
+            }
+            // `tree.file(@path)` on a remote producing tree — the demand-pull across
+            // executors, reached from the language. Force the path over vox via the
+            // strand (`force_remote` parks until the producer yields it, or poisons if
+            // the producer finished without it). The bytes render lossily as a `Str`
+            // until a real `Bytes`/`Blob` value lands.
+            ("file", Value::Tree(handle)) => {
+                let path = match argv.as_slice() {
+                    [Value::Str(p)] => p.to_string(),
+                    other => {
+                        return Err(poison(format!("tree.file expects one path, got {other:?}")));
+                    }
+                };
+                match &*force_remote(*handle, PartKey::TreePath(path.clone())) {
+                    Part::Bytes(b) => Ok(Value::Str(Rc::from(String::from_utf8_lossy(b).as_ref()))),
+                    Part::Absent(why) => Err(poison(format!("tree path `{path}` absent: {why}"))),
+                }
             }
             (m, r) => Err(poison(format!("unknown method `{m}` on {r:?}"))),
         }

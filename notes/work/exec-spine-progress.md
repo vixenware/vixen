@@ -40,7 +40,7 @@ tree) cross back as remote handles.
   the strand (`AwaitingObserve`), the **boss** drives the vox `observe()` on its runtime,
   resolves, wakes the strand. No `block_on` cheat. **Built + tested.**
 
-## What's DONE (20 commits this session, all green, see `git log`)
+## What's DONE (21 commits this session, all green, see `git log`)
 
 Foundation (shippable typed IR):
 - `c02dcb9c`..`8e8c9a1b` — `vx-span` (rowan-free `SourceId`/`SourceSpan`), re-point all
@@ -112,18 +112,36 @@ Over vox:
   - `@[ … ]` CLI literals type as `Poison` (`infer_cli_literal` — "Command not modelled in
     the type system yet"), which is compatible with `command: Command` (poison branch), so
     `exec(@[ … ])` type-checks fine.
+- **The eval↔remote join (real):** the join `remote.rs` flagged as missing ("eval's own
+  `force` calling `force_remote` … comes with exec") is built. `Value::Tree(HandleId)` is a
+  remote producing-tree handle (eval holds only the scheduler `HandleId`, never the vox
+  client). `tree.file(@p)` in eval forces that path via `strand::force_remote` over vox —
+  parking the strand until the producer yields the part (bytes → a `Str` for now, the lossy
+  convention; an absent part → poison). `crates/vx-runtime/tests/remote_tree_via_eval.rs`:
+  a `.vx` `tree.file(@out)` on a strand forces a remote tree over vox — already-produced,
+  park-then-resume, and never-produced→poison, all through eval. Fixed a real bug on the way:
+  **bare `@path` literals lowered to empty text** (`build_path_literal_expr` only read the
+  interpolated / quoted-`@"…"` forms; the bare segmented form `@out`/`@Cargo.toml`/`@src/lib.rs`
+  fell through to `vec![]`) — now reconstructed from the segment tokens. `Value::Tree` also
+  got a `<tree>` display arm in vx-daemon's `test_runner::map_value`.
 
 ## NEXT (pick up here)
 
-The data value crossing is real; the remaining pieces are the *handle* crossing and the
-genuinely-remote outputs. Assemble them one by one, then the next real thing:
-- **Remote handles for the genuinely-remote leaves (task #5, ③).** `WireValue` carries only
-  data. `run.ok.out` (the producing write-set `Tree`) and `run.stream.*` (the live
-  `Stream`s) are *handles*, not inline data — they must cross as `Stream`/`Tree` handle
-  variants (the `remote.rs` machinery: `RemoteHandle`/`force_remote`/parts is already built)
-  and join via `eval.force → force_remote`. This is the piece behind streaming observers
-  (`-> Stream[Artifact]`) and `run_value`'s currently-stubbed `.stream` face (empty struct)
-  + `Exit.out` (not built). `to_wire` poisons on these today (honestly), which is the seam.
+The eval *consumer* of a remote handle is real; what's left is the executor *producing* one,
+plus streams and the structured failure crossing. Assemble one by one:
+- **Make `exec` produce the handle (the other half of the crossing).** Today `to_wire`
+  poisons on `Value::Tree` (honest seam) — the executor doesn't yet serve its outputs. The
+  executor must, when the observer's result contains a tree/stream, stand up a producer
+  (`remote::ProducerService` / the `Producing` service, *already built*) over **vox** and put
+  a reference in the result the orchestrator turns into a `RemoteHandle` + `register_handle` →
+  `Value::Tree(HandleId)`. vox has first-class **channels** (`Tx`/`Rx`/`Conduit`,
+  `shape_contains_channel`) and virtual connections — that's almost certainly how the handle
+  reference rides back in the `observe` response (verify the idiom before building). This is
+  the architectural piece; it also needs `run_value` to build `run.ok.out`/`run.stream.out`
+  as real tree handles (today `.stream` = empty struct, `Exit.out` unbuilt).
+- **Streams.** `Value::Stream` + forcing `PartKey::StreamItem(n)` + the eval stream ops
+  (`.lines()`/`.map()`/`.filter_map()`/`.collect()`), behind streaming observers
+  (`-> Stream[Artifact]`, cf. `zoo/rustc-hello.vx`).
 - **The structured failure crossing.** `Observed::Poisoned(String)` still crosses a bare
   message; the failure model wants the domain error *value* (`ProcError`) + the
   `FailureContext` (span/demand-path) to cross, so a caught `run.ok?` → `Result[Exit,
@@ -132,16 +150,18 @@ genuinely-remote outputs. Assemble them one by one, then the next real thing:
   test). §4 routing — choosing an executor from the command's ability provenance — is later.
 
 ## Deferred / stubbed (don't forget, not now)
-- `.stream` face = empty struct; `Stream`/`Tree` handle `Value` variants + the
-  `eval.force → force_remote` join for **outputs** (③, task #5) — the genuinely-remote part.
+- The eval *consumer* of a remote `Tree` is **done** (`Value::Tree` + `tree.file → force_remote`,
+  see above); what remains is the executor *producing* one (the other half — see NEXT), the
+  `Stream` handle + `StreamItem` forcing, and `run_value` building `run.ok.out`/`run.stream.*`
+  as real handles (today `.stream` = empty struct, `Exit.out` unbuilt).
 - `run.ok? → Result[Exit, ProcError]` *catch typing* (gate poisons with a ProcError value
   already; teaching the checker `.ok` is fallible-with-ProcError is its own piece).
-- Real `Bytes` value (today `Exit.stdout` renders lossily as a `Str`).
-- The data value-crossing (`WireValue`) is **done** (see above); the *handle* crossing
-  (`Stream`/`Tree`) and structured failure crossing remain. `ExecCommand` is program+args;
-  the full `Command` value + `run_exec`-under-sandbox (mounts/outputs/the write-set `Tree`)
-  land with input/output handling. The other `exec` `where`-kwargs (`env`/`mounts`/
-  `writable`/`create_dirs`) and the signature's *default* observer are unread by `eval_where`.
+- Real `Bytes` value (today `Exit.stdout` and a forced tree path render lossily as a `Str`).
+- The data value-crossing (`WireValue`) is **done**; the *handle* crossing's producer half +
+  the structured failure crossing remain (see NEXT). `ExecCommand` is program+args; the full
+  `Command` value + `run_exec`-under-sandbox (mounts/outputs/the write-set `Tree`) land with
+  input/output handling. The other `exec` `where`-kwargs (`env`/`mounts`/`writable`/
+  `create_dirs`) and the signature's *default* observer are unread by `eval_where`.
 - Daemon-host `Observe` (so colocated/separate is the daemon's call, not a test's
   `local_observer`).
 - FSKit block-VFS follow-ups (#19), doctor ladder (#17), Vixen Management install (#18).

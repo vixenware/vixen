@@ -151,6 +151,7 @@ fn map_value(value: Value) -> RuntimeValue {
         Value::Grammars(_) => RuntimeValue::String("<grammars>".to_string()),
         Value::Grammar { .. } => RuntimeValue::String("<grammar>".to_string()),
         Value::Host => RuntimeValue::String("<host>".to_string()),
+        Value::Tree(_) => RuntimeValue::String("<tree>".to_string()),
         Value::FailureContext(_) => RuntimeValue::String("<failure-context>".to_string()),
         Value::Variant { tag, .. } => RuntimeValue::String(format!("{tag}{{…}}")),
     }

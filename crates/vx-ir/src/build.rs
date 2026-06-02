@@ -2536,7 +2536,34 @@ impl VirBuilder {
                 .unwrap_or_default();
             vec![StringPart::Text(text)]
         } else {
-            vec![]
+            // A bare path literal `@out` / `@src/lib.rs` / `@Cargo.toml`: the parser
+            // collects its segment tokens (ident / `.` / `/` / `-` / `_` / int)
+            // directly under the node — there is no `literal`/`interpolated` child.
+            // Reconstruct the path text from those tokens (the leading `@` and any
+            // trivia are not among them), matching the parser's `is_path_literal_token`.
+            let text: String = pl
+                .syntax()
+                .children_with_tokens()
+                .filter_map(|el| el.into_token())
+                .filter(|t| {
+                    matches!(
+                        t.kind(),
+                        SyntaxKind::LOWER_IDENT
+                            | SyntaxKind::UPPER_IDENT
+                            | SyntaxKind::INT
+                            | SyntaxKind::SLASH
+                            | SyntaxKind::DOT
+                            | SyntaxKind::MINUS
+                            | SyntaxKind::UNDERSCORE
+                    )
+                })
+                .map(|t| t.text().to_string())
+                .collect();
+            if text.is_empty() {
+                vec![]
+            } else {
+                vec![StringPart::Text(text)]
+            }
         };
 
         self.arena.alloc_expr(Expr {
