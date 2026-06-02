@@ -8,8 +8,6 @@
 //! rendered output, since rendering is the next milestone.
 
 use margin::{AnnotationRole, NoteKind, Severity, Span as MarginSpan};
-use rowan::{TextRange, TextSize};
-
 use vx_ir::cap::CapSet;
 use vx_ir::diagnostic::{IrDiagnostic, MethodCandidate};
 use vx_ir::expr::BinOp;
@@ -19,10 +17,7 @@ use vx_parser::{SourceId, SourceSpan};
 use vx_types::{Scalar, TypeEnv};
 
 fn span(start: u32, end: u32) -> SourceSpan {
-    SourceSpan::new(
-        SourceId(0),
-        TextRange::new(TextSize::new(start), TextSize::new(end)),
-    )
+    SourceSpan::new(SourceId(0), start, end)
 }
 
 fn margin_span(start: usize, end: usize) -> MarginSpan {
@@ -427,7 +422,7 @@ fn non_exhaustive_match_lists_missing_cases() {
 #[test]
 fn non_zero_source_id_is_stringified() {
     let env = TypeEnv::new();
-    let custom_span = SourceSpan::new(SourceId(42), TextRange::new(0.into(), 4.into()));
+    let custom_span = SourceSpan::new(SourceId(42), 0, 4);
     let diag = IrDiagnostic::Unresolved { name: custom_span };
 
     let report = diag.to_report(&env);

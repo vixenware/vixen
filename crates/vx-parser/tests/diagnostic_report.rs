@@ -5,17 +5,12 @@
 //! annotation counts, primary span coordinates, etc.).
 
 use margin::{AnnotationRole, Severity, Span as MarginSpan};
-use rowan::{TextRange, TextSize};
-
 use vx_parser::{
     ExpectedKind, LegacySyntaxKind, ParseDiagnostic, SourceId, SourceSpan, SyntaxKind,
 };
 
 fn span(start: u32, end: u32) -> SourceSpan {
-    SourceSpan::new(
-        SourceId(0),
-        TextRange::new(TextSize::new(start), TextSize::new(end)),
-    )
+    SourceSpan::new(SourceId(0), start, end)
 }
 
 fn margin_span(start: usize, end: usize) -> MarginSpan {

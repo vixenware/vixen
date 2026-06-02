@@ -13,7 +13,7 @@ use vx_ir::{BodyId, ExprId, VirArena, VirVisitor};
 use vx_parser::{SourceId, SourceSpan};
 
 fn dummy_span() -> SourceSpan {
-    SourceSpan::new(SourceId(0), rowan::TextRange::default())
+    SourceSpan::new(SourceId(0), 0, 0)
 }
 
 /// Allocate a body, expr, binding, scope, and item — index by ID, assert round-trip.

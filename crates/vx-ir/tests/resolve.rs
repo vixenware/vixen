@@ -35,8 +35,8 @@ fn build_and_resolve(
         .into_iter()
         .map(|diag| {
             let span = diag.primary_span();
-            let start = u32::from(span.range.start()) as usize;
-            let end = u32::from(span.range.end()) as usize;
+            let start = span.start() as usize;
+            let end = span.end() as usize;
             let name = source.get(start..end).unwrap_or("").to_string();
             ResolveDiag { diag, name }
         })

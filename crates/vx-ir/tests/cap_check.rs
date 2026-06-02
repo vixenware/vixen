@@ -27,8 +27,8 @@ fn cap_check_source(source: &str) -> Vec<(IrDiagnostic, String)> {
         .into_iter()
         .map(|e| {
             let span = e.primary_span();
-            let start = u32::from(span.range.start()) as usize;
-            let end = u32::from(span.range.end()) as usize;
+            let start = span.start() as usize;
+            let end = span.end() as usize;
             let text = source.get(start..end).unwrap_or("").to_string();
             (e, text)
         })
