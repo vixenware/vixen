@@ -36,6 +36,7 @@ pub mod eval;
 pub mod graph;
 pub mod kernel;
 pub mod lower;
+pub mod observe;
 pub mod remote;
 pub mod strand;
 

@@ -71,16 +71,6 @@ fn bundle_collects_the_reachable_closure_across_resolution_edges() {
             .any(|(_, d)| matches!(d, TypeDef::Struct(_))),
         "the Stat struct def must travel"
     );
-
-    // And the whole bundle ships.
-    let bytes = facet_postcard::to_vec(&bundle).expect("bundle serializes");
-    let back: vx_ir::Bundle = facet_postcard::from_slice(&bytes).expect("bundle deserializes");
-    assert_eq!(back.entry, bundle.entry);
-    assert_eq!(back.bodies.len(), bundle.bodies.len(), "bodies");
-    assert_eq!(back.exprs.len(), bundle.exprs.len(), "exprs");
-    assert_eq!(back.items.len(), bundle.items.len(), "items");
-    assert_eq!(back.types.len(), bundle.types.len(), "types");
-    assert_eq!(back.type_defs.len(), bundle.type_defs.len(), "type_defs");
 }
 
 /// The mirror installs the bundle in the original id space and reads every collected

@@ -3981,7 +3981,6 @@ dependencies = [
  "command-grammar-vx",
  "command-model",
  "facet",
- "facet-postcard",
  "margin",
  "rowan",
  "vx-package",
@@ -4053,7 +4052,6 @@ dependencies = [
  "corosensei",
  "facet",
  "facet-json",
- "facet-postcard",
  "futures-util",
  "tokio",
  "vox",
@@ -4120,7 +4118,6 @@ name = "vx-types"
 version = "0.1.0"
 dependencies = [
  "facet",
- "facet-postcard",
  "vx-parser",
 ]
 

@@ -15,4 +15,3 @@ vx-parser = { workspace = true }
 facet = { workspace = true }
 
 [dev-dependencies]
-facet-postcard = { workspace = true }
