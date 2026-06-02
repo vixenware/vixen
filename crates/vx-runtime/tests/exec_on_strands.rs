@@ -1,15 +1,16 @@
 //! `exec(command) where { observer }` end-to-end — the language surface of the exec
-//! spine (#3b). A real `.vx` program is compiled through the bundled front-end, then
-//! evaluated on a strand: eval hits the `where`-decorated `exec`, projects the
-//! command to its argv, bundles the observer closure's *static reachable closure*,
-//! and dispatches the `observe` RPC to an executor **over vox** (`local_observer`).
-//! The strand parks on the observe, the boss drives the vox call (the executor runs
-//! the real process, builds a `Run`, evaluates the observer against it), and the
-//! strand resumes with the result.
+//! spine, returning the observer's **real value**. A real `.vx` program is compiled
+//! through the bundled front-end, then evaluated on a strand: eval hits the
+//! `where`-decorated `exec`, projects the command to its argv, bundles the observer
+//! closure's static reachable closure, and dispatches the `observe` RPC to an
+//! executor **over vox** (`local_observer`). The strand parks; the boss drives the
+//! call (the executor runs the real process, builds a `Run`, evaluates the observer
+//! against it, and **deep-forces the result into a value**); the strand resumes, and
+//! `exec(…)` evaluates to that value — reconstructed from the wire.
 //!
-//! This sits on top of `observe_on_strands` (which drives `dispatch_observe`
-//! directly): here the observer body is *extracted from the program*, by eval, from
-//! the `where { observer: (run) => … }` keyword record — no hand-built bundle.
+//! So `exec(@[ ${cmd} ]) where { observer: (run) => run.ok }` returns the actual
+//! `Exit` struct that crossed back, not a placeholder. (`observe_on_strands` drives
+//! `dispatch_observe` directly; `observe`'s own test asserts the crossed `WireValue`.)
 
 use std::rc::Rc;
 
@@ -23,7 +24,8 @@ use vx_runtime::strand::{Outcome, ResourceId, Scheduler};
 
 /// Compile `exec(@[ ${cmd} ]) where { observer: (run) => run.ok }`, run it on a
 /// strand against a local executor running `binary`, and return the strand outcome.
-/// `run.ok` gates on the real exit code, so `true` → Clean and `false` → Poisoned.
+/// On success the observer's value is the `Exit` struct — verified worker-side (a
+/// `Value` can't cross the strand boundary), so a regression to `Unit` fails here.
 fn exec_outcome(binary: &str) -> Option<Outcome> {
     let fe = compile_source(
         "fn t(cmd: Command) -> Exit ( exec(@[ ${cmd} ]) where { observer: (run) => run.ok } )",
@@ -62,7 +64,20 @@ fn exec_outcome(binary: &str) -> Option<Outcome> {
             projected: None,
         }));
         match eval_body_with_exec(&program, &env, entry, vec![cmd], KernelMode::Off, cid) {
-            EvalOutcome::Clean(_) => Outcome::Clean,
+            // `run.ok` is the `Exit` struct; it crossed back over vox and `exec`
+            // evaluates to it. Confirm the shape here — `Value` is `!Send` and can't
+            // leave the strand, and a regression to `Value::Unit` trips this.
+            EvalOutcome::Clean(Value::Struct(fields)) => {
+                let names: Vec<&str> = fields.iter().map(|(n, _)| n.as_str()).collect();
+                if names == ["stdout", "stderr"] {
+                    Outcome::Clean
+                } else {
+                    Outcome::Poisoned(format!("exec returned a struct with fields {names:?}"))
+                }
+            }
+            EvalOutcome::Clean(other) => {
+                Outcome::Poisoned(format!("exec returned {other:?}, not the Exit struct"))
+            }
             EvalOutcome::Poisoned { reason, .. } => Outcome::Poisoned(reason),
         }
     });
@@ -71,15 +86,16 @@ fn exec_outcome(binary: &str) -> Option<Outcome> {
     s.outcome(strand)
 }
 
-/// `true` exits 0 → the observer's `run.ok` forces to an `Exit` → `exec` returns it
-/// → the strand finishes Clean. The whole path — `where`-hook, command projection,
-/// observer bundling, observe over vox on a strand — ran end to end.
+/// `true` exits 0 → the observer's `run.ok` forces to an `Exit` → that whole struct
+/// crosses back and `exec(…)` evaluates to it (verified worker-side). The whole path
+/// — `where`-hook, command projection, observer bundling, observe + value crossing
+/// over vox on a strand — ran end to end.
 #[test]
-fn exec_over_vox_gates_clean_on_a_successful_process() {
+fn exec_over_vox_returns_the_observers_exit_value() {
     assert_eq!(
         exec_outcome("true"),
         Some(Outcome::Clean),
-        "exit 0 → run.ok clean → exec clean"
+        "exit 0 → exec returns the Exit struct the observer produced"
     );
 }
 

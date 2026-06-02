@@ -31,7 +31,7 @@ use vx_types::TypeEnv;
 
 use crate::dispatch::{self, Dispatcher};
 use crate::graph::Span;
-use crate::observe::{ExecCommand, ObserveRequest, Observed};
+use crate::observe::{ExecCommand, ObserveRequest, Observed, WireValue};
 use crate::strand::{ObserveClientId, dispatch_observe};
 
 /// The uniform runtime envelope of a failure (the failure model's `context`) —
@@ -1013,13 +1013,13 @@ impl Evaluator<'_> {
         })?;
         let observed = dispatch_observe(client, ObserveRequest { bundle, command });
 
-        // Cross the result back into a `Value`. `Observed` is the slice-1 placeholder
-        // result enum; the general value-crossing (the producing handle for streams,
-        // structured results) lands with the output handling. A poison crossing back
-        // detonates here (I6 across the boundary).
+        // Reconstruct the observer's result as a real `Value` — `exec(…)` evaluates to
+        // exactly what the observer returned, crossed back over vox. A poison crossing
+        // back detonates here (I6 across the boundary). (The genuinely-remote leaves —
+        // `run.stream.*`, the producing tree — cross as handles, not inline; that join
+        // is its own piece.)
         match &*observed {
-            Observed::U64(n) => Ok(Value::U64(*n)),
-            Observed::Clean => Ok(Value::Unit),
+            Observed::Value(wire) => Ok(from_wire(wire)),
             Observed::Poisoned(reason) => Err(poison(reason.clone())),
         }
     }
@@ -1063,6 +1063,48 @@ impl Evaluator<'_> {
             ExprKind::Closure(c) => Ok(c.body),
             _ => Err(poison("`exec`'s `observer` must be a closure".into())),
         }
+    }
+
+    /// Deep-force a value into a [`WireValue`] — the executor side of the value
+    /// crossing. Every nested thunk is forced (a value crosses as data, never as a
+    /// thunk), so the observer's whole result travels, not a lossy top-level peek.
+    /// Forcing may poison (a forced bomb, a failed gate), which propagates. Values
+    /// that are not data — closures (code), commands/grammars/host (capabilities),
+    /// the failure envelope — cannot cross this way and poison honestly; the
+    /// genuinely-remote leaves (`Stream`/`Tree`) will cross as handles, separately.
+    fn to_wire(&self, v: &Value) -> Result<WireValue, Poison> {
+        Ok(match v {
+            Value::U64(n) => WireValue::U64(*n),
+            Value::Bool(b) => WireValue::Bool(*b),
+            Value::Str(s) => WireValue::Str(s.to_string()),
+            Value::Unit => WireValue::Unit,
+            Value::Tuple(ts) => WireValue::Tuple(self.wire_thunks(ts)?),
+            Value::Array(ts) => WireValue::Array(self.wire_thunks(ts)?),
+            Value::Struct(fields) => WireValue::Struct(self.wire_fields(fields)?),
+            Value::Variant { tag, fields } => WireValue::Variant {
+                tag: tag.clone(),
+                fields: self.wire_fields(fields)?,
+            },
+            other => {
+                return Err(poison(format!(
+                    "`exec` observer returned a value that cannot cross back: {other:?}"
+                )));
+            }
+        })
+    }
+
+    /// Force each thunk and wire it — for tuple/array elements.
+    fn wire_thunks(&self, ts: &[Thunk]) -> Result<Vec<WireValue>, Poison> {
+        ts.iter().map(|t| self.to_wire(&self.force(t)?)).collect()
+    }
+
+    /// Force each field's thunk and wire it, keeping the name — for struct fields and
+    /// variant payloads.
+    fn wire_fields(&self, fields: &[(String, Thunk)]) -> Result<Vec<(String, WireValue)>, Poison> {
+        fields
+            .iter()
+            .map(|(name, t)| Ok((name.clone(), self.to_wire(&self.force(t)?)?)))
+            .collect()
     }
 
     /// Bind `args` (lazy thunks in the *caller's* `caller_env`) to `body`'s
@@ -1420,6 +1462,60 @@ fn eval_body_inner(
         Err(p) => Outcome::Poisoned {
             reason: p.message(),
             span: p.context.span,
+        },
+    }
+}
+
+/// Evaluate the observer `body` against `args` and **deep-force** its result into a
+/// [`WireValue`] — the executor entry of the value crossing. The whole value is
+/// forced to data here, on the executor, so the observer's result (not a lossy
+/// top-level peek) crosses back over vox. `Err` is the poison's message — a failed
+/// gate, a forced bomb, an un-crossable value. No exec client: a nested `exec` in an
+/// observer is a later piece.
+pub fn eval_body_wire(
+    program: &VirProgram,
+    env: &TypeEnv,
+    body: BodyId,
+    args: Vec<Value>,
+    mode: KernelMode,
+) -> Result<WireValue, String> {
+    let ev = Evaluator {
+        program,
+        env,
+        current_body: Cell::new(body),
+        dispatch: Dispatcher::default(),
+        dispatches: Cell::new(0),
+        mode,
+        exec_client: None,
+    };
+    ev.invoke_body_values(body, args, Env::new())
+        .and_then(|v| ev.to_wire(&v))
+        .map_err(|p| p.message())
+}
+
+/// Reconstruct a [`Value`] from a [`WireValue`] — the orchestrator side of the value
+/// crossing. The wire form is already fully forced, so every field is a resolved
+/// (`done`) thunk.
+pub fn from_wire(wire: &WireValue) -> Value {
+    match wire {
+        WireValue::U64(n) => Value::U64(*n),
+        WireValue::Bool(b) => Value::Bool(*b),
+        WireValue::Str(s) => Value::Str(Rc::from(s.as_str())),
+        WireValue::Unit => Value::Unit,
+        WireValue::Tuple(ws) => Value::Tuple(ws.iter().map(|w| done(from_wire(w))).collect()),
+        WireValue::Array(ws) => Value::Array(ws.iter().map(|w| done(from_wire(w))).collect()),
+        WireValue::Struct(fields) => Value::Struct(
+            fields
+                .iter()
+                .map(|(n, w)| (n.clone(), done(from_wire(w))))
+                .collect(),
+        ),
+        WireValue::Variant { tag, fields } => Value::Variant {
+            tag: tag.clone(),
+            fields: fields
+                .iter()
+                .map(|(n, w)| (n.clone(), done(from_wire(w))))
+                .collect(),
         },
     }
 }

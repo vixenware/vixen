@@ -12,7 +12,7 @@
 
 use vx_ir::Bundle;
 
-use crate::eval::{KernelMode, Outcome, Value, eval_body};
+use crate::eval::{KernelMode, eval_body_wire};
 use crate::run_value::{self, ProcOutcome};
 
 /// A command to run — minimal for now (program + args). The full `Command` value
@@ -31,15 +31,43 @@ pub struct ObserveRequest {
     pub command: ExecCommand,
 }
 
-/// The result of observing. Minimal for now; the general value-crossing (structured
-/// results, the producing handle for streams) lands with the value model.
+/// A runtime value crossing back from the executor to the orchestrator over vox —
+/// the observer's result, fully forced into data. This is the wire form of
+/// `eval::Value`'s data subset: scalars and the compound shapes (tuple/array/struct/
+/// variant), with every field already forced (no thunks cross). Code values
+/// (closures), capability values (commands/grammars/host), and the opaque failure
+/// envelope are not data and never cross here; the genuinely-remote leaves
+/// (`Stream`/`Tree`) cross as handles, not inline — both are their own pieces.
+///
+/// Facet-derived: it *is* the vox contract for the `observe` result. Vox owns the
+/// serialization; this code never names a codec.
+#[derive(facet::Facet, Debug, Clone, PartialEq, Eq)]
+#[repr(u8)]
+pub enum WireValue {
+    U64(u64),
+    Bool(bool),
+    Str(String),
+    Unit,
+    Tuple(Vec<WireValue>),
+    Array(Vec<WireValue>),
+    /// A struct's named fields, in construction order.
+    Struct(Vec<(String, WireValue)>),
+    /// An enum variant: its `tag` plus its (named or positional-`"0"`/`"1"`/…) fields.
+    Variant {
+        tag: String,
+        fields: Vec<(String, WireValue)>,
+    },
+}
+
+/// The result of observing: the observer's value crossed back as data, or a poison
+/// (a failed `run.ok`, or a run that couldn't start). The poison still crosses as a
+/// bare message — the *structured* failure crossing (the domain error value + the
+/// failure context) is its own piece.
 #[derive(facet::Facet, Debug, Clone, PartialEq, Eq)]
 #[repr(u8)]
 pub enum Observed {
-    /// The observer returned a `U64`.
-    U64(u64),
-    /// The observer returned cleanly with a value we don't carry structurally yet.
-    Clean,
+    /// The observer returned cleanly; here is its value.
+    Value(WireValue),
     /// The observer poisoned (e.g. `run.ok` on a failed process), or the run couldn't start.
     Poisoned(String),
 }
@@ -73,19 +101,19 @@ impl Observe for ObserveService {
         };
 
         // Build the `Run` (its `.ok` gate forces on the real exit code) and evaluate
-        // the observer against it on a fresh mirror.
+        // the observer against it on a fresh mirror, deep-forcing its result into a
+        // `WireValue` to cross back. The whole value crosses — not a lossy projection.
         let run = run_value::build(proc);
         let (program, env) = request.bundle.install();
-        match eval_body(
+        match eval_body_wire(
             &program,
             &env,
             request.bundle.entry,
             vec![run],
             KernelMode::Off,
         ) {
-            Outcome::Clean(Value::U64(n)) => Observed::U64(n),
-            Outcome::Clean(_) => Observed::Clean,
-            Outcome::Poisoned { reason, .. } => Observed::Poisoned(reason),
+            Ok(value) => Observed::Value(value),
+            Err(reason) => Observed::Poisoned(reason),
         }
     }
 }
@@ -153,13 +181,15 @@ mod tests {
     }
 
     /// The first real exec over vox: ship the observer + a command, the executor runs
-    /// the real process, builds a `Run`, and `run.ok` gates on its actual exit code.
+    /// the real process, builds a `Run`, `run.ok` gates on its actual exit code, and
+    /// the observer's value — the whole `Exit` struct — crosses back as data.
     #[tokio::test]
-    async fn observe_runs_a_real_command_and_gates_on_its_exit() {
+    async fn observe_runs_a_real_command_and_returns_the_observer_value() {
         let bundle = observer_bundle();
         let client = local_observer().await;
 
-        // `true` exits 0 → run.ok forces to an Exit → observer clean.
+        // `true` exits 0 → run.ok forces to an `Exit` → the struct crosses back
+        // verbatim (empty stdout/stderr for `true`), not a "clean" placeholder.
         let ok = client
             .observe(ObserveRequest {
                 bundle: bundle.clone(),
@@ -167,9 +197,13 @@ mod tests {
             })
             .await
             .expect("observe over vox");
-        assert!(
-            matches!(ok, Observed::Clean),
-            "exit 0 → run.ok clean, got {ok:?}"
+        assert_eq!(
+            ok,
+            Observed::Value(WireValue::Struct(vec![
+                ("stdout".to_string(), WireValue::Str(String::new())),
+                ("stderr".to_string(), WireValue::Str(String::new())),
+            ])),
+            "exit 0 → the whole Exit value crosses back, got {ok:?}"
         );
 
         // `false` exits 1 → run.ok poisons.
