@@ -37,7 +37,7 @@ pub struct TypeDefId(pub u32);
 pub struct TypeId(pub u32);
 
 /// A unique identifier for a type variable introduced during inference.
-#[derive(Clone, Copy, PartialEq, Eq, Hash, Debug)]
+#[derive(facet::Facet, Clone, Copy, PartialEq, Eq, Hash, Debug)]
 pub struct InferVar(pub u32);
 
 /// The core type representation.
@@ -49,7 +49,8 @@ pub struct InferVar(pub u32);
 /// Sub-types are stored as [`TypeId`]s referring back into the [`TypeEnv`]
 /// that interns this `Ty`. The `Ty` itself is therefore shallow — recursing
 /// requires fetching child types from the env.
-#[derive(Clone, PartialEq, Eq, Hash, Debug)]
+#[derive(facet::Facet, Clone, PartialEq, Eq, Hash, Debug)]
+#[repr(u8)]
 pub enum Ty {
     /// A scalar type: U64, I64, F64, Bool, String.
     Scalar(Scalar),
@@ -104,7 +105,8 @@ pub enum Ty {
 }
 
 /// Scalar types built into the language.
-#[derive(Clone, Copy, PartialEq, Eq, Hash, Debug)]
+#[derive(facet::Facet, Clone, Copy, PartialEq, Eq, Hash, Debug)]
+#[repr(u8)]
 pub enum Scalar {
     U64,
     I64,
@@ -114,7 +116,7 @@ pub enum Scalar {
 }
 
 /// A reference to a generic type parameter.
-#[derive(Clone, PartialEq, Eq, Hash, Debug)]
+#[derive(facet::Facet, Clone, PartialEq, Eq, Hash, Debug)]
 pub struct TypeParam {
     /// The name as written in source (e.g. "T", "K", "V").
     pub name: String,
@@ -123,46 +125,46 @@ pub struct TypeParam {
 }
 
 /// A struct type with optional generic arguments.
-#[derive(Clone, PartialEq, Eq, Hash, Debug)]
+#[derive(facet::Facet, Clone, PartialEq, Eq, Hash, Debug)]
 pub struct StructTy {
     pub def: TypeDefId,
     pub type_args: Vec<TypeId>,
 }
 
 /// An enum type with optional generic arguments.
-#[derive(Clone, PartialEq, Eq, Hash, Debug)]
+#[derive(facet::Facet, Clone, PartialEq, Eq, Hash, Debug)]
 pub struct EnumTy {
     pub def: TypeDefId,
     pub type_args: Vec<TypeId>,
 }
 
 /// A newtype with optional generic arguments.
-#[derive(Clone, PartialEq, Eq, Hash, Debug)]
+#[derive(facet::Facet, Clone, PartialEq, Eq, Hash, Debug)]
 pub struct NewtypeTy {
     pub def: TypeDefId,
     pub type_args: Vec<TypeId>,
 }
 
 /// A type alias with its concrete target.
-#[derive(Clone, PartialEq, Eq, Hash, Debug)]
+#[derive(facet::Facet, Clone, PartialEq, Eq, Hash, Debug)]
 pub struct AliasTy {
     pub def: TypeDefId,
     pub type_args: Vec<TypeId>,
 }
 
 /// An opaque nominal type with optional generic arguments.
-#[derive(Clone, PartialEq, Eq, Hash, Debug)]
+#[derive(facet::Facet, Clone, PartialEq, Eq, Hash, Debug)]
 pub struct OpaqueTy {
     pub def: TypeDefId,
     pub type_args: Vec<TypeId>,
 }
 
 /// A heterogeneous tuple type.
-#[derive(Clone, PartialEq, Eq, Hash, Debug)]
+#[derive(facet::Facet, Clone, PartialEq, Eq, Hash, Debug)]
 pub struct TupleTy(pub Vec<TypeId>);
 
 /// A function type: `Fn(params) #caps -> ret`.
-#[derive(Clone, PartialEq, Eq, Hash, Debug)]
+#[derive(facet::Facet, Clone, PartialEq, Eq, Hash, Debug)]
 pub struct FunctionTy {
     pub params: Vec<TypeId>,
     pub ret: TypeId,
@@ -170,22 +172,22 @@ pub struct FunctionTy {
 }
 
 /// `Array[T]`.
-#[derive(Clone, PartialEq, Eq, Hash, Debug)]
+#[derive(facet::Facet, Clone, PartialEq, Eq, Hash, Debug)]
 pub struct ArrayTy(pub TypeId);
 
 /// `Map[K, V]`.
-#[derive(Clone, PartialEq, Eq, Hash, Debug)]
+#[derive(facet::Facet, Clone, PartialEq, Eq, Hash, Debug)]
 pub struct MapTy {
     pub key: TypeId,
     pub value: TypeId,
 }
 
 /// `Stream[T]`.
-#[derive(Clone, PartialEq, Eq, Hash, Debug)]
+#[derive(facet::Facet, Clone, PartialEq, Eq, Hash, Debug)]
 pub struct StreamTy(pub TypeId);
 
 /// A capability tag on a function type (e.g. `#fs`, `#discover`).
-#[derive(Clone, PartialEq, Eq, Hash, Debug)]
+#[derive(facet::Facet, Clone, PartialEq, Eq, Hash, Debug)]
 pub struct Capability {
     pub name: String,
     /// Span of the capability name token in source. May be a default span
@@ -197,7 +199,8 @@ pub struct Capability {
 ///
 /// [`TypeDefId`] indexes into a table of these. This is populated during the
 /// type collection pass that walks the AST before checking begins.
-#[derive(Clone, Debug)]
+#[derive(facet::Facet, Clone, Debug)]
+#[repr(u8)]
 pub enum TypeDef {
     Struct(StructDef),
     Enum(EnumDef),
@@ -207,7 +210,7 @@ pub enum TypeDef {
 }
 
 /// A struct definition with its fields and generic parameters.
-#[derive(Clone, Debug)]
+#[derive(facet::Facet, Clone, Debug)]
 pub struct StructDef {
     pub name: String,
     /// The [`TypeDefId`] of the parent enum, if this struct is an enum variant.
@@ -218,7 +221,7 @@ pub struct StructDef {
 }
 
 /// A field in a struct definition.
-#[derive(Clone, Debug)]
+#[derive(facet::Facet, Clone, Debug)]
 pub struct FieldDef {
     pub name: String,
     pub ty: TypeId,
@@ -229,7 +232,8 @@ pub struct FieldDef {
     pub name_span: SourceSpan,
 }
 
-#[derive(Clone, Debug)]
+#[derive(facet::Facet, Clone, Debug)]
+#[repr(u8)]
 pub enum FieldDefaultValue {
     Bool(bool),
     String(String),
@@ -240,7 +244,7 @@ pub enum FieldDefaultValue {
 }
 
 /// An enum definition with its variants and generic parameters.
-#[derive(Clone, Debug)]
+#[derive(facet::Facet, Clone, Debug)]
 pub struct EnumDef {
     pub name: String,
     pub type_params: Vec<String>,
@@ -250,7 +254,8 @@ pub struct EnumDef {
     pub variants: Vec<TypeDefId>,
 }
 
-#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
+#[derive(facet::Facet, Clone, Copy, Debug, PartialEq, Eq, Hash)]
+#[repr(u8)]
 pub enum DeserRenameRule {
     SnakeCase,
     CamelCase,
@@ -259,21 +264,21 @@ pub enum DeserRenameRule {
     ScreamingSnakeCase,
 }
 
-#[derive(Clone, Debug, Default)]
+#[derive(facet::Facet, Clone, Debug, Default)]
 pub struct DeserContainerAttrs {
     pub rename: Option<String>,
     pub rename_all: Option<DeserRenameRule>,
     pub untagged: bool,
 }
 
-#[derive(Clone, Debug, Default)]
+#[derive(facet::Facet, Clone, Debug, Default)]
 pub struct DeserFieldAttrs {
     pub rename: Option<String>,
     pub flatten: bool,
 }
 
 /// A newtype definition.
-#[derive(Clone, Debug)]
+#[derive(facet::Facet, Clone, Debug)]
 pub struct NewtypeDef {
     pub name: String,
     pub type_params: Vec<String>,
@@ -281,7 +286,7 @@ pub struct NewtypeDef {
 }
 
 /// A type alias definition: `type Name = A | B | C`.
-#[derive(Clone, Debug)]
+#[derive(facet::Facet, Clone, Debug)]
 pub struct AliasDef {
     pub name: String,
     pub type_params: Vec<String>,
@@ -289,7 +294,7 @@ pub struct AliasDef {
 }
 
 /// An opaque nominal type definition: `type Name;`.
-#[derive(Clone, Debug)]
+#[derive(facet::Facet, Clone, Debug)]
 pub struct OpaqueDef {
     pub name: String,
     pub type_params: Vec<String>,
@@ -299,7 +304,7 @@ pub struct OpaqueDef {
 ///
 /// Sum types are not a Ty variant because they're always behind an alias.
 /// The alias target stores the alternatives directly.
-#[derive(Clone, PartialEq, Eq, Hash, Debug)]
+#[derive(facet::Facet, Clone, PartialEq, Eq, Hash, Debug)]
 pub struct SumTy {
     pub alternatives: Vec<TypeId>,
 }
@@ -308,7 +313,7 @@ pub struct SumTy {
 ///
 /// This is richer than [`FunctionTy`] because it includes parameter names,
 /// keyword parameters with defaults, and generic type parameters.
-#[derive(Clone, Debug)]
+#[derive(facet::Facet, Clone, Debug)]
 pub struct FnSig {
     pub name: String,
     /// Span of the function name token in source.
@@ -321,7 +326,7 @@ pub struct FnSig {
 }
 
 /// A positional parameter in a function signature.
-#[derive(Clone, Debug)]
+#[derive(facet::Facet, Clone, Debug)]
 pub struct ParamDef {
     pub name: String,
     /// Span of the parameter name token in source.
@@ -331,7 +336,7 @@ pub struct ParamDef {
 }
 
 /// A keyword parameter in a function signature — has a name and may have a default.
-#[derive(Clone, Debug)]
+#[derive(facet::Facet, Clone, Debug)]
 pub struct KeywordParamDef {
     pub name: String,
     /// Span of the keyword parameter name token in source.
@@ -346,7 +351,7 @@ pub struct KeywordParamDef {
 /// [`TypeDefId`] values index into `defs`. [`TypeId`] values index into `types`.
 /// The checker builds this during the collection pass, then uses it throughout
 /// type checking.
-#[derive(Clone, Debug, Default)]
+#[derive(facet::Facet, Clone, Debug, Default)]
 pub struct TypeEnv {
     defs: Vec<TypeDef>,
     /// Maps type def names to their [`TypeDefId`]s for lookup.

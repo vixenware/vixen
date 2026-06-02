@@ -4119,6 +4119,7 @@ name = "vx-types"
 version = "0.1.0"
 dependencies = [
  "facet",
+ "facet-postcard",
  "vx-parser",
 ]
 
