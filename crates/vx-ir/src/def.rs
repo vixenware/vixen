@@ -6,7 +6,8 @@
 use vx_parser::{SourceId, SourceSpan};
 
 /// What kind of definition a name refers to.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(facet::Facet, Debug, Clone, Copy, PartialEq, Eq)]
+#[repr(u8)]
 pub enum DefKind {
     /// `fn name(...) { ... }`
     Function,
@@ -32,13 +33,14 @@ pub enum DefKind {
 
 pub type DefSite = SourceSpan;
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+#[derive(facet::Facet, Debug, Clone, Copy, PartialEq, Eq, Hash)]
+#[repr(u8)]
 pub enum DefId {
     Source { source: SourceId, local: u32 },
 }
 
 /// A name definition in a scope.
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(facet::Facet, Debug, Clone, PartialEq, Eq)]
 pub struct Definition {
     /// Stable identity for this definition.
     pub id: DefId,

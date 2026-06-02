@@ -8,7 +8,7 @@ use crate::{BindingId, BodyId, ExprId, ItemId, PatternId, ScopeId, TypeRefId};
 use vx_parser::SourceSpan;
 
 /// A statement node in the VIR.
-#[derive(Debug, Clone)]
+#[derive(facet::Facet, Debug, Clone)]
 pub struct Stmt {
     /// The source location of this statement.
     /// Populated during: CST walk.
@@ -28,7 +28,8 @@ pub struct Stmt {
 }
 
 /// Discriminant for all statement forms.
-#[derive(Debug, Clone)]
+#[derive(facet::Facet, Debug, Clone)]
+#[repr(u8)]
 pub enum StmtKind {
     /// `let pattern = expr` or `let name: Type = expr`.
     Let(LetStmt),
@@ -56,7 +57,7 @@ pub enum StmtKind {
 }
 
 /// A let statement: `let pattern = expr`.
-#[derive(Debug, Clone)]
+#[derive(facet::Facet, Debug, Clone)]
 pub struct LetStmt {
     /// The pattern being bound. For simple `let x = ...` this is a
     /// [`PatternKind::Binding`](crate::PatternKind::Binding).
@@ -70,7 +71,7 @@ pub struct LetStmt {
 }
 
 /// An assignment statement: `name = expr`.
-#[derive(Debug, Clone)]
+#[derive(facet::Facet, Debug, Clone)]
 pub struct AssignStmt {
     /// The name being assigned to.
     pub name: String,
@@ -84,7 +85,7 @@ pub struct AssignStmt {
 }
 
 /// A compound update statement: `name with= { field: value }`.
-#[derive(Debug, Clone)]
+#[derive(facet::Facet, Debug, Clone)]
 pub struct CompoundUpdateStmt {
     /// The name being updated.
     pub name: String,
@@ -98,7 +99,7 @@ pub struct CompoundUpdateStmt {
 }
 
 /// A field assignment statement: `a.b.c = expr`.
-#[derive(Debug, Clone)]
+#[derive(facet::Facet, Debug, Clone)]
 pub struct FieldAssignStmt {
     /// The base name being assigned through (the `a` in `a.b.c = ...`).
     pub base: String,
@@ -116,7 +117,7 @@ pub struct FieldAssignStmt {
 }
 
 /// A return statement: `return expr` or bare `return`.
-#[derive(Debug, Clone)]
+#[derive(facet::Facet, Debug, Clone)]
 pub struct ReturnStmt {
     /// The returned expression. `None` for bare `return` (returns unit).
     pub value: Option<ExprId>,

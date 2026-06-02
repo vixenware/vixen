@@ -10,7 +10,7 @@ use crate::def::DefId;
 use vx_types::TypeDefId;
 
 /// A top-level declaration item.
-#[derive(Debug, Clone)]
+#[derive(facet::Facet, Debug, Clone)]
 pub struct Item {
     /// Source span of the entire declaration.
     /// Populated during: CST walk.
@@ -42,7 +42,8 @@ impl Item {
 }
 
 /// Discriminant for all declaration item forms.
-#[derive(Debug, Clone)]
+#[derive(facet::Facet, Debug, Clone)]
+#[repr(u8)]
 pub enum ItemKind {
     /// A function declaration: `fn name(params) ( body )`.
     Function(FunctionItem),
@@ -68,7 +69,7 @@ pub enum ItemKind {
 }
 
 /// A function declaration item.
-#[derive(Debug, Clone)]
+#[derive(facet::Facet, Debug, Clone)]
 pub struct FunctionItem {
     /// The function name.
     pub name: String,
@@ -86,7 +87,7 @@ pub struct FunctionItem {
 }
 
 /// A field in a struct or enum variant declaration.
-#[derive(Debug, Clone)]
+#[derive(facet::Facet, Debug, Clone)]
 pub struct FieldDecl {
     /// The field name.
     pub name: String,
@@ -103,7 +104,7 @@ pub struct FieldDecl {
 }
 
 /// A struct declaration item.
-#[derive(Debug, Clone)]
+#[derive(facet::Facet, Debug, Clone)]
 pub struct StructItem {
     /// The struct name.
     pub name: String,
@@ -120,7 +121,7 @@ pub struct StructItem {
 }
 
 /// A variant in an enum declaration.
-#[derive(Debug, Clone)]
+#[derive(facet::Facet, Debug, Clone)]
 pub struct VariantDecl {
     /// The variant name.
     pub name: String,
@@ -133,7 +134,7 @@ pub struct VariantDecl {
 }
 
 /// An enum declaration item.
-#[derive(Debug, Clone)]
+#[derive(facet::Facet, Debug, Clone)]
 pub struct EnumItem {
     /// The enum name.
     pub name: String,
@@ -150,7 +151,7 @@ pub struct EnumItem {
 }
 
 /// A newtype declaration item.
-#[derive(Debug, Clone)]
+#[derive(facet::Facet, Debug, Clone)]
 pub struct NewtypeItem {
     /// The newtype name.
     pub name: String,
@@ -167,7 +168,7 @@ pub struct NewtypeItem {
 }
 
 /// A type alias declaration item.
-#[derive(Debug, Clone)]
+#[derive(facet::Facet, Debug, Clone)]
 pub struct TypeAliasItem {
     /// The type alias name.
     pub name: String,
@@ -184,7 +185,7 @@ pub struct TypeAliasItem {
 }
 
 /// A namespace declaration item.
-#[derive(Debug, Clone)]
+#[derive(facet::Facet, Debug, Clone)]
 pub struct NamespaceItem {
     /// The namespace name.
     pub name: String,
@@ -203,7 +204,7 @@ pub struct NamespaceItem {
 }
 
 /// An attribute on a declaration: `#[key: value]`.
-#[derive(Debug, Clone)]
+#[derive(facet::Facet, Debug, Clone)]
 pub struct Attribute {
     /// The attribute entries.
     pub entries: Vec<AttributeEntry>,
@@ -212,7 +213,7 @@ pub struct Attribute {
 }
 
 /// A single entry in an attribute: `key` or `key: value`.
-#[derive(Debug, Clone)]
+#[derive(facet::Facet, Debug, Clone)]
 pub struct AttributeEntry {
     /// The attribute key.
     pub key: String,

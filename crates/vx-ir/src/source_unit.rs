@@ -10,7 +10,7 @@ use vx_parser::SourceId;
 /// A source file's VIR root.
 ///
 /// Populated during: CST walk.
-#[derive(Debug, Clone)]
+#[derive(facet::Facet, Debug, Clone)]
 pub struct SourceUnit {
     /// The source file this unit represents.
     pub source: SourceId,

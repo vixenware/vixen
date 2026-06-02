@@ -17,7 +17,7 @@ use vx_types::TypeId;
 ///
 /// Bindings are the atoms of name resolution. Every `let x`, every parameter,
 /// every match pattern binding gets a unique [`BindingId`](crate::BindingId).
-#[derive(Debug, Clone)]
+#[derive(facet::Facet, Debug, Clone)]
 pub struct Binding {
     /// The name of this binding as written in source.
     pub name: String,
@@ -64,7 +64,7 @@ pub struct Binding {
 }
 
 /// The provenance of a binding introduced by an `import`.
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(facet::Facet, Debug, Clone, PartialEq, Eq)]
 pub struct ImportOrigin {
     /// The imported module's source unit.
     pub unit: SourceUnitId,
@@ -76,7 +76,8 @@ pub struct ImportOrigin {
 }
 
 /// How a binding was introduced in source.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(facet::Facet, Debug, Clone, Copy, PartialEq, Eq)]
+#[repr(u8)]
 pub enum BindingKind {
     /// Introduced by a `let` statement pattern.
     Let,

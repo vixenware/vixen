@@ -14,7 +14,7 @@ use vx_parser::SourceSpan;
 /// A source-level type annotation.
 ///
 /// Populated during: CST walk.
-#[derive(Debug, Clone)]
+#[derive(facet::Facet, Debug, Clone)]
 pub struct TypeRef {
     /// The source span of this type annotation.
     pub span: SourceSpan,
@@ -24,7 +24,8 @@ pub struct TypeRef {
 }
 
 /// The syntactic form of a type annotation.
-#[derive(Debug, Clone)]
+#[derive(facet::Facet, Debug, Clone)]
+#[repr(u8)]
 pub enum TypeRefKind {
     /// A path type: `Foo`, `Foo.Bar`, `Foo[T, U]`.
     Path(PathTypeRef),
@@ -43,7 +44,7 @@ pub enum TypeRefKind {
 }
 
 /// A path type reference: `Foo`, `Foo.Bar`, `Foo[T, U]`.
-#[derive(Debug, Clone)]
+#[derive(facet::Facet, Debug, Clone)]
 pub struct PathTypeRef {
     /// The path segments (e.g. `["Foo", "Bar"]` for `Foo.Bar`).
     pub segments: Vec<String>,
@@ -53,7 +54,7 @@ pub struct PathTypeRef {
 }
 
 /// A function type reference: `Fn(A, B) -> C`.
-#[derive(Debug, Clone)]
+#[derive(facet::Facet, Debug, Clone)]
 pub struct FunctionTypeRef {
     /// The parameter types.
     pub params: Vec<TypeRefId>,
@@ -66,14 +67,14 @@ pub struct FunctionTypeRef {
 }
 
 /// A tuple type reference: `(A, B, C)`.
-#[derive(Debug, Clone)]
+#[derive(facet::Facet, Debug, Clone)]
 pub struct TupleTypeRef {
     /// The element types.
     pub elements: Vec<TypeRefId>,
 }
 
 /// A sum type reference: `A | B | C`.
-#[derive(Debug, Clone)]
+#[derive(facet::Facet, Debug, Clone)]
 pub struct SumTypeRef {
     /// The alternative types (at least two).
     pub alternatives: Vec<TypeRefId>,

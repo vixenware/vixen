@@ -22,7 +22,7 @@ use vx_parser::SourceSpan;
 ///
 /// These are assigned during type collection — the pass that walks the AST
 /// and registers all type declarations before checking begins.
-#[derive(Clone, Copy, PartialEq, Eq, Hash, Debug)]
+#[derive(Clone, Copy, PartialEq, Eq, Hash, Debug, facet::Facet)]
 pub struct TypeDefId(pub u32);
 
 /// A unique identifier for a [`Ty`] interned in a [`TypeEnv`].
@@ -33,7 +33,7 @@ pub struct TypeDefId(pub u32);
 ///
 /// `Ord` is by interning order (the raw `u32`) — a stable, arbitrary total
 /// order used to canonicalize inferred error unions deterministically.
-#[derive(Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Debug)]
+#[derive(Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Debug, facet::Facet)]
 pub struct TypeId(pub u32);
 
 /// A unique identifier for a type variable introduced during inference.

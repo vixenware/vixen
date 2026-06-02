@@ -9,7 +9,8 @@
 use crate::diagnostic::IrDiagnostic;
 
 /// A set of capabilities, represented as a bitset.
-#[derive(Clone, Copy, PartialEq, Eq, Default, Debug)]
+#[derive(Clone, Copy, PartialEq, Eq, Default, Debug, facet::Facet)]
+#[repr(transparent)]
 pub struct CapSet(u8);
 
 impl CapSet {

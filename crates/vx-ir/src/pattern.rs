@@ -10,7 +10,7 @@ use vx_parser::SourceSpan;
 use vx_types::TypeId;
 
 /// A pattern node in the VIR.
-#[derive(Debug, Clone)]
+#[derive(facet::Facet, Debug, Clone)]
 pub struct Pattern {
     /// Source location of this pattern.
     /// Populated during: CST walk.
@@ -37,7 +37,8 @@ pub struct Pattern {
 /// Discriminant for all pattern forms.
 ///
 /// Paren patterns are NOT represented — they are unwrapped during the CST walk.
-#[derive(Debug, Clone)]
+#[derive(facet::Facet, Debug, Clone)]
+#[repr(u8)]
 pub enum PatternKind {
     /// A binding pattern: `x`. Introduces a new binding.
     Binding(PatternBinding),
@@ -79,7 +80,7 @@ pub enum PatternKind {
 }
 
 /// A binding pattern: `x`.
-#[derive(Debug, Clone)]
+#[derive(facet::Facet, Debug, Clone)]
 pub struct PatternBinding {
     /// The name being bound.
     pub name: String,
@@ -89,21 +90,21 @@ pub struct PatternBinding {
 }
 
 /// A literal pattern: `42`, `"hello"`, `true`.
-#[derive(Debug, Clone)]
+#[derive(facet::Facet, Debug, Clone)]
 pub struct PatternLiteral {
     /// The literal value to match against.
     pub value: LitKind,
 }
 
 /// A tuple pattern: `(a, b, c)`.
-#[derive(Debug, Clone)]
+#[derive(facet::Facet, Debug, Clone)]
 pub struct TuplePattern {
     /// The element patterns.
     pub elements: Vec<PatternId>,
 }
 
 /// A field in a struct destructuring pattern: `name: pattern`.
-#[derive(Debug, Clone)]
+#[derive(facet::Facet, Debug, Clone)]
 pub struct StructPatternField {
     /// The field name.
     pub name: String,
@@ -115,21 +116,21 @@ pub struct StructPatternField {
 }
 
 /// A struct destructuring pattern: `{ x, y: pat }`.
-#[derive(Debug, Clone)]
+#[derive(facet::Facet, Debug, Clone)]
 pub struct StructPattern {
     /// The fields being destructured.
     pub fields: Vec<StructPatternField>,
 }
 
 /// An array pattern: `[a, b, ..rest]`.
-#[derive(Debug, Clone)]
+#[derive(facet::Facet, Debug, Clone)]
 pub struct ArrayPattern {
     /// The element patterns (may include an ArrayRest pattern).
     pub elements: Vec<PatternId>,
 }
 
 /// A rest pattern in an array: `..name` or bare `..`.
-#[derive(Debug, Clone)]
+#[derive(facet::Facet, Debug, Clone)]
 pub struct ArrayRestPattern {
     /// The binding name for the rest elements. `None` for bare `..`.
     pub name: Option<String>,
@@ -139,7 +140,7 @@ pub struct ArrayRestPattern {
 }
 
 /// A variant pattern: `Some { value }` or bare `None`.
-#[derive(Debug, Clone)]
+#[derive(facet::Facet, Debug, Clone)]
 pub struct VariantPattern {
     /// The variant name (e.g. `"Some"`, `"None"`).
     pub name: String,
@@ -156,7 +157,7 @@ pub struct VariantPattern {
 }
 
 /// An at-pattern: `name @ pattern`.
-#[derive(Debug, Clone)]
+#[derive(facet::Facet, Debug, Clone)]
 pub struct AtPattern {
     /// The name being bound to the whole value.
     pub name: String,
@@ -168,7 +169,7 @@ pub struct AtPattern {
 }
 
 /// An or-pattern: `pat1 | pat2`.
-#[derive(Debug, Clone)]
+#[derive(facet::Facet, Debug, Clone)]
 pub struct OrPattern {
     /// The alternative patterns. At least two.
     pub alternatives: Vec<PatternId>,

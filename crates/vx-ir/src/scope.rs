@@ -19,7 +19,7 @@ use vx_parser::SourceSpan;
 /// A lexical scope in the VIR.
 ///
 /// Populated during: CST walk (bindings) and scope-building pass (item entries).
-#[derive(Debug, Clone)]
+#[derive(facet::Facet, Debug, Clone)]
 pub struct Scope {
     /// The parent scope, or `None` for the root module scope.
     pub parent: Option<ScopeId>,
@@ -51,7 +51,8 @@ pub struct Scope {
 }
 
 /// What syntactic construct introduced this scope.
-#[derive(Debug, Clone)]
+#[derive(facet::Facet, Debug, Clone)]
+#[repr(u8)]
 pub enum ScopeOwner {
     /// The per-file module scope. Contains only item definitions
     /// (order-independent). Top-level function bodies parent to this scope.
@@ -87,7 +88,8 @@ pub enum ScopeOwner {
 // ---------------------------------------------------------------------------
 
 /// What a scope entry points to.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(facet::Facet, Debug, Clone, Copy, PartialEq, Eq)]
+#[repr(u8)]
 pub enum ScopeEntryTarget {
     /// A local binding (let, parameter, pattern match, etc.).
     Binding(BindingId),
@@ -98,7 +100,7 @@ pub enum ScopeEntryTarget {
 /// A single named entry in a scope — either a local binding or an item
 /// definition. Bindings and items share a namespace in Vixen, so they live
 /// in one unified list for correct shadowing.
-#[derive(Debug, Clone)]
+#[derive(facet::Facet, Debug, Clone)]
 pub struct ScopeEntry {
     /// What this entry points to.
     pub target: ScopeEntryTarget,
@@ -135,7 +137,7 @@ impl ScopeEntry {
 ///
 /// When/if Vixen gets a proper prelude or import system, this should be
 /// replaced with explicit imports.
-#[derive(Debug, Clone)]
+#[derive(facet::Facet, Debug, Clone)]
 pub struct PromotedVariant {
     /// The variant name (e.g. `"Some"`, `"None"`).
     pub name: String,
@@ -152,7 +154,8 @@ pub struct PromotedVariant {
 // ---------------------------------------------------------------------------
 
 /// The result of name lookup — what a name resolved to.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(facet::Facet, Debug, Clone, Copy, PartialEq, Eq)]
+#[repr(u8)]
 pub enum DefTarget {
     /// A local binding (let, parameter, match pattern, etc.).
     Binding(BindingId),

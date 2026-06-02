@@ -8,7 +8,7 @@ use crate::{BindingId, BodyId, ExprId, ItemId, PatternId, ScopeId, TypeRefId};
 use vx_parser::{SourceId, SourceSpan};
 
 /// A body is a scope-owning unit: a function, closure, or top-level thunk.
-#[derive(Debug, Clone)]
+#[derive(facet::Facet, Debug, Clone)]
 pub struct Body {
     /// The source span of the entire body.
     /// Populated during: CST walk.
@@ -53,7 +53,8 @@ pub struct Body {
 }
 
 /// What kind of construct owns a body.
-#[derive(Debug, Clone)]
+#[derive(facet::Facet, Debug, Clone)]
+#[repr(u8)]
 pub enum BodyOwner {
     /// A named function: `fn name(...) ( ... )`.
     /// Links to the function's [`Item`](crate::item::Item) rather than
@@ -75,7 +76,7 @@ pub enum BodyOwner {
 }
 
 /// A capability tag on a body — the name as written and its source span.
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(facet::Facet, Debug, Clone, PartialEq, Eq)]
 pub struct CapabilityTag {
     /// The capability name (e.g. `"fs"`, `"discover"`).
     pub name: String,
@@ -89,7 +90,7 @@ pub struct CapabilityTag {
 /// pattern tree. A destructuring parameter like `(a, b)` introduces
 /// multiple bindings through its pattern. For simple identifier params,
 /// the pattern is a `PatternKind::Binding` which holds the `BindingId`.
-#[derive(Debug, Clone)]
+#[derive(facet::Facet, Debug, Clone)]
 pub struct Param {
     /// The pattern for this parameter. Usually a simple binding pattern
     /// (`PatternKind::Binding`), but may be a destructuring pattern that

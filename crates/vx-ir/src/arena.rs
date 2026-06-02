@@ -25,7 +25,7 @@ use vx_parser::SourceId;
 /// Each `Vec` is indexed by the corresponding ID type. For example,
 /// `arena.exprs[expr_id.index()]` returns the expression with that ID.
 /// The `Index` trait impls provide ergonomic access: `arena[expr_id]`.
-#[derive(Debug, Clone)]
+#[derive(facet::Facet, Debug, Clone)]
 pub struct VirArena {
     /// All expression nodes.
     pub exprs: Vec<Expr>,

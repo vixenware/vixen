@@ -10,7 +10,7 @@ use vx_parser::SourceSpan;
 use vx_types::TypeId;
 
 /// An expression node in the VIR.
-#[derive(Debug, Clone)]
+#[derive(facet::Facet, Debug, Clone)]
 pub struct Expr {
     /// The source location of this expression in the original source file.
     /// Populated during: CST walk.
@@ -44,7 +44,8 @@ pub struct Expr {
 ///
 /// Paren expressions are NOT represented — they are unwrapped during the
 /// CST-to-VIR walk so that the inner expression is used directly.
-#[derive(Debug, Clone)]
+#[derive(facet::Facet, Debug, Clone)]
+#[repr(u8)]
 pub enum ExprKind {
     /// A literal value: `42`, `3.14`, `"hello"`, `true`, `false`.
     Literal(LiteralExpr),
@@ -152,7 +153,8 @@ pub enum ExprKind {
 // ---------------------------------------------------------------------------
 
 /// The kind of literal value.
-#[derive(Debug, Clone)]
+#[derive(facet::Facet, Debug, Clone)]
+#[repr(u8)]
 pub enum LitKind {
     /// An integer literal (e.g. `42`, `0xFF`). Raw token text, not parsed.
     Int { raw: String },
@@ -166,14 +168,14 @@ pub enum LitKind {
 }
 
 /// A literal value expression.
-#[derive(Debug, Clone)]
+#[derive(facet::Facet, Debug, Clone)]
 pub struct LiteralExpr {
     /// The literal value.
     pub value: LitKind,
 }
 
 /// A path literal expression: `p"some/path"`.
-#[derive(Debug, Clone)]
+#[derive(facet::Facet, Debug, Clone)]
 pub struct PathLiteralExpr {
     /// The parts of the path literal. A plain path has one Text part;
     /// an interpolated path has alternating Text and Expr parts.
@@ -181,7 +183,7 @@ pub struct PathLiteralExpr {
 }
 
 /// A reference to a name in scope.
-#[derive(Debug, Clone)]
+#[derive(facet::Facet, Debug, Clone)]
 pub struct NameRefExpr {
     /// The name as written in source.
     pub name: String,
@@ -197,7 +199,7 @@ pub struct NameRefExpr {
 }
 
 /// A block expression: `{ stmts...; tail_expr }`.
-#[derive(Debug, Clone)]
+#[derive(facet::Facet, Debug, Clone)]
 pub struct BlockExpr {
     /// The scope introduced by this block.
     /// Populated during: CST walk.
@@ -216,21 +218,22 @@ pub struct BlockExpr {
 }
 
 /// A closure expression: `(x, y) => body`.
-#[derive(Debug, Clone)]
+#[derive(facet::Facet, Debug, Clone)]
 pub struct ClosureExpr {
     /// The body of the closure. The body holds parameters and root expression.
     pub body: BodyId,
 }
 
 /// A tuple constructor: `(a, b, c)`.
-#[derive(Debug, Clone)]
+#[derive(facet::Facet, Debug, Clone)]
 pub struct TupleExpr {
     /// The elements of the tuple. Empty = unit `()`.
     pub elements: Vec<ExprId>,
 }
 
 /// An element in an array literal.
-#[derive(Debug, Clone)]
+#[derive(facet::Facet, Debug, Clone)]
+#[repr(u8)]
 pub enum ArrayElement {
     /// A plain element: `expr`.
     Expr(ExprId),
@@ -239,14 +242,14 @@ pub enum ArrayElement {
 }
 
 /// An array literal: `[a, b, ..c]`.
-#[derive(Debug, Clone)]
+#[derive(facet::Facet, Debug, Clone)]
 pub struct ArrayExpr {
     /// The elements, which may include spreads.
     pub elements: Vec<ArrayElement>,
 }
 
 /// A field in a record literal: `name: value`.
-#[derive(Debug, Clone)]
+#[derive(facet::Facet, Debug, Clone)]
 pub struct RecordField {
     /// The field name.
     pub name: String,
@@ -257,14 +260,15 @@ pub struct RecordField {
 }
 
 /// A record literal: `{ name: value, ... }`.
-#[derive(Debug, Clone)]
+#[derive(facet::Facet, Debug, Clone)]
 pub struct RecordExpr {
     /// The fields of the record.
     pub fields: Vec<RecordField>,
 }
 
 /// A key in a map literal entry.
-#[derive(Debug, Clone)]
+#[derive(facet::Facet, Debug, Clone)]
+#[repr(u8)]
 pub enum MapKey {
     /// A computed key expression: `[expr]: value` or a bare expression key.
     Expr(ExprId),
@@ -278,7 +282,7 @@ pub enum MapKey {
 }
 
 /// A key-value entry in a map literal.
-#[derive(Debug, Clone)]
+#[derive(facet::Facet, Debug, Clone)]
 pub struct MapEntry {
     /// The key.
     pub key: MapKey,
@@ -289,7 +293,8 @@ pub struct MapEntry {
 }
 
 /// An element in a map literal.
-#[derive(Debug, Clone)]
+#[derive(facet::Facet, Debug, Clone)]
+#[repr(u8)]
 pub enum MapElement {
     /// A key-value entry.
     Entry(MapEntry),
@@ -298,14 +303,14 @@ pub enum MapElement {
 }
 
 /// A map literal: `%{ key: value, ... }`.
-#[derive(Debug, Clone)]
+#[derive(facet::Facet, Debug, Clone)]
 pub struct MapExpr {
     /// The entries, which may include spreads.
     pub entries: Vec<MapElement>,
 }
 
 /// A field in a struct literal: `name: value`.
-#[derive(Debug, Clone)]
+#[derive(facet::Facet, Debug, Clone)]
 pub struct StructLiteralField {
     /// The field name.
     pub name: String,
@@ -318,7 +323,7 @@ pub struct StructLiteralField {
 
 /// A named struct literal: `Point { x: 1, y: 2 }`, or an enum-variant
 /// construction with a struct payload: `Kind.Input { dir: false }`.
-#[derive(Debug, Clone)]
+#[derive(facet::Facet, Debug, Clone)]
 pub struct StructLiteralExpr {
     /// The struct or enum name as written (e.g. `"Point"`, or `"Kind"` for the
     /// enum-variant form `Kind.Input { … }`).
@@ -342,7 +347,7 @@ pub struct StructLiteralExpr {
 }
 
 /// A function call: `f(a, b)` or `f[T](a, b)`.
-#[derive(Debug, Clone)]
+#[derive(facet::Facet, Debug, Clone)]
 pub struct CallExpr {
     /// The callee expression (the function being called).
     pub callee: ExprId,
@@ -353,7 +358,7 @@ pub struct CallExpr {
 }
 
 /// A positional argument in a function call.
-#[derive(Debug, Clone)]
+#[derive(facet::Facet, Debug, Clone)]
 pub struct Arg {
     /// The argument expression.
     pub expr: ExprId,
@@ -362,7 +367,7 @@ pub struct Arg {
 }
 
 /// A keyword-argument call: `callee where { key: val }`.
-#[derive(Debug, Clone)]
+#[derive(facet::Facet, Debug, Clone)]
 pub struct WhereExpr {
     /// The callee expression (may be a Call or a NameRef).
     pub callee: ExprId,
@@ -371,14 +376,14 @@ pub struct WhereExpr {
 }
 
 /// A bare invocation (no-arg call): `callee!`.
-#[derive(Debug, Clone)]
+#[derive(facet::Facet, Debug, Clone)]
 pub struct InvokeExpr {
     /// The callee expression being invoked with no arguments.
     pub callee: ExprId,
 }
 
 /// A partial application: `partial f(a, _)`.
-#[derive(Debug, Clone)]
+#[derive(facet::Facet, Debug, Clone)]
 pub struct PartialAppExpr {
     /// The callee expression being partially applied.
     pub callee: ExprId,
@@ -387,7 +392,8 @@ pub struct PartialAppExpr {
 }
 
 /// An argument in a partial application.
-#[derive(Debug, Clone)]
+#[derive(facet::Facet, Debug, Clone)]
+#[repr(u8)]
 pub enum PartialArg {
     /// A concrete argument value.
     Expr(ExprId),
@@ -399,7 +405,7 @@ pub enum PartialArg {
 }
 
 /// An index operation: `a[b]`.
-#[derive(Debug, Clone)]
+#[derive(facet::Facet, Debug, Clone)]
 pub struct IndexExpr {
     /// The expression being indexed.
     pub receiver: ExprId,
@@ -408,7 +414,8 @@ pub struct IndexExpr {
 }
 
 /// A key identifying a field on a product type.
-#[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Hash)]
+#[derive(facet::Facet, Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Hash)]
+#[repr(u8)]
 pub enum FieldKey {
     /// A named field: `.name`.
     Name(String),
@@ -417,7 +424,7 @@ pub enum FieldKey {
 }
 
 /// A field access: `a.field` or `a.0`.
-#[derive(Debug, Clone)]
+#[derive(facet::Facet, Debug, Clone)]
 pub struct FieldExpr {
     /// The expression whose field is being accessed.
     pub receiver: ExprId,
@@ -428,7 +435,7 @@ pub struct FieldExpr {
 }
 
 /// An if expression: `if cond ( then ) else ( otherwise )`.
-#[derive(Debug, Clone)]
+#[derive(facet::Facet, Debug, Clone)]
 pub struct IfExpr {
     /// The condition expression.
     pub condition: ExprId,
@@ -439,7 +446,7 @@ pub struct IfExpr {
 }
 
 /// A match arm: `pattern => body`.
-#[derive(Debug, Clone)]
+#[derive(facet::Facet, Debug, Clone)]
 pub struct MatchArm {
     /// The pattern to match against.
     pub pattern: PatternId,
@@ -452,7 +459,7 @@ pub struct MatchArm {
 }
 
 /// A match expression: `match scrutinee { arms... }`.
-#[derive(Debug, Clone)]
+#[derive(facet::Facet, Debug, Clone)]
 pub struct MatchExpr {
     /// The expression being matched on.
     pub scrutinee: ExprId,
@@ -461,7 +468,8 @@ pub struct MatchExpr {
 }
 
 /// Binary operators available in Vixen.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(facet::Facet, Debug, Clone, Copy, PartialEq, Eq)]
+#[repr(u8)]
 pub enum BinOp {
     /// `+` addition.
     Add,
@@ -496,7 +504,7 @@ pub enum BinOp {
 }
 
 /// A binary expression: `lhs op rhs`.
-#[derive(Debug, Clone)]
+#[derive(facet::Facet, Debug, Clone)]
 pub struct BinaryExpr {
     /// The left-hand operand.
     pub lhs: ExprId,
@@ -509,7 +517,8 @@ pub struct BinaryExpr {
 }
 
 /// Prefix (unary) operators.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(facet::Facet, Debug, Clone, Copy, PartialEq, Eq)]
+#[repr(u8)]
 pub enum PrefixOp {
     /// `!` logical negation.
     Not,
@@ -518,7 +527,7 @@ pub enum PrefixOp {
 }
 
 /// A prefix expression: `!a` or `-a`.
-#[derive(Debug, Clone)]
+#[derive(facet::Facet, Debug, Clone)]
 pub struct PrefixExpr {
     /// The operator.
     pub op: PrefixOp,
@@ -529,7 +538,7 @@ pub struct PrefixExpr {
 }
 
 /// A range expression: `a..b`, `a..=b`, `a..`, `..b`, `..=b`, or `..`.
-#[derive(Debug, Clone)]
+#[derive(facet::Facet, Debug, Clone)]
 pub struct RangeExpr {
     /// The start of the range. `None` for `..b` or `..`.
     pub start: Option<ExprId>,
@@ -540,7 +549,8 @@ pub struct RangeExpr {
 }
 
 /// The kind of type operation.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(facet::Facet, Debug, Clone, Copy, PartialEq, Eq)]
+#[repr(u8)]
 pub enum TypeOpKind {
     /// `expr as Type` — type cast/coercion.
     As,
@@ -551,7 +561,7 @@ pub enum TypeOpKind {
 }
 
 /// A type operation: `expr as T`, `expr is T`, `expr :: T`.
-#[derive(Debug, Clone)]
+#[derive(facet::Facet, Debug, Clone)]
 pub struct TypeOpExpr {
     /// The expression being operated on.
     pub expr: ExprId,
@@ -562,7 +572,8 @@ pub struct TypeOpExpr {
 }
 
 /// A field update within a `with` expression or compound update statement.
-#[derive(Debug, Clone)]
+#[derive(facet::Facet, Debug, Clone)]
+#[repr(u8)]
 pub enum UpdateField {
     /// `field_path: new_value` — set a field to a new value.
     Set {
@@ -585,7 +596,7 @@ pub enum UpdateField {
 }
 
 /// A functional update: `value with { updates... }`.
-#[derive(Debug, Clone)]
+#[derive(facet::Facet, Debug, Clone)]
 pub struct WithExpr {
     /// The base expression being updated.
     pub receiver: ExprId,
@@ -594,14 +605,15 @@ pub struct WithExpr {
 }
 
 /// A fallible expression: `expr?`.
-#[derive(Debug, Clone)]
+#[derive(facet::Facet, Debug, Clone)]
 pub struct FallibleExpr {
     /// The expression that may fail.
     pub expr: ExprId,
 }
 
 /// A part of an interpolated string or path literal.
-#[derive(Debug, Clone)]
+#[derive(facet::Facet, Debug, Clone)]
+#[repr(u8)]
 pub enum StringPart {
     /// A literal text segment.
     Text(String),
@@ -610,14 +622,14 @@ pub enum StringPart {
 }
 
 /// An interpolated string: `` `hello {name}` ``.
-#[derive(Debug, Clone)]
+#[derive(facet::Facet, Debug, Clone)]
 pub struct InterpolatedStringExpr {
     /// The parts of the interpolated string, alternating text and expressions.
     pub parts: Vec<StringPart>,
 }
 
 /// An import expression: `import "path/to/file"`.
-#[derive(Debug, Clone)]
+#[derive(facet::Facet, Debug, Clone)]
 pub struct ImportExpr {
     /// The import path as written in source (string literal content).
     pub path: String,
@@ -627,7 +639,7 @@ pub struct ImportExpr {
 }
 
 /// A CLI literal: `@grammar[ args… ]` — a tool command typed by its grammar.
-#[derive(Debug, Clone)]
+#[derive(facet::Facet, Debug, Clone)]
 pub struct CliLiteralExpr {
     /// The grammar name after `@` (e.g. `cc`).
     pub grammar: String,
@@ -640,7 +652,7 @@ pub struct CliLiteralExpr {
 /// One CLI-literal argument: adjacent text + interpolation pieces. A `$name` or
 /// `${expr}` hole is lowered to a [`StringPart::Expr`] (a real sub-expression
 /// that resolves and type-checks like any other).
-#[derive(Debug, Clone)]
+#[derive(facet::Facet, Debug, Clone)]
 pub struct CliArgIr {
     /// Span of the whole argument, for diagnostics (e.g. an unknown flag).
     pub span: SourceSpan,
@@ -648,7 +660,7 @@ pub struct CliArgIr {
 }
 
 /// A fail expression: `fail "message"` or `fail expr`.
-#[derive(Debug, Clone)]
+#[derive(facet::Facet, Debug, Clone)]
 pub struct FailExpr {
     /// The message expression. `None` for bare `fail`.
     pub message: Option<ExprId>,

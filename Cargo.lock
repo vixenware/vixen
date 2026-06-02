@@ -3980,6 +3980,7 @@ version = "0.1.0"
 dependencies = [
  "command-grammar-vx",
  "command-model",
+ "facet",
  "margin",
  "rowan",
  "vx-package",
@@ -4116,6 +4117,7 @@ dependencies = [
 name = "vx-types"
 version = "0.1.0"
 dependencies = [
+ "facet",
  "vx-parser",
 ]
 
