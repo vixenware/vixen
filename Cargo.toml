@@ -4,6 +4,7 @@ members = [
   "crates-plus/*",
 
   ## lang crates
+  "crates/vx-span",
   "crates/vx-parser",
   "crates/vx-package",
   "crates/vx-types",
@@ -57,6 +58,7 @@ vx-io = { path = "crates/vx-io" }
 vx-vfs = { path = "crates/vx-vfs" }
 vx-vfsd = { path = "crates/vx-vfsd" }
 vx-vfs-types = { path = "crates/vx-vfs-types" }
+vx-span = { path = "crates/vx-span" }
 vx-parser = { path = "crates/vx-parser" }
 vx-package = { path = "crates/vx-package" }
 vx-ir = { path = "crates/vx-ir" }

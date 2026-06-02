@@ -4075,6 +4075,13 @@ dependencies = [
 ]
 
 [[package]]
+name = "vx-span"
+version = "0.1.0"
+dependencies = [
+ "facet",
+]
+
+[[package]]
 name = "vx-stdlib"
 version = "0.1.0"
 
