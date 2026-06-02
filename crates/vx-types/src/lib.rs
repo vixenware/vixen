@@ -362,9 +362,42 @@ pub struct TypeEnv {
     intern_table: HashMap<Ty, TypeId>,
 }
 
+/// Place each `(id, value)` at its id index in a dense `Vec`, filling unused slots
+/// with `filler` — sparse-in-original-id-space reconstruction for the exec mirror.
+fn densify<Id, T: Clone>(pairs: Vec<(Id, T)>, idx: impl Fn(&Id) -> usize, filler: T) -> Vec<T> {
+    if pairs.is_empty() {
+        return Vec::new();
+    }
+    let max = pairs.iter().map(|(id, _)| idx(id)).max().unwrap();
+    let mut v = vec![filler; max + 1];
+    for (id, val) in pairs {
+        v[idx(&id)] = val;
+    }
+    v
+}
+
 impl TypeEnv {
     pub fn new() -> Self {
         Self::default()
+    }
+
+    /// Rebuild a read-only env from sparse `(id, value)` pairs — the exec **mirror**
+    /// install step. Each value lands at its original id index (holes filled with a
+    /// placeholder that is never read, because a complete bundle only references
+    /// collected ids). The name/intern indices stay empty: a mirror never interns a
+    /// new `Ty` or resolves a name — it only reads what the orchestrator allocated.
+    pub fn from_sparse(types: Vec<(TypeId, Ty)>, defs: Vec<(TypeDefId, TypeDef)>) -> Self {
+        let types = densify(types, |id| id.0 as usize, Ty::Poison);
+        let defs = match defs.first().map(|(_, d)| d.clone()) {
+            Some(filler) => densify(defs, |id| id.0 as usize, filler),
+            None => Vec::new(),
+        };
+        Self {
+            defs,
+            name_to_def: HashMap::new(),
+            types,
+            intern_table: HashMap::new(),
+        }
     }
 
     // ----- Definitions -----

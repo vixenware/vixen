@@ -82,3 +82,46 @@ fn bundle_collects_the_reachable_closure_across_resolution_edges() {
     assert_eq!(back.types.len(), bundle.types.len(), "types");
     assert_eq!(back.type_defs.len(), bundle.type_defs.len(), "type_defs");
 }
+
+/// The mirror installs the bundle in the original id space and reads every collected
+/// node back identically — `arena[id]` and `env.get_ty(id)` match the orchestrator's.
+#[test]
+fn install_reconstructs_every_collected_node_in_place() {
+    let fe = compile_source(SRC, "observe").expect("front-end compiles");
+    let entry = fn_body(&fe.program.arena, "observe");
+    let bundle = reachable(&fe.program.arena, &fe.env, entry);
+
+    let (prog, env) = bundle.install();
+
+    // The entry body lands at its verbatim id.
+    assert_eq!(
+        prog.arena[entry].root_expr,
+        fe.program.arena[entry].root_expr
+    );
+
+    // Every collected expr/body reconstructs in place (Debug-equal — nodes are Clone,
+    // not PartialEq, so we compare their rendered form).
+    for (id, _) in &bundle.exprs {
+        assert_eq!(
+            format!("{:?}", prog.arena[*id]),
+            format!("{:?}", fe.program.arena[*id]),
+            "expr {id:?} reconstructs in place"
+        );
+    }
+    for (id, _) in &bundle.bodies {
+        assert_eq!(
+            format!("{:?}", prog.arena[*id]),
+            format!("{:?}", fe.program.arena[*id]),
+            "body {id:?} reconstructs in place"
+        );
+    }
+    // Every collected type resolves to the same structural `Ty` under the same id.
+    for (id, ty) in &bundle.types {
+        assert_eq!(env.get_ty(*id), ty, "type {id:?} installed verbatim");
+        assert_eq!(
+            env.get_ty(*id),
+            fe.env.get_ty(*id),
+            "type {id:?} matches origin"
+        );
+    }
+}

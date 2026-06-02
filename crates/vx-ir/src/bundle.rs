@@ -78,6 +78,52 @@ pub fn reachable(arena: &VirArena, env: &TypeEnv, entry: BodyId) -> Bundle {
     c.into_bundle(entry)
 }
 
+impl Bundle {
+    /// Install this bundle into a fresh `VirProgram` + `TypeEnv` in the **original id
+    /// space** — the mirror side. Each node lands at its verbatim id; the holes (ids
+    /// the observer can't reach) hold placeholders that eval never indexes, because
+    /// the closure is complete. Scopes/source-units stay empty: eval reads neither
+    /// when a body is invoked directly.
+    pub fn install(&self) -> (crate::build::VirProgram, TypeEnv) {
+        let arena = VirArena {
+            exprs: densify(&self.exprs, |id| id.index()),
+            stmts: densify(&self.stmts, |id| id.index()),
+            patterns: densify(&self.patterns, |id| id.index()),
+            bindings: densify(&self.bindings, |id| id.index()),
+            bodies: densify(&self.bodies, |id| id.index()),
+            items: densify(&self.items, |id| id.index()),
+            scopes: Vec::new(),
+            type_refs: densify(&self.type_refs, |id| id.index()),
+            source_units: Vec::new(),
+            imports: std::collections::HashMap::new(),
+            grammars: std::collections::HashMap::new(),
+        };
+        let env = TypeEnv::from_sparse(self.types.clone(), self.type_defs.clone());
+        (
+            crate::build::VirProgram {
+                arena,
+                source_units: Vec::new(),
+            },
+            env,
+        )
+    }
+}
+
+/// Reconstruct a dense node `Vec` from `(id, node)` pairs: place each at its id
+/// index, fill holes with a clone of the first node. The holes are never indexed —
+/// a complete bundle only references collected ids — so their content is irrelevant.
+fn densify<Id: Copy, T: Clone>(pairs: &[(Id, T)], idx: impl Fn(Id) -> usize) -> Vec<T> {
+    if pairs.is_empty() {
+        return Vec::new();
+    }
+    let max = pairs.iter().map(|(id, _)| idx(*id)).max().unwrap();
+    let mut v = vec![pairs[0].1.clone(); max + 1];
+    for (id, node) in pairs {
+        v[idx(*id)] = node.clone();
+    }
+    v
+}
+
 struct Collector<'a> {
     arena: &'a VirArena,
     env: &'a TypeEnv,
