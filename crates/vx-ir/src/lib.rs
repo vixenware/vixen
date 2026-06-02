@@ -32,6 +32,7 @@ pub mod arena;
 pub mod binding;
 pub mod body;
 pub mod build;
+pub mod bundle;
 pub mod cap;
 pub mod cap_check;
 pub mod capture;
@@ -60,6 +61,9 @@ pub use ids::*;
 // Re-export the arena and visitor trait.
 pub use arena::VirArena;
 pub use visitor::VirVisitor;
+
+// The exec bundle: the static reachable closure of an observer body.
+pub use bundle::{Bundle, reachable};
 
 // Re-export moved semantic types so external users can write `vx_ir::Definition`
 // etc. instead of `vx_ir::def::Definition`.
