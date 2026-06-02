@@ -20,7 +20,7 @@ use std::rc::Rc;
 use vx_ir::build::VirProgram;
 use vx_ir::expr::{
     ArrayElement, BinOp, CliArgIr, CliLiteralExpr, ExprKind, FieldExpr, FieldKey, LitKind,
-    StringPart,
+    StringPart, WhereExpr,
 };
 use vx_ir::ids::{BindingId, BodyId, ExprId, PatternId};
 use vx_ir::item::ItemKind;
@@ -31,6 +31,8 @@ use vx_types::TypeEnv;
 
 use crate::dispatch::{self, Dispatcher};
 use crate::graph::Span;
+use crate::observe::{ExecCommand, ObserveRequest, Observed};
+use crate::strand::{ObserveClientId, dispatch_observe};
 
 /// The uniform runtime envelope of a failure (the failure model's `context`) —
 /// identical for every failure regardless of the domain error type `E`. Carried by
@@ -242,6 +244,12 @@ struct Evaluator<'a> {
     dispatches: Cell<u64>,
     /// Which kernel path dispatch takes (`Off` ⇒ pure tree-walk, no dispatch).
     mode: KernelMode,
+    /// The executor an `exec(…)` dispatches its observe RPC to (the orchestrator
+    /// side). `None` when eval isn't driving exec — the mirror's observer eval, the
+    /// `.vx` test harness, every non-strand path. Set only when running on a strand
+    /// with an observe client registered; an `exec` without it poisons honestly
+    /// (dispatch_observe must park, which only a strand can do).
+    exec_client: Option<ObserveClientId>,
 }
 
 impl Evaluator<'_> {
@@ -322,8 +330,8 @@ impl Evaluator<'_> {
     fn expr_span(&self, e: ExprId) -> Option<Span> {
         let span = self.program.arena[e].span;
         Some(Span {
-            start: span.start().into(),
-            end: span.end().into(),
+            start: span.start(),
+            end: span.end(),
         })
     }
 
@@ -568,6 +576,10 @@ impl Evaluator<'_> {
             // A call: resolve the callee to a function body and evaluate it with
             // the arguments bound (lazily) to its parameters.
             ExprKind::Call(c) => self.call(c.callee, c.args.iter().map(|a| a.expr), env),
+
+            // `exec(command) where { observer: (run) => … }` — the language surface
+            // for the exec spine. The only `where`-decorated callable wired so far.
+            ExprKind::Where(w) => self.eval_where(w, env),
 
             // A CLI literal `@[ ${cmd} args… ]`: the leading hole carries the
             // grammar (a value); project it against the rendered arguments.
@@ -947,6 +959,112 @@ impl Evaluator<'_> {
         result
     }
 
+    /// `exec(command) where { observer: (run) => … }` — the eval surface of the exec
+    /// spine. Recognise the exec shape, project the command to its execution argv,
+    /// bundle the observer's *static reachable closure* (its code, not a forced
+    /// value), and dispatch the `observe` RPC to an executor **over vox** — parking
+    /// the strand until the boss drives the call and it returns. The orchestrator
+    /// ships code; the executor runs the command, builds a `Run`, evaluates the
+    /// observer there, and returns the result (`crate::observe`).
+    ///
+    /// eval must be running on a strand (so `dispatch_observe` can park, freeing its
+    /// worker): an `exec` reached off a strand — or with no executor registered —
+    /// poisons honestly rather than blocking.
+    fn eval_where(&self, w: &WhereExpr, env: &Env) -> Result<Value, Poison> {
+        // The only `where`-decorated callable wired so far is `exec(command)`: the
+        // callee is a `Call` whose own callee is the `exec` name (mirroring the
+        // `discover` recognition in `call`).
+        let ExprKind::Call(call) = &self.program.arena[w.callee].kind else {
+            return Err(poison(
+                "`where` keyword arguments are only supported on `exec` so far".into(),
+            ));
+        };
+        let is_exec = matches!(
+            &self.program.arena[call.callee].kind,
+            ExprKind::NameRef(n) if n.name == "exec"
+        );
+        if !is_exec {
+            return Err(poison(
+                "`where` keyword arguments are only supported on `exec` so far".into(),
+            ));
+        }
+
+        // The command — evaluate the single positional arg to a `Command` value and
+        // project it to the minimal `ExecCommand` (program + args) the RPC carries.
+        let command_expr = call
+            .args
+            .first()
+            .ok_or_else(|| poison("`exec` expects a command argument".into()))?
+            .expr;
+        let command = self.exec_command(&self.eval(command_expr, env)?)?;
+
+        // The observer — ship its body's reachable closure, not a forced value.
+        let observer_body = self.observer_body(w.keywords)?;
+        let bundle = vx_ir::reachable(&self.program.arena, self.env, observer_body);
+
+        // Dispatch over vox on the strand. The boss drives `observe()`; the strand
+        // parks (`AwaitingObserve`) until it lands. eval knows only the client id.
+        let client = self.exec_client.ok_or_else(|| {
+            poison(
+                "`exec` must run on a strand with an observe executor registered \
+                 (no executor available)"
+                    .into(),
+            )
+        })?;
+        let observed = dispatch_observe(client, ObserveRequest { bundle, command });
+
+        // Cross the result back into a `Value`. `Observed` is the slice-1 placeholder
+        // result enum; the general value-crossing (the producing handle for streams,
+        // structured results) lands with the output handling. A poison crossing back
+        // detonates here (I6 across the boundary).
+        match &*observed {
+            Observed::U64(n) => Ok(Value::U64(*n)),
+            Observed::Clean => Ok(Value::Unit),
+            Observed::Poisoned(reason) => Err(poison(reason.clone())),
+        }
+    }
+
+    /// Project a `Command` value to the minimal [`ExecCommand`] the `observe` RPC
+    /// carries: the literal execution argv (holes substituted), split into the
+    /// program and its arguments. Poisons if the value is not a projected command.
+    fn exec_command(&self, v: &Value) -> Result<ExecCommand, Poison> {
+        let Value::Command(cmd) = v else {
+            return Err(poison(format!("`exec` expects a Command, got {v:?}")));
+        };
+        let projected = cmd.projected.as_ref().ok_or_else(|| {
+            poison("`exec`'s command has not been projected against its grammar".into())
+        })?;
+        let (program, args) = projected
+            .execution_argv
+            .split_first()
+            .ok_or_else(|| poison("`exec`'s command has an empty argv".into()))?;
+        Ok(ExecCommand {
+            program: program.clone(),
+            args: args.to_vec(),
+        })
+    }
+
+    /// The observer body from an `exec` `where` record: find the `observer` keyword
+    /// (which must be a closure) and return its `BodyId`. Slice-1 requires an
+    /// explicit observer; the signature's default (`(run) => run.ok.out`) is a later
+    /// refinement (it lives in the sig, not the call's keyword record).
+    fn observer_body(&self, keywords: ExprId) -> Result<BodyId, Poison> {
+        let ExprKind::Record(rec) = &self.program.arena[keywords].kind else {
+            return Err(poison(
+                "`exec`'s `where` clause must be a keyword record".into(),
+            ));
+        };
+        let observer = rec
+            .fields
+            .iter()
+            .find(|f| f.name == "observer")
+            .ok_or_else(|| poison("`exec`'s `where` clause needs an `observer`".into()))?;
+        match &self.program.arena[observer.value].kind {
+            ExprKind::Closure(c) => Ok(c.body),
+            _ => Err(poison("`exec`'s `observer` must be a closure".into())),
+        }
+    }
+
     /// Bind `args` (lazy thunks in the *caller's* `caller_env`) to `body`'s
     /// parameters over `base` — a closure's captured env, or empty for a top-level
     /// function — then evaluate `body`. `body` becomes current while it runs;
@@ -1236,6 +1354,7 @@ pub fn run_in_mode(source: &str, entry: &str, mode: KernelMode) -> Result<(Outco
         dispatch: Dispatcher::default(),
         dispatches: Cell::new(0),
         mode,
+        exec_client: None,
     };
     let outcome = match ev.eval(root, &Env::new()) {
         Ok(v) => Outcome::Clean(v),
@@ -1251,13 +1370,41 @@ pub fn run_in_mode(source: &str, entry: &str, mode: KernelMode) -> Result<(Outco
 /// `program` + `env` — the exec **mirror** entry. Unlike [`run_in_mode`] it skips
 /// the front-end entirely: the mirror installs a bundle (`vx_ir::Bundle::install`)
 /// and runs its observer body here, never compiling and never allocating an id. The
-/// observer's sole argument — the `Run` — arrives in `args`.
+/// observer's sole argument — the `Run` — arrives in `args`. No exec client: the
+/// observer is a leaf (it consumes a `Run`; a nested `exec` is later).
 pub fn eval_body(
     program: &VirProgram,
     env: &TypeEnv,
     body: BodyId,
     args: Vec<Value>,
     mode: KernelMode,
+) -> Outcome {
+    eval_body_inner(program, env, body, args, mode, None)
+}
+
+/// As [`eval_body`], but with the executor an `exec(…)` in `body` dispatches to —
+/// the **orchestrator** entry. eval must run on a strand (so the `observe` RPC can
+/// park via the strand boss); register the client with
+/// [`Scheduler::register_observe_client`](crate::strand::Scheduler::register_observe_client)
+/// and pass its id here. `exec` reached without this poisons honestly.
+pub fn eval_body_with_exec(
+    program: &VirProgram,
+    env: &TypeEnv,
+    body: BodyId,
+    args: Vec<Value>,
+    mode: KernelMode,
+    exec_client: ObserveClientId,
+) -> Outcome {
+    eval_body_inner(program, env, body, args, mode, Some(exec_client))
+}
+
+fn eval_body_inner(
+    program: &VirProgram,
+    env: &TypeEnv,
+    body: BodyId,
+    args: Vec<Value>,
+    mode: KernelMode,
+    exec_client: Option<ObserveClientId>,
 ) -> Outcome {
     let ev = Evaluator {
         program,
@@ -1266,6 +1413,7 @@ pub fn eval_body(
         dispatch: Dispatcher::default(),
         dispatches: Cell::new(0),
         mode,
+        exec_client,
     };
     match ev.invoke_body_values(body, args, Env::new()) {
         Ok(v) => Outcome::Clean(v),
@@ -1454,6 +1602,7 @@ mod tests {
             dispatch: Dispatcher::default(),
             dispatches: Cell::new(0),
             mode: KernelMode::Off,
+            exec_client: None,
         };
         match ev.eval(root, &Env::new()) {
             Ok(v) => panic!("expected a poison, evaluated clean: {v:?}"),
@@ -1554,6 +1703,7 @@ mod tests {
             dispatch: Dispatcher::default(),
             dispatches: Cell::new(0),
             mode: KernelMode::Off,
+            exec_client: None,
         };
         let Value::Command(applied) = ev.eval(root, &start).expect("eval cli literal") else {
             panic!("expected a Command value");
@@ -1609,6 +1759,7 @@ mod tests {
             dispatch: Dispatcher::default(),
             dispatches: Cell::new(0),
             mode: KernelMode::Off,
+            exec_client: None,
         };
         match ev
             .eval(root_expr, &Env::new())
@@ -1656,6 +1807,7 @@ mod tests {
             dispatch: Dispatcher::default(),
             dispatches: Cell::new(0),
             mode: KernelMode::Off,
+            exec_client: None,
         };
         let Value::Command(applied) = ev.eval(root_expr, &Env::new()).expect("eval") else {
             panic!("expected a Command value");
@@ -1714,6 +1866,7 @@ mod tests {
             dispatch: Dispatcher::default(),
             dispatches: Cell::new(0),
             mode: KernelMode::Off,
+            exec_client: None,
         };
         let Value::Command(applied) = ev.eval(root_expr, &Env::new()).expect("eval") else {
             panic!("expected a Command value");

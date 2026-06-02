@@ -1,0 +1,99 @@
+//! `exec(command) where { observer }` end-to-end — the language surface of the exec
+//! spine (#3b). A real `.vx` program is compiled through the bundled front-end, then
+//! evaluated on a strand: eval hits the `where`-decorated `exec`, projects the
+//! command to its argv, bundles the observer closure's *static reachable closure*,
+//! and dispatches the `observe` RPC to an executor **over vox** (`local_observer`).
+//! The strand parks on the observe, the boss drives the vox call (the executor runs
+//! the real process, builds a `Run`, evaluates the observer against it), and the
+//! strand resumes with the result.
+//!
+//! This sits on top of `observe_on_strands` (which drives `dispatch_observe`
+//! directly): here the observer body is *extracted from the program*, by eval, from
+//! the `where { observer: (run) => … }` keyword record — no hand-built bundle.
+
+use std::rc::Rc;
+
+use command_model::examples;
+use vx_ir::compile::compile_source;
+use vx_ir::item::ItemKind;
+use vx_runtime::command::CommandValue;
+use vx_runtime::eval::{KernelMode, Outcome as EvalOutcome, Value, eval_body_with_exec};
+use vx_runtime::observe::local_observer;
+use vx_runtime::strand::{Outcome, ResourceId, Scheduler};
+
+/// Compile `exec(@[ ${cmd} ]) where { observer: (run) => run.ok }`, run it on a
+/// strand against a local executor running `binary`, and return the strand outcome.
+/// `run.ok` gates on the real exit code, so `true` → Clean and `false` → Poisoned.
+fn exec_outcome(binary: &str) -> Option<Outcome> {
+    let fe = compile_source(
+        "fn t(cmd: Command) -> Exit ( exec(@[ ${cmd} ]) where { observer: (run) => run.ok } )",
+        "t",
+    )
+    .expect("exec program compiles");
+    let entry = fe
+        .program
+        .arena
+        .items
+        .iter()
+        .find_map(|it| match &it.kind {
+            ItemKind::Function(f) if f.name == "t" => Some(f.body),
+            _ => None,
+        })
+        .expect("fn t");
+
+    let s = Scheduler::new(&[4]);
+    // Establish the observe client on the scheduler's runtime so the boss drives it.
+    let client = s.block_on(local_observer());
+    let cid = s.register_observe_client(client);
+
+    // Move the owned (Send) program + env into the strand body; the Rc-bearing
+    // command/eval state is built worker-side and never crosses a thread.
+    let program = fe.program;
+    let env = fe.env;
+    let binary = binary.to_string();
+    let strand = s.spawn(ResourceId(0), move || {
+        // A `cc`-grammar command whose binary is the real `true`/`false`. The
+        // `@[ ${cmd} ]` literal projects it to `execution_argv = [binary]`; the
+        // grammar only classifies args (there are none), not the argv that runs.
+        let cmd = Value::Command(Rc::new(CommandValue {
+            grammars: examples(),
+            grammar: "cc".to_string(),
+            binary,
+            projected: None,
+        }));
+        match eval_body_with_exec(&program, &env, entry, vec![cmd], KernelMode::Off, cid) {
+            EvalOutcome::Clean(_) => Outcome::Clean,
+            EvalOutcome::Poisoned { reason, .. } => Outcome::Poisoned(reason),
+        }
+    });
+    s.demand(strand);
+    s.run();
+    s.outcome(strand)
+}
+
+/// `true` exits 0 → the observer's `run.ok` forces to an `Exit` → `exec` returns it
+/// → the strand finishes Clean. The whole path — `where`-hook, command projection,
+/// observer bundling, observe over vox on a strand — ran end to end.
+#[test]
+fn exec_over_vox_gates_clean_on_a_successful_process() {
+    assert_eq!(
+        exec_outcome("true"),
+        Some(Outcome::Clean),
+        "exit 0 → run.ok clean → exec clean"
+    );
+}
+
+/// `false` exits 1 → the observer's `run.ok` poisons → that poison crosses back from
+/// the executor (`Observed::Poisoned`) and detonates the strand (I6 across vox).
+#[test]
+fn exec_over_vox_carries_a_failed_process_back_as_a_poison() {
+    match exec_outcome("false") {
+        Some(Outcome::Poisoned(reason)) => {
+            assert!(
+                !reason.is_empty(),
+                "the failure reason crosses back: {reason:?}"
+            )
+        }
+        other => panic!("exit 1 → run.ok poisons → exec poisons, got {other:?}"),
+    }
+}

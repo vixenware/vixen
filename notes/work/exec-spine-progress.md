@@ -40,7 +40,7 @@ tree) cross back as remote handles.
   the strand (`AwaitingObserve`), the **boss** drives the vox `observe()` on its runtime,
   resolves, wakes the strand. No `block_on` cheat. **Built + tested.**
 
-## What's DONE (18 commits this session, all green, see `git log`)
+## What's DONE (19 commits this session, all green, see `git log`)
 
 Foundation (shippable typed IR):
 - `c02dcb9c`..`8e8c9a1b` — `vx-span` (rowan-free `SourceId`/`SourceSpan`), re-point all
@@ -72,36 +72,53 @@ Over vox:
   `AwaitingRemotePart`; `drive_observe` ≈ `force_part`; boss select-branch added).
   `crates/vx-runtime/tests/observe_on_strands.rs`: a strand dispatches observe, parks,
   the boss drives the vox call, resumes — clean on exit 0, failure crossing back on exit 1.
+- **#3b, the eval `where`-hook (DONE):** `exec(cmd) where { observer }` is a real language
+  feature now. `ExprKind::Where` arm in `eval.rs` (`eval_where`): recognise exec (callee is
+  a `Call` of `NameRef "exec"`, mirroring `discover`), project the command to its argv
+  (`exec_command`), pull the observer closure body out of the `where` record
+  (`observer_body`), `vx_ir::reachable(&arena, env, observer_body)` → `Bundle`, then
+  `dispatch_observe(client, ObserveRequest{bundle, command})`; cross `Observed` back to a
+  `Value` (poison detonates). New orchestrator entry `eval::eval_body_with_exec(…,
+  exec_client)` threads the client onto a new `Evaluator.exec_client` field; off-strand /
+  no-client `exec` poisons honestly. `strand::ObserveClientId` is now `pub`; `ObserveSlot`'s
+  request boxed + a collapsible-if collapsed (clippy clean).
+  `crates/vx-runtime/tests/exec_on_strands.rs`: `fn t(cmd: Command) -> Exit ( exec(@[ ${cmd}
+  ]) where { observer: (run) => run.ok } )` runs end-to-end over vox on a strand — Clean on
+  `true` (exit 0), the failure crossing back as a poison on `false` (exit 1).
 
-## NEXT: #3b — the eval `where`-hook (make `exec(cmd) where {observer}` real)
+  **What the verify-first found (the §5/#3b grounding was partly stale):**
+  - `exec` is **already declared** — in `crates/vx-stdlib/std/build.vx` (not core.vx), with
+    the *full* §5 sig incl. defaults + `#sandbox`: `fn exec[T](command: Command) where { env,
+    mounts, writable, create_dirs, observer: Fn(Run) #sandbox -> T = (run) => run.ok.out } ->
+    T`. No new declaration needed.
+  - The type checker **already fully handles `where`-kwargs** — `calls::infer_where` binds
+    the `where { observer: … }` record to the sig's `keyword_params`, binds the closure's
+    `run: Run`, and substitutes `T` from `run.ok : Exit`. `keyword_params` come from a fn
+    decl's `where { … }` clause (`type_collect::collect_fn_sig_from_body`, `param.is_keyword`).
+  - **Surface syntax is `where { }`, not `with { }`** (the notes' §5 "`with`" was conceptual):
+    `parser::fn_decl_contents` parses fn-decl keyword params with `WHERE_KW`, and a call-site
+    `f(a) where { k: v }` is `ExprKind::Where` (a `Record` keywords expr). `ExprKind::With` is
+    the unrelated functional-update `value with { field: new }`. The `zoo/*.vx` files using
+    `exec(...) with { observer }` are stale and don't parse on today's grammar.
+  - `@[ … ]` CLI literals type as `Poison` (`infer_cli_literal` — "Command not modelled in
+    the type system yet"), which is compatible with `command: Command` (poison branch), so
+    `exec(@[ … ])` type-checks fine.
 
-The strand→observe bridge is built + tested underneath; what's missing is the **language
-surface**. Grounding found (eval.rs has NO `ExprKind::Where` handling; `exec` is NOT a
-stdlib fn):
+## NEXT (pick up here)
 
-1. **Declare `exec` in `crates/vx-stdlib/std/core.vx`** — the §5 signature
-   `fn exec[T](command: Command) with { observer: Fn(Run) -> T } -> T` (or a stripped
-   start: just `command` + `observer`, no `env`/`mounts`/…), so the program type-checks.
-2. **OPEN QUESTION (decides the size):** does the type checker already handle `where`-kwargs
-   (the §5 "surviving kwargs" — binding a `where { observer: … }` record to a function's
-   `with`-params + the `with`-clause signature + `Fn(Run)->T`)? **Verify first.** If yes,
-   #3b is mostly the eval hook. If no, #3b also includes that type-checking work
-   (vx-ir/src/type_check) — a separate chunk.
-3. **eval `ExprKind::Where { callee, keywords }` handling** (`crates/vx-runtime/src/eval.rs`,
-   add an arm; today Where is unhandled). Recognize the exec case: `callee` is a `Call`
-   whose callee is `NameRef "exec"` — mirror the `if n.name == "discover"` pattern at
-   eval.rs:~850. Extract: the command (eval the call's arg → a `Command`/`CommandValue` →
-   `ExecCommand{program=argv[0], args=argv[1..]}` via `command.rs::CommandValue.projected
-   .execution_argv`); the observer (the `keywords` record's `observer` field expr → a
-   `ClosureExpr` → its `BodyId`).
-4. **Dispatch:** `reachable(program.arena, env, observer_body) -> Bundle`, then
-   `strand::dispatch_observe(client_id, ObserveRequest{bundle, command})` → `Observed` →
-   convert to a `Value`. eval **must run on a strand** (so `dispatch_observe` can park) —
-   run the test program via the `Scheduler`, with the local `Observe` client registered
-   (`register_observe_client`). client_id is trivially "the local executor" for now;
-   executor *selection* (multiple) is §4 routing, later.
-5. Test: a `.vx` program doing `exec(@[ ... ]) where { observer: (run) => run.ok }` runs
-   end-to-end over vox on a strand and returns the result.
+The exec language surface is live end-to-end, but slice-1-thin. Natural next steps:
+- **The other `exec` kwargs + the default observer.** `eval_where` reads only `observer`
+  from the `where` record and *requires* it; `env`/`mounts`/`writable`/`create_dirs` and the
+  signature's default observer (`(run) => run.ok.out`, which lives in the *sig*, not the
+  call's record) are ignored/unsupported. Wiring the default means reading the keyword
+  param's default-value expr from the resolved sig when the call omits `observer`.
+- **The general value-crossing (task #5, ③).** `Observed{U64|Clean|Poisoned}` is a
+  placeholder: a non-U64 clean observer result collapses to `Value::Unit`. The real result
+  type `T` crosses back as a value/handle — and `run.ok.out` / `run.stream.*` return the
+  genuinely-remote outputs (the `Stream`/`Tree` handle variants + the `eval.force →
+  force_remote` join). That's where streaming observers (`-> Stream[Artifact]`) land.
+- **Executor *selection*.** `exec_client` is "the local executor" (one, registered by the
+  test). §4 routing — choosing an executor from the command's ability provenance — is later.
 
 ## Deferred / stubbed (don't forget, not now)
 - `.stream` face = empty struct; `Stream`/`Tree` handle `Value` variants + the

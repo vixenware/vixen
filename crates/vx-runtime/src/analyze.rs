@@ -596,8 +596,8 @@ fn bin_kind(op: BinOp) -> KernelOp {
 
 fn to_span(span: vx_parser::SourceSpan) -> Span {
     Span {
-        start: span.start().into(),
-        end: span.end().into(),
+        start: span.start(),
+        end: span.end(),
     }
 }
 

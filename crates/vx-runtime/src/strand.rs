@@ -196,14 +196,18 @@ enum PartSlot {
 type ObserveReqId = u32;
 
 /// Identifies a registered [`ObserveClient`] (a boss-held vox client to an executor).
-type ObserveClientId = u32;
+/// eval holds one (the executor an `exec` dispatches to) and hands it to
+/// [`dispatch_observe`]; executor *selection* among several is later (§4 routing).
+pub type ObserveClientId = u32;
 
 /// The rendezvous slot for one `observe` demand: the request (read by the boss to
-/// drive the call) until it resolves to the executor's [`Observed`] result.
+/// drive the call) until it resolves to the executor's [`Observed`] result. The
+/// request is boxed — it carries the observer's whole bundle, dwarfing the resolved
+/// arm, and an in-flight observe is rare enough that the indirection is free.
 enum ObserveSlot {
     Pending {
         client: ObserveClientId,
-        request: ObserveRequest,
+        request: Box<ObserveRequest>,
         signal: Signal,
     },
     Resolved(Arc<Observed>),
@@ -514,21 +518,19 @@ impl Scheduler {
                         reason: ParkReason::AwaitingObserve { req },
                         ..
                     } = &msg
+                        && observe_driving.insert(*req)
                     {
-                        if observe_driving.insert(*req) {
-                            let (client_id, request) = {
-                                let reg = registry.lock().unwrap();
-                                match reg.observes.get(req) {
-                                    Some(ObserveSlot::Pending { client, request, .. }) => {
-                                        (*client, request.clone())
-                                    }
-                                    _ => unreachable!("an observe park without a pending slot"),
+                        let (client_id, request) = {
+                            let reg = registry.lock().unwrap();
+                            match reg.observes.get(req) {
+                                Some(ObserveSlot::Pending { client, request, .. }) => {
+                                    (*client, request.as_ref().clone())
                                 }
-                            };
-                            let client =
-                                self.0.borrow().observe_clients[client_id as usize].clone();
-                            observe_drives.push(drive_observe(client, *req, request));
-                        }
+                                _ => unreachable!("an observe park without a pending slot"),
+                            }
+                        };
+                        let client = self.0.borrow().observe_clients[client_id as usize].clone();
+                        observe_drives.push(drive_observe(client, *req, request));
                     }
                     self.complete(msg);
                 }
@@ -916,7 +918,7 @@ pub fn dispatch_observe(client: ObserveClientId, request: ObserveRequest) -> Arc
             req,
             ObserveSlot::Pending {
                 client,
-                request,
+                request: Box::new(request),
                 signal: signal.clone(),
             },
         );
