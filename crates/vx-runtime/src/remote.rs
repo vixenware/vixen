@@ -147,6 +147,16 @@ pub struct RemoteHandle {
 }
 
 impl RemoteHandle {
+    /// Wrap a [`ProducingClient`] obtained out-of-band — e.g. opened over a **virtual
+    /// connection** (`session.open::<ProducingClient>()`) to an executor serving its
+    /// outputs. The consumer forces parts through it exactly as a [`channel`]-made one;
+    /// register it with `Scheduler::register_handle` and `force_remote` pulls over it.
+    pub fn new(client: ProducingClient) -> RemoteHandle {
+        RemoteHandle {
+            client: Arc::new(client),
+        }
+    }
+
     /// Force one part: a vox `force` call that blocks until the producer yields it
     /// or declares it [`Part::Absent`]. `Err` only if the connection is gone.
     pub async fn force(&self, key: PartKey) -> Result<Part, &'static str> {
@@ -167,16 +177,25 @@ impl RemoteHandle {
     }
 }
 
+/// Create a producer and the service that serves it, sharing state, with **no
+/// transport of its own**. The caller serves the [`ProducerService`] where it wants
+/// — e.g. on a virtual connection via `ProducingDispatcher::new(service)`, the way an
+/// executor exposes a run's outputs — and drives the outputs through the [`Producer`].
+/// (cf. [`channel`], which also stands up an in-process link for tests.)
+pub fn producer() -> (ProducerService, Producer) {
+    let shared = Arc::new(Shared {
+        state: Mutex::new(ProducerState::default()),
+        notify: Notify::new(),
+    });
+    (ProducerService(Arc::clone(&shared)), Producer(shared))
+}
+
 /// Stand up a producer and a consumer connected by an in-process vox memory link
 /// (the same `establish` dance the daemon uses for in-process services). Returns
 /// the consumer-side [`RemoteHandle`] and the producer-side [`Producer`]; they
 /// share no memory — only the vox connection.
 pub async fn channel() -> (RemoteHandle, Producer) {
-    let shared = Arc::new(Shared {
-        state: Mutex::new(ProducerState::default()),
-        notify: Notify::new(),
-    });
-    let service = ProducerService(Arc::clone(&shared));
+    let (service, producer) = producer();
 
     let (client_link, server_link) = vox::memory_link_pair(64);
     tokio::spawn(async move {
@@ -204,12 +223,7 @@ pub async fn channel() -> (RemoteHandle, Producer) {
         .establish::<ProducingClient>()
         .await
         .expect("establish in-process Producing client");
-    (
-        RemoteHandle {
-            client: Arc::new(client),
-        },
-        Producer(shared),
-    )
+    (RemoteHandle::new(client), producer)
 }
 
 #[cfg(test)]

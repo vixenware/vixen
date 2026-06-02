@@ -40,7 +40,7 @@ tree) cross back as remote handles.
   the strand (`AwaitingObserve`), the **boss** drives the vox `observe()` on its runtime,
   resolves, wakes the strand. No `block_on` cheat. **Built + tested.**
 
-## What's DONE (21 commits this session, all green, see `git log`)
+## What's DONE (23 commits this session, all green, see `git log`)
 
 Foundation (shippable typed IR):
 - `c02dcb9c`..`8e8c9a1b` — `vx-span` (rowan-free `SourceId`/`SourceSpan`), re-point all
@@ -125,28 +125,44 @@ Over vox:
   fell through to `vec![]`) — now reconstructed from the segment tokens. `Value::Tree` also
   got a `<tree>` display arm in vx-daemon's `test_runner::map_value`.
 
+## Vox mechanics for the crossing (settled with Amos — do not relitigate)
+- A vox service method **returns plain data and cannot return a channel** (returning channels
+  used to work; it was confusing and got forbidden). Channels ride **in args only**. Arg
+  directionality (0.8.2 `channel.rs`, verified by round-trip): `Tx<T>` ⇒ handler sends → caller;
+  `Rx<T>` ⇒ handler receives ← caller. So to **push** a stream back, the method takes a `Tx<T>`.
+- **Request/response demand-pull is NOT faked over a channel pair** — that's what **virtual
+  connections** are for (Amos was explicit). The executor serves the `Producing` service on
+  inbound virtual connections; the orchestrator does `observe_client.session.open::<ProducingClient>(
+  ConnectionSettings { parity: Odd, max_concurrent_requests, initial_channel_credit })` to get
+  a client, wraps it `RemoteHandle::new` → `register_handle` → `HandleId`, and `force_remote`
+  pulls `force(PartKey)` over the vconn. **Verified end-to-end:** `tests/remote_tree_over_vconn.rs`
+  (force a tree path over a Producing vconn, on a strand). The vconn opens fine over our
+  `memory_link_pair` + `acceptor_on`/`initiator_on` + `Bare` establish.
+- **Conduits are a different mechanism — not this.** **Do NOT read or compile against `~/vox`**
+  — divergent, different codec; the contract is the published **vox 0.8.2** the workspace locks.
+- Built toward it: `remote::producer() -> (ProducerService, Producer)` (shared state, no
+  transport — the executor serves the service where it wants) and `RemoteHandle::new(ProducingClient)`
+  (wrap a vconn-opened client); `channel()` now DRYs through both.
+
 ## NEXT (pick up here)
 
-The eval *consumer* of a remote handle is real; what's left is the executor *producing* one,
-plus streams and the structured failure crossing. Assemble one by one:
-- **Make `exec` produce the handle (the other half of the crossing).** Today `to_wire`
-  poisons on `Value::Tree` (honest seam) — the executor doesn't yet serve its outputs.
-  **Vox mechanics (settled with Amos — do not relitigate):** a vox service method returns
-  plain data and **cannot return a channel**; channels are **passed as arguments**. So to
-  hand the outputs *back*, `observe` does **not** return them — it grows a **channel-end
-  parameter**, the executor writes output parts into it, and the orchestrator holds the
-  receiving end. **Conduits are a different mechanism — not this.** Per 0.8.2 `channel.rs`,
-  method-arg directionality is: `Tx<T>` ⇒ handler sends → caller; `Rx<T>` ⇒ handler
-  receives ← caller — **verify with a minimal `memory_link_pair` round-trip before wiring
-  `observe`**, so the stream can't point the wrong way. The orchestrator's receiving end
-  becomes the `Value::Tree`/`Value::Stream` handle (`register_handle` → `HandleId`) that
-  `force_remote` already pulls. Also needs `run_value` to build `run.ok.out`/`run.stream.out`
-  as real handles (today `.stream` = empty struct, `Exit.out` unbuilt).
-  **Do NOT read or compile against `~/vox`** — it's a divergent, different-codec version;
-  the contract is the published **vox 0.8.2** the workspace locks.
-- **Streams.** `Value::Stream` + forcing `PartKey::StreamItem(n)` + the eval stream ops
-  (`.lines()`/`.map()`/`.filter_map()`/`.collect()`), behind streaming observers
-  (`-> Stream[Artifact]`, cf. `zoo/rustc-hello.vx`).
+Both halves of the **tree** crossing exist in isolation — eval pulls a `Value::Tree` via
+`force_remote` (consumer), and `force_remote` pulls over a `Producing` vconn (producer
+connection). What's left is to **join them through `exec`**, then streams + the failure crossing:
+- **Wire `exec` to produce the tree handle.** The executor (in `observe`) runs the command,
+  builds its outputs into a `remote::producer()` (`write_path` per finalized output), and serves
+  that `ProducerService` on inbound `Producing` vconns (extend `local_observer`'s acceptor). The
+  observer's result tree (`run.ok.out`) becomes a `Value::Tree`; `to_wire` (today poisons on it)
+  emits a tree-handle marker. **The friction to design:** `from_wire` runs sync on a strand
+  worker, but opening the vconn + `register_handle` is async + boss-side — so the **boss** should
+  open the vconn and register during `dispatch_observe`'s resolution (the `Observed` carries the
+  marker), handing eval back a `Value::Tree(HandleId)`. Also needs `run_value` to build
+  `run.ok.out`/`run.stream.out` as real handles (today `.stream` = empty struct, `Exit.out` unbuilt).
+- **Streams** (the *push* side, uses a `Tx`, not a vconn). `observe` grows a `Tx<…>` arg for a
+  streaming observer result (`-> Stream[Artifact]`); the executor pushes items, the orchestrator's
+  `Rx` feeds them in. `Value::Stream` + `PartKey::StreamItem(n)` + eval stream ops
+  (`.lines()`/`.map()`/`.filter_map()`/`.collect()`). The channel round-trip is verified; cf.
+  `zoo/rustc-hello.vx`.
 - **The structured failure crossing.** `Observed::Poisoned(String)` still crosses a bare
   message; the failure model wants the domain error *value* (`ProcError`) + the
   `FailureContext` (span/demand-path) to cross, so a caught `run.ok?` → `Result[Exit,
