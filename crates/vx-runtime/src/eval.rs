@@ -31,9 +31,9 @@ use vx_types::TypeEnv;
 
 use crate::dispatch::{self, Dispatcher};
 use crate::graph::Span;
-use crate::observe::{ExecCommand, ObserveRequest, Observed, WireValue};
+use crate::observe::{ExecCommand, ObserveRequest, WireValue};
 use crate::remote::{Part, PartKey};
-use crate::strand::{HandleId, ObserveClientId, dispatch_observe, force_remote};
+use crate::strand::{HandleId, ObserveClientId, ObserveOutcome, dispatch_observe, force_remote};
 
 /// The uniform runtime envelope of a failure (the failure model's `context`) —
 /// identical for every failure regardless of the domain error type `E`. Carried by
@@ -1049,14 +1049,14 @@ impl Evaluator<'_> {
         })?;
         let observed = dispatch_observe(client, ObserveRequest { bundle, command });
 
-        // Reconstruct the observer's result as a real `Value` — `exec(…)` evaluates to
-        // exactly what the observer returned, crossed back over vox. A poison crossing
-        // back detonates here (I6 across the boundary). (The genuinely-remote leaves —
-        // `run.stream.*`, the producing tree — cross as handles, not inline; that join
-        // is its own piece.)
+        // The result, with handles already crossed by the boss: a data value rebuilds
+        // (`from_wire`); a returned producing tree is a registered `HandleId` that
+        // `force_remote` pulls (`run.stream.out.file(@p)` over vox); a poison detonates
+        // here (I6 across the boundary).
         match &*observed {
-            Observed::Value(wire) => from_wire(wire),
-            Observed::Poisoned(reason) => Err(poison(reason.clone())),
+            ObserveOutcome::Value(wire) => from_wire(wire),
+            ObserveOutcome::Tree(handle) => Ok(Value::Tree(*handle)),
+            ObserveOutcome::Poisoned(reason) => Err(poison(reason.clone())),
         }
     }
 

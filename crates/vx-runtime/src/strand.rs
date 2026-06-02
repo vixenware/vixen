@@ -43,8 +43,8 @@ use corosensei::{Coroutine, CoroutineResult, Yielder};
 use futures_util::stream::{FuturesUnordered, StreamExt};
 use tokio::sync::mpsc::{UnboundedReceiver, UnboundedSender};
 
-use crate::observe::{ObserveClient, ObserveRequest, Observed};
-use crate::remote::{Part, PartKey, RemoteHandle};
+use crate::observe::{ObserveClient, ObserveRequest, Observed, WireValue};
+use crate::remote::{Part, PartKey, ProducingClient, RemoteHandle};
 
 /// What a strand yields when it parks: the typed reason **plus** a backtrace
 /// captured on the strand's own (deep) stack at the park point — the stall report's
@@ -210,7 +210,24 @@ enum ObserveSlot {
         request: Box<ObserveRequest>,
         signal: Signal,
     },
-    Resolved(Arc<Observed>),
+    Resolved(Arc<ObserveOutcome>),
+}
+
+/// What an `observe` resolves to **after the boss has crossed any handles** — what
+/// [`dispatch_observe`] hands eval. Distinct from the wire [`Observed`]: a returned
+/// producing tree (`WireValue::Tree`) has been turned into a [`HandleId`] here (the
+/// boss opened a `Producing` virtual connection to the executor and registered it), so
+/// eval can `force_remote` it. Scalars/compounds ride as the [`WireValue`] they
+/// crossed as. (Slice-1 crosses a *top-level* tree; a tree nested inside a `Value`
+/// still poisons in `from_wire` until the general walk lands.)
+#[derive(Debug)]
+pub enum ObserveOutcome {
+    /// A data value (no top-level producing tree).
+    Value(WireValue),
+    /// A returned producing tree, opened + registered as `HandleId`.
+    Tree(HandleId),
+    /// The observer poisoned, or the run couldn't start / its outputs couldn't be served.
+    Poisoned(String),
 }
 
 struct Inner {
@@ -549,15 +566,30 @@ impl Scheduler {
                     }
                     driving.remove(&key);
                 }
-                // An observe RPC landed: resolve its slot and wake the strand on it.
-                Some((req, observed)) = observe_drives.next(), if !observe_drives.is_empty() => {
+                // An observe RPC landed: cross any returned tree handle (register the
+                // `Producing` vconn the drive opened), resolve the slot, wake the strand.
+                Some((req, observed, producing)) = observe_drives.next(), if !observe_drives.is_empty() => {
+                    let outcome = match (observed, producing) {
+                        // A producing tree: register its vconn client as a handle eval
+                        // can `force_remote`.
+                        (Observed::Value(WireValue::Tree), Some(client)) => {
+                            ObserveOutcome::Tree(self.register_handle(RemoteHandle::new(client)))
+                        }
+                        (Observed::Value(WireValue::Tree), None) => ObserveOutcome::Poisoned(
+                            "`exec` returned a tree, but opening its Producing virtual \
+                             connection failed"
+                                .into(),
+                        ),
+                        (Observed::Value(value), _) => ObserveOutcome::Value(value),
+                        (Observed::Poisoned(reason), _) => ObserveOutcome::Poisoned(reason),
+                    };
                     let sig = {
                         let mut reg = registry.lock().unwrap();
                         match reg.observes.get(&req) {
                             Some(ObserveSlot::Pending { signal, .. }) => {
                                 let sig = signal.clone();
                                 reg.observes
-                                    .insert(req, ObserveSlot::Resolved(Arc::new(observed)));
+                                    .insert(req, ObserveSlot::Resolved(Arc::new(outcome)));
                                 Some(sig)
                             }
                             _ => None,
@@ -703,16 +735,37 @@ async fn force_part(client: RemoteHandle, key: PartId) -> (PartId, Part) {
 
 /// Drive one `observe` RPC to completion on the boss runtime. A connection error
 /// becomes a poisoned [`Observed`], so the consumer always gets a definite answer.
+///
+/// If the observer returned a producing tree (`WireValue::Tree`), also open a
+/// `Producing` **virtual connection** on the *same* observe session — that's the demand
+/// path into the executor's outputs. The returned [`ProducingClient`] is registered by
+/// the boss loop (it owns the handle table); we open here because the session lives on
+/// the [`ObserveClient`].
 async fn drive_observe(
     client: Arc<ObserveClient>,
     req: ObserveReqId,
     request: ObserveRequest,
-) -> (ObserveReqId, Observed) {
+) -> (ObserveReqId, Observed, Option<ProducingClient>) {
     let observed = match client.observe(request).await {
         Ok(o) => o,
         Err(e) => Observed::Poisoned(format!("observe RPC failed: {e:?}")),
     };
-    (req, observed)
+    let producing = if matches!(observed, Observed::Value(WireValue::Tree)) {
+        match client.session.as_ref() {
+            Some(session) => session
+                .open::<ProducingClient>(vox::ConnectionSettings {
+                    parity: vox::Parity::Odd,
+                    max_concurrent_requests: 64,
+                    initial_channel_credit: 16,
+                })
+                .await
+                .ok(),
+            None => None,
+        }
+    } else {
+        None
+    };
+    (req, observed, producing)
 }
 
 /// The least-loaded worker (fewest outstanding commands); ties go to the lowest
@@ -905,7 +958,7 @@ pub fn force_remote(handle: HandleId, part: PartKey) -> Arc<Part> {
 /// boss's registry, parks (`AwaitingObserve`, freeing the worker) until the boss drives
 /// the vox `observe()` and resolves it. eval knows only the [`ObserveClientId`], never
 /// the live vox client. One-shot: each call is a distinct demand (no dedup).
-pub fn dispatch_observe(client: ObserveClientId, request: ObserveRequest) -> Arc<Observed> {
+pub fn dispatch_observe(client: ObserveClientId, request: ObserveRequest) -> Arc<ObserveOutcome> {
     let registry = REGISTRY
         .with(|r| r.borrow().clone())
         .expect("dispatch_observe outside a worker");

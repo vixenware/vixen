@@ -7,8 +7,8 @@
 use vx_ir::compile::compile_source;
 use vx_ir::item::ItemKind;
 use vx_ir::reachable;
-use vx_runtime::observe::{ExecCommand, ObserveRequest, Observed, local_observer};
-use vx_runtime::strand::{Outcome, ResourceId, Scheduler, dispatch_observe};
+use vx_runtime::observe::{ExecCommand, ObserveRequest, local_observer};
+use vx_runtime::strand::{ObserveOutcome, Outcome, ResourceId, Scheduler, dispatch_observe};
 
 /// Bundle `(run) => run.ok` — clean on exit 0, poisons on nonzero.
 fn observer_bundle() -> vx_ir::Bundle {
@@ -50,8 +50,8 @@ fn a_strand_dispatches_an_observe_and_resumes_clean() {
     let strand = s.spawn(ResourceId(0), move || {
         let observed = dispatch_observe(cid, req);
         match &*observed {
-            Observed::Poisoned(why) => Outcome::Poisoned(format!("observe poisoned: {why}")),
-            // Clean (or a U64) means the observer ran and `run.ok` was clean.
+            ObserveOutcome::Poisoned(why) => Outcome::Poisoned(format!("observe poisoned: {why}")),
+            // A crossed value (or tree handle) means the observer ran and `run.ok` was clean.
             _ => Outcome::Clean,
         }
     });
@@ -72,7 +72,7 @@ fn a_strand_observe_carries_back_the_processs_failure() {
     let strand = s.spawn(ResourceId(0), move || {
         let observed = dispatch_observe(cid, req);
         match &*observed {
-            Observed::Poisoned(_) => Outcome::Poisoned("run.ok poisoned".into()),
+            ObserveOutcome::Poisoned(_) => Outcome::Poisoned("run.ok poisoned".into()),
             other => Outcome::Poisoned(format!("expected a poison, got {other:?}")),
         }
     });
