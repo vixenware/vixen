@@ -40,12 +40,12 @@ fn parameter_hints_anchor_on_effective_argument_tokens() {
     let text = r#"
 fn discover_like(class: String, probe: Fn(String) -> String) {}
 fn run(args: Array[String]) {}
-fn executor_class(label: String) {}
+fn make_label(label: String) {}
 
 fn demo(class: String, cc: String) {
   discover_like(class, (host) => host);
   run [cc, "--version"];
-  executor_class("default");
+  make_label("default");
 }
 "#;
 
@@ -68,7 +68,7 @@ fn definition_with_origin_at_uses_reference_range_for_hovered_usages() {
     let text = r#"
 fn demo() {
   let class: String = "default";
-  discover(class);
+  read_file(class);
 }
 "#;
 
@@ -224,24 +224,24 @@ fn build(cmd: Command) {
 fn stdlib_reference_points_at_real_stdlib_definition() {
     let text = r#"
 fn demo() {
-  executor_class("default")
+  read_file("default")
 }
 "#;
 
     let state = DocumentState::new_with_uri(text.to_string(), None);
-    let offset = TextSize::new(text.find("executor_class").unwrap() as u32);
+    let offset = TextSize::new(text.find("read_file").unwrap() as u32);
     let def = state.definition_at(offset).unwrap();
 
-    assert_eq!(def.name, "executor_class");
+    assert_eq!(def.name, "read_file");
     assert_ne!(def.source(), *state.current_source());
     assert_eq!(def.kind, vx_ir::DefKind::Function);
     assert_eq!(
         state.declaration_snippet(&def),
-        "fn executor_class(label: String) -> ExecutorClass"
+        "fn read_file(path: String) -> Blob"
     );
     assert_eq!(
         state.doc_comment_for(&def).as_deref(),
-        Some("Construct an executor class selector value.")
+        Some("Read a local file as a blob.")
     );
 
     let uri = state.uri_for_source(def.source()).unwrap();
@@ -388,7 +388,7 @@ fn demo(values: Map[String, String]) {
 fn inlay_hints_use_stdlib_function_parameters() {
     let text = r#"
 fn demo() {
-  executor_class("default")
+  read_file("default")
 }
 "#;
 
@@ -401,14 +401,14 @@ fn demo() {
         })
         .collect::<Vec<_>>();
 
-    assert!(hints.contains(&(String::from("label:"), hint_position(text, "\"default\""))));
+    assert!(hints.contains(&(String::from("path:"), hint_position(text, "\"default\""))));
 }
 
 #[test]
 fn binding_type_inlay_hints_use_named_opaque_types() {
     let text = r#"
 fn demo() {
-  let class = executor_class("default");
+  let class = read_file("default");
 }
 "#;
 
@@ -421,6 +421,6 @@ fn demo() {
         })
         .collect::<Vec<_>>();
 
-    assert!(hints.iter().any(|label| label == ": ExecutorClass"));
+    assert!(hints.iter().any(|label| label == ": Blob"));
     assert!(!hints.iter().any(|label| label.contains("<opaque#")));
 }

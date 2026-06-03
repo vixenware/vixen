@@ -1,20 +1,6 @@
-/// Construct an executor class selector value.
-fn executor_class(label: String) -> ExecutorClass (
-  label as ExecutorClass
-)
-
 /// Evaluate a build entry function through the runtime.
 fn build[T](
   entry: Fn(Path, Array[String], Map[String, String]) -> T,
-) -> T;
-
-/// Probe a representative executor in the class with host authority.
-///
-/// Values returned from `discover` carry hidden verification obligations
-/// derived from the host observations performed by the probe.
-fn discover[T](
-  class: ExecutorClass,
-  probe: Fn(Host) -> T,
 ) -> T;
 
 /// Fetch a fixed-hash resource and return its content as a blob.
@@ -84,11 +70,3 @@ fn exec[T](
   /// success-gated write-set tree.
   observer: Fn(Run) -> T = (run) => run.ok.out,
 } -> T;
-
-/// Persist and reuse a chosen result across builds.
-fn stabilize[W, T](
-  /// Local witness for when the stabilized result should be reconsidered.
-  witness: Fn() -> W,
-  /// Discovery/resolve step that computes the stabilized result.
-  resolve: Fn(W) -> T,
-) -> T;

@@ -340,12 +340,6 @@ mod tests {
     use vx_parser::SourceId;
     use vx_stdlib::stdlib_sources;
 
-    const SOURCE_DISCOVER_WHICH: &str = r#"
-fn probe() #discover -> String (
-  discover(executor_class("default"), (host) => host.which("sh"))
-)
-"#;
-
     const SOURCE_EXEC_STDOUT: &str = r#"
 fn probe(cmd: Command) -> Bytes (
   exec(cmd) with {
@@ -654,25 +648,6 @@ fn probe() -> Bool (
             tc_errors.is_empty(),
             "grammar-cc should type-check against the imported vocabulary, got {tc_errors:#?}"
         );
-    }
-
-    #[test]
-    fn semantic_pipeline_resolves_discover_and_executor_class_from_stdlib() {
-        let mut program = semantically_analyze(SOURCE_DISCOVER_WHICH);
-        let mut types = collect_types_vir(&mut program.arena);
-        let resolve_errors = resolve_names(&mut program.arena);
-        assert!(
-            resolve_errors.is_empty(),
-            "expected stdlib names to resolve, got {resolve_errors:?}"
-        );
-        let tc_result = type_check_vir(&mut program.arena, &mut types);
-        assert!(
-            tc_result.errors.is_empty(),
-            "expected discover source to type-check, got {:?}",
-            tc_result.errors
-        );
-        super::compile_source(SOURCE_DISCOVER_WHICH, "probe")
-            .expect("discover source should compile through the front-end");
     }
 
     #[test]

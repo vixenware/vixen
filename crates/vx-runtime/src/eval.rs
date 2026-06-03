@@ -99,16 +99,6 @@ fn done(value: Value) -> Thunk {
     Thunk(Rc::new(RefCell::new(ThunkState::Done(Ok(value)))))
 }
 
-/// Resolve `name` against the host `PATH` (first match that is a file) — the
-/// `host.which` primitive.
-fn which_on_path(name: &str) -> Option<String> {
-    let path = std::env::var_os("PATH")?;
-    std::env::split_paths(&path)
-        .map(|dir| dir.join(name))
-        .find(|candidate| candidate.is_file())
-        .map(|p| p.to_string_lossy().into_owned())
-}
-
 /// A runtime value. Compound fields are [`Thunk`]s, so they stay unforced until
 /// demanded (`r[eval.pending]`/`r[eval.forcing]`).
 #[derive(Debug, Clone)]
@@ -147,9 +137,6 @@ pub enum Value {
         set: Rc<command_model::GrammarSet>,
         name: String,
     },
-    /// The executor-local host-inspection capability — `discover` hands one to a
-    /// probe, which reads `os`/`arch`/`which`/`hash` to build a command.
-    Host,
     /// A **remote producing tree** — a value produced on another executor that
     /// resolves in parts (per path) over vox. eval holds only the scheduler-registered
     /// [`HandleId`](crate::strand::HandleId), never the vox client; forcing a path
@@ -894,10 +881,6 @@ impl Evaluator<'_> {
         if let ExprKind::NameRef(n) = &prog.arena[callee].kind {
             match n.resolved {
                 Some(DefTarget::Item(item)) => {
-                    // Native stdlib free functions dispatch by name; others run their body.
-                    if n.name == "discover" {
-                        return self.native_discover(args, env);
-                    }
                     return match &prog.arena[item].kind {
                         ItemKind::Function(f) => self.invoke_body(f.body, args, env, Env::new()),
                         _ => Err(poison(format!("`{}` is not callable", n.name))),
@@ -946,33 +929,8 @@ impl Evaluator<'_> {
         }
     }
 
-    /// `discover(class, probe: Fn(Host) -> T)` — run the probe with the
-    /// executor-local host. (No executor selection yet: the local host stands in
-    /// for a representative executor of the class, which is left unevaluated.)
-    fn native_discover(
-        &self,
-        args: impl Iterator<Item = ExprId>,
-        env: &Env,
-    ) -> Result<Value, Poison> {
-        let args: Vec<ExprId> = args.collect();
-        let probe = match args.as_slice() {
-            [_class, probe] => *probe,
-            _ => return Err(poison("discover expects (executor_class, probe)".into())),
-        };
-        match self.eval(probe, env)? {
-            Value::Closure {
-                body,
-                env: captured,
-            } => self.invoke_body_values(body, vec![Value::Host], captured),
-            other => Err(poison(format!(
-                "discover's probe must be a function, got {other:?}"
-            ))),
-        }
-    }
-
     /// Invoke `body` binding its parameters to already-evaluated `vals` over `base`
-    /// — for native callers (e.g. `discover` passing a `Host`) that hold values
-    /// rather than argument expressions.
+    /// — for native callers that hold values rather than argument expressions.
     fn invoke_body_values(
         &self,
         body: BodyId,
@@ -1215,23 +1173,6 @@ impl Evaluator<'_> {
                             s.len()
                         ))
                     })
-            }
-            // Host inspection — `discover` hands a probe a `Host`; these read the
-            // executor-local host to build a command.
-            ("os", Value::Host) => Ok(Value::Str(Rc::from(std::env::consts::OS))),
-            ("arch", Value::Host) => Ok(Value::Str(Rc::from(std::env::consts::ARCH))),
-            ("which", Value::Host) => {
-                let name = match argv.as_slice() {
-                    [Value::Str(s)] => s,
-                    other => {
-                        return Err(poison(format!(
-                            "host.which expects one String, got {other:?}"
-                        )));
-                    }
-                };
-                which_on_path(name)
-                    .map(|p| Value::Str(Rc::from(p.as_str())))
-                    .ok_or_else(|| poison(format!("`{name}` not found on the host PATH")))
             }
             // `tree.file(@path)` on a remote producing tree — the demand-pull across
             // executors, reached from the language. Force the path over vox via the
@@ -1994,70 +1935,5 @@ mod tests {
             p.outputs
         );
         assert_eq!(p.execution_argv, vec!["cc", "-c", "x.c", "-o", "x.o"]);
-    }
-
-    /// The probe, end to end: `discover` hands the closure a `Host`; the probe
-    /// reads `host.which` + an imported grammar to build a command record; and
-    /// `@[ ${cmd} … ]` projects it — a capability-*built* command, no injected
-    /// value. (`sh` is reliably on the host PATH.)
-    #[test]
-    fn discover_builds_a_command_and_projects_it() {
-        use crate::dispatch::Dispatcher;
-        use std::cell::Cell;
-        use vx_ir::compile::{NoopObserver, semantic_front_end};
-        use vx_ir::item::ItemKind;
-        use vx_package::CompositeResolver;
-
-        let root = concat!(env!("CARGO_MANIFEST_DIR"), "/../../packages");
-        let resolver = CompositeResolver::new(root);
-        let src = "fn t() ( \
-                   let cmd = discover(executor_class(\"default\"), (host) => ( \
-                     let g = import \"@vixen/grammar-cc\"; \
-                     { grammar: g.cc, binary: host.which(\"sh\") } \
-                   )); \
-                   @[ ${cmd} -c x.c -o x.o ] )";
-        let fe = semantic_front_end(src, &resolver, &mut NoopObserver).expect("front-end");
-
-        let primary = *fe.program.source_units.first().unwrap();
-        let body = fe.program.arena[primary]
-            .items
-            .iter()
-            .find_map(|&id| match &fe.program.arena[id].kind {
-                ItemKind::Function(f) if f.name == "t" => Some(f.body),
-                _ => None,
-            })
-            .expect("fn t");
-        let root_expr = fe.program.arena[body].root_expr;
-
-        let ev = Evaluator {
-            program: &fe.program,
-            env: &fe.env,
-            current_body: Cell::new(body),
-            dispatch: Dispatcher::default(),
-            dispatches: Cell::new(0),
-            mode: KernelMode::Off,
-            exec_client: None,
-        };
-        let Value::Command(applied) = ev.eval(root_expr, &Env::new()).expect("eval") else {
-            panic!("expected a Command value");
-        };
-        let p = applied.projected.as_ref().expect("projected");
-        assert!(
-            p.effective.inputs.iter().any(|i| i.path == "x.c"),
-            "x.c is an input: {:?}",
-            p.effective.inputs
-        );
-        assert!(
-            p.outputs.iter().any(|o| o.path == "x.o"),
-            "x.o is an output: {:?}",
-            p.outputs
-        );
-        // argv[0] is the probed binary (sh's path); the rest are the literal args.
-        assert!(
-            p.execution_argv[0].ends_with("sh"),
-            "argv[0] is the probed sh: {:?}",
-            p.execution_argv
-        );
-        assert_eq!(&p.execution_argv[1..], &["-c", "x.c", "-o", "x.o"]);
     }
 }
