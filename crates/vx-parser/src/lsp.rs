@@ -461,9 +461,6 @@ fn classify_lower_ident(token: &SyntaxToken) -> Option<SemanticTokenType> {
         // Name references are functions when they are the root callee of an application chain.
         SyntaxKind::NAME_REF_EXPR => classify_name_ref_context(&parent),
 
-        // Capability tags
-        SyntaxKind::CAPABILITY_TAG => Some(SemanticTokenType::Type),
-
         // Closure parameters
         SyntaxKind::CLOSURE_PARAM_CLAUSE => Some(SemanticTokenType::Parameter),
 

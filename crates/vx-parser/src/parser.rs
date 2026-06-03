@@ -441,10 +441,6 @@ fn fn_decl_contents(p: &mut Parser<'_>, allow_upper_name: bool) {
     if p.at(SyntaxKind::WITH_KW) {
         keyword_parameter_block(p);
     }
-    capability_list(p);
-    if p.at(SyntaxKind::WITH_KW) {
-        keyword_parameter_block(p);
-    }
     if p.eat(SyntaxKind::THIN_ARROW) {
         let ret = p.start();
         type_expr(p);
@@ -727,19 +723,6 @@ fn parameter_clause(p: &mut Parser<'_>) {
     marker.complete(p, SyntaxKind::PARAMETER_CLAUSE);
 }
 
-fn capability_list(p: &mut Parser<'_>) {
-    if !p.at(SyntaxKind::HASH) {
-        return;
-    }
-    let marker = p.start();
-    while p.eat(SyntaxKind::HASH) {
-        let tag = p.start();
-        name(p, false);
-        tag.complete(p, SyntaxKind::CAPABILITY_TAG);
-    }
-    marker.complete(p, SyntaxKind::CAPABILITY_LIST);
-}
-
 // r[decl.struct.nested]
 fn slot_type(p: &mut Parser<'_>) {
     let marker = p.start();
@@ -803,10 +786,6 @@ fn function_type(p: &mut Parser<'_>) -> CompletedMarker {
         }
     }
     p.expect(SyntaxKind::R_PAREN);
-    if p.at(SyntaxKind::WITH_KW) {
-        keyword_parameter_block(p);
-    }
-    capability_list(p);
     if p.at(SyntaxKind::WITH_KW) {
         keyword_parameter_block(p);
     }

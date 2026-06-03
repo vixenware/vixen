@@ -14,7 +14,6 @@ use margin::{Annotation, AnnotationRole, Note, NoteKind, Report, Severity, Span}
 use vx_parser::SourceSpan;
 use vx_types::TypeEnv;
 
-use crate::cap::CapSet;
 use crate::diagnostic::{IrDiagnostic, MethodCandidate};
 use crate::expr::BinOp;
 use crate::scope::DefTarget;
@@ -147,50 +146,6 @@ impl IrDiagnostic {
                 annotations: vec![primary(
                     *expr,
                     Some("this expression's value is discarded".to_string()),
-                )],
-                notes: Vec::new(),
-                sections: Vec::new(),
-            },
-
-            IrDiagnostic::CapabilityViolation {
-                closure,
-                slot,
-                allowed,
-                found,
-            } => Report {
-                severity: Severity::Error,
-                title: "capability violation".to_string(),
-                annotations: vec![
-                    primary(
-                        *closure,
-                        Some(format!(
-                            "inferred capabilities `{}` exceed allowed `{}`",
-                            cap_set_display(*found),
-                            cap_set_display(*allowed)
-                        )),
-                    ),
-                    context(
-                        *slot,
-                        Some("slot declared with these allowed capabilities here".to_string()),
-                    ),
-                ],
-                notes: vec![Note {
-                    kind: NoteKind::Help,
-                    text: format!(
-                        "the closure uses {} but the slot only permits {}",
-                        cap_set_display(*found),
-                        cap_set_display(*allowed)
-                    ),
-                }],
-                sections: Vec::new(),
-            },
-
-            IrDiagnostic::UnknownCapability { name } => Report {
-                severity: Severity::Error,
-                title: "unknown capability".to_string(),
-                annotations: vec![primary(
-                    *name,
-                    Some("not a recognized capability".to_string()),
                 )],
                 notes: Vec::new(),
                 sections: Vec::new(),
@@ -351,21 +306,4 @@ fn op_kind_label(op: BinOp) -> &'static str {
         BinOp::Or => "||",
         BinOp::Pipe => "|>",
     }
-}
-
-/// Render a [`CapSet`] as a `{cap1, cap2}` string.
-fn cap_set_display(set: CapSet) -> String {
-    let names = set.names();
-    if names.is_empty() {
-        return "{}".to_string();
-    }
-    let mut out = String::from("{");
-    for (i, name) in names.iter().enumerate() {
-        if i > 0 {
-            out.push_str(", ");
-        }
-        out.push_str(name);
-    }
-    out.push('}');
-    out
 }

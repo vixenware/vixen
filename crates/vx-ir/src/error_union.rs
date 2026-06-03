@@ -10,9 +10,8 @@
 //!
 //! Computing `E` is a whole-call-graph fixpoint (`fail e` reaches a `?` through
 //! any number of intervening calls). The single-sweep type checker cannot do it
-//! in source order, so — exactly like [`cap_check`](crate::cap_check) — this
-//! runs after `type_check_vir`, reading the types it wrote and overwriting the
-//! `Fallible` (and dependent) nodes in place.
+//! in source order, so this runs after `type_check_vir`, reading the types it
+//! wrote and overwriting the `Fallible` (and dependent) nodes in place.
 //!
 //! ## Four phases
 //!
@@ -569,9 +568,7 @@ impl ErrorUnionPass<'_> {
                 let Some(res_ret) = intern_result_in(&mut self.types.env, fn_ty.ret, err_ty) else {
                     return;
                 };
-                self.types
-                    .env
-                    .intern_function(fn_ty.params, res_ret, fn_ty.capabilities)
+                self.types.env.intern_function(fn_ty.params, res_ret)
             }
             _ => match intern_result_in(&mut self.types.env, inner_ty, err_ty) {
                 Some(t) => t,
@@ -865,8 +862,8 @@ impl ErrorUnionPass<'_> {
         }
     }
 
-    /// Direct child expressions for generic recursion (mirrors cap_check's
-    /// `child_exprs`). Block/Closure/If/Match/Call/Where/Invoke/PartialApp are
+    /// Direct child expressions for generic recursion.
+    /// Block/Closure/If/Match/Call/Where/Invoke/PartialApp are
     /// handled explicitly by callers, so they return their children here only
     /// where a generic walk reaches them.
     fn child_exprs(&self, expr_id: ExprId) -> Vec<ExprId> {

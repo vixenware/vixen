@@ -105,7 +105,6 @@ fn arena_round_trip() {
         root_expr: lit_id,
         parent: None,
         return_ty: None,
-        capabilities: vec![],
         captures: vec![],
     });
 
@@ -254,7 +253,6 @@ fn visitor_traversal_count() {
         root_expr: bin_id,
         parent: None,
         return_ty: None,
-        capabilities: vec![],
         captures: vec![],
     });
 

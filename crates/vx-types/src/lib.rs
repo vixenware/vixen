@@ -80,7 +80,7 @@ pub enum Ty {
     /// A heterogeneous tuple: `(A, B, C)`.
     Tuple(TupleTy),
 
-    /// A function type: `Fn(A, B) -> C` with optional capability tags.
+    /// A function type: `Fn(A, B) -> C`.
     Function(FunctionTy),
 
     /// `Array[T]`.
@@ -163,12 +163,11 @@ pub struct OpaqueTy {
 #[derive(facet::Facet, Clone, PartialEq, Eq, Hash, Debug)]
 pub struct TupleTy(pub Vec<TypeId>);
 
-/// A function type: `Fn(params) #caps -> ret`.
+/// A function type: `Fn(params) -> ret`.
 #[derive(facet::Facet, Clone, PartialEq, Eq, Hash, Debug)]
 pub struct FunctionTy {
     pub params: Vec<TypeId>,
     pub ret: TypeId,
-    pub capabilities: Vec<Capability>,
 }
 
 /// `Array[T]`.
@@ -185,15 +184,6 @@ pub struct MapTy {
 /// `Stream[T]`.
 #[derive(facet::Facet, Clone, PartialEq, Eq, Hash, Debug)]
 pub struct StreamTy(pub TypeId);
-
-/// A capability tag on a function type (e.g. `#fs`, `#discover`).
-#[derive(facet::Facet, Clone, PartialEq, Eq, Hash, Debug)]
-pub struct Capability {
-    pub name: String,
-    /// Span of the capability name token in source. May be a default span
-    /// when constructed synthetically (e.g. from runtime-injected capabilities).
-    pub name_span: SourceSpan,
-}
 
 /// The definition of a named type, stored in the type environment.
 ///
@@ -322,7 +312,6 @@ pub struct FnSig {
     pub positional_params: Vec<ParamDef>,
     pub keyword_params: Vec<KeywordParamDef>,
     pub ret: TypeId,
-    pub capabilities: Vec<Capability>,
 }
 
 /// A positional parameter in a function signature.
@@ -488,17 +477,8 @@ impl TypeEnv {
         self.intern(Ty::Array(ArrayTy(elem)))
     }
 
-    pub fn intern_function(
-        &mut self,
-        params: Vec<TypeId>,
-        ret: TypeId,
-        caps: Vec<Capability>,
-    ) -> TypeId {
-        self.intern(Ty::Function(FunctionTy {
-            params,
-            ret,
-            capabilities: caps,
-        }))
+    pub fn intern_function(&mut self, params: Vec<TypeId>, ret: TypeId) -> TypeId {
+        self.intern(Ty::Function(FunctionTy { params, ret }))
     }
 
     pub fn intern_map(&mut self, key: TypeId, value: TypeId) -> TypeId {
@@ -677,9 +657,6 @@ impl<'a> std::fmt::Display for TyDisplay<'a> {
                     write!(f, "{}", self.env[*param_id].display_with_env(self.env))?;
                 }
                 write!(f, ")")?;
-                for cap in &function.capabilities {
-                    write!(f, " {cap}")?;
-                }
                 write!(
                     f,
                     " -> {}",
@@ -769,28 +746,10 @@ mod tests {
     fn function_display() {
         let mut env = TypeEnv::new();
         let u64_id = env.intern_scalar(Scalar::U64);
-        let f_id = env.intern_function(vec![u64_id, u64_id], u64_id, vec![]);
+        let f_id = env.intern_function(vec![u64_id, u64_id], u64_id);
         assert_eq!(
             env.get_ty(f_id).display_with_env(&env).to_string(),
             "Fn(U64, U64) -> U64"
-        );
-    }
-
-    #[test]
-    fn function_with_caps_display() {
-        let mut env = TypeEnv::new();
-        let s = env.intern_scalar(Scalar::String);
-        let f_id = env.intern_function(
-            vec![s],
-            s,
-            vec![Capability {
-                name: "fs".to_owned(),
-                name_span: Default::default(),
-            }],
-        );
-        assert_eq!(
-            env.get_ty(f_id).display_with_env(&env).to_string(),
-            "Fn(String) #fs -> String"
         );
     }
 
@@ -859,7 +818,7 @@ mod tests {
         let exec_input_id = env.intern_alias(exec_input_def, vec![]);
         let arr_id = env.intern_array(exec_input_id);
         let tree_id = env.intern_opaque(tree_def, vec![]);
-        let fn_id = env.intern_function(vec![arr_id], tree_id, vec![]);
+        let fn_id = env.intern_function(vec![arr_id], tree_id);
         assert_eq!(
             env.get_ty(fn_id).display_with_env(&env).to_string(),
             "Fn(Array[ExecInput]) -> Tree"

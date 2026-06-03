@@ -553,15 +553,6 @@ fn collect_fn_sig_from_body(
         None => env.intern_unit(),
     };
 
-    let capabilities = body
-        .capabilities
-        .iter()
-        .map(|tag| vx_types::Capability {
-            name: tag.name.clone(),
-            name_span: tag.name_span,
-        })
-        .collect();
-
     FnSig {
         name: func.name.clone(),
         name_span: func.name_span,
@@ -569,7 +560,6 @@ fn collect_fn_sig_from_body(
         positional_params,
         keyword_params,
         ret,
-        capabilities,
     }
 }
 
@@ -657,20 +647,12 @@ pub fn resolve_type_ref(
         TypeRefKind::Function(func) => {
             let param_refs = func.params.clone();
             let ret_ref = func.ret;
-            let capabilities: Vec<vx_types::Capability> = func
-                .capabilities
-                .iter()
-                .map(|tag| vx_types::Capability {
-                    name: tag.name.clone(),
-                    name_span: tag.name_span,
-                })
-                .collect();
             let params: Vec<TypeId> = param_refs
                 .into_iter()
                 .map(|p| resolve_type_ref(arena, p, name_to_id, type_params, self_ty, env))
                 .collect();
             let ret = resolve_type_ref(arena, ret_ref, name_to_id, type_params, self_ty, env);
-            env.intern_function(params, ret, capabilities)
+            env.intern_function(params, ret)
         }
         TypeRefKind::Sum(sum) => {
             // Sum types: resolve each variant. Same behavior as old collector —

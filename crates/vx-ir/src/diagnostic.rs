@@ -1,10 +1,10 @@
 //! Structured diagnostics for VIR passes.
 //!
-//! [`IrDiagnostic`] is the unified diagnostic type produced by the resolve,
-//! type-check, and capability-check passes. Each variant carries the
+//! [`IrDiagnostic`] is the unified diagnostic type produced by the resolve
+//! and type-check passes. Each variant carries the
 //! structural data needed to render a user-facing message — all names
 //! carrying a source origin are `SourceSpan`s, all structural references
-//! are IDs, and all operator/capability kinds are enums. No raw strings
+//! are IDs, and all operator kinds are enums. No raw strings
 //! live inside diagnostic variants.
 //!
 //! Rendering to a user-facing report happens at the consumer boundary
@@ -17,7 +17,6 @@ use vx_parser::SourceSpan;
 use vx_types::TypeId;
 
 use crate::ItemId;
-use crate::cap::CapSet;
 use crate::expr::BinOp;
 use crate::scope::DefTarget;
 
@@ -25,8 +24,8 @@ use crate::scope::DefTarget;
 ///
 /// All variants carry only structural data — no preformatted strings.
 /// Spans pinpoint exact source locations; IDs reference other structural
-/// nodes (items, bindings, types); enums classify kinds (binary operators,
-/// capability slots) that previously lived as strings.
+/// nodes (items, bindings, types); enums classify kinds (binary operators)
+/// that previously lived as strings.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum IrDiagnostic {
     // -----------------------------------------------------------------
@@ -90,27 +89,6 @@ pub enum IrDiagnostic {
     UnusedExprStatement {
         /// Span of the offending expression.
         expr: SourceSpan,
-    },
-
-    // -----------------------------------------------------------------
-    // Cap-check pass
-    // -----------------------------------------------------------------
-    /// A closure's inferred capabilities exceed the mask allowed by the
-    /// callback slot it was passed to.
-    CapabilityViolation {
-        /// The closure expression that exceeds the slot's allowed capabilities.
-        closure: SourceSpan,
-        /// The slot declaration's name token in the called fn's signature.
-        slot: SourceSpan,
-        /// Capabilities the slot allows.
-        allowed: CapSet,
-        /// Capabilities the closure body actually uses.
-        found: CapSet,
-    },
-    /// An unknown capability tag was used.
-    UnknownCapability {
-        /// The capability name token in source.
-        name: SourceSpan,
     },
 
     // -----------------------------------------------------------------
@@ -201,8 +179,6 @@ impl IrDiagnostic {
             IrDiagnostic::BinaryOpMismatch { op, .. } => *op,
             IrDiagnostic::NoSuchMethod { method_call, .. } => *method_call,
             IrDiagnostic::UnusedExprStatement { expr } => *expr,
-            IrDiagnostic::CapabilityViolation { closure, .. } => *closure,
-            IrDiagnostic::UnknownCapability { name } => *name,
             IrDiagnostic::NonExhaustiveMatch { match_span, .. } => *match_span,
             IrDiagnostic::Cli { span, .. } => *span,
         }
@@ -215,7 +191,6 @@ impl IrDiagnostic {
         match self {
             IrDiagnostic::Unresolved { .. } => Vec::new(),
             IrDiagnostic::UnusedExprStatement { .. } => Vec::new(),
-            IrDiagnostic::UnknownCapability { .. } => Vec::new(),
             IrDiagnostic::NonExhaustiveMatch { .. } => Vec::new(),
             IrDiagnostic::InvalidTarget { .. } => Vec::new(),
             IrDiagnostic::ArgTypeMismatch { param, .. } => vec![RelatedSpan {
@@ -249,10 +224,6 @@ impl IrDiagnostic {
                 }
                 out
             }
-            IrDiagnostic::CapabilityViolation { slot, .. } => vec![RelatedSpan {
-                span: *slot,
-                kind: RelatedKind::SlotDeclaration,
-            }],
             IrDiagnostic::Cli { .. } => Vec::new(),
         }
     }
@@ -272,8 +243,6 @@ pub struct RelatedSpan {
 pub enum RelatedKind {
     /// "parameter declared here"
     ParameterDeclaration,
-    /// "slot declared here"
-    SlotDeclaration,
     /// "receiver of the method call"
     Receiver,
     /// "operand"

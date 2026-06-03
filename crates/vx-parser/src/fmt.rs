@@ -107,8 +107,6 @@ impl Formatter {
             SyntaxKind::PARAMETER => self.fmt_inline(node),
             SyntaxKind::KEYWORD_PARAMETER => self.fmt_inline(node),
             SyntaxKind::RETURN_TYPE => self.fmt_return_type(node),
-            SyntaxKind::CAPABILITY_LIST => self.fmt_inline(node),
-            SyntaxKind::CAPABILITY_TAG => self.fmt_inline(node),
             SyntaxKind::TYPE_PARAM_LIST => self.fmt_inline(node),
             SyntaxKind::SLOT_TYPE => self.fmt_slot_type(node),
             SyntaxKind::BLOCK_EXPR => self.fmt_block_expr(node),
@@ -247,10 +245,6 @@ impl Formatter {
                     }
                     SyntaxKind::TYPE_PARAM_LIST => self.fmt_inline(n),
                     SyntaxKind::PARAMETER_CLAUSE => self.fmt_parameter_clause(n),
-                    SyntaxKind::CAPABILITY_LIST => {
-                        self.space();
-                        self.fmt_inline(n);
-                    }
                     SyntaxKind::RETURN_TYPE => {
                         self.fmt_node(n);
                     }

@@ -33,8 +33,6 @@ pub mod binding;
 pub mod body;
 pub mod build;
 pub mod bundle;
-pub mod cap;
-pub mod cap_check;
 pub mod capture;
 pub mod compile;
 pub mod def;
@@ -67,7 +65,6 @@ pub use bundle::{Bundle, reachable};
 
 // Re-export moved semantic types so external users can write `vx_ir::Definition`
 // etc. instead of `vx_ir::def::Definition`.
-pub use cap::{CapCheckResult, CapSet};
 pub use def::{DefId, DefKind, DefSite, Definition};
 pub use diagnostic::{
     CliDiagnosticKind, CliHoleExpect, IrDiagnostic, MethodCandidate, RelatedKind, RelatedSpan,

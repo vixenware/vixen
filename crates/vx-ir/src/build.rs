@@ -279,7 +279,6 @@ impl VirBuilder {
             root_expr: ExprId(0), // placeholder, fixed below
             parent: None,
             return_ty: None,
-            capabilities: vec![],
             captures: vec![],
         });
 
@@ -486,7 +485,6 @@ impl VirBuilder {
             root_expr: ExprId(0), // placeholder
             parent: parent_body,
             return_ty: None, // filled below
-            capabilities: self.build_capabilities_from_fn(f),
             captures: vec![],
         });
 
@@ -1066,31 +1064,6 @@ impl VirBuilder {
         attrs
     }
 
-    fn build_capabilities_from_fn(&self, f: &vx_parser::FnDecl) -> Vec<crate::body::CapabilityTag> {
-        // CapabilityList is not exported from vx-parser, so work with raw syntax.
-        // Look for CAPABILITY_LIST child containing CAPABILITY_TAG nodes with LOWER_IDENT tokens.
-        f.syntax()
-            .children()
-            .find(|c| c.kind() == SyntaxKind::CAPABILITY_LIST)
-            .map(|list| {
-                list.children()
-                    .filter(|c| c.kind() == SyntaxKind::CAPABILITY_TAG)
-                    .filter_map(|tag| {
-                        tag.children_with_tokens()
-                            .find_map(|c| {
-                                c.into_token()
-                                    .filter(|t| t.kind() == SyntaxKind::LOWER_IDENT)
-                            })
-                            .map(|t| crate::body::CapabilityTag {
-                                name: t.text().to_string(),
-                                name_span: self.token_span(&t),
-                            })
-                    })
-                    .collect()
-            })
-            .unwrap_or_default()
-    }
-
     fn extract_type_params(&self, node: &vx_parser::SyntaxNode) -> Vec<String> {
         // TYPE_PARAM_LIST contains UPPER_IDENT tokens for type parameter names.
         node.children()
@@ -1285,7 +1258,6 @@ impl VirBuilder {
             root_expr: ExprId(0), // placeholder
             parent: Some(parent_body),
             return_ty: None,
-            capabilities: vec![],
             captures: vec![],
         });
 
@@ -3321,28 +3293,11 @@ impl VirBuilder {
         // the last Type child is the return type. This is a recovery heuristic
         // matching the parser's FunctionType.parameter_types() convention, not a
         // structural guarantee — if the CST is broken, the split may be wrong.
-        // Non-Type children that aren't CapabilityList or KeywordParameterList
-        // get error type refs.
+        // Non-Type children that aren't KeywordParameterList get error type refs.
         let mut type_children: Vec<TypeRefId> = Vec::new();
-        let mut capabilities: Vec<crate::body::CapabilityTag> = Vec::new();
         for child in f.syntax().children() {
             if let Some(t) = vx_parser::Type::cast(child.clone()) {
                 type_children.push(self.build_type_ref(&t));
-            } else if child.kind() == SyntaxKind::CAPABILITY_LIST {
-                // Extract capability tags from the capability list's syntax children.
-                for tag_node in child.children() {
-                    if tag_node.kind() == SyntaxKind::CAPABILITY_TAG
-                        && let Some(name_token) = tag_node
-                            .children_with_tokens()
-                            .filter_map(|c| c.into_token())
-                            .find(|t| t.kind() == SyntaxKind::LOWER_IDENT)
-                    {
-                        capabilities.push(crate::body::CapabilityTag {
-                            name: name_token.text().to_string(),
-                            name_span: self.token_span(&name_token),
-                        });
-                    }
-                }
             } else if child.kind() == SyntaxKind::KEYWORD_PARAMETER_LIST {
                 // Expected non-Type structural child — skip.
             } else {
@@ -3356,11 +3311,7 @@ impl VirBuilder {
 
         self.arena.alloc_type_ref(TypeRef {
             span: type_span,
-            kind: TypeRefKind::Function(FunctionTypeRef {
-                params,
-                ret,
-                capabilities,
-            }),
+            kind: TypeRefKind::Function(FunctionTypeRef { params, ret }),
         })
     }
 

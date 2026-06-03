@@ -63,11 +63,7 @@ pub(crate) fn infer_call(tc: &mut TypeChecker, expr_id: ExprId, call: &CallExpr)
             {
                 // Type the callee field expression as the method's function type.
                 let params: Vec<TypeId> = method_sig.params.iter().map(|p| p.ty).collect();
-                let method_ty = tc.types.env.intern_function(
-                    params,
-                    method_sig.ret,
-                    method_sig.capabilities.clone(),
-                );
+                let method_ty = tc.types.env.intern_function(params, method_sig.ret);
                 tc.arena[call.callee].ty = Some(method_ty);
 
                 check_method_args(tc, call, &method_sig.params, &method_name);
@@ -416,7 +412,6 @@ pub(crate) fn infer_where(tc: &mut TypeChecker, w: &WhereExpr) -> TypeId {
                 positional_params: remaining_positional,
                 keyword_params: callee_sig.keyword_params,
                 ret: callee_sig.ret,
-                capabilities: callee_sig.capabilities,
             };
             tc.function_ty_from_sig(&fn_sig)
         }

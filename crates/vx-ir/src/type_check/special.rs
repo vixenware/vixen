@@ -48,9 +48,7 @@ pub(crate) fn infer_fallible(tc: &mut TypeChecker, f: &FallibleExpr) -> TypeId {
     match inner_clone {
         Ty::Function(fn_ty) => {
             let res_ret = intern_result(tc, fn_ty.ret, err_ty);
-            tc.types
-                .env
-                .intern_function(fn_ty.params, res_ret, fn_ty.capabilities)
+            tc.types.env.intern_function(fn_ty.params, res_ret)
         }
         _ => intern_result(tc, inner_ty, err_ty),
     }

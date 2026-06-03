@@ -27,7 +27,7 @@ pub(crate) fn infer_closure(tc: &mut TypeChecker, closure: &ClosureExpr) -> Type
 
     let ret = tc.infer_expr(body.root_expr);
 
-    tc.types.env.intern_function(params, ret, vec![])
+    tc.types.env.intern_function(params, ret)
 }
 
 /// Bind closure parameter types from a callback slot's function type.

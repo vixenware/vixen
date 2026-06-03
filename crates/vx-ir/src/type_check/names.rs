@@ -100,8 +100,7 @@ pub(crate) fn type_of_item(tc: &mut TypeChecker, item_id: ItemId) -> TypeId {
             if let Some(sig) = tc.types.def_to_fn_sig.get(&def_site).cloned() {
                 let params: Vec<TypeId> = sig.positional_params.iter().map(|p| p.ty).collect();
                 let ret = sig.ret;
-                let caps = sig.capabilities;
-                return tc.types.env.intern_function(params, ret, caps);
+                return tc.types.env.intern_function(params, ret);
             }
             tc.poison()
         }
@@ -178,7 +177,7 @@ pub(crate) fn type_of_variant(
     }
     // Variant with fields → its constructor function type.
     let params: Vec<TypeId> = fields_snapshot.iter().map(|(_, t)| *t).collect();
-    tc.types.env.intern_function(params, ret, vec![])
+    tc.types.env.intern_function(params, ret)
 }
 
 /// The enum's own generic type — `intern_enum(def, [Param(0), Param(1), …])` — used
@@ -277,6 +276,5 @@ pub(crate) fn variant_sig(
             .collect(),
         keyword_params: vec![],
         ret,
-        capabilities: vec![],
     })
 }

@@ -57,7 +57,7 @@ struct BuildInput {
   args: Array[String],
 }
 
-fn build[T](input: BuildInput) #fs -> T {
+fn build[T](input: BuildInput) -> T {
   input
 }
 "#;
@@ -299,7 +299,7 @@ fn function_declaration_with_blocks_parse() {
         r#"
 fn exec[T](args: Array[ExecInput]) with {
   mounts: Map[Path, Blob | Tree] = {},
-  observer: Fn(Process, Tree) #sandbox -> T,
+  observer: Fn(Process, Tree) -> T,
 } -> T;
 "#,
     );
@@ -807,7 +807,7 @@ fn build(process: Process, args: Array[String], defaults: Config) {
 #[test]
 fn ast_wraps_types_and_patterns_for_lowering() {
     let input = r#"
-type Entry = Blob | Fn(String, Bool) #fs -> Result?
+type Entry = Blob | Fn(String, Bool) -> Result?
 
 fn decode(input: Array[String]?, item: Message) -> Map[String, Entry?] {
   match item {

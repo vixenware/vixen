@@ -33,17 +33,13 @@ pub fn substitute_type_params(ty: TypeId, substitutions: &[TypeId], env: &mut Ty
                 .collect();
             env.intern_tuple(elems)
         }
-        Ty::Function(FunctionTy {
-            params,
-            ret,
-            capabilities,
-        }) => {
+        Ty::Function(FunctionTy { params, ret }) => {
             let params: Vec<TypeId> = params
                 .into_iter()
                 .map(|p| substitute_type_params(p, substitutions, env))
                 .collect();
             let ret = substitute_type_params(ret, substitutions, env);
-            env.intern_function(params, ret, capabilities)
+            env.intern_function(params, ret)
         }
         Ty::Struct(s) => {
             let args: Vec<TypeId> = s
@@ -121,17 +117,13 @@ pub fn substitute_bound_type_params(
                 .collect();
             env.intern_tuple(elems)
         }
-        Ty::Function(FunctionTy {
-            params,
-            ret,
-            capabilities,
-        }) => {
+        Ty::Function(FunctionTy { params, ret }) => {
             let params: Vec<TypeId> = params
                 .into_iter()
                 .map(|p| substitute_bound_type_params(p, substitutions, env))
                 .collect();
             let ret = substitute_bound_type_params(ret, substitutions, env);
-            env.intern_function(params, ret, capabilities)
+            env.intern_function(params, ret)
         }
         Ty::Struct(s) => {
             let args: Vec<TypeId> = s

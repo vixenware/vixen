@@ -71,7 +71,7 @@ let libpng_loongarch_sources = [
 
 let common_cflags = ["-O2", "-fPIC"];
 
-fn build(ws: Path, args: Array[String], env: Map[String, String]) #fs #discover -> Tree (
+fn build(ws: Path, args: Array[String], env: Map[String, String]) -> Tree (
   struct Tool {
     path: String,
     hash: Blob,

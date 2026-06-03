@@ -40,10 +40,7 @@ pub(crate) fn infer_field(tc: &mut TypeChecker, _expr_id: ExprId, f: &FieldExpr)
     // Check namespace methods on the receiver type.
     if let Some(method_sig) = resolve_method_on_receiver(tc, receiver_ty, field_name) {
         let params: Vec<TypeId> = method_sig.params.into_iter().map(|p| p.ty).collect();
-        return tc
-            .types
-            .env
-            .intern_function(params, method_sig.ret, method_sig.capabilities);
+        return tc.types.env.intern_function(params, method_sig.ret);
     }
 
     // Check struct fields.
@@ -294,7 +291,6 @@ pub(crate) fn instantiate_method_sig(
         return Some(BoundMethodSig {
             params: Vec::new(),
             ret,
-            capabilities: sig.capabilities.clone(),
         });
     }
     if sig.name == "to_map"
@@ -314,7 +310,6 @@ pub(crate) fn instantiate_method_sig(
         return Some(BoundMethodSig {
             params: Vec::new(),
             ret,
-            capabilities: sig.capabilities.clone(),
         });
     }
 
@@ -380,7 +375,6 @@ pub(crate) fn instantiate_method_sig(
     Some(BoundMethodSig {
         params: bound_params,
         ret,
-        capabilities: sig.capabilities.clone(),
     })
 }
 

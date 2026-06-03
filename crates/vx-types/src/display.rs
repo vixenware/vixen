@@ -9,7 +9,7 @@
 
 use std::fmt;
 
-use crate::{Capability, InferVar, Scalar, TypeParam};
+use crate::{InferVar, Scalar, TypeParam};
 
 impl fmt::Display for Scalar {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
@@ -32,11 +32,5 @@ impl fmt::Display for TypeParam {
 impl fmt::Display for InferVar {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         write!(f, "?{}", self.0)
-    }
-}
-
-impl fmt::Display for Capability {
-    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        write!(f, "#{}", self.name)
     }
 }

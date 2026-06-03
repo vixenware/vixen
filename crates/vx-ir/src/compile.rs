@@ -1,6 +1,6 @@
 //! The semantic front-end: source text → a checked VIR program + type env.
 //!
-//! Parse → VIR → prelude → type-collect → resolve → type-check → capability-check
+//! Parse → VIR → prelude → type-collect → resolve → type-check
 //! → capture analysis. The eager `ExecutableProgram` back-end is gone; the
 //! demand-driven `vx-runtime` is the evaluator. vx-lsp and vx-diagnostics consume
 //! the diagnostics this surfaces.
@@ -12,7 +12,6 @@ use vx_parser::{AstNode, SourceId};
 use vx_types::TypeEnv;
 
 use crate::build::VirBuilder;
-use crate::cap_check::check_capabilities_vir;
 use crate::capture::analyze_captures;
 use crate::diagnostic::IrDiagnostic;
 use crate::error_union::infer_error_unions;
@@ -39,10 +38,6 @@ pub enum CompileError {
         errors: Vec<IrDiagnostic>,
         env: Box<TypeEnv>,
     },
-    Capability {
-        errors: Vec<IrDiagnostic>,
-        env: Box<TypeEnv>,
-    },
     MissingEntry(String),
 }
 
@@ -53,7 +48,6 @@ impl fmt::Display for CompileError {
             Self::Resolve { errors, .. } => write!(f, "resolve errors: {errors:?}"),
             Self::Type { errors, .. } => write!(f, "type errors: {errors:?}"),
             Self::ErrorUnion { errors, .. } => write!(f, "error-union errors: {errors:?}"),
-            Self::Capability { errors, .. } => write!(f, "capability errors: {errors:?}"),
             Self::MissingEntry(name) => write!(f, "entry function `{name}` not found"),
         }
     }
@@ -62,7 +56,7 @@ impl fmt::Display for CompileError {
 impl std::error::Error for CompileError {}
 
 /// The output of the semantic front-end: a fully name-resolved, type-checked,
-/// capability-checked VIR program and its type environment. No lowering — the
+/// type-checked VIR program and its type environment. No lowering — the
 /// demand-driven `vx-runtime` is the evaluator.
 #[derive(Debug)]
 pub struct FrontEnd {
@@ -149,7 +143,6 @@ pub trait CompileObserver {
     fn parsed(&mut self, _elapsed: Duration, _cst_nodes: u64, _bytes: u64) {}
     fn name_resolved(&mut self, _elapsed: Duration) {}
     fn type_checked(&mut self, _elapsed: Duration) {}
-    fn capability_checked(&mut self, _elapsed: Duration) {}
 }
 
 /// A `CompileObserver` that ignores everything.
@@ -179,7 +172,7 @@ pub fn compile_source_observed(
 }
 
 /// The **semantic front-end**: source → a fully resolved, type-checked,
-/// capability-checked VIR program + type env, with grammars loaded — *no* entry
+/// type-checked VIR program + type env, with grammars loaded — *no* entry
 /// check (that's [`compile_source_observed_with_resolver`]). This is the one
 /// pipeline the demand-driven runtime (`vx-runtime::analyze`) drives; vx-lsp and
 /// vx-diagnostics ride the same passes. Pass a [`vx_package::CompositeResolver`]
@@ -298,15 +291,6 @@ pub fn semantic_front_end(
     }
     observer.type_checked(t.elapsed());
 
-    let t = Instant::now();
-    let cap_result = check_capabilities_vir(&program.arena, &types, &tc_result);
-    if !cap_result.errors.is_empty() {
-        return Err(CompileError::Capability {
-            errors: cap_result.errors,
-            env: Box::new(types.env),
-        });
-    }
-    observer.capability_checked(t.elapsed());
     analyze_captures(&mut program.arena);
 
     Ok(FrontEnd {
@@ -350,7 +334,6 @@ pub fn compile_source_observed_with_resolver(
 mod tests {
     use super::inject_implicit_stdlib_imports;
     use crate::build::VirBuilder;
-    use crate::cap_check::check_capabilities_vir;
     use crate::resolve::resolve_names;
     use crate::type_check::type_check_vir;
     use crate::type_collect::collect_types_vir;
@@ -688,13 +671,6 @@ fn probe() -> Bool (
             "expected discover source to type-check, got {:?}",
             tc_result.errors
         );
-        let cap_result = check_capabilities_vir(&program.arena, &types, &tc_result);
-        assert!(
-            cap_result.errors.is_empty(),
-            "expected discover source to pass capability checks, got {:?}",
-            cap_result.errors
-        );
-
         super::compile_source(SOURCE_DISCOVER_WHICH, "probe")
             .expect("discover source should compile through the front-end");
     }
@@ -714,13 +690,6 @@ fn probe() -> Bool (
             "expected exec source to type-check, got {:?}",
             tc_result.errors
         );
-        let cap_result = check_capabilities_vir(&program.arena, &types, &tc_result);
-        assert!(
-            cap_result.errors.is_empty(),
-            "expected exec source to pass capability checks, got {:?}",
-            cap_result.errors
-        );
-
         super::compile_source(SOURCE_EXEC_STDOUT, "probe")
             .expect("exec source should compile through the front-end");
     }

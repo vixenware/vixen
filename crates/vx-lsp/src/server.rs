@@ -14,7 +14,7 @@ use vx_ir::type_check::TypeCheckVirResult;
 use vx_ir::{BindingId, ItemId, ScopeId, TypeCollection};
 use vx_parser::{self as vx, AstNode, FnDecl, Parsed, SourceFile, SyntaxKind, trimmed_range};
 
-use vx_ir::{CapCheckResult, DefId, DefKind, Definition};
+use vx_ir::{DefId, DefKind, Definition};
 use vx_parser::{SourceId, SourceSpan};
 
 /// Reconstruct a rowan `TextRange` from a (rowan-free) [`SourceSpan`]. The LSP is the
@@ -39,7 +39,6 @@ pub(crate) struct DocumentState {
     span_index: SpanIndex,
     types: TypeCollection,
     type_check: TypeCheckVirResult,
-    cap_check: CapCheckResult,
     resolve_errors: Vec<vx_ir::IrDiagnostic>,
     /// Diagnostics from the inferred-error-union pass (non-exhaustive `?` matches).
     error_union_errors: Vec<vx_ir::IrDiagnostic>,
@@ -120,11 +119,9 @@ impl DocumentState {
         let resolve_errors = vx_ir::resolve::resolve_names(&mut program.arena);
         let type_check = vx_ir::type_check::type_check_vir(&mut program.arena, &mut types);
         // Infer `?` error unions (re-types Fallible nodes + match arms in place)
-        // before cap-check, mirroring the front-end pipeline order.
+        // mirroring the front-end pipeline order.
         let error_union_errors =
             vx_ir::error_union::infer_error_unions(&mut program.arena, &mut types, &type_check);
-        let cap_check =
-            vx_ir::cap_check::check_capabilities_vir(&program.arena, &types, &type_check);
 
         let span_index = SpanIndex::build(&program.arena);
         let arena = program.arena;
@@ -140,7 +137,6 @@ impl DocumentState {
             span_index,
             types,
             type_check,
-            cap_check,
             resolve_errors,
             error_union_errors,
             all_defs,
@@ -1653,23 +1649,6 @@ impl VxLanguageServer {
             });
         }
 
-        // Capability checking diagnostics
-        for err in &state.cap_check.errors {
-            let primary = err.primary_span();
-            if primary.source != state.current_source {
-                continue;
-            }
-            let (message, source_tag) = format_ir_diagnostic(state, err);
-            diagnostics.push(Diagnostic {
-                range: state.to_lsp_range_span(primary),
-                severity: Some(DiagnosticSeverity::ERROR),
-                source: Some(source_tag.to_string()),
-                message,
-                related_information: related_info_for(state, err),
-                ..Default::default()
-            });
-        }
-
         // Unused binding/parameter warnings
         {
             use std::collections::HashSet;
@@ -1826,9 +1805,6 @@ fn related_info_for(
             let location = state.location_for_span(rs.span)?;
             let message = match rs.kind {
                 RelatedKind::ParameterDeclaration => "parameter declared here".to_string(),
-                RelatedKind::SlotDeclaration => {
-                    "slot declared with these allowed capabilities here".to_string()
-                }
                 RelatedKind::Receiver => "receiver of the method call".to_string(),
                 RelatedKind::Operand => "operand".to_string(),
                 RelatedKind::Candidate => {
@@ -1922,27 +1898,6 @@ fn format_ir_diagnostic(
         IrDiagnostic::UnusedExprStatement { .. } => {
             ("unused expression statement".to_string(), "vx-type")
         }
-        IrDiagnostic::CapabilityViolation {
-            slot,
-            allowed,
-            found,
-            ..
-        } => {
-            let excess = found.satisfies(*allowed);
-            (
-                format!(
-                    "capability violation in `{}`: requires {} but slot only allows {}",
-                    state.text_at(*slot),
-                    excess,
-                    allowed,
-                ),
-                "vx-cap",
-            )
-        }
-        IrDiagnostic::UnknownCapability { name } => (
-            format!("unknown capability `#{}`", state.text_at(*name)),
-            "vx-cap",
-        ),
         IrDiagnostic::NonExhaustiveMatch { missing, .. } => (
             format!("non-exhaustive match — missing {}", missing.join(", ")),
             "vx-type",

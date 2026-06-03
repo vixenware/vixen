@@ -7,8 +7,7 @@
 //! These are *structural* tests — they intentionally do not snapshot the
 //! rendered output, since rendering is the next milestone.
 
-use margin::{AnnotationRole, NoteKind, Severity, Span as MarginSpan};
-use vx_ir::cap::CapSet;
+use margin::{AnnotationRole, Severity, Span as MarginSpan};
 use vx_ir::diagnostic::{IrDiagnostic, MethodCandidate};
 use vx_ir::expr::BinOp;
 use vx_ir::scope::DefTarget;
@@ -310,81 +309,6 @@ fn unused_expr_statement_basic() {
     assert_eq!(
         report.annotations[0].message.as_deref(),
         Some("this expression's value is discarded")
-    );
-}
-
-// ---------------------------------------------------------------------------
-// CapabilityViolation
-// ---------------------------------------------------------------------------
-
-#[test]
-fn capability_violation_basic() {
-    let env = TypeEnv::new();
-    let diag = IrDiagnostic::CapabilityViolation {
-        closure: span(0, 20),
-        slot: span(50, 60),
-        allowed: CapSet::FS,
-        found: CapSet::FS.union(CapSet::HOST),
-    };
-
-    let report = diag.to_report(&env);
-
-    assert_eq!(report.severity, Severity::Error);
-    assert_eq!(report.title, "capability violation");
-    assert_eq!(report.annotations.len(), 2);
-    assert_eq!(report.annotations[0].role, AnnotationRole::PrimaryLabel);
-    assert_eq!(report.annotations[0].spans, vec![margin_span(0, 20)]);
-    assert_eq!(
-        report.annotations[0].message.as_deref(),
-        Some("inferred capabilities `{fs, host}` exceed allowed `{fs}`")
-    );
-    assert_eq!(report.annotations[1].role, AnnotationRole::SecondaryLabel);
-    assert_eq!(report.annotations[1].spans, vec![margin_span(50, 60)]);
-    assert_eq!(
-        report.annotations[1].message.as_deref(),
-        Some("slot declared with these allowed capabilities here")
-    );
-    // Help note is attached
-    assert_eq!(report.notes.len(), 1);
-    assert_eq!(report.notes[0].kind, NoteKind::Help);
-}
-
-#[test]
-fn capability_violation_empty_allowed() {
-    let env = TypeEnv::new();
-    let diag = IrDiagnostic::CapabilityViolation {
-        closure: span(0, 5),
-        slot: span(10, 15),
-        allowed: CapSet::EMPTY,
-        found: CapSet::DISCOVER,
-    };
-
-    let report = diag.to_report(&env);
-    assert_eq!(
-        report.annotations[0].message.as_deref(),
-        Some("inferred capabilities `{discover}` exceed allowed `{}`")
-    );
-}
-
-// ---------------------------------------------------------------------------
-// UnknownCapability
-// ---------------------------------------------------------------------------
-
-#[test]
-fn unknown_capability_basic() {
-    let env = TypeEnv::new();
-    let diag = IrDiagnostic::UnknownCapability { name: span(5, 15) };
-
-    let report = diag.to_report(&env);
-
-    assert_eq!(report.severity, Severity::Error);
-    assert_eq!(report.title, "unknown capability");
-    assert_eq!(report.annotations.len(), 1);
-    assert_eq!(report.annotations[0].role, AnnotationRole::PrimaryLabel);
-    assert_eq!(report.annotations[0].spans, vec![margin_span(5, 15)]);
-    assert_eq!(
-        report.annotations[0].message.as_deref(),
-        Some("not a recognized capability")
     );
 }
 

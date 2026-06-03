@@ -26,7 +26,7 @@ pub mod subst;
 use std::collections::HashMap;
 
 use vx_parser::SourceSpan;
-use vx_types::{Capability, FnSig, ParamDef, Ty, TypeId};
+use vx_types::{FnSig, ParamDef, Ty, TypeId};
 
 use crate::arena::VirArena;
 use crate::def::Definition;
@@ -105,7 +105,6 @@ pub(crate) struct TypeChecker<'a> {
 pub(crate) struct BoundMethodSig {
     pub(crate) params: Vec<ParamDef>,
     pub(crate) ret: TypeId,
-    pub(crate) capabilities: Vec<Capability>,
 }
 
 impl<'a> TypeChecker<'a> {
@@ -322,7 +321,6 @@ impl<'a> TypeChecker<'a> {
     pub(crate) fn function_ty_from_sig(&mut self, sig: &FnSig) -> TypeId {
         let params: Vec<TypeId> = sig.positional_params.iter().map(|p| p.ty).collect();
         let ret = sig.ret;
-        let caps = sig.capabilities.clone();
-        self.types.env.intern_function(params, ret, caps)
+        self.types.env.intern_function(params, ret)
     }
 }

@@ -318,7 +318,7 @@ namespace Yaml {
 
 namespace Http {
   /// Fetch a URL and return the response body as a blob.
-  fn get(url: String) #discover -> Blob;
+  fn get(url: String) -> Blob;
 }
 
 namespace Tree {
@@ -327,7 +327,7 @@ namespace Tree {
   /// Construct a tree by merging an array of tree/blob values.
   fn Tree(entries: Array[TreeEntry]) -> Self;
   /// Create a lazy filesystem-backed tree handle.
-  fn Tree(path: Path) #fs -> Self;
+  fn Tree(path: Path) -> Self;
 
   /// Select a blob at a relative path.
   fn file(self, path: Path) -> Blob;
