@@ -1763,9 +1763,6 @@ fn format_parse_diagnostic(diag: &vx_parser::ParseDiagnostic) -> String {
             ExpectedKind::TypeMember => "expected a type member".to_string(),
             ExpectedKind::BindingPattern => "expected a binding pattern".to_string(),
             ExpectedKind::StructPatternField => "expected a struct pattern field".to_string(),
-            ExpectedKind::BarePathOrPathLiteral => {
-                "expected a bare path or `@(...)` path literal".to_string()
-            }
             ExpectedKind::ShorthandFieldName => "expected a shorthand field name".to_string(),
             ExpectedKind::RecordFieldName => "expected a record field name".to_string(),
             ExpectedKind::StructFieldName => "expected a struct field name".to_string(),

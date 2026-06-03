@@ -165,7 +165,6 @@ impl<'a> TypeChecker<'a> {
 
         let ty = match kind {
             ExprKind::Literal(ref lit) => literals::infer_literal(self, lit),
-            ExprKind::PathLiteral(_) => literals::infer_path_literal(self),
             ExprKind::InterpolatedString(ref is) => literals::infer_interpolated_string(self, is),
             ExprKind::CliLiteral(ref c) => cli::infer_cli_literal(self, expr_id, c),
             ExprKind::NameRef(ref nr) => names::infer_name_ref(self, expr_id, nr),

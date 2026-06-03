@@ -264,7 +264,6 @@ impl Collector<'_> {
         }
         match &expr.kind {
             ExprKind::Literal(_) | ExprKind::Bomb | ExprKind::Error => {}
-            ExprKind::PathLiteral(p) => self.collect_string_parts(&p.parts),
             ExprKind::NameRef(n) => {
                 if let Some(t) = n.resolved {
                     self.collect_def_target(t);

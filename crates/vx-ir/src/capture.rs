@@ -229,8 +229,7 @@ fn visit_expr(
                 }
             }
         }
-        ExprKind::Literal(_) | ExprKind::PathLiteral(_) | ExprKind::Import(_) | ExprKind::Error => {
-        }
+        ExprKind::Literal(_) | ExprKind::Import(_) | ExprKind::Error => {}
     }
 }
 

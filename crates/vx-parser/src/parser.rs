@@ -1213,12 +1213,19 @@ fn multiplicative_expr(p: &mut Parser<'_>) -> CompletedMarker {
 
 fn prefix_expr(p: &mut Parser<'_>) -> CompletedMarker {
     match p.current() {
-        // `@[ … ]` (CLI_OPEN at 1, no grammar) or `@grammar[ … ]` (CLI_OPEN at 2)
-        // vs an `@path` literal.
+        // `@[ … ]` (CLI_OPEN at 1, no grammar) or `@grammar[ … ]` (CLI_OPEN at 2).
+        // `@` no longer introduces anything else — paths are plain strings now.
         SyntaxKind::AT if p.nth(1) == SyntaxKind::CLI_OPEN || p.nth(2) == SyntaxKind::CLI_OPEN => {
             cli_literal_expr(p)
         }
-        SyntaxKind::AT => path_literal_expr(p),
+        // A bare `@` is the old `@key(...)` attribute syntax (now `#[...]`): flag it
+        // and recover by consuming the `@` as an error node.
+        SyntaxKind::AT => {
+            let marker = p.start();
+            p.diagnose_legacy(LegacySyntaxKind::AtAttribute);
+            p.bump();
+            marker.complete(p, SyntaxKind::ERROR)
+        }
         SyntaxKind::BANG | SyntaxKind::MINUS => {
             let marker = p.start();
             p.bump();
@@ -1242,23 +1249,6 @@ fn partial_app_expr(p: &mut Parser<'_>) -> CompletedMarker {
     p.expect(SyntaxKind::PARTIAL_KW);
     application_expr(p);
     marker.complete(p, SyntaxKind::PARTIAL_APP_EXPR)
-}
-
-fn path_literal_expr(p: &mut Parser<'_>) -> CompletedMarker {
-    let marker = p.start();
-    p.expect(SyntaxKind::AT);
-    if p.eat(SyntaxKind::L_PAREN) {
-        path_template_contents(p);
-        p.expect(SyntaxKind::R_PAREN);
-    } else {
-        let saw_bare = path_bare_contents(p);
-        if !saw_bare {
-            p.diagnose_at(ExpectedKind::BarePathOrPathLiteral);
-        } else if p.at(SyntaxKind::L_PAREN) {
-            p.diagnose_legacy(LegacySyntaxKind::AtAttribute);
-        }
-    }
-    marker.complete(p, SyntaxKind::PATH_LITERAL_EXPR)
 }
 
 // r[expr.cli-literal] — `@[ ${cmd} … ]` (the leading hole carries the grammar) or
@@ -1984,35 +1974,6 @@ fn import_expr(p: &mut Parser<'_>) -> CompletedMarker {
     marker.complete(p, SyntaxKind::IMPORT_EXPR)
 }
 
-fn path_template_contents(p: &mut Parser<'_>) {
-    let mut depth = 1usize;
-    while !p.at(SyntaxKind::EOF) {
-        match p.current() {
-            SyntaxKind::L_PAREN => {
-                depth += 1;
-                p.bump();
-            }
-            SyntaxKind::R_PAREN => {
-                depth -= 1;
-                if depth == 0 {
-                    break;
-                }
-                p.bump();
-            }
-            _ => p.bump(),
-        }
-    }
-}
-
-fn path_bare_contents(p: &mut Parser<'_>) -> bool {
-    let mut saw_any = false;
-    while is_path_literal_token(p.current()) {
-        saw_any = true;
-        p.bump();
-    }
-    saw_any
-}
-
 fn looks_like_closure(p: &Parser<'_>) -> bool {
     if !p.at(SyntaxKind::L_PAREN) {
         return false;
@@ -2279,19 +2240,6 @@ fn decl_stmt_start(p: &Parser<'_>) -> bool {
             | SyntaxKind::TYPE_KW
             | SyntaxKind::NAMESPACE_KW
     ) || attribute_followed_by_decl(p)
-}
-
-fn is_path_literal_token(kind: SyntaxKind) -> bool {
-    matches!(
-        kind,
-        SyntaxKind::LOWER_IDENT
-            | SyntaxKind::UPPER_IDENT
-            | SyntaxKind::INT
-            | SyntaxKind::SLASH
-            | SyntaxKind::DOT
-            | SyntaxKind::MINUS
-            | SyntaxKind::UNDERSCORE
-    )
 }
 
 fn is_item_start(kind: SyntaxKind) -> bool {

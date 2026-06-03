@@ -4,9 +4,8 @@ use rowan::TextSize;
 
 use crate::{
     AstNode, Breadcrumb, CliLiteralExpr, DocumentSymbol, Expr, FoldingRangeKind, Item, LineIndex,
-    MapEntry, Parse, Parsed, PathLiteralExpr, Position, SemanticTokenType, SourceFile, SourceId,
-    Stmt, SymbolKind, SyntaxKind, Type, document_symbols, enclosing_nodes, folding_ranges,
-    semantic_tokens,
+    MapEntry, Parse, Parsed, Position, SemanticTokenType, SourceFile, SourceId, Stmt, SymbolKind,
+    SyntaxKind, Type, document_symbols, enclosing_nodes, folding_ranges, semantic_tokens,
 };
 
 /// Test wrapper that defaults the source id to `SourceId(0)` so the test
@@ -754,40 +753,6 @@ fn demo(verifier: Verifier, value: U64) {
 }
 
 #[test]
-fn bare_and_interpolated_path_literals_parse() {
-    let parse = parse(
-        r#"
-fn build(name: String) {
-  @bin/lua;
-  @(out/{name}.o)
-}
-"#,
-    );
-    assert_eq!(parse.errors(), []);
-
-    let file = SourceFile::cast_root(parse.syntax());
-    let function = match file.items().next().expect("function item") {
-        Item::FnDecl(node) => node,
-        item => panic!("expected function decl, got {item:?}"),
-    };
-    let body = function.body().expect("function body");
-    let exprs = body
-        .statements()
-        .filter_map(|stmt| match stmt {
-            Stmt::Expr(Expr::PathLiteral(expr)) => Some(expr),
-            _ => None,
-        })
-        .collect::<Vec<PathLiteralExpr>>();
-
-    assert_eq!(exprs.len(), 2);
-    assert_eq!(exprs[0].syntax().text().to_string().trim(), "@bin/lua");
-    assert_eq!(
-        exprs[1].syntax().text().to_string().trim(),
-        "@(out/{name}.o)"
-    );
-}
-
-#[test]
 fn formatter_preserves_current_call_spacing() {
     let input = r#"
 fn build(process: Process, args: Array[String], defaults: Config) {
@@ -1190,26 +1155,4 @@ fn cli_literal_glued_interpolation_is_one_arg() {
     let (_p, lit) = only_cli_literal("let o = @cc[ -I$dir main.c ]\n");
     let args: Vec<String> = lit.args().map(|a| a.text().trim().to_string()).collect();
     assert_eq!(args, ["-I$dir", "main.c"]);
-}
-
-#[test]
-fn at_path_literal_is_untouched_by_cli_literals() {
-    // `@` not followed by `ident[` is still a path literal, not a CLI literal.
-    let parse = parse("let p = @Cargo.lock\n");
-    assert_eq!(parse.errors(), []);
-    assert!(
-        parse
-            .syntax()
-            .descendants()
-            .find_map(CliLiteralExpr::cast)
-            .is_none(),
-        "no CLI literal here"
-    );
-    assert!(
-        parse
-            .syntax()
-            .descendants()
-            .any(|n| n.kind() == SyntaxKind::PATH_LITERAL_EXPR),
-        "still a path literal"
-    );
 }

@@ -67,9 +67,6 @@ pub enum ExpectedKind {
     BindingPattern,
     /// A field inside a struct pattern (`{ ... }`).
     StructPatternField,
-    /// A bare path literal (e.g. `@bin/lua`) or a parenthesized path literal
-    /// (`@(...)`).
-    BarePathOrPathLiteral,
     /// The name part of a shorthand field (`:name`).
     ShorthandFieldName,
     /// A field name inside a record literal (`{ key: value, ... }`).

@@ -29,11 +29,10 @@ use crate::expr::{
     IfExpr as VirIfExpr, IndexExpr as VirIndexExpr, InvokeExpr as VirInvokeExpr, LitKind,
     LiteralExpr as VirLiteralExpr, MapElement, MapEntry as VirMapEntry, MapExpr as VirMapExpr,
     MapKey, MatchArm as VirMatchArm, MatchExpr as VirMatchExpr, NameRefExpr as VirNameRefExpr,
-    PartialAppExpr as VirPartialAppExpr, PartialArg, PathLiteralExpr as VirPathLiteralExpr,
-    PrefixExpr as VirPrefixExpr, PrefixOp, RangeExpr as VirRangeExpr, RecordExpr as VirRecordExpr,
-    RecordField, StringPart, StructLiteralExpr as VirStructLiteralExpr, StructLiteralField,
-    TupleExpr as VirTupleExpr, TypeOpExpr as VirTypeOpExpr, WhereExpr as VirWhereExpr,
-    WithExpr as VirWithExpr,
+    PartialAppExpr as VirPartialAppExpr, PartialArg, PrefixExpr as VirPrefixExpr, PrefixOp,
+    RangeExpr as VirRangeExpr, RecordExpr as VirRecordExpr, RecordField, StringPart,
+    StructLiteralExpr as VirStructLiteralExpr, StructLiteralField, TupleExpr as VirTupleExpr,
+    TypeOpExpr as VirTypeOpExpr, WhereExpr as VirWhereExpr, WithExpr as VirWithExpr,
 };
 use crate::expr::{Arg, InterpolatedStringExpr as VirInterpolatedStringExpr, UpdateField};
 use crate::item::{
@@ -1118,7 +1117,6 @@ impl VirBuilder {
             vx_parser::Expr::Fail(f) => self.build_fail_expr(f),
             vx_parser::Expr::Bomb(b) => self.build_bomb_expr(b),
             vx_parser::Expr::InterpolatedString(is) => self.build_interpolated_string_expr(is),
-            vx_parser::Expr::PathLiteral(pl) => self.build_path_literal_expr(pl),
             vx_parser::Expr::Import(i) => self.build_import_expr(i),
             vx_parser::Expr::CliLiteral(c) => self.build_cli_literal_expr(c),
         }
@@ -2467,84 +2465,6 @@ impl VirBuilder {
             span: arg_span,
             pieces,
         }
-    }
-
-    fn build_path_literal_expr(&mut self, pl: &vx_parser::PathLiteralExpr) -> ExprId {
-        let pl_span = self.span(pl.syntax());
-
-        // A path literal may contain interpolations.
-        let parts: Vec<StringPart> = if let Some(interp) = pl.interpolated() {
-            interp
-                .parts()
-                .map(|part| match part {
-                    vx_parser::StringPart::Text(tok) => StringPart::Text(tok.text().to_string()),
-                    vx_parser::StringPart::Interpolation(i) => {
-                        if let Some(expr) = i.expr() {
-                            StringPart::Expr(self.build_expr(&expr))
-                        } else {
-                            StringPart::Expr(self.error_expr(self.span(i.syntax())))
-                        }
-                    }
-                })
-                .collect()
-        } else if let Some(lit) = pl.literal() {
-            let text = lit
-                .token()
-                .map(|t| {
-                    let s = t.text();
-                    // Strip quotes if present.
-                    if s.len() >= 2 && (s.starts_with('"') || s.starts_with('@')) {
-                        // Path literals start with @, e.g. @"path"
-                        let inner = s.trim_start_matches('@');
-                        if inner.len() >= 2 {
-                            inner[1..inner.len() - 1].to_string()
-                        } else {
-                            inner.to_string()
-                        }
-                    } else {
-                        s.to_string()
-                    }
-                })
-                .unwrap_or_default();
-            vec![StringPart::Text(text)]
-        } else {
-            // A bare path literal `@out` / `@src/lib.rs` / `@Cargo.toml`: the parser
-            // collects its segment tokens (ident / `.` / `/` / `-` / `_` / int)
-            // directly under the node — there is no `literal`/`interpolated` child.
-            // Reconstruct the path text from those tokens (the leading `@` and any
-            // trivia are not among them), matching the parser's `is_path_literal_token`.
-            let text: String = pl
-                .syntax()
-                .children_with_tokens()
-                .filter_map(|el| el.into_token())
-                .filter(|t| {
-                    matches!(
-                        t.kind(),
-                        SyntaxKind::LOWER_IDENT
-                            | SyntaxKind::UPPER_IDENT
-                            | SyntaxKind::INT
-                            | SyntaxKind::SLASH
-                            | SyntaxKind::DOT
-                            | SyntaxKind::MINUS
-                            | SyntaxKind::UNDERSCORE
-                    )
-                })
-                .map(|t| t.text().to_string())
-                .collect();
-            if text.is_empty() {
-                vec![]
-            } else {
-                vec![StringPart::Text(text)]
-            }
-        };
-
-        self.arena.alloc_expr(Expr {
-            span: pl_span,
-            body: self.current_body(),
-            scope: self.current_scope(),
-            kind: ExprKind::PathLiteral(VirPathLiteralExpr { parts }),
-            ty: None,
-        })
     }
 
     fn build_import_expr(&mut self, i: &vx_parser::ImportExpr) -> ExprId {

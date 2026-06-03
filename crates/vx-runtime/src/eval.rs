@@ -426,28 +426,6 @@ impl Evaluator<'_> {
 
             ExprKind::Literal(lit) => self.lit_value(&lit.value),
 
-            // A path literal `@some/path` (or interpolated `@{x}/path`): render to a
-            // string — paths are strings to eval, the same shape `render_cli_arg`
-            // produces. (A real `Path`/`ExecPath` value lands with input handling.)
-            ExprKind::PathLiteral(p) => {
-                let mut out = String::new();
-                for part in &p.parts {
-                    match part {
-                        StringPart::Text(t) => out.push_str(t),
-                        StringPart::Expr(x) => match self.eval(*x, env)? {
-                            Value::Str(s) => out.push_str(&s),
-                            Value::U64(n) => out.push_str(&n.to_string()),
-                            other => {
-                                return Err(poison(format!(
-                                    "can't interpolate {other:?} into a path"
-                                )));
-                            }
-                        },
-                    }
-                }
-                Ok(Value::Str(Rc::from(out.as_str())))
-            }
-
             // Lazy data: fields are thunks, NOT forced here.
             ExprKind::Tuple(t) => Ok(Value::Tuple(
                 t.elements.iter().map(|&x| self.thunk(x, env)).collect(),

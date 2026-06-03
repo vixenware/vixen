@@ -92,9 +92,6 @@ fn expected_message(what: &ExpectedKind) -> String {
         ExpectedKind::TypeMember => "expected a type member".to_string(),
         ExpectedKind::BindingPattern => "expected a binding pattern".to_string(),
         ExpectedKind::StructPatternField => "expected a struct pattern field".to_string(),
-        ExpectedKind::BarePathOrPathLiteral => {
-            "expected a bare path or `@(...)` path literal".to_string()
-        }
         ExpectedKind::ShorthandFieldName => "expected a shorthand field name".to_string(),
         ExpectedKind::RecordFieldName => "expected a record field name".to_string(),
         ExpectedKind::StructFieldName => "expected a struct field name".to_string(),
@@ -125,7 +122,6 @@ fn short_expected_label(what: &ExpectedKind) -> &'static str {
         ExpectedKind::TypeMember => "expected type member",
         ExpectedKind::BindingPattern => "expected binding pattern",
         ExpectedKind::StructPatternField => "expected struct pattern field",
-        ExpectedKind::BarePathOrPathLiteral => "expected bare path or path literal",
         ExpectedKind::ShorthandFieldName => "expected shorthand field name",
         ExpectedKind::RecordFieldName => "expected record field name",
         ExpectedKind::StructFieldName => "expected struct field name",

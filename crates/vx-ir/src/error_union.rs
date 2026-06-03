@@ -925,14 +925,6 @@ impl ErrorUnionPass<'_> {
                     StringPart::Text(_) => None,
                 })
                 .collect(),
-            ExprKind::PathLiteral(pl) => pl
-                .parts
-                .iter()
-                .filter_map(|p| match p {
-                    StringPart::Expr(id) => Some(*id),
-                    StringPart::Text(_) => None,
-                })
-                .collect(),
             ExprKind::CliLiteral(cli) => cli
                 .args
                 .iter()

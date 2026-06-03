@@ -74,13 +74,6 @@ pub trait VirVisitor {
 pub fn walk_expr<V: VirVisitor + ?Sized>(v: &mut V, arena: &VirArena, id: ExprId) {
     match &arena[id].kind {
         ExprKind::Literal(_) | ExprKind::Import(_) | ExprKind::Bomb | ExprKind::Error => {}
-        ExprKind::PathLiteral(pl) => {
-            for part in &pl.parts {
-                if let StringPart::Expr(id) = part {
-                    v.visit_expr(arena, *id);
-                }
-            }
-        }
         ExprKind::NameRef(_) => {}
         ExprKind::Block(block) => {
             v.visit_scope(arena, block.scope);

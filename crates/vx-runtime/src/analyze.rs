@@ -421,30 +421,6 @@ impl Builder<'_> {
                 }
             }
 
-            // Path literal `p"a/{x}/b"` — a constant if pure, else a kernel over
-            // its interpolated parts.
-            ExprKind::PathLiteral(p) => {
-                let exprs: Vec<ExprId> = p
-                    .parts
-                    .iter()
-                    .filter_map(|pt| match pt {
-                        StringPart::Expr(x) => Some(*x),
-                        StringPart::Text(_) => None,
-                    })
-                    .collect();
-                if exprs.is_empty() {
-                    self.emit(NodeKind::Const, "path".into(), span, vec![])
-                } else {
-                    let inputs = exprs.into_iter().map(|x| self.walk(x)).collect();
-                    self.emit(
-                        NodeKind::Kernel(KernelOp::Opaque),
-                        "p`…`".into(),
-                        span,
-                        inputs,
-                    )
-                }
-            }
-
             // A map literal — lazy data over its entry values (and spreads).
             ExprKind::Map(m) => {
                 let exprs: Vec<ExprId> = m

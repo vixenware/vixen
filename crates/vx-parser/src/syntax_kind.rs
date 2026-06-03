@@ -160,7 +160,6 @@ syntax_kinds!(
     CLOSURE_EXPR,
     CLOSURE_PARAM_CLAUSE,
     INTERPOLATED_STRING_EXPR,
-    PATH_LITERAL_EXPR,
     // CLI-literal nodes: the whole literal, one argument (a run of adjacent
     // words/strings/interpolations), and a `${ expr }` interpolation hole.
     CLI_LITERAL_EXPR,

@@ -1,4 +1,4 @@
-//! Literal, path literal, and interpolated string inference.
+//! Literal and interpolated string inference.
 
 use vx_types::{Scalar, TypeId};
 
@@ -14,10 +14,6 @@ pub(crate) fn infer_literal(tc: &mut TypeChecker, lit: &LiteralExpr) -> TypeId {
         LitKind::Bool(_) => Scalar::Bool,
     };
     tc.types.env.intern_scalar(s)
-}
-
-pub(crate) fn infer_path_literal(tc: &mut TypeChecker) -> TypeId {
-    tc.nominal_ty("Path")
 }
 
 pub(crate) fn infer_interpolated_string(

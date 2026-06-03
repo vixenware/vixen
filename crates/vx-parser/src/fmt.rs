@@ -145,7 +145,6 @@ impl Formatter {
             SyntaxKind::TYPE_OP_EXPR => self.fmt_inline(node),
             SyntaxKind::RANGE_EXPR => self.fmt_inline(node),
             SyntaxKind::FALLIBLE_EXPR => self.fmt_inline(node),
-            SyntaxKind::PATH_LITERAL_EXPR => self.fmt_verbatim(node),
             SyntaxKind::PARTIAL_APP_EXPR => self.fmt_inline(node),
             SyntaxKind::SPREAD_EXPR => self.fmt_inline(node),
             SyntaxKind::ERROR => self.fmt_verbatim(node),

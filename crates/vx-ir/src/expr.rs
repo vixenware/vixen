@@ -50,9 +50,6 @@ pub enum ExprKind {
     /// A literal value: `42`, `3.14`, `"hello"`, `true`, `false`.
     Literal(LiteralExpr),
 
-    /// A path literal: `p"some/path"` or `p"some/{interpolated}/path"`.
-    PathLiteral(PathLiteralExpr),
-
     /// A reference to a name in scope: `x`, `foo`, `MyType`.
     /// After name resolution, `resolved` points to the definition.
     NameRef(NameRefExpr),
@@ -189,14 +186,6 @@ pub enum LitKind {
 pub struct LiteralExpr {
     /// The literal value.
     pub value: LitKind,
-}
-
-/// A path literal expression: `p"some/path"`.
-#[derive(facet::Facet, Debug, Clone)]
-pub struct PathLiteralExpr {
-    /// The parts of the path literal. A plain path has one Text part;
-    /// an interpolated path has alternating Text and Expr parts.
-    pub parts: Vec<StringPart>,
 }
 
 /// A reference to a name in scope.

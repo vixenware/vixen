@@ -183,13 +183,6 @@ fn resolve_expr(
         }
         // All other expression kinds: recurse into children with same ref_order.
         ExprKind::Literal(_) | ExprKind::Error => {}
-        ExprKind::PathLiteral(pl) => {
-            for part in &pl.parts {
-                if let StringPart::Expr(id) = part {
-                    resolve_expr(arena, *id, ref_order, errors);
-                }
-            }
-        }
         ExprKind::Tuple(t) => {
             for &elem in &t.elements {
                 resolve_expr(arena, elem, ref_order, errors);
