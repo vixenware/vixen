@@ -1,8 +1,8 @@
 //! Expression nodes.
 //!
 //! Every expression in a Vixen program becomes an [`Expr`] with a unique
-//! [`ExprId`](crate::ExprId). The [`ExprKind`] enum has 28 variants (27
-//! language constructs + Error). Parenthesized expressions are eliminated
+//! [`ExprId`](crate::ExprId). The [`ExprKind`] enum has 31 variants (29
+//! language constructs + Bomb + Error). Parenthesized expressions are eliminated
 //! during the CST-to-VIR walk — the inner expression is used directly.
 
 use crate::{BodyId, ExprId, ItemId, PatternId, ScopeId, StmtId, TypeRefId};
@@ -37,7 +37,7 @@ pub struct Expr {
 }
 
 // ---------------------------------------------------------------------------
-// ExprKind — 27 variants
+// ExprKind — 31 variants
 // ---------------------------------------------------------------------------
 
 /// Discriminant for all expression forms in Vixen.
@@ -136,6 +136,14 @@ pub enum ExprKind {
     /// A fail expression: `fail "message"` or `fail expr`.
     Fail(FailExpr),
 
+    /// An implicit coercion inserted by the checker — never produced by the CST
+    /// walk. Materialized at a checking-mode site (annotated binding, parameter,
+    /// struct field, return) where the expression's type `A` differs from the
+    /// expected type `B` and a `#[coerce] fn(A) -> B` exists: `expr` is wrapped
+    /// and converted by `coerce_fn`. For `String -> Path` this is identity at
+    /// runtime.
+    Coerce(CoerceExpr),
+
     /// The bomb literal `💣`: a bottom-typed value that detonates (poisons) the
     /// instant it is forced. Demand-driven tripwire — `Ty::Poison`, fits any
     /// position, never reached unless the evaluator over-forces.
@@ -151,6 +159,15 @@ pub enum ExprKind {
 // ---------------------------------------------------------------------------
 // Helper types for each variant
 // ---------------------------------------------------------------------------
+
+/// The data for an implicit [`ExprKind::Coerce`] node.
+#[derive(facet::Facet, Debug, Clone)]
+pub struct CoerceExpr {
+    /// The expression being coerced (its type is the coercion's source type).
+    pub expr: ExprId,
+    /// The `#[coerce]` function that performs the conversion.
+    pub coerce_fn: crate::ItemId,
+}
 
 /// The kind of literal value.
 #[derive(facet::Facet, Debug, Clone)]

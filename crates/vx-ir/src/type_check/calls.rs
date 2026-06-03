@@ -196,10 +196,11 @@ fn check_call_args(tc: &mut TypeChecker, call: &CallExpr, sig: &FnSig) {
     let args = call.args.clone();
     let params = sig.positional_params.clone();
     for (arg, param) in args.iter().zip(params.iter()) {
-        let arg_ty = tc.infer_expr(arg.expr);
-        let arg_is_poison = tc.types.env.get_ty(arg_ty).is_poison();
-        let param_is_poison = tc.types.env.get_ty(param.ty).is_poison();
-        if !arg_is_poison && !param_is_poison && !tc.types_compatible(arg_ty, param.ty) {
+        // Checking mode: the parameter type is known. `coerce_to` infers the arg,
+        // returns true if compatible (or poison on either side, suppressing the
+        // error), and otherwise inserts a `#[coerce]` node when one applies.
+        if !tc.coerce_to(arg.expr, param.ty) {
+            let arg_ty = tc.arena[arg.expr].ty.unwrap_or_else(|| tc.poison());
             let arg_span = tc.arena[arg.expr].span;
             tc.push_diagnostic(IrDiagnostic::ArgTypeMismatch {
                 arg: arg_span,
@@ -220,10 +221,9 @@ fn check_method_args(
     let args = call.args.clone();
     let params: Vec<ParamDef> = params.to_vec();
     for (arg, param) in args.iter().zip(params.iter()) {
-        let arg_ty = tc.infer_expr(arg.expr);
-        let arg_is_poison = tc.types.env.get_ty(arg_ty).is_poison();
-        let param_is_poison = tc.types.env.get_ty(param.ty).is_poison();
-        if !arg_is_poison && !param_is_poison && !tc.types_compatible(arg_ty, param.ty) {
+        // Checking mode: see `check_call_args`.
+        if !tc.coerce_to(arg.expr, param.ty) {
+            let arg_ty = tc.arena[arg.expr].ty.unwrap_or_else(|| tc.poison());
             let arg_span = tc.arena[arg.expr].span;
             tc.push_diagnostic(IrDiagnostic::ArgTypeMismatch {
                 arg: arg_span,
@@ -491,8 +491,12 @@ fn process_record_keywords(
                 infer_type_params(param.ty, value_ty, substitutions, &tc.types.env);
             }
         } else {
+            // Checking mode: the keyword's declared (substituted) type is known —
+            // feed type-param inference from the value, then coerce the value to
+            // the slot type so a `String` keyword lands where a `Path` is expected.
             let value_ty = tc.infer_expr(field.value);
             infer_type_params(param.ty, value_ty, substitutions, &tc.types.env);
+            tc.coerce_to(field.value, param_ty);
         }
     }
 }

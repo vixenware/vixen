@@ -185,6 +185,10 @@ fn visit_expr(
         ExprKind::Fallible(f) => {
             visit_expr(arena, body_id, f.expr, captured);
         }
+        // A coercion is a transparent single-child wrapper: walk its child.
+        ExprKind::Coerce(c) => {
+            visit_expr(arena, body_id, c.expr, captured);
+        }
         ExprKind::Fail(f) => {
             if let Some(msg) = f.message {
                 visit_expr(arena, body_id, msg, captured);

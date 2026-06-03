@@ -39,7 +39,16 @@ fn check_stmt(tc: &mut TypeChecker, stmt_id: StmtId, is_tail: bool) {
                 .map(|tr_id| tc.resolve_type_ref_id(tr_id))
                 .filter(|t| !tc.types.env.get_ty(*t).is_poison());
 
-            let inferred_ty = tc.infer_expr(let_.init);
+            // With an annotation we're in checking mode: coerce the initializer to
+            // it (so `let p: Path = "x"` inserts the String→Path coercion). Without
+            // one, infer the initializer's type (inference mode — no coercion).
+            let inferred_ty = match annotation_ty {
+                Some(t) => {
+                    tc.coerce_to(let_.init, t);
+                    t
+                }
+                None => tc.infer_expr(let_.init),
+            };
             // Annotation wins, inferred is fallback.
             let ty = annotation_ty.unwrap_or(inferred_ty);
             if !tc.types.env.get_ty(ty).is_poison() {

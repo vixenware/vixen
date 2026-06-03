@@ -376,6 +376,8 @@ impl Collector<'_> {
                 self.collect_update_fields(&w.updates);
             }
             ExprKind::Fallible(f) => self.collect_expr(f.expr),
+            // A coercion is a transparent single-child wrapper.
+            ExprKind::Coerce(c) => self.collect_expr(c.expr),
             ExprKind::InterpolatedString(s) => self.collect_string_parts(&s.parts),
             ExprKind::Import(_) => {
                 // The imported items are reached through the resolved NameRef/Field

@@ -514,6 +514,11 @@ impl Builder<'_> {
                 )
             }
 
+            // A coercion is a transparent single-child wrapper: forward to its
+            // child's node so demand flows through it unchanged (identity at
+            // runtime for `String -> Path`).
+            ExprKind::Coerce(c) => return self.walk(c.expr),
+
             // A name: link to its bound value's node, else a leaf.
             ExprKind::NameRef(n) => {
                 if let Some(DefTarget::Binding(bid)) = n.resolved

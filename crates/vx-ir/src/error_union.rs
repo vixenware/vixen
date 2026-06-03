@@ -903,6 +903,8 @@ impl ErrorUnionPass<'_> {
                 children
             }
             ExprKind::Fallible(f) => vec![f.expr],
+            // A coercion is a transparent single-child wrapper.
+            ExprKind::Coerce(c) => vec![c.expr],
             ExprKind::Fail(f) => f.message.into_iter().collect(),
             ExprKind::TypeOp(top) => vec![top.expr],
             ExprKind::Range(r) => {

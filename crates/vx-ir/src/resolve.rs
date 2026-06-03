@@ -284,6 +284,11 @@ fn resolve_expr(
         ExprKind::Fallible(f) => {
             resolve_expr(arena, f.expr, ref_order, errors);
         }
+        // A coercion is a transparent single-child wrapper. The checker only
+        // inserts it after name resolution, so this is defensive — recurse anyway.
+        ExprKind::Coerce(c) => {
+            resolve_expr(arena, c.expr, ref_order, errors);
+        }
         ExprKind::InterpolatedString(is) => {
             for part in &is.parts {
                 if let StringPart::Expr(id) = part {

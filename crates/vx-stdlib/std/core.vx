@@ -257,7 +257,10 @@ namespace Map[K, V] {
 fn map_put[K, V](map: Map[K, V], key: K, value: V) -> Map[K, V];
 
 namespace Path {
-  /// Parse and normalize a path string.
+  /// Parse and normalize a path string. Marked `#[coerce]`, so a `String` used
+  /// where a `Path` is expected (in checking position) coerces through it
+  /// implicitly — at runtime the conversion is identity.
+  #[coerce]
   fn Path(s: String) -> Self;
   /// Convert a path back to its normalized textual spelling.
   fn to_string(self) -> String;

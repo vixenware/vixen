@@ -399,6 +399,31 @@ impl Evaluator<'_> {
                 }
             },
 
+            // An implicit `#[coerce]` conversion inserted by the checker. Evaluate
+            // the inner value, then apply `coerce_fn`. A bodiless builtin coercion
+            // (its body is the synthetic Error expr — e.g. `String -> Path`) is
+            // identity: the value passes through unchanged. A coercion fn with a
+            // real body is invoked with the value as its single argument.
+            ExprKind::Coerce(c) => {
+                let inner = self.eval(c.expr, env)?;
+                match &prog.arena[c.coerce_fn].kind {
+                    ItemKind::Function(f) => {
+                        let body = f.body;
+                        let is_bodiless =
+                            matches!(prog.arena[prog.arena[body].root_expr].kind, ExprKind::Error);
+                        if is_bodiless {
+                            Ok(inner)
+                        } else {
+                            self.invoke_body_values(body, vec![inner], Env::new())
+                        }
+                    }
+                    _ => Err(poison(format!(
+                        "coercion target {:?} is not a function",
+                        c.coerce_fn
+                    ))),
+                }
+            }
+
             ExprKind::Literal(lit) => self.lit_value(&lit.value),
 
             // A path literal `@some/path` (or interpolated `@{x}/path`): render to a

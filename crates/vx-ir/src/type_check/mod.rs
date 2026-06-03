@@ -31,7 +31,7 @@ use vx_types::{FnSig, ParamDef, Ty, TypeId};
 use crate::arena::VirArena;
 use crate::def::Definition;
 use crate::diagnostic::IrDiagnostic;
-use crate::expr::ExprKind;
+use crate::expr::{CoerceExpr, ExprKind};
 use crate::item::ItemKind;
 use crate::type_collect::resolve_type_ref;
 use crate::type_collection::TypeCollection;
@@ -67,9 +67,43 @@ pub fn type_check_vir(arena: &mut VirArena, types: &mut TypeCollection) -> TypeC
         pattern.ty = None;
     }
 
+    // Build the coercion table: scan every item for `#[coerce]`-marked unary
+    // functions `fn(A) -> B` and record `(A, B) -> fn item`. The checker inserts
+    // an `ExprKind::Coerce` wherever a value of type `A` appears in a checking
+    // position expecting `B`. We build this before constructing the checker
+    // because it borrows `arena` + `types` immutably.
+    let mut coercions: HashMap<(TypeId, TypeId), ItemId> = HashMap::new();
+    for i in 0..arena.items.len() {
+        let item_id = ItemId::from_index(i);
+        let ItemKind::Function(f) = &arena[item_id].kind else {
+            continue;
+        };
+        let is_coerce = f
+            .attributes
+            .iter()
+            .flat_map(|a| &a.entries)
+            .any(|e| e.key == "coerce");
+        if !is_coerce {
+            continue;
+        }
+        // The signature is keyed by the function's name span. A coercion fn must
+        // take exactly one positional param and no keyword params; malformed ones
+        // are skipped (and ignored).
+        let Some(sig) = types.def_to_fn_sig.get(&f.name_span) else {
+            continue;
+        };
+        if sig.positional_params.len() != 1 || !sig.keyword_params.is_empty() {
+            continue;
+        }
+        let source_ty = sig.positional_params[0].ty;
+        let target_ty = sig.ret;
+        coercions.insert((source_ty, target_ty), item_id);
+    }
+
     let mut checker = TypeChecker {
         arena,
         types,
+        coercions,
         member_defs: HashMap::new(),
         closure_param_docs: HashMap::new(),
         errors: Vec::new(),
@@ -95,6 +129,9 @@ pub fn type_check_vir(arena: &mut VirArena, types: &mut TypeCollection) -> TypeC
 pub(crate) struct TypeChecker<'a> {
     pub(crate) arena: &'a mut VirArena,
     pub(crate) types: &'a mut TypeCollection,
+    /// Implicit coercions declared by `#[coerce]` functions: `(source_ty,
+    /// target_ty) -> coerce fn item`. Built once in [`type_check_vir`].
+    pub(crate) coercions: std::collections::HashMap<(vx_types::TypeId, vx_types::TypeId), ItemId>,
     pub(crate) member_defs: HashMap<SourceSpan, Definition>,
     pub(crate) closure_param_docs: HashMap<BindingId, String>,
     pub(crate) errors: Vec<IrDiagnostic>,
@@ -148,6 +185,25 @@ impl<'a> TypeChecker<'a> {
             ExprKind::Record(ref r) => collections::infer_record(self, r),
             ExprKind::Map(ref m) => collections::infer_map(self, m),
             ExprKind::StructLiteral(ref sl) => collections::infer_struct_literal(self, sl),
+            ExprKind::Coerce(ref c) => {
+                // A Coerce node is created post-inference by `coerce_to`, so its
+                // target type is already set; this arm is defensive. Infer the
+                // inner, then report the node's recorded target type (falling back
+                // to the coerce fn's return type, then poison).
+                let coerce_fn = c.coerce_fn;
+                self.infer_expr(c.expr);
+                self.arena[expr_id]
+                    .ty
+                    .or_else(|| {
+                        let kind = self.arena[coerce_fn].kind.clone();
+                        if let ItemKind::Function(f) = kind {
+                            self.types.def_to_fn_sig.get(&f.name_span).map(|s| s.ret)
+                        } else {
+                            None
+                        }
+                    })
+                    .unwrap_or_else(|| self.poison())
+            }
             ExprKind::With(ref w) => special::infer_with(self, w),
             ExprKind::Fallible(ref f) => special::infer_fallible(self, f),
             ExprKind::Fail(ref f) => special::infer_fail(self, f),
@@ -169,10 +225,35 @@ impl<'a> TypeChecker<'a> {
         ty
     }
 
-    /// Check a body: infer its root expression.
+    /// Check a body: infer its root expression. If the body declares a return
+    /// type, that's a checking-mode position for the body's value expression —
+    /// coerce it (so a `fn f() -> Path ( "x" )` inserts the String→Path coercion).
     pub(crate) fn check_body(&mut self, body_id: BodyId) {
         let root_expr = self.arena[body_id].root_expr;
         self.infer_expr(root_expr);
+
+        let Some(return_tr) = self.arena[body_id].return_ty else {
+            return;
+        };
+        let return_ty = self.resolve_type_ref_id(return_tr);
+        if self.types.env.get_ty(return_ty).is_poison() {
+            return;
+        }
+        // Coerce the value-bearing expression: the tail of the body block, or the
+        // root expression itself when the body is a single expression.
+        if let Some(value_expr) = self.body_value_expr(root_expr) {
+            self.coerce_to(value_expr, return_ty);
+        }
+    }
+
+    /// The value-bearing expression of a body root: the tail of a block (if it has
+    /// one), else the root itself. Used to find the checking-mode position for a
+    /// declared return type.
+    fn body_value_expr(&self, root_expr: ExprId) -> Option<ExprId> {
+        match &self.arena[root_expr].kind {
+            ExprKind::Block(block) => block.tail,
+            _ => Some(root_expr),
+        }
     }
 
     /// Check an item declaration.
@@ -303,6 +384,39 @@ impl<'a> TypeChecker<'a> {
                 (Ty::Infer(_), _) | (_, Ty::Infer(_)) | (Ty::Param(_), _) | (_, Ty::Param(_))
             ),
         }
+    }
+
+    /// In checking mode: if `expr_id`'s inferred type isn't compatible with
+    /// `expected` but a `#[coerce]` fn from it to `expected` exists, wrap the node
+    /// in an `ExprKind::Coerce` (in place) and return true. Returns true if already
+    /// compatible (no wrap). Returns false if neither compatible nor coercible.
+    pub(crate) fn coerce_to(&mut self, expr_id: ExprId, expected: TypeId) -> bool {
+        let actual = match self.arena[expr_id].ty {
+            Some(ty) => ty,
+            None => self.infer_expr(expr_id),
+        };
+        // Don't cascade errors through poison on either side.
+        if self.types.env.get_ty(actual).is_poison() || self.types.env.get_ty(expected).is_poison()
+        {
+            return true;
+        }
+        if self.types_compatible(actual, expected) {
+            return true;
+        }
+        let Some(&coerce_fn) = self.coercions.get(&(actual, expected)) else {
+            return false;
+        };
+        // Wrap in place so the parent's `ExprId` reference stays valid: clone the
+        // current node into a fresh `inner_id`, then overwrite this node as a
+        // Coerce wrapping the inner, typed at the target.
+        let inner = self.arena[expr_id].clone();
+        let inner_id = self.arena.alloc_expr(inner);
+        self.arena[expr_id].kind = ExprKind::Coerce(CoerceExpr {
+            expr: inner_id,
+            coerce_fn,
+        });
+        self.arena[expr_id].ty = Some(expected);
+        true
     }
 
     /// Resolve a VIR TypeRefId to a Ty using the type collection's name_to_id.

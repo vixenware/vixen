@@ -205,6 +205,10 @@ pub fn walk_expr<V: VirVisitor + ?Sized>(v: &mut V, arena: &VirArena, id: ExprId
         ExprKind::Fallible(f) => {
             v.visit_expr(arena, f.expr);
         }
+        // A coercion is a transparent single-child wrapper: walk its child.
+        ExprKind::Coerce(c) => {
+            v.visit_expr(arena, c.expr);
+        }
         ExprKind::InterpolatedString(is) => {
             for part in &is.parts {
                 if let StringPart::Expr(id) = part {

@@ -76,9 +76,24 @@ pub(crate) fn infer_map(tc: &mut TypeChecker, m: &MapExpr) -> TypeId {
 }
 
 pub(crate) fn infer_struct_literal(tc: &mut TypeChecker, sl: &StructLiteralExpr) -> TypeId {
-    // Infer field value expressions.
+    // Checking mode: each field value is checked against its declared field type
+    // (resolved from the struct/variant definition), so a `String` literal in a
+    // `Path` field coerces. Fall back to plain inference when the field type
+    // isn't known.
+    let field_types = struct_literal_field_types(tc, sl);
     for field in &sl.fields {
-        tc.infer_expr(field.value);
+        match field_types
+            .iter()
+            .find(|(name, _)| name == &field.name)
+            .map(|(_, ty)| *ty)
+        {
+            Some(field_ty) => {
+                tc.coerce_to(field.value, field_ty);
+            }
+            None => {
+                tc.infer_expr(field.value);
+            }
+        }
     }
 
     // Enum-variant construction `Enum.Variant { … }`: the value has the enum
@@ -120,4 +135,52 @@ pub(crate) fn infer_struct_literal(tc: &mut TypeChecker, sl: &StructLiteralExpr)
         }
     }
     tc.poison()
+}
+
+/// The declared `(field name, field type)` pairs for a struct-literal target —
+/// the struct's fields, or the chosen variant's fields for `Enum.Variant { … }`.
+/// Empty when the target can't be resolved (the caller falls back to inference).
+fn struct_literal_field_types(
+    tc: &mut TypeChecker,
+    sl: &StructLiteralExpr,
+) -> Vec<(String, TypeId)> {
+    let extract = |def: &vx_types::TypeDef| -> Vec<(String, TypeId)> {
+        match def {
+            vx_types::TypeDef::Struct(sdef) => sdef
+                .fields
+                .iter()
+                .map(|fd| (fd.name.clone(), fd.ty))
+                .collect(),
+            _ => vec![],
+        }
+    };
+
+    // Enum-variant construction: the chosen variant's payload struct.
+    if let Some(item_id) = sl.resolved
+        && sl.resolved_variant.is_some()
+        && let crate::item::ItemKind::Enum(ref e) = tc.arena[item_id].kind
+    {
+        let enum_name_span = e.name_span;
+        if let Some(&enum_def_id) = tc.types.def_to_type.get(&enum_name_span)
+            && let vx_types::TypeDef::Enum(edef) = &tc.types.env[enum_def_id]
+            && let Some(variant_idx) = sl.resolved_variant
+            && let Some(variant_def_id) = edef.variants.get(variant_idx as usize).copied()
+        {
+            let def = tc.types.env[variant_def_id].clone();
+            return extract(&def);
+        }
+        return vec![];
+    }
+
+    // Plain struct construction.
+    if let Some(item_id) = sl.resolved
+        && let crate::item::ItemKind::Struct(ref s) = tc.arena[item_id].kind
+    {
+        let name_span = s.name_span;
+        if let Some(&def_id) = tc.types.def_to_type.get(&name_span) {
+            let def = tc.types.env[def_id].clone();
+            return extract(&def);
+        }
+    }
+    vec![]
 }
