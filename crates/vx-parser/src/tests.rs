@@ -634,6 +634,35 @@ fn build(run: Fn(Array[String]) -> Tree) {
 }
 
 #[test]
+fn string_literals_are_juxtaposed_application_args() {
+    // Paths are strings now, so a string literal applies by juxtaposition just as
+    // an `@`-path once did: `f "x"` is `f("x")`, `` g `a/{b}` `` is `g(...)`.
+    let parse = parse(
+        r#"
+fn build(compile: Fn(String) -> Tree, name: String) {
+  compile "main.c";
+  compile `src/{name}.c`;
+}
+"#,
+    );
+    assert_eq!(parse.errors(), []);
+
+    let file = SourceFile::cast_root(parse.syntax());
+    let function = match file.items().next().expect("function item") {
+        Item::FnDecl(node) => node,
+        item => panic!("expected function decl, got {item:?}"),
+    };
+    let body = function.body().expect("function body");
+    let call = match body.statements().next().expect("call statement") {
+        Stmt::Expr(Expr::Call(node)) => node,
+        stmt => panic!("expected call expr, got {stmt:?}"),
+    };
+    let args = call.positional_args();
+    assert_eq!(args.len(), 1);
+    assert!(matches!(&args[0], Expr::Literal(_)));
+}
+
+#[test]
 fn upper_ident_can_take_map_payload_by_juxtaposition() {
     let parse = parse(
         r#"

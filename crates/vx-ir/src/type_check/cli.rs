@@ -123,8 +123,27 @@ pub(crate) fn infer_cli_literal(
         let Some(&hty) = hole_tys.get(*hole_idx) else {
             continue;
         };
+        let hole_expr = hole_exprs[*hole_idx];
+        // A `Path` position accepts a plain `String`: paths are strings, so the
+        // hole coerces (String→Path) in place — the same checking-mode coercion
+        // as any other argument position. Try the scalar form, then `Array[Path]`
+        // for a repeatable position; if neither coerces, fall back to the
+        // structural check (which still accepts `ExecPath` / arrays of it and
+        // reports a genuine mismatch).
+        if matches!(req.expect, CliHoleExpect::Path) {
+            let path_ty = tc.nominal_ty("Path");
+            if tc.coerce_to(hole_expr, path_ty) {
+                continue;
+            }
+            if req.repeatable {
+                let arr = tc.types.env.intern_array(path_ty);
+                if tc.coerce_to(hole_expr, arr) {
+                    continue;
+                }
+            }
+        }
         if let Some(kind) = check_hole_type(tc, hty, req) {
-            let span = tc.arena[hole_exprs[*hole_idx]].span;
+            let span = tc.arena[hole_expr].span;
             diags.push((span, kind));
         }
     }

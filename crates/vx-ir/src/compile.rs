@@ -387,7 +387,7 @@ fn probe(cmd: Command) -> Tree (
     /// hole at a path position type-checks).
     fn cc_user_module(body: &str) -> String {
         format!(
-            "fn probe() -> Bool (\n  let {{ cc }} = import \"@vixen/grammar-cc\";\n  let out: Path = \"out\";\n  let _cmd = {body};\n  true\n)\n"
+            "fn probe() -> Bool (\n  let {{ cc }} = import \"@vixen/grammar-cc\";\n  let out = \"out\";\n  let _cmd = {body};\n  true\n)\n"
         )
     }
 
@@ -460,10 +460,11 @@ fn probe(cmd: Command) -> Tree (
     }
 
     #[test]
-    fn cli_literal_hole_typed_by_position() {
+    fn cli_literal_path_hole_coerces_a_string() {
         // `-o` is a path position; the grammar makes `$out` demand a `Path`.
-        // A `String` bound to `out` and spliced into the `$out` hole is a
-        // HoleType error — the CLI-hole check is exact, not a coercion site.
+        // Paths are strings, so a `String` spliced into the `$out` hole coerces
+        // (String→Path) — a hole is a checking position like any other, not an
+        // exact-match-only site.
         let source = "fn probe() -> Bool (\n  let { cc } = import \"@vixen/grammar-cc\";\n  let out = \"a.out\";\n  let _cmd = @cc[ -o $out ];\n  true\n)\n";
         let (_program, resolve_errors, tc_errors) = front_end(source, &packages_resolver());
         assert!(
@@ -472,8 +473,8 @@ fn probe(cmd: Command) -> Tree (
         );
         let diags = cli_diags(&tc_errors);
         assert!(
-            diags.iter().any(|d| d.contains("HoleType")),
-            "expected a HoleType diagnostic for a String at a path position, got {tc_errors:#?}"
+            diags.is_empty(),
+            "a String at a path hole should coerce to Path, got {tc_errors:#?}"
         );
     }
 

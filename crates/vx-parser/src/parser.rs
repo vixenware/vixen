@@ -2134,7 +2134,12 @@ fn starts_expr(kind: SyntaxKind) -> bool {
 
 fn starts_application_arg(p: &Parser<'_>) -> bool {
     let kind = p.current();
-    matches!(kind, SyntaxKind::L_BRACKET | SyntaxKind::AT) && p.has_significant_gap_before_current()
+    // String and backtick literals are juxtaposable args — paths are strings now,
+    // so `f "x"` / `` f `x/{y}` `` is application, exactly as `f @path` once was.
+    matches!(
+        kind,
+        SyntaxKind::L_BRACKET | SyntaxKind::AT | SyntaxKind::STRING | SyntaxKind::BACKTICK
+    ) && p.has_significant_gap_before_current()
         || (kind == SyntaxKind::L_PAREN && !p.has_significant_gap_before_current())
         || (kind == SyntaxKind::L_CURLY
             && !p.disallow_block_application
