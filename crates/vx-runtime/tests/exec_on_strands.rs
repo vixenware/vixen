@@ -12,13 +12,11 @@
 //! `Exit` struct that crossed back, not a placeholder. (`observe_on_strands` drives
 //! `dispatch_observe` directly; `observe`'s own test asserts the crossed `WireValue`.)
 
-use std::rc::Rc;
-
-use command_model::examples;
 use vx_ir::compile::compile_source;
 use vx_ir::item::ItemKind;
-use vx_runtime::command::CommandValue;
-use vx_runtime::eval::{KernelMode, Outcome as EvalOutcome, Value, eval_body_with_exec};
+use vx_runtime::eval::{
+    KernelMode, Outcome as EvalOutcome, Value, command_value, eval_body_with_exec,
+};
 use vx_runtime::observe::local_observer;
 use vx_runtime::strand::{Outcome, ResourceId, Scheduler};
 
@@ -55,14 +53,9 @@ fn exec_outcome(binary: &str) -> Option<Outcome> {
     let binary = binary.to_string();
     let strand = s.spawn(ResourceId(0), move || {
         // A `cc`-grammar command whose binary is the real `true`/`false`. The
-        // `@[ ${cmd} ]` literal projects it to `execution_argv = [binary]`; the
-        // grammar only classifies args (there are none), not the argv that runs.
-        let cmd = Value::Command(Rc::new(CommandValue {
-            grammars: examples(),
-            grammar: "cc".to_string(),
-            binary,
-            projected: None,
-        }));
+        // `@[ ${cmd} ]` literal carries the grammar coordinate forward and applies no
+        // args, so `exec` runs the bare `binary`.
+        let cmd = command_value("@vixen/grammar-cc", "cc", &binary, vec![]);
         match eval_body_with_exec(&program, &env, entry, vec![cmd], KernelMode::Off, cid) {
             // `run.ok` is the `Exit` struct; it crossed back over vox and `exec`
             // evaluates to it. Confirm the shape here — `Value` is `!Send` and can't

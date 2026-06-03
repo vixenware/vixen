@@ -111,6 +111,67 @@ fn single_str_arg<'a>(argv: &'a [Value], who: &str) -> Result<&'a Value, Poison>
     }
 }
 
+/// A **grammar coordinate** value `{ package, name }`: the import spec the grammar's
+/// `GrammarSet` is loaded under (on the arena) plus the grammar's name. The runtime
+/// resolves it to a `command_model` grammar by looking `package` up in
+/// `arena.grammars` — the grammar's data is never copied into the value. This is the
+/// command/grammar analogue of `Host { os, arch }`: small scalar fields the runtime
+/// fills, validation backed by Rust reading the real `GrammarSet`.
+pub fn grammar_coord_value(package: &str, name: &str) -> Value {
+    Value::Struct(vec![
+        (
+            "package".to_string(),
+            Thunk::done(Value::Str(Rc::from(package))),
+        ),
+        ("name".to_string(), Thunk::done(Value::Str(Rc::from(name)))),
+    ])
+}
+
+/// An imported grammar package as an ordinary struct value: one field per grammar in
+/// the set, each a grammar coordinate (`grammar_coord_value`). Field access
+/// (`pkg.cc`) is then plain struct projection — no dedicated `Value` variant.
+fn grammar_package_value(package: &str, set: &command_model::GrammarSet) -> Value {
+    Value::Struct(
+        set.grammars
+            .iter()
+            .map(|g| {
+                (
+                    g.name.clone(),
+                    Thunk::done(grammar_coord_value(package, &g.name)),
+                )
+            })
+            .collect(),
+    )
+}
+
+/// Build an (applied) command value `{ grammar, binary, args }` from a grammar
+/// coordinate value carried forward verbatim — the internal core of `command_value`.
+fn command_value_from(grammar: Value, binary: &str, args: Vec<String>) -> Value {
+    Value::Struct(vec![
+        ("grammar".to_string(), Thunk::done(grammar)),
+        (
+            "binary".to_string(),
+            Thunk::done(Value::Str(Rc::from(binary))),
+        ),
+        (
+            "args".to_string(),
+            Thunk::done(Value::Array(
+                args.into_iter()
+                    .map(|a| Thunk::done(Value::Str(Rc::from(a.as_str()))))
+                    .collect(),
+            )),
+        ),
+    ])
+}
+
+/// Build an (applied) command value `{ grammar, binary, args }`: a record whose
+/// `grammar` is a coordinate `{ package, name }` locating the grammar on the arena.
+/// This is what `@[ ${cmd} … ]` evaluates to; exposed for tests and capability
+/// probes that synthesize commands directly.
+pub fn command_value(package: &str, grammar: &str, binary: &str, args: Vec<String>) -> Value {
+    command_value_from(grammar_coord_value(package, grammar), binary, args)
+}
+
 /// A runtime value. Compound fields are [`Thunk`]s, so they stay unforced until
 /// demanded (`r[eval.pending]`/`r[eval.forcing]`).
 #[derive(Debug, Clone)]
@@ -136,18 +197,6 @@ pub enum Value {
     Closure {
         body: BodyId,
         env: Env,
-    },
-    /// A command value — what the leading hole of a CLI literal carries, and what
-    /// `@[ ${cmd} … ]` evaluates to once it projects its grammar against the args.
-    Command(Rc<crate::command::CommandValue>),
-    /// An imported grammar package — `import "@vixen/grammar-cc"` as a *value*
-    /// (per "Types are values"). Field access selects one of its grammars.
-    Grammars(Rc<command_model::GrammarSet>),
-    /// One grammar selected from a set (`grammars.cc`) — a value a `Command`
-    /// carries and a CLI literal projects.
-    Grammar {
-        set: Rc<command_model::GrammarSet>,
-        name: String,
     },
     /// A **remote producing tree** — a value produced on another executor that
     /// resolves in parts (per path) over vox. eval holds only the scheduler-registered
@@ -623,11 +672,12 @@ impl Evaluator<'_> {
             // grammar (a value); project it against the rendered arguments.
             ExprKind::CliLiteral(cli) => self.eval_cli_literal(cli, env),
 
-            // `import "@vixen/grammar-cc"` as a value: the package's grammar set,
-            // loaded by the front-end. Field access (`.cc`) selects one grammar.
-            // (Non-grammar package imports aren't modeled as values yet.)
+            // `import "@vixen/grammar-cc"` as a value: an ordinary struct, one field
+            // per grammar in the package, each a coordinate locating it on the arena.
+            // Field access (`.cc`) is plain struct projection. (Non-grammar package
+            // imports aren't modeled as values yet.)
             ExprKind::Import(imp) => match self.program.arena.grammars.get(&imp.path) {
-                Some(set) => Ok(Value::Grammars(Rc::new(set.clone()))),
+                Some(set) => Ok(grammar_package_value(&imp.path, set)),
                 None => Err(poison(format!(
                     "import `{}` is not a grammar package (only grammar imports are values yet)",
                     imp.path
@@ -732,10 +782,13 @@ impl Evaluator<'_> {
         }
     }
 
-    /// Evaluate a grammar-less CLI literal `@[ ${cmd} args… ]`: force the leading
-    /// hole to a [`Value::Command`] (carrying its grammar), render the remaining
-    /// arguments to argv strings, and project — the grammar classifies inputs vs.
-    /// outputs. The result is the command value carrying its projected form.
+    /// Evaluate a CLI literal `@[ ${cmd} args… ]`: force the leading hole to a command
+    /// record, carry its grammar coordinate + program forward, render the remaining
+    /// arguments to argv strings, and return the **applied** command record
+    /// `{ grammar, binary, args }`. The runtime never reflects the grammar's data into
+    /// the value (it lives on the arena, keyed by the coordinate); classifying the
+    /// literal against the grammar is the type-checker's job, and the
+    /// inputs/outputs/exec-argv are derived on demand from this record.
     fn eval_cli_literal(&self, cli: &CliLiteralExpr, env: &Env) -> Result<Value, Poison> {
         let Some((lead, rest)) = cli.args.split_first() else {
             return Err(poison("empty CLI literal".into()));
@@ -749,64 +802,40 @@ impl Evaluator<'_> {
                 ));
             }
         };
-        // Extract the bundle (grammar value + program) from the leading hole.
-        let bundle = self.command_bundle(&self.eval(cmd_expr, env)?)?;
-        // Render the remaining arguments to argv strings (static text verbatim,
-        // holes forced to a scalar).
+        // Read the leading command's grammar coordinate (carried forward verbatim) and
+        // its program.
+        let (grammar, binary) = self.read_command_record(&self.eval(cmd_expr, env)?)?;
+        // Render the remaining arguments to argv strings (static text verbatim, holes
+        // forced to a scalar).
         let mut args = Vec::with_capacity(rest.len());
         for arg in rest {
             args.push(self.render_cli_arg(arg, env)?);
         }
-        match crate::command::apply_args(&bundle, &args) {
-            Some(applied) => Ok(Value::Command(Rc::new(applied))),
-            None => Err(poison(format!(
-                "grammar `{}` is not in the command's grammar set",
-                bundle.grammar
-            ))),
-        }
+        Ok(command_value_from(grammar, &binary, args))
     }
 
-    /// Extract a command bundle (grammar set + grammar name + program) from the
-    /// leading hole of a CLI literal — either a command value, or a record
-    /// `{ grammar: <Grammar>, binary: <String>, … }` (the shape a capability builds
-    /// from `import`ed grammars + a probed binary).
-    fn command_bundle(&self, val: &Value) -> Result<crate::command::CommandValue, Poison> {
-        use crate::command::CommandValue;
-        match val {
-            Value::Command(c) => Ok((**c).clone()),
-            Value::Struct(fields) => {
-                let field = |want: &str| -> Result<Value, Poison> {
-                    fields
-                        .iter()
-                        .find(|(n, _)| n == want)
-                        .ok_or_else(|| poison(format!("command record has no `{want}` field")))
-                        .and_then(|(_, th)| self.force(th))
-                };
-                let (set, name) = match field("grammar")? {
-                    Value::Grammar { set, name } => (set, name),
-                    other => {
-                        return Err(poison(format!(
-                            "`grammar` must be a Grammar, got {other:?}"
-                        )));
-                    }
-                };
-                let binary = match field("binary")? {
-                    Value::Str(s) => s.to_string(),
-                    other => {
-                        return Err(poison(format!("`binary` must be a String, got {other:?}")));
-                    }
-                };
-                Ok(CommandValue {
-                    grammars: (*set).clone(),
-                    grammar: name,
-                    binary,
-                    projected: None,
-                })
-            }
-            other => Err(poison(format!(
-                "the leading hole of `@[ … ]` must be a command, got {other:?}"
-            ))),
-        }
+    /// Read a command record `{ grammar, binary, … }` — the shape a capability builds
+    /// and `@[ ${cmd} … ]` leads with — into its grammar coordinate value (carried
+    /// forward as-is) and its program string.
+    fn read_command_record(&self, val: &Value) -> Result<(Value, String), Poison> {
+        let Value::Struct(fields) = val else {
+            return Err(poison(format!(
+                "the leading hole of `@[ … ]` must be a command record, got {val:?}"
+            )));
+        };
+        let field = |want: &str| {
+            fields
+                .iter()
+                .find(|(n, _)| n == want)
+                .map(|(_, th)| th)
+                .ok_or_else(|| poison(format!("command record has no `{want}` field")))
+        };
+        let grammar = self.force(field("grammar")?)?;
+        let binary = match self.force(field("binary")?)? {
+            Value::Str(s) => s.to_string(),
+            other => return Err(poison(format!("`binary` must be a String, got {other:?}"))),
+        };
+        Ok((grammar, binary))
     }
 
     /// Render one CLI-literal argument to a string: static text verbatim, each
@@ -1033,24 +1062,47 @@ impl Evaluator<'_> {
         }
     }
 
-    /// Project a `Command` value to the minimal [`ExecCommand`] the `observe` RPC
-    /// carries: the literal execution argv (holes substituted), split into the
-    /// program and its arguments. Poisons if the value is not a projected command.
+    /// Project a command record `{ binary, args, … }` to the minimal [`ExecCommand`]
+    /// the `observe` RPC carries: the program (the record's `binary`) and the applied
+    /// `args`. Poisons if the value is not a command record. (The grammar-classified
+    /// inputs/outputs that drive the sandbox mount set are derived separately, when
+    /// input mounting lands.)
     fn exec_command(&self, v: &Value) -> Result<ExecCommand, Poison> {
-        let Value::Command(cmd) = v else {
+        let Value::Struct(fields) = v else {
             return Err(poison(format!("`exec` expects a Command, got {v:?}")));
         };
-        let projected = cmd.projected.as_ref().ok_or_else(|| {
-            poison("`exec`'s command has not been projected against its grammar".into())
-        })?;
-        let (program, args) = projected
-            .execution_argv
-            .split_first()
-            .ok_or_else(|| poison("`exec`'s command has an empty argv".into()))?;
-        Ok(ExecCommand {
-            program: program.clone(),
-            args: args.to_vec(),
-        })
+        let field = |want: &str| {
+            fields
+                .iter()
+                .find(|(n, _)| n == want)
+                .map(|(_, th)| th)
+                .ok_or_else(|| poison(format!("command record has no `{want}` field")))
+        };
+        let program = match self.force(field("binary")?)? {
+            Value::Str(s) => s.to_string(),
+            other => {
+                return Err(poison(format!(
+                    "command `binary` must be a String, got {other:?}"
+                )));
+            }
+        };
+        let args = match self.force(field("args")?)? {
+            Value::Array(items) => items
+                .iter()
+                .map(|t| match self.force(t)? {
+                    Value::Str(s) => Ok(s.to_string()),
+                    other => Err(poison(format!(
+                        "command arg must be a String, got {other:?}"
+                    ))),
+                })
+                .collect::<Result<Vec<_>, _>>()?,
+            other => {
+                return Err(poison(format!(
+                    "command `args` must be an Array, got {other:?}"
+                )));
+            }
+        };
+        Ok(ExecCommand { program, args })
     }
 
     /// The observer body from an `exec` `where` record: find the `observer` keyword
@@ -1242,14 +1294,6 @@ impl Evaluator<'_> {
                 Some((_, th)) => self.force(th),
                 None => Err(poison(format!("no field `{name}`"))),
             },
-            // Selecting a grammar from an imported grammar package (`grammars.cc`).
-            Value::Grammars(set) if set.get(name).is_some() => Ok(Value::Grammar {
-                set: set.clone(),
-                name: name.to_string(),
-            }),
-            Value::Grammars(_) => Err(poison(format!(
-                "grammar `{name}` is not in the imported package"
-            ))),
             other => Err(poison(format!("can't access `.{name}` on {other:?}"))),
         }
     }
@@ -1791,22 +1835,57 @@ mod tests {
         );
     }
 
+    /// Pull `(binary, args)` out of a command record value — the `{ grammar, binary,
+    /// args }` shape `@[ … ]` produces — forcing each field.
+    fn read_command(ev: &Evaluator, v: &Value) -> (String, Vec<String>) {
+        let Value::Struct(fields) = v else {
+            panic!("expected a command record, got {v:?}");
+        };
+        let force_field = |want: &str| {
+            let th = &fields
+                .iter()
+                .find(|(n, _)| n == want)
+                .unwrap_or_else(|| panic!("no `{want}` field"))
+                .1;
+            ev.force(th).expect("force field")
+        };
+        let Value::Str(binary) = force_field("binary") else {
+            panic!("binary is a string");
+        };
+        let Value::Array(items) = force_field("args") else {
+            panic!("args is an array");
+        };
+        let args = items
+            .iter()
+            .map(|t| match ev.force(t).expect("force arg") {
+                Value::Str(s) => s.to_string(),
+                other => panic!("arg must be a string, got {other:?}"),
+            })
+            .collect();
+        (binary.to_string(), args)
+    }
+
     /// The CLI-literal resolver, on the real eval path: `@[ ${cmd} -c x.c -o x.o ]`
-    /// forces the leading hole to a command value (carrying the cc grammar as a
-    /// value), renders the rest to argv, and projects — the grammar classifies
-    /// `x.c` as an input and the `-o` target as an output.
+    /// forces the leading hole to a command record, carries its grammar **coordinate**
+    /// forward, and applies the literal's args. The coordinate resolves on the arena,
+    /// and the cc grammar classifies `x.c` as an input and the `-o` target an output.
     #[test]
     fn cli_literal_projects_the_command_grammar() {
-        use crate::command::CommandValue;
         use crate::dispatch::Dispatcher;
         use command_model::examples;
-        use std::cell::{Cell, RefCell};
-        use std::rc::Rc;
+        use std::cell::Cell;
+        use std::collections::BTreeMap;
         use vx_ir::item::ItemKind;
         use vx_ir::pattern::PatternKind;
 
         let src = "fn t(cmd: Command) -> Command ( @[ ${cmd} -c x.c -o x.o ] )";
-        let (program, tenv) = crate::analyze::front_end(src).expect("front-end");
+        let (mut program, tenv) = crate::analyze::front_end(src).expect("front-end");
+        // The grammar set lives on the arena, keyed by import spec; the command value
+        // carries only its coordinate.
+        program
+            .arena
+            .grammars
+            .insert("@vixen/grammar-cc".to_string(), examples());
 
         // Locate `t`, its body, `cmd`'s binding, and the CLI-literal root expr.
         let primary = *program.source_units.first().unwrap();
@@ -1824,18 +1903,10 @@ mod tests {
         };
         let root = program.arena[body].root_expr;
 
-        // Bind `cmd` to a cc command value — the grammar carried as a value.
-        let cmd = Value::Command(Rc::new(CommandValue {
-            grammars: examples(),
-            grammar: "cc".to_string(),
-            binary: "cc".to_string(),
-            projected: None,
-        }));
+        // Bind `cmd` to an (unapplied) cc command record — grammar coordinate + program.
+        let cmd = command_value("@vixen/grammar-cc", "cc", "cc", vec![]);
         let mut start = Env::new();
-        start.insert(
-            cmd_bid,
-            Thunk(Rc::new(RefCell::new(ThunkState::Done(Ok(cmd))))),
-        );
+        start.insert(cmd_bid, Thunk::done(cmd));
 
         let ev = Evaluator {
             program: &program,
@@ -1846,29 +1917,36 @@ mod tests {
             mode: KernelMode::Off,
             exec_client: None,
         };
-        let Value::Command(applied) = ev.eval(root, &start).expect("eval cli literal") else {
-            panic!("expected a Command value");
-        };
-        let p = applied
-            .projected
-            .as_ref()
-            .expect("projected after the literal");
+        let applied = ev.eval(root, &start).expect("eval cli literal");
+        let (binary, args) = read_command(&ev, &applied);
+        assert_eq!(binary, "cc");
+        assert_eq!(args, vec!["-c", "x.c", "-o", "x.o"]);
+
+        // The coordinate resolves on the arena and the grammar classifies the argv.
+        let mut argv = vec![binary];
+        argv.extend(args);
+        let projected = crate::command::project(&examples(), "cc", &argv, &BTreeMap::new())
+            .expect("cc grammar projects");
         assert!(
-            p.effective.inputs.iter().any(|i| i.path == "x.c"),
+            projected.effective.inputs.iter().any(|i| i.path == "x.c"),
             "x.c is an input: {:?}",
-            p.effective.inputs
+            projected.effective.inputs
         );
         assert!(
-            p.outputs.iter().any(|o| o.path == "x.o"),
+            projected.outputs.iter().any(|o| o.path == "x.o"),
             "the -o target is an output: {:?}",
-            p.outputs
+            projected.outputs
         );
-        assert_eq!(p.execution_argv, vec!["cc", "-c", "x.c", "-o", "x.o"]);
+        assert_eq!(
+            projected.execution_argv,
+            vec!["cc", "-c", "x.c", "-o", "x.o"]
+        );
     }
 
-    /// `import "@vixen/grammar-cc"` evaluates to a grammar-set value, and `.cc`
-    /// selects one grammar — the grammar-as-value path on the real eval, against
-    /// the on-disk package (resolved via a CompositeResolver over packages/).
+    /// `import "@vixen/grammar-cc"` evaluates to a package struct (one field per
+    /// grammar), and `.cc` selects a grammar **coordinate** `{ package, name }` — the
+    /// grammar-as-value path on the real eval, against the on-disk package (resolved
+    /// via a CompositeResolver over packages/).
     #[test]
     fn import_grammar_package_selects_a_grammar_value() {
         use crate::dispatch::Dispatcher;
@@ -1902,18 +1980,33 @@ mod tests {
             mode: KernelMode::Off,
             exec_client: None,
         };
-        match ev
+        let coord = ev
             .eval(root_expr, &Env::new())
-            .expect("eval grammar import")
+            .expect("eval grammar import");
+        let (name, pkg) = read_grammar_coord(&ev, &coord);
+        assert_eq!(name, "cc");
+        assert_eq!(pkg, "@vixen/grammar-cc");
+    }
+
+    /// Read `(name, package)` out of a grammar coordinate value `{ package, name }`.
+    fn read_grammar_coord(ev: &Evaluator, v: &Value) -> (String, String) {
+        let Value::Struct(fields) = v else {
+            panic!("expected a grammar coordinate, got {v:?}");
+        };
+        let get = |want: &str| match ev
+            .force(&fields.iter().find(|(n, _)| n == want).expect("field").1)
+            .expect("force")
         {
-            Value::Grammar { name, .. } => assert_eq!(name, "cc"),
-            other => panic!("expected a Grammar value, got {other:?}"),
-        }
+            Value::Str(s) => s.to_string(),
+            other => panic!("`{want}` must be a string, got {other:?}"),
+        };
+        (get("name"), get("package"))
     }
 
     /// The whole grammar-as-value path from real `.vx`: import a grammar, build a
     /// command record `{ grammar: g.cc, binary: "cc" }`, and have `@[ ${cmd} … ]`
-    /// project it — no test-injected value, no grammar name in the syntax.
+    /// carry its coordinate forward — no test-injected value, no grammar name in the
+    /// syntax. The set the import loaded onto the arena then classifies the argv.
     #[test]
     fn cli_literal_from_imported_grammar_projects() {
         use crate::dispatch::Dispatcher;
@@ -1950,20 +2043,36 @@ mod tests {
             mode: KernelMode::Off,
             exec_client: None,
         };
-        let Value::Command(applied) = ev.eval(root_expr, &Env::new()).expect("eval") else {
-            panic!("expected a Command value");
-        };
-        let p = applied.projected.as_ref().expect("projected");
+        let applied = ev.eval(root_expr, &Env::new()).expect("eval");
+        let (binary, args) = read_command(&ev, &applied);
+        assert_eq!(binary, "cc");
+        assert_eq!(args, vec!["-c", "x.c", "-o", "x.o"]);
+
+        // The grammar set the import loaded onto the arena classifies the argv.
+        let set = fe
+            .program
+            .arena
+            .grammars
+            .get("@vixen/grammar-cc")
+            .expect("grammar set on arena");
+        let mut argv = vec![binary];
+        argv.extend(args);
+        let projected =
+            crate::command::project(set, "cc", &argv, &std::collections::BTreeMap::new())
+                .expect("cc grammar projects");
         assert!(
-            p.effective.inputs.iter().any(|i| i.path == "x.c"),
+            projected.effective.inputs.iter().any(|i| i.path == "x.c"),
             "x.c is an input: {:?}",
-            p.effective.inputs
+            projected.effective.inputs
         );
         assert!(
-            p.outputs.iter().any(|o| o.path == "x.o"),
+            projected.outputs.iter().any(|o| o.path == "x.o"),
             "x.o is an output: {:?}",
-            p.outputs
+            projected.outputs
         );
-        assert_eq!(p.execution_argv, vec!["cc", "-c", "x.c", "-o", "x.o"]);
+        assert_eq!(
+            projected.execution_argv,
+            vec!["cc", "-c", "x.c", "-o", "x.o"]
+        );
     }
 }

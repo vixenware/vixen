@@ -89,39 +89,6 @@ pub fn project(
     })
 }
 
-/// A runtime **command value** — what the leading hole of a CLI literal evaluates
-/// to, and what `@[ ${cmd} … ]` enriches with arguments. It carries its grammar as
-/// a value (per the wiki, "Types are values"), the program, and — once a CLI
-/// literal supplies arguments — the projected [`Command`]. (Fingerprint +
-/// exemptions join the bundle as exec grows.)
-#[derive(Debug, Clone)]
-pub struct CommandValue {
-    /// The grammar set the command's grammar lives in — projected on demand.
-    pub grammars: GrammarSet,
-    /// Which grammar in the set classifies this command's arguments.
-    pub grammar: String,
-    /// The program (argv[0]).
-    pub binary: String,
-    /// The projected command, once a CLI literal has supplied its arguments.
-    pub projected: Option<Command>,
-}
-
-/// Enrich a command value with a CLI literal's `args`: prepend the program, project
-/// the argv against the command's grammar, and return the value carrying the
-/// projected [`Command`]. `None` if the grammar isn't in the set.
-pub fn apply_args(cmd: &CommandValue, args: &[String]) -> Option<CommandValue> {
-    let mut argv = Vec::with_capacity(args.len() + 1);
-    argv.push(cmd.binary.clone());
-    argv.extend(args.iter().cloned());
-    let projected = project(&cmd.grammars, &cmd.grammar, &argv, &BTreeMap::new())?;
-    Some(CommandValue {
-        grammars: cmd.grammars.clone(),
-        grammar: cmd.grammar.clone(),
-        binary: cmd.binary.clone(),
-        projected: Some(projected),
-    })
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -174,34 +141,5 @@ mod tests {
     #[test]
     fn unknown_grammar_is_none() {
         assert!(project(&examples(), "nope", &argv(&["nope"]), &env(&[])).is_none());
-    }
-
-    /// Applying a CLI literal's args to a `cc` command value projects the compile:
-    /// the leading hole carried the grammar; `apply_args` prepends the program and
-    /// classifies the source as an input + the `-o` target as an output.
-    #[test]
-    fn apply_args_projects_a_cc_compile() {
-        let cmd = CommandValue {
-            grammars: examples(),
-            grammar: "cc".to_string(),
-            binary: "cc".to_string(),
-            projected: None,
-        };
-        let applied =
-            apply_args(&cmd, &argv(&["-c", "src/x.c", "-o", "x.o"])).expect("cc grammar present");
-        let p = applied.projected.expect("projected after applying args");
-        assert!(
-            p.effective.inputs.iter().any(|i| i.path == "src/x.c"),
-            "the source is an input"
-        );
-        assert!(
-            p.outputs.iter().any(|o| o.path == "x.o"),
-            "the -o target is an output"
-        );
-        assert_eq!(
-            p.execution_argv,
-            argv(&["cc", "-c", "src/x.c", "-o", "x.o"]),
-            "the program is prepended to the literal's args"
-        );
     }
 }
