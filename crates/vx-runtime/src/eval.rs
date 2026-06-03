@@ -99,6 +99,27 @@ fn done(value: Value) -> Thunk {
     Thunk(Rc::new(RefCell::new(ThunkState::Done(Ok(value)))))
 }
 
+/// Pull the sole `Value::Str` argument out of an already-evaluated `argv` — the
+/// shape every `Host` method takes. Poisons (with `who` named) on the wrong arity
+/// or arg type.
+fn single_str_arg<'a>(argv: &'a [Value], who: &str) -> Result<&'a Value, Poison> {
+    match argv {
+        [v @ Value::Str(_)] => Ok(v),
+        other => Err(poison(format!(
+            "{who} expects one string arg, got {other:?}"
+        ))),
+    }
+}
+
+/// A Rust-backed opaque runtime value with no Vixen-visible structure — a
+/// capability/intrinsic (e.g. `Host`). Held generically so each such type does
+/// NOT get its own `Value` variant; method dispatch downcasts via `as_any`. The
+/// Vixen type is an ordinary `Ty::Opaque` (`type Foo;`), so inference never
+/// special-cases these.
+pub trait Opaque: std::fmt::Debug + 'static {
+    fn as_any(&self) -> &dyn std::any::Any;
+}
+
 /// A runtime value. Compound fields are [`Thunk`]s, so they stay unforced until
 /// demanded (`r[eval.pending]`/`r[eval.forcing]`).
 #[derive(Debug, Clone)]
@@ -156,6 +177,13 @@ pub enum Value {
     /// propagating poison did. Authors carry it through but do not inspect it
     /// (compared by identity, never structurally equal across distinct failures).
     FailureContext(Rc<FailureContext>),
+    /// A Rust-backed opaque value — a capability/intrinsic (e.g. `Host`) with no
+    /// Vixen-visible structure. One shared holder for every such type (rather than a
+    /// `Value` variant per intrinsic); method dispatch downcasts the inner [`Opaque`]
+    /// via `as_any`. `Rc<dyn Opaque>` is `Clone`, and `Opaque: Debug` keeps `Value:
+    /// Debug`. Does not cross the vox wire (handled like `Closure`/`Command` in
+    /// `to_wire`).
+    Opaque(Rc<dyn Opaque>),
 }
 
 /// The outcome of evaluating a test body: clean, or poisoned (with the source
@@ -1192,6 +1220,41 @@ impl Evaluator<'_> {
                 match &*force_remote(*handle, PartKey::TreePath(path.clone())) {
                     Part::Bytes(b) => Ok(Value::Str(Rc::from(String::from_utf8_lossy(b).as_ref()))),
                     Part::Absent(why) => Err(poison(format!("tree path `{path}` absent: {why}"))),
+                }
+            }
+            // `host.which(name)` — resolve a tool on the executor's `$PATH`. POISONS
+            // when absent (the failure model — a probe writes `host.which(x)?` to
+            // catch it), rather than yielding an `Option`.
+            ("which", Value::Opaque(o)) if o.as_any().is::<crate::host::HostHandle>() => {
+                let Value::Str(name) = single_str_arg(&argv, "host.which")? else {
+                    unreachable!()
+                };
+                match crate::host::which(name) {
+                    Some(p) => Ok(Value::Str(Rc::from(p.as_str()))),
+                    None => Err(poison(format!("host tool `{name}` not found"))),
+                }
+            }
+            // `host.hash(path)` — Blake3 of a host file, hex. IO error poisons.
+            ("hash", Value::Opaque(o)) if o.as_any().is::<crate::host::HostHandle>() => {
+                let Value::Str(path) = single_str_arg(&argv, "host.hash")? else {
+                    unreachable!()
+                };
+                match crate::host::hash(path) {
+                    Ok(h) => Ok(Value::Str(Rc::from(h.as_str()))),
+                    Err(e) => Err(poison(format!("host.hash(`{path}`) failed: {e}"))),
+                }
+            }
+            // `host.read(path)` — raw bytes of a host file, rendered lossily as a
+            // `Str` (the existing Blob-as-Str convention). IO error poisons.
+            ("read", Value::Opaque(o)) if o.as_any().is::<crate::host::HostHandle>() => {
+                let Value::Str(path) = single_str_arg(&argv, "host.read")? else {
+                    unreachable!()
+                };
+                match crate::host::read(path) {
+                    Ok(bytes) => Ok(Value::Str(Rc::from(
+                        String::from_utf8_lossy(&bytes).as_ref(),
+                    ))),
+                    Err(e) => Err(poison(format!("host.read(`{path}`) failed: {e}"))),
                 }
             }
             (m, r) => Err(poison(format!("unknown method `{m}` on {r:?}"))),

@@ -34,6 +34,7 @@ pub mod command;
 pub mod dispatch;
 pub mod eval;
 pub mod graph;
+pub mod host;
 pub mod kernel;
 pub mod lower;
 pub mod observe;

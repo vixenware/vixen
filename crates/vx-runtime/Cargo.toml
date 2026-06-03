@@ -16,6 +16,8 @@ rustdoc-args = ["--html-in-header", "arborium-header.html"]
 # graph types (this crate is deliberately dependency-light at this stage).
 
 [dependencies]
+# Host capability: hashing host files (Host.hash) with Blake3.
+blake3.workspace = true
 facet = { workspace = true }
 facet-json = { workspace = true }
 vx-ir = { workspace = true }
