@@ -1,27 +1,30 @@
 //! The `Host` capability — a read-only view of the unsandboxed executor machine,
-//! handed to a capability probe (r[exec.verifier.host]). Held at runtime as a
-//! generic Value::Opaque, never a dedicated Value variant. Host paths are real-FS
-//! `String`s, not VFS `Path`s.
+//! handed to a capability probe (r[exec.verifier.host]). `Host` is an ordinary
+//! struct (`struct Host { os: String, arch: String }`): `os`/`arch` are plain
+//! fields filled by Rust, and being Rust-backed is just an implementation detail
+//! of its methods — it earns no special `Value` representation. Host paths are
+//! real-FS `String`s, not VFS `Path`s.
 
 use std::path::Path;
 
-/// A handle to the local host machine. A local host carries no state yet; a
-/// remote/region-scoped host would carry its executor identity here. Held at
-/// runtime inside a [`crate::eval::Value::Opaque`].
-#[derive(Debug)]
-pub struct HostHandle;
+use crate::eval::{Thunk, Value};
 
-impl HostHandle {
-    /// The local (in-process) host.
-    pub fn local() -> Self {
-        HostHandle
-    }
-}
-
-impl crate::eval::Opaque for HostHandle {
-    fn as_any(&self) -> &dyn std::any::Any {
-        self
-    }
+/// Build the local host as an ordinary struct value: `{ os, arch }`, each field a
+/// `Value::Str` filled from the compiled-in target constants. This is what a probe
+/// receives as its `Host` argument; the struct shape means `host.os` is a plain
+/// field read and `host.which(name)` is a name-based method dispatch (see
+/// `eval::call_method`), with no dedicated `Value` variant.
+pub fn local_host_value() -> Value {
+    Value::Struct(vec![
+        (
+            "os".to_string(),
+            Thunk::done(Value::Str(std::env::consts::OS.into())),
+        ),
+        (
+            "arch".to_string(),
+            Thunk::done(Value::Str(std::env::consts::ARCH.into())),
+        ),
+    ])
 }
 
 /// Resolve a tool name against `$PATH`, returning the absolute path of the first
@@ -40,17 +43,6 @@ pub fn which(name: &str) -> Option<String> {
         }
     }
     None
-}
-
-/// Hash a host file with Blake3, returning the lowercase hex digest.
-pub fn hash(path: &str) -> std::io::Result<String> {
-    let bytes = std::fs::read(path)?;
-    Ok(blake3::hash(&bytes).to_hex().to_string())
-}
-
-/// Read a host file's raw bytes.
-pub fn read(path: &str) -> std::io::Result<Vec<u8>> {
-    std::fs::read(path)
 }
 
 /// Whether `p` is a regular file the current user can execute. On Unix this checks

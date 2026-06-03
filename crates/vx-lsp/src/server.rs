@@ -2301,8 +2301,12 @@ pub(crate) fn completions_for_type(
     state: &DocumentState,
     offset: rowan::TextSize,
 ) -> Option<Vec<CompletionItem>> {
-    struct_fields_from_ty(ty, state).or_else(|| {
-        let items: Vec<CompletionItem> = visible_members_for_receiver(state, offset, ty)
+    // A type can have BOTH fields (a struct) and namespace methods (e.g. `Host`
+    // with `os`/`arch` fields and a `which` method) — offer both, not one or the
+    // other.
+    let mut items: Vec<CompletionItem> = struct_fields_from_ty(ty, state).unwrap_or_default();
+    items.extend(
+        visible_members_for_receiver(state, offset, ty)
             .into_iter()
             .filter(|def| def.kind == DefKind::Function)
             .map(|def| CompletionItem {
@@ -2316,10 +2320,9 @@ pub(crate) fn completions_for_type(
                     })
                 }),
                 ..Default::default()
-            })
-            .collect();
-        if items.is_empty() { None } else { Some(items) }
-    })
+            }),
+    );
+    if items.is_empty() { None } else { Some(items) }
 }
 
 /// Given a Ty, if it's a struct, return field completions.

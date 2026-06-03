@@ -29,8 +29,13 @@ type Json;
 type Yaml;
 /// Marker namespace for HTTP access.
 type Http;
-/// Executor-local host inspection capability.
-type Host;
+/// Executor-local host inspection capability. An ordinary struct: `os`/`arch` are
+/// plain fields the runtime fills from the executor; being Rust-backed is just an
+/// implementation detail of its methods, so it is not opaque.
+struct Host {
+  os: String,
+  arch: String,
+}
 
 enum Option[T] {
   Some(T),
@@ -354,16 +359,8 @@ namespace Tree {
 }
 
 namespace Host {
-  /// Canonical host operating system name, e.g. `"linux"`, `"darwin"`, or `"windows"`.
-  fn os(self) -> String;
-  /// Canonical host CPU architecture, e.g. `"x86_64"` or `"aarch64"`.
-  fn arch(self) -> String;
   /// Resolve a tool or executable name on the executor host.
   fn which(self, name: String) -> String;
-  /// Read a host file.
-  fn read(self, path: String) -> Blob;
-  /// Hash a host file with Blake3.
-  fn hash(self, path: String) -> Blob;
 }
 
 /// Halt execution with an error message (testing/debugging primitive).

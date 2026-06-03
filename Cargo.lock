@@ -4047,7 +4047,6 @@ dependencies = [
 name = "vx-runtime"
 version = "0.1.0"
 dependencies = [
- "blake3",
  "command-model",
  "copypatch",
  "corosensei",

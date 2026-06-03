@@ -324,7 +324,7 @@ fn demo(host: Host) {
         .lookup_def("Host")
         .first()
         .expect("Host type");
-    let host_ty = vx_types::Ty::Opaque(vx_types::OpaqueTy {
+    let host_ty = vx_types::Ty::Struct(vx_types::StructTy {
         def: host_def,
         type_args: vec![],
     });
