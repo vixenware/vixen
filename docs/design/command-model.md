@@ -138,6 +138,6 @@ described command. Exact spelling TBD.
 
 ## Building it
 
-Build the `cc` grammar against **libpng** (`old-zoo/libpng.vx`) first — it
+Build the `cc` grammar against **libpng** (`crates/fixtures/libpng.vx`) first — it
 stresses the spelling/policy/kind axes and the #2 coupling — then generalize. The
 ten study reports under `command-study/` are the reference corpus.

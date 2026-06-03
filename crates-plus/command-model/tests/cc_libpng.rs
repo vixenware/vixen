@@ -1,4 +1,4 @@
-//! Integration tests against the `cc` flags `old-zoo/libpng.vx` actually emits.
+//! Integration tests against the `cc` flags `crates/fixtures/libpng.vx` actually emits.
 //! These exercise the canonicalizer the way a real build would drive it.
 
 use command_model::{Lint, examples};
