@@ -5,7 +5,7 @@
 //! The whole spine fires on one strand: eval dispatches the observe (parks); the boss
 //! drives it — the executor runs the command (writing a file), captures its outputs,
 //! and serves them on a `Producing` virtual connection; the boss opens that vconn +
-//! `register_handle` and hands eval a `Value::Tree(HandleId)`; then `out.file(@out.txt)`
+//! `register_handle` and hands eval a `Value::Tree(HandleId)`; then `out.file("out.txt")`
 //! `force_remote`s that path (parks again), the boss pulls it over the vconn, and eval
 //! resumes with the file's bytes. Demand-pull across executors, in the language.
 
@@ -24,7 +24,7 @@ fn exec_returns_a_forceable_output_tree_over_vox() {
     let fe = compile_source(
         "fn t(cmd: Command) -> Blob ( \
            let out = exec(cmd) with { observer: (run) => run.stream.out }; \
-           out.file(@out.txt) )",
+           out.file(\"out.txt\") )",
         "t",
     )
     .expect("exec/tree program compiles");
@@ -62,7 +62,7 @@ fn exec_returns_a_forceable_output_tree_over_vox() {
         let cmd_value = Value::Command(Rc::new(cmd));
 
         match eval_body_with_exec(&program, &env, entry, vec![cmd_value], KernelMode::Off, cid) {
-            // `out.file(@out.txt)` forced the path over the vconn → the file's bytes
+            // `out.file("out.txt")` forced the path over the vconn → the file's bytes
             // (rendered lossily as a `Str` for now).
             EvalOutcome::Clean(Value::Str(s)) if &*s == "CONTENT" => Outcome::Clean,
             EvalOutcome::Clean(v) => {

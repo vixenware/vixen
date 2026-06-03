@@ -26,12 +26,12 @@ pub mod subst;
 use std::collections::HashMap;
 
 use vx_parser::SourceSpan;
-use vx_types::{FnSig, ParamDef, Ty, TypeId};
+use vx_types::{ArrayTy, FnSig, MapTy, ParamDef, Ty, TypeId};
 
 use crate::arena::VirArena;
 use crate::def::Definition;
 use crate::diagnostic::IrDiagnostic;
-use crate::expr::{CoerceExpr, ExprKind};
+use crate::expr::{ArrayElement, CoerceExpr, ExprKind, MapElement, MapKey};
 use crate::item::ItemKind;
 use crate::type_collect::resolve_type_ref;
 use crate::type_collection::TypeCollection;
@@ -403,20 +403,67 @@ impl<'a> TypeChecker<'a> {
         if self.types_compatible(actual, expected) {
             return true;
         }
-        let Some(&coerce_fn) = self.coercions.get(&(actual, expected)) else {
-            return false;
+        if let Some(&coerce_fn) = self.coercions.get(&(actual, expected)) {
+            // Wrap in place so the parent's `ExprId` reference stays valid: clone
+            // the current node into a fresh `inner_id`, then overwrite this node as
+            // a Coerce wrapping the inner, typed at the target.
+            let inner = self.arena[expr_id].clone();
+            let inner_id = self.arena.alloc_expr(inner);
+            self.arena[expr_id].kind = ExprKind::Coerce(CoerceExpr {
+                expr: inner_id,
+                coerce_fn,
+            });
+            self.arena[expr_id].ty = Some(expected);
+            return true;
+        }
+        // Structural coercion of collection literals: an array/map literal in a
+        // checking position coerces element-wise into the expected collection
+        // type (so `["out.txt"]` coerces to `Array[Path]` via the String→Path
+        // scalar coercion on each element). Resolve aliases on `expected` first so
+        // an alias for `Array[T]`/`Map[K, V]` is handled too.
+        let resolved_expected = {
+            let mut ty = expected;
+            while let Some(target) = self.alias_target(ty) {
+                ty = target;
+            }
+            ty
         };
-        // Wrap in place so the parent's `ExprId` reference stays valid: clone the
-        // current node into a fresh `inner_id`, then overwrite this node as a
-        // Coerce wrapping the inner, typed at the target.
-        let inner = self.arena[expr_id].clone();
-        let inner_id = self.arena.alloc_expr(inner);
-        self.arena[expr_id].kind = ExprKind::Coerce(CoerceExpr {
-            expr: inner_id,
-            coerce_fn,
-        });
-        self.arena[expr_id].ty = Some(expected);
-        true
+        let kind = self.arena[expr_id].kind.clone();
+        match (self.types.env.get_ty(resolved_expected).clone(), kind) {
+            (Ty::Array(ArrayTy(elem)), ExprKind::Array(arr)) => {
+                let all_ok = arr.elements.iter().all(|el| match el {
+                    ArrayElement::Expr(e) => self.coerce_to(*e, elem),
+                    // A spread contributes a whole `Array[elem]`.
+                    ArrayElement::Spread(e) => self.coerce_to(*e, expected),
+                });
+                if all_ok {
+                    self.arena[expr_id].ty = Some(expected);
+                    return true;
+                }
+                false
+            }
+            (Ty::Map(MapTy { key, value }), ExprKind::Map(m)) => {
+                let all_ok = m.entries.iter().all(|el| match el {
+                    MapElement::Entry(entry) => {
+                        // A `Name` key is already a `String` with no sub-expression
+                        // to coerce; only `Expr` keys carry a coercible node.
+                        let key_ok = match &entry.key {
+                            MapKey::Expr(k) => self.coerce_to(*k, key),
+                            MapKey::Name { .. } => true,
+                        };
+                        let value_ok = self.coerce_to(entry.value, value);
+                        key_ok && value_ok
+                    }
+                    MapElement::Spread(e) => self.coerce_to(*e, expected),
+                });
+                if all_ok {
+                    self.arena[expr_id].ty = Some(expected);
+                    return true;
+                }
+                false
+            }
+            _ => false,
+        }
     }
 
     /// Resolve a VIR TypeRefId to a Ty using the type collection's name_to_id.

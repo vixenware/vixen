@@ -5,18 +5,18 @@
 // by git.
 
 let core_sources = [
-  @lapi.c, @lcode.c, @lctype.c, @ldebug.c, @ldo.c, @ldump.c,
-  @lfunc.c, @lgc.c, @llex.c, @lmem.c, @lobject.c, @lopcodes.c,
-  @lparser.c, @lstate.c, @lstring.c, @ltable.c, @ltm.c,
-  @lundump.c, @lvm.c, @lzio.c,
+  "lapi.c", "lcode.c", "lctype.c", "ldebug.c", "ldo.c", "ldump.c",
+  "lfunc.c", "lgc.c", "llex.c", "lmem.c", "lobject.c", "lopcodes.c",
+  "lparser.c", "lstate.c", "lstring.c", "ltable.c", "ltm.c",
+  "lundump.c", "lvm.c", "lzio.c",
 ];
 
-let aux_sources = [@lauxlib.c];
+let aux_sources = ["lauxlib.c"];
 
 let lib_sources = [
-  @lbaselib.c, @ldblib.c, @liolib.c, @lmathlib.c, @loslib.c,
-  @ltablib.c, @lstrlib.c, @lutf8lib.c, @loadlib.c, @lcorolib.c,
-  @linit.c,
+  "lbaselib.c", "ldblib.c", "liolib.c", "lmathlib.c", "loslib.c",
+  "ltablib.c", "lstrlib.c", "lutf8lib.c", "loadlib.c", "lcorolib.c",
+  "linit.c",
 ];
 
 let all_lib_sources = [..core_sources, ..aux_sources, ..lib_sources];
@@ -36,7 +36,7 @@ fn build(ws: Path, args: Array[String], env: Map[String, String]) -> Tree (
   }
 
   let class = executor_class("default");
-  let src_tree = Tree(ws / @zoo/lua-src);
+  let src_tree = Tree(ws / "zoo/lua-src");
   let toolchain =
     discover(class, (host) =>
       // The map stays demand-driven: each discovered tool can become
@@ -57,7 +57,7 @@ fn build(ws: Path, args: Array[String], env: Map[String, String]) -> Tree (
       if proc.exit_code != 0 (
         fail `process failed`
       ) else (
-        vfs.subtree(@out)
+        vfs.subtree("out")
       )
     ),
   };
@@ -70,28 +70,28 @@ fn build(ws: Path, args: Array[String], env: Map[String, String]) -> Tree (
       "-c",
       ..cflags,
       "-o",
-      @(out/obj/{file}.o),
-      @(src/{file}),
+      `out/obj/{file}.o`,
+      `src/{file}`,
     ] with {
-      mounts: %{ @src => src_tree },
+      mounts: %{ "src" => src_tree },
     }
   );
 
   fn archive(objs: Tree) -> Tree (
-    cexec [libtool, "-static", "-o", @out/liblua.a, ..objs]
+    cexec [libtool, "-static", "-o", "out/liblua.a", ..objs]
   );
 
   fn link(objs: Tree) -> Tree (
-    cexec [cc, "-o", @out/bin/lua, ..ldflags, ..objs, ..syslibs]
+    cexec [cc, "-o", "out/bin/lua", ..ldflags, ..objs, ..syslibs]
   );
 
   let objects = (all_lib_sources.map(compile)).merge();
   let liblua = archive(objects);
 
-  let lua_exe = link(Tree [compile @lua.c, liblua]);
+  let lua_exe = link(Tree [compile("lua.c"), liblua]);
 
   Tree %{
-    @bin/lua => lua_exe.file(@bin/lua).executable(),
-    @lib/liblua.a => liblua.file(@liblua.a),
+    "bin/lua" => lua_exe.file("bin/lua").executable(),
+    "lib/liblua.a" => liblua.file("liblua.a"),
   }
 )

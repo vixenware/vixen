@@ -1,5 +1,5 @@
 //! The eval↔remote join: a real `.vx` program forces a file out of a **remote
-//! producing tree** over vox, on a strand. `tree.file(@path)` in eval calls
+//! producing tree** over vox, on a strand. `tree.file("path")` in eval calls
 //! `force_remote` (the consumer half of `remote.rs`) — if the path isn't produced
 //! yet the strand **parks** while the boss drives the vox `force()`, then resumes
 //! with the bytes; a path the producer never makes poisons.
@@ -17,11 +17,11 @@ use vx_runtime::eval::{KernelMode, Outcome as EvalOutcome, Value, eval_body};
 use vx_runtime::remote;
 use vx_runtime::strand::{HandleId, Outcome, ResourceId, Scheduler, StrandId};
 
-/// Spawn `fn t(tree: Tree) -> Blob ( tree.file(@out) )` as a strand against the
-/// remote tree `hid`: `Clean` iff `tree.file(@out)` forces to `want`, else
+/// Spawn `fn t(tree: Tree) -> Blob ( tree.file("out") )` as a strand against the
+/// remote tree `hid`: `Clean` iff `tree.file("out")` forces to `want`, else
 /// `Poisoned` (carrying eval's reason — e.g. an absent part).
 fn force_out(s: &Scheduler, hid: HandleId, want: &'static str) -> StrandId {
-    let fe = compile_source("fn t(tree: Tree) -> Blob ( tree.file(@out) )", "t")
+    let fe = compile_source("fn t(tree: Tree) -> Blob ( tree.file(\"out\") )", "t")
         .expect("exec/tree program compiles");
     let entry = fe
         .program
@@ -36,7 +36,7 @@ fn force_out(s: &Scheduler, hid: HandleId, want: &'static str) -> StrandId {
     let program = fe.program;
     let env = fe.env;
     s.spawn(ResourceId(0), move || {
-        // The Rc-bearing tree value is built worker-side; eval forces `@out` over vox.
+        // The Rc-bearing tree value is built worker-side; eval forces `"out"` over vox.
         match eval_body(
             &program,
             &env,
@@ -51,7 +51,7 @@ fn force_out(s: &Scheduler, hid: HandleId, want: &'static str) -> StrandId {
     })
 }
 
-/// The path is already produced → `tree.file(@out)` forces it on the first try,
+/// The path is already produced → `tree.file("out")` forces it on the first try,
 /// over vox, and `exec`/eval evaluates to its bytes.
 #[test]
 fn eval_forces_a_file_already_in_the_remote_tree() {

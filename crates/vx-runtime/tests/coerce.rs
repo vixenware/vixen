@@ -64,3 +64,66 @@ fn string_literal_coerces_to_path_end_to_end() {
         other => panic!("expected the coerced path string `out.txt`, got {other:?}"),
     }
 }
+
+/// An array literal in a checking position coerces element-wise: `["a", "b"]`
+/// passed where `Array[Path]` is expected has each `String` element coerced
+/// through `Path`'s `#[coerce]` constructor. Type-checks (no ArgTypeMismatch on
+/// the array) and evaluates to the same strings (the coercion is identity).
+#[test]
+fn string_array_coerces_to_path_array_end_to_end() {
+    // `f` wants an `Array[Path]`; `main` passes a `["a", "b"]` array of bare
+    // `String` literals. The argument is a checking-mode position, so the checker
+    // coerces each element structurally.
+    let src = "fn f(ps: Array[Path]) -> Array[Path] ( ps )\n\
+               fn main() -> Array[Path] ( f([\"a\", \"b\"]) )";
+
+    // (a) Type-checks: a successful front-end run means no ArgTypeMismatch was
+    // raised on the array — the element-wise coercion was inserted instead.
+    let fe = compile_source(src, "main").expect("front-end compiles: array coercion inserted");
+
+    // Each string element must have been wrapped in a `Coerce` node pointing at
+    // `Path`'s constructor.
+    let arena = &fe.program.arena;
+    let coerces: Vec<_> = arena
+        .exprs
+        .iter()
+        .filter_map(|e| match &e.kind {
+            ExprKind::Coerce(c) => Some(c.clone()),
+            _ => None,
+        })
+        .collect();
+    assert!(
+        coerces.len() >= 2,
+        "expected at least two Coerce nodes (one per array element), got {}",
+        coerces.len()
+    );
+    for coerce in &coerces {
+        assert!(
+            matches!(&arena[coerce.expr].kind, ExprKind::Literal(_)),
+            "each coerced child is an original string literal, got {:?}",
+            arena[coerce.expr].kind
+        );
+        match &arena[coerce.coerce_fn].kind {
+            ItemKind::Function(f) => {
+                assert_eq!(f.name, "Path", "coerce_fn is Path's constructor")
+            }
+            other => panic!("coerce_fn should be a function, got {other:?}"),
+        }
+    }
+
+    // (b) Evaluates correctly: the array value comes back clean (the coercion is
+    // identity, so the two paths are the same strings). The elements are lazy
+    // thunks; the front-end already proved each was coerced, so here we just
+    // confirm the array evaluates without poison and has the right arity.
+    let outcome = run(src, "main").expect("evaluation runs");
+    match outcome {
+        Outcome::Clean(Value::Array(items)) => {
+            assert_eq!(
+                items.len(),
+                2,
+                "the coerced `Array[Path]` has both elements"
+            );
+        }
+        other => panic!("expected a clean array of two coerced paths, got {other:?}"),
+    }
+}
