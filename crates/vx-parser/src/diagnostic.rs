@@ -57,7 +57,7 @@ pub enum ExpectedKind {
     FieldName,
     /// A variant name inside an enum body.
     VariantName,
-    /// A keyword-parameter name inside a `where { ... }` block (or after `;`).
+    /// A keyword-parameter name inside a `with { ... }` block (or after `;`).
     KeywordParameterName,
     /// A type parameter inside `[T, ...]`.
     TypeParameter,

@@ -93,7 +93,7 @@ fn build(ws: Path, args: Array[String], env: Map[String, String]) #fs #discover 
   let { cc, ar } = tools;
 
   let target_triple =
-    exec [cc, "-dumpmachine"] where {
+    exec [cc, "-dumpmachine"] with {
       observer: (proc, _vfs) => (
         if proc.exit_code != 0 (
           fail `process failed`
@@ -118,7 +118,7 @@ fn build(ws: Path, args: Array[String], env: Map[String, String]) #fs #discover 
       "generic"
     );
 
-  let cexec = partial exec where {
+  let cexec = partial exec with {
     observer: (proc, vfs) => (
       if proc.exit_code != 0 (
         fail `process failed`
@@ -128,7 +128,7 @@ fn build(ws: Path, args: Array[String], env: Map[String, String]) #fs #discover 
     ),
   };
 
-  fn cc_probe(source: Blob) where {
+  fn cc_probe(source: Blob) with {
     flags: Array[String] = [],
     link: Bool = false,
   } -> Bool (
@@ -145,13 +145,13 @@ fn build(ws: Path, args: Array[String], env: Map[String, String]) #fs #discover 
       @probe.c,
       ..mode_args,
       ..flags,
-    ] where {
+    ] with {
       mounts: %{ @probe.c => source },
       observer: (proc, _vfs) => proc.exit_code == 0,
     }
   );
 
-  fn compile_objects(src: Tree, sources: Array[Path]) where {
+  fn compile_objects(src: Tree, sources: Array[Path]) with {
     generated: Map[Path, Blob] = %{},
     mounts: Map[Path, TreeEntry] = %{},
     includes: Array[Path] = [],
@@ -170,7 +170,7 @@ fn build(ws: Path, args: Array[String], env: Map[String, String]) #fs #discover 
           ..defines.map((define) => `-D${define}`),
           ..common_cflags,
           ..flags,
-        ] where {
+        ] with {
           mounts: %{ @src => src, @gen => Tree(generated), ..mounts },
         }
       )
@@ -181,16 +181,16 @@ fn build(ws: Path, args: Array[String], env: Map[String, String]) #fs #discover 
     cexec [ar, "rcs", @(out/{name}), ..objects]
   );
 
-  fn shared_library(name: Path, objects: Tree) where {
+  fn shared_library(name: Path, objects: Tree) with {
     link_flags: Array[ExecInput] = [],
     mounts: Map[Path, TreeEntry] = %{},
   } -> Tree (
-    cexec [cc, "-shared", "-o", @(out/{name}), ..objects, ..link_flags] where {
+    cexec [cc, "-shared", "-o", @(out/{name}), ..objects, ..link_flags] with {
       mounts,
     }
   );
 
-  let zlib_src = acquire(zlib_url) where {
+  let zlib_src = acquire(zlib_url) with {
     digest: zlib_digest,
     extract: "tar.gz",
   };
@@ -205,7 +205,7 @@ fn build(ws: Path, args: Array[String], env: Map[String, String]) #fs #discover 
   ];
 
   let zlib_objects =
-    compile_objects(zlib_src, zlib_sources) where {
+    compile_objects(zlib_src, zlib_sources) with {
       includes: [@src],
       defines: zlib_defines,
     };
@@ -220,13 +220,13 @@ fn build(ws: Path, args: Array[String], env: Map[String, String]) #fs #discover 
     @lib/libz.so => zlib_shared.file @lib/libz.so,
   };
 
-  let libpng_src = acquire(libpng_url) where {
+  let libpng_src = acquire(libpng_url) with {
     digest: libpng_digest,
     extract: "tar.xz",
   };
 
   let has_ld_version_script =
-    cc_probe(Blob("void sym1(void) {} void sym2(void) {} int main(void) { return 0; }\n")) where {
+    cc_probe(Blob("void sym1(void) {} void sym2(void) {} int main(void) { return 0; }\n")) with {
       link: true,
       flags: ["-Wl,--version-script=@conftest.map"],
     };
@@ -254,7 +254,7 @@ fn build(ws: Path, args: Array[String], env: Map[String, String]) #fs #discover 
   let pnglibconf_h = libpng_src.file @scripts/pnglibconf.h.prebuilt;
 
   let libpng_objects =
-    compile_objects(libpng_src, libpng_core_sources ++ png_arch_sources) where {
+    compile_objects(libpng_src, libpng_core_sources ++ png_arch_sources) with {
       generated: %{ @pnglibconf.h => pnglibconf_h },
       mounts: %{ @deps/zlib => zlib_install },
       includes: [@gen, @src, @deps/zlib/include],
@@ -263,7 +263,7 @@ fn build(ws: Path, args: Array[String], env: Map[String, String]) #fs #discover 
 
   let libpng_static = static_archive(@lib/libpng16.a, libpng_objects);
   let libpng_shared =
-    shared_library(@lib/libpng16.so, libpng_objects) where {
+    shared_library(@lib/libpng16.so, libpng_objects) with {
       link_flags: [
         ..if has_ld_version_script (["-Wl,--version-script=@src/libpng.vers"]) else ([]),
         @deps/zlib/lib/libz.so,

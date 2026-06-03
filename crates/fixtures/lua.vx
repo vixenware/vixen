@@ -62,7 +62,7 @@ fn build(ws: Path, args: Array[String], env: Map[String, String]) #fs #discover 
     ),
   };
 
-  let cexec = partial exec where common;
+  let cexec = partial exec with common;
 
   fn compile(file: Path) -> Tree (
     cexec [
@@ -72,7 +72,7 @@ fn build(ws: Path, args: Array[String], env: Map[String, String]) #fs #discover 
       "-o",
       @(out/obj/{file}.o),
       @(src/{file}),
-    ] where {
+    ] with {
       mounts: %{ @src => src_tree },
     }
   );

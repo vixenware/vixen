@@ -294,8 +294,8 @@ fn infer_static_namespace_call_sig(
 }
 
 pub(crate) fn infer_where(tc: &mut TypeChecker, w: &WhereExpr) -> TypeId {
-    // A `where` either decorates a Call (`exec(...) where {...}`) or a
-    // PartialApp (`partial exec where {...}` / `partial exec where common`).
+    // A `with` either decorates a Call (`exec(...) with {...}`) or a
+    // PartialApp (`partial exec with {...}` / `partial exec with common`).
     // In both cases we need to inspect the underlying function's signature so
     // we can bind closure parameter types from callback slots and feed the
     // closure body's return type back into type-parameter substitution.
@@ -318,8 +318,8 @@ pub(crate) fn infer_where(tc: &mut TypeChecker, w: &WhereExpr) -> TypeId {
                 return tc.arena[w.callee].ty.unwrap_or_else(|| tc.poison());
             }
         },
-        // Bare NameRef: `f where {...}` returns a partially-applied function.
-        // This shape shows up as the inner expression of `partial f where {...}`
+        // Bare NameRef: `f with {...}` returns a partially-applied function.
+        // This shape shows up as the inner expression of `partial f with {...}`
         // since the parser parses that as `PartialApp(Where(NameRef, ...))`.
         ExprKind::NameRef(nr) => match nr.resolved.and_then(|t| sig_for_name_ref_target(tc, t)) {
             Some(sig) => (sig, WhereCalleeKind::NameRef),
@@ -427,7 +427,7 @@ pub(crate) fn infer_where(tc: &mut TypeChecker, w: &WhereExpr) -> TypeId {
 enum WhereCalleeKind {
     Call(CallExpr),
     Partial(PartialAppExpr),
-    /// `f where {...}` where `f` is a bare function name — yields the
+    /// `f with {...}` where `f` is a bare function name — yields the
     /// partially-applied function type with no positional args dropped.
     NameRef,
 }

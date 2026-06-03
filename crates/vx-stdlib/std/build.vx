@@ -18,13 +18,13 @@ fn discover[T](
 ) #discover -> T;
 
 /// Fetch a fixed-hash resource and return its content as a blob.
-fn acquire(url: String) where {
+fn acquire(url: String) with {
   /// Expected digest of the fetched payload, written as `scheme:hex`.
   digest: String,
 } -> Blob;
 
 /// Fetch and extract a fixed-hash archive in one cached step.
-fn acquire(url: String) where {
+fn acquire(url: String) with {
   /// Expected digest of the fetched archive, written as `scheme:hex`.
   digest: String,
   /// Archive format selector, e.g. `"tar.gz"` or `"tar.xz"`.
@@ -36,7 +36,7 @@ fn acquire(url: String) where {
 /// The template may interpolate values from the bindings record. This is the
 /// primitive used for generated config headers, pkg-config files, and small
 /// generated scripts in builds.
-fn render[T](template: Path) where {
+fn render[T](template: Path) with {
   bindings: T,
 } -> Blob;
 
@@ -71,7 +71,7 @@ fn metadata(path: String) #fs -> Map[String, String];
 /// `Stream[T]`, `exec` itself returns `Stream[T]`.
 fn exec[T](
   command: Command,
-) where {
+) with {
   /// Value source for grammar-declared environment channels.
   env: Map[String, ExecInput] = %{},
   /// Extra VFS mounts not already implied by the command's classified inputs.

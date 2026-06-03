@@ -334,7 +334,7 @@ impl Builder<'_> {
                 self.emit(NodeKind::Fail, "fail".into(), span, inputs)
             }
 
-            // `exec [...] where { observer, mounts, ... }` — the build boundary.
+            // `exec [...] with { observer, mounts, ... }` — the build boundary.
             // References the underlying call and the keyword-config record.
             ExprKind::Where(w) => {
                 let (callee, keywords) = (w.callee, w.keywords);

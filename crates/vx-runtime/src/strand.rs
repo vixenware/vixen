@@ -954,7 +954,7 @@ pub fn force_remote(handle: HandleId, part: PartKey) -> Arc<Part> {
 }
 
 /// Dispatch an `observe` RPC and block (park) until the executor returns its result —
-/// the eval-side entry for `exec(cmd) where { observer }`. Registers the request in the
+/// the eval-side entry for `exec(cmd) with { observer }`. Registers the request in the
 /// boss's registry, parks (`AwaitingObserve`, freeing the worker) until the boss drives
 /// the vox `observe()` and resolves it. eval knows only the [`ObserveClientId`], never
 /// the live vox client. One-shot: each call is a distinct demand (no dedup).

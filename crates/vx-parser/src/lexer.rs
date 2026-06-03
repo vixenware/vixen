@@ -446,6 +446,7 @@ impl<'a> Lexer<'a> {
             }
             "with" => SyntaxKind::WITH_KW,
             "where" => SyntaxKind::WHERE_KW,
+            "wherein" => SyntaxKind::WHEREIN_KW,
             "is" => SyntaxKind::IS_KW,
             "as" => SyntaxKind::AS_KW,
             "import" => SyntaxKind::IMPORT_KW,

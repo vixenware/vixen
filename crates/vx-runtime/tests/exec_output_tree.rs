@@ -1,4 +1,4 @@
-//! The tree output crossing, end to end: `exec(cmd) where { observer: (run) =>
+//! The tree output crossing, end to end: `exec(cmd) with { observer: (run) =>
 //! run.stream.out }` returns the run's **output tree**, and forcing a file out of it
 //! pulls the bytes over vox.
 //!
@@ -23,7 +23,7 @@ use vx_runtime::strand::{Outcome, ResourceId, Scheduler};
 fn exec_returns_a_forceable_output_tree_over_vox() {
     let fe = compile_source(
         "fn t(cmd: Command) -> Blob ( \
-           let out = exec(cmd) where { observer: (run) => run.stream.out }; \
+           let out = exec(cmd) with { observer: (run) => run.stream.out }; \
            out.file(@out.txt) )",
         "t",
     )

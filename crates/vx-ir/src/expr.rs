@@ -85,7 +85,7 @@ pub enum ExprKind {
     /// A function call: `f(a, b)`.
     Call(CallExpr),
 
-    /// A keyword-argument call: `f(a) where { key: val }`.
+    /// A keyword-argument call: `f(a) with { key: val }`.
     Where(WhereExpr),
 
     /// A bare invocation (no-arg call): `f!`.
@@ -366,7 +366,7 @@ pub struct Arg {
     pub span: SourceSpan,
 }
 
-/// A keyword-argument call: `callee where { key: val }`.
+/// A keyword-argument call: `callee with { key: val }`.
 #[derive(facet::Facet, Debug, Clone)]
 pub struct WhereExpr {
     /// The callee expression (may be a Call or a NameRef).

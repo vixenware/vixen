@@ -534,7 +534,7 @@ impl VirBuilder {
                     // Keyword parameters live in KEYWORD_PARAMETER_LIST.
                     // They may either be nested under PARAMETER_CLAUSE (for the
                     // `(positional; key: T)` form) or appear as a direct child
-                    // of FN_DECL (for the `(positional) where { key: T }` form).
+                    // of FN_DECL (for the `(positional) with { key: T }` form).
                     let kw_list = clause
                         .children()
                         .find(|c| c.kind() == SyntaxKind::KEYWORD_PARAMETER_LIST)

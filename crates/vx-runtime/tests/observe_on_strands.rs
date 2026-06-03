@@ -2,7 +2,7 @@
 //! (`AwaitingObserve`, freeing its worker), the boss drives the vox call on its
 //! runtime, and the strand **resumes** with the result. This is `force_remote`
 //! generalized to "force an observe" — the eval↔async-observe bridge for
-//! `exec(cmd) where { observer }`, over a real vox connection (`local_observer`).
+//! `exec(cmd) with { observer }`, over a real vox connection (`local_observer`).
 
 use vx_ir::compile::compile_source;
 use vx_ir::item::ItemKind;

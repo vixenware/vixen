@@ -60,6 +60,7 @@ syntax_kinds!(
     ELSE_KW,
     WITH_KW,
     WHERE_KW,
+    WHEREIN_KW,
     IS_KW,
     AS_KW,
     IMPORT_KW,

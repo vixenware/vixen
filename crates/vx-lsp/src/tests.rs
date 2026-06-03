@@ -127,7 +127,7 @@ fn build(ws: Path) -> Tree {
 fn inferred_def_type_uses_closure_parameter_types() {
     let text = r#"
 fn build(cmd: Command) {
-  exec(cmd) where {
+  exec(cmd) with {
     observer: (run) => run.ok.out,
   };
 }
@@ -152,7 +152,7 @@ fn build(cmd: Command) {
 fn inferred_def_type_uses_specialized_exec_return_type() {
     let text = r#"
 fn build(cmd: Command) {
-  let output = exec(cmd) where {
+  let output = exec(cmd) with {
     observer: (run) => run.ok.out,
   };
 
@@ -181,7 +181,7 @@ fn build() {
   let common = {
     observer: (run) => run.ok.out,
   };
-  let cexec = partial exec where common;
+  let cexec = partial exec with common;
 
   cexec
 }
@@ -205,7 +205,7 @@ fn build() {
 fn documentation_for_uses_callback_slot_docs() {
     let text = r#"
 fn build(cmd: Command) {
-  exec(cmd) where {
+  exec(cmd) with {
     observer: (run) => run.ok.out,
   };
 }

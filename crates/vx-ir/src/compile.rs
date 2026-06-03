@@ -365,7 +365,7 @@ fn probe() #discover -> String (
 
     const SOURCE_EXEC_STDOUT: &str = r#"
 fn probe(cmd: Command) -> Bytes (
-  exec(cmd) where {
+  exec(cmd) with {
     observer: (run) => run.ok.stdout
   }
 )
@@ -373,7 +373,7 @@ fn probe(cmd: Command) -> Bytes (
 
     const SOURCE_EXEC_WRITABLE: &str = r#"
 fn probe(cmd: Command) -> Tree (
-  exec(cmd) where {
+  exec(cmd) with {
     writable: [@out],
     create_dirs: [@out],
     observer: (run) => run.ok.out

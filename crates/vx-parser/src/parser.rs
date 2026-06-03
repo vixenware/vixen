@@ -438,11 +438,11 @@ fn fn_decl_contents(p: &mut Parser<'_>, allow_upper_name: bool) {
     name(p, allow_upper_name);
     type_param_list(p);
     parameter_clause(p);
-    if p.at(SyntaxKind::WHERE_KW) {
+    if p.at(SyntaxKind::WITH_KW) {
         keyword_parameter_block(p);
     }
     capability_list(p);
-    if p.at(SyntaxKind::WHERE_KW) {
+    if p.at(SyntaxKind::WITH_KW) {
         keyword_parameter_block(p);
     }
     if p.eat(SyntaxKind::THIN_ARROW) {
@@ -632,7 +632,7 @@ fn namespace_body(p: &mut Parser<'_>) {
 }
 
 fn keyword_parameter_block(p: &mut Parser<'_>) {
-    p.expect(SyntaxKind::WHERE_KW);
+    p.expect(SyntaxKind::WITH_KW);
     let params = p.start();
     p.expect(SyntaxKind::L_CURLY);
     while !p.at(SyntaxKind::R_CURLY) && !p.at(SyntaxKind::EOF) {
@@ -803,11 +803,11 @@ fn function_type(p: &mut Parser<'_>) -> CompletedMarker {
         }
     }
     p.expect(SyntaxKind::R_PAREN);
-    if p.at(SyntaxKind::WHERE_KW) {
+    if p.at(SyntaxKind::WITH_KW) {
         keyword_parameter_block(p);
     }
     capability_list(p);
-    if p.at(SyntaxKind::WHERE_KW) {
+    if p.at(SyntaxKind::WITH_KW) {
         keyword_parameter_block(p);
     }
     p.expect(SyntaxKind::THIN_ARROW);
@@ -1124,7 +1124,7 @@ fn pipe_expr(p: &mut Parser<'_>) -> CompletedMarker {
 // r[lex.precedence]
 fn with_expr(p: &mut Parser<'_>) -> CompletedMarker {
     let lhs = logical_or_expr(p);
-    if p.at(SyntaxKind::WITH_KW) {
+    if p.at(SyntaxKind::WHEREIN_KW) {
         let marker = lhs.precede(p);
         p.bump();
         update_body(p);
@@ -1409,7 +1409,9 @@ fn application_expr(p: &mut Parser<'_>) -> CompletedMarker {
             continue;
         }
 
-        if p.at(SyntaxKind::WHERE_KW) {
+        // `with { … }` = keyword args; `where ( … )` = capability/predicate query.
+        // Both complete to WHERE_EXPR (the checker dispatches on record vs. predicate).
+        if p.at(SyntaxKind::WITH_KW) || p.at(SyntaxKind::WHERE_KW) {
             let marker = lhs.precede(p);
             p.bump();
             expr(p);
@@ -1723,7 +1725,7 @@ fn update_body(p: &mut Parser<'_>) {
             expr(p);
         } else if p.eat(SyntaxKind::COLON) {
             field_path(p);
-            p.expect(SyntaxKind::WITH_KW);
+            p.expect(SyntaxKind::WHEREIN_KW);
             update_body(p);
         } else {
             field_path(p);

@@ -1,14 +1,14 @@
-//! `exec(command) where { observer }` end-to-end — the language surface of the exec
+//! `exec(command) with { observer }` end-to-end — the language surface of the exec
 //! spine, returning the observer's **real value**. A real `.vx` program is compiled
 //! through the bundled front-end, then evaluated on a strand: eval hits the
-//! `where`-decorated `exec`, projects the command to its argv, bundles the observer
+//! `with`-decorated `exec`, projects the command to its argv, bundles the observer
 //! closure's static reachable closure, and dispatches the `observe` RPC to an
 //! executor **over vox** (`local_observer`). The strand parks; the boss drives the
 //! call (the executor runs the real process, builds a `Run`, evaluates the observer
 //! against it, and **deep-forces the result into a value**); the strand resumes, and
 //! `exec(…)` evaluates to that value — reconstructed from the wire.
 //!
-//! So `exec(@[ ${cmd} ]) where { observer: (run) => run.ok }` returns the actual
+//! So `exec(@[ ${cmd} ]) with { observer: (run) => run.ok }` returns the actual
 //! `Exit` struct that crossed back, not a placeholder. (`observe_on_strands` drives
 //! `dispatch_observe` directly; `observe`'s own test asserts the crossed `WireValue`.)
 
@@ -22,13 +22,13 @@ use vx_runtime::eval::{KernelMode, Outcome as EvalOutcome, Value, eval_body_with
 use vx_runtime::observe::local_observer;
 use vx_runtime::strand::{Outcome, ResourceId, Scheduler};
 
-/// Compile `exec(@[ ${cmd} ]) where { observer: (run) => run.ok }`, run it on a
+/// Compile `exec(@[ ${cmd} ]) with { observer: (run) => run.ok }`, run it on a
 /// strand against a local executor running `binary`, and return the strand outcome.
 /// On success the observer's value is the `Exit` struct — verified worker-side (a
 /// `Value` can't cross the strand boundary), so a regression to `Unit` fails here.
 fn exec_outcome(binary: &str) -> Option<Outcome> {
     let fe = compile_source(
-        "fn t(cmd: Command) -> Exit ( exec(@[ ${cmd} ]) where { observer: (run) => run.ok } )",
+        "fn t(cmd: Command) -> Exit ( exec(@[ ${cmd} ]) with { observer: (run) => run.ok } )",
         "t",
     )
     .expect("exec program compiles");
@@ -88,7 +88,7 @@ fn exec_outcome(binary: &str) -> Option<Outcome> {
 
 /// `true` exits 0 → the observer's `run.ok` forces to an `Exit` → that whole struct
 /// crosses back and `exec(…)` evaluates to it (verified worker-side). The whole path
-/// — `where`-hook, command projection, observer bundling, observe + value crossing
+/// — `with`-hook, command projection, observer bundling, observe + value crossing
 /// over vox on a strand — ran end to end.
 #[test]
 fn exec_over_vox_returns_the_observers_exit_value() {

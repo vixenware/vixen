@@ -775,7 +775,9 @@ impl Formatter {
             self.fmt_node(base.syntax());
         }
         self.space();
-        self.write("where");
+        // Keyword-argument application is spelled `with` (the node is still
+        // named WHERE_EXPR internally; the surface keyword migrated where→with).
+        self.write("with");
         if let Some(keywords) = children.next() {
             self.space();
             self.fmt_node(keywords.syntax());

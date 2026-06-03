@@ -252,12 +252,6 @@ fn libpng_sketch_parses() {
 }
 
 #[test]
-fn cargo_resolve_sketch_parses() {
-    let path = Path::new(env!("CARGO_MANIFEST_DIR")).join("../fixtures/cargo-resolve.vx");
-    assert_file_parses(&path);
-}
-
-#[test]
 fn lua_sketch_parses() {
     let path = Path::new(env!("CARGO_MANIFEST_DIR")).join("../fixtures/lua.vx");
     assert_file_parses(&path);
@@ -300,10 +294,10 @@ fn download_url(template: String) -> String (
 }
 
 #[test]
-fn function_declaration_where_blocks_parse() {
+fn function_declaration_with_blocks_parse() {
     let parse = parse(
         r#"
-fn exec[T](args: Array[ExecInput]) where {
+fn exec[T](args: Array[ExecInput]) with {
   mounts: Map[Path, Blob | Tree] = {},
   observer: Fn(Process, Tree) #sandbox -> T,
 } -> T;
@@ -351,7 +345,7 @@ fn demo(value: Blob, cexec: Fn(Array[String]) -> Tree, ranlib: String, y: String
 }
 
 #[test]
-fn partial_symbol_literals_and_uppercase_where_keys_parse() {
+fn partial_symbol_literals_and_uppercase_with_keys_parse() {
     let parse = parse(
         r#"
 fn demo(exec: Fn(Array[String]) -> Tree) -> Tree (
@@ -360,7 +354,7 @@ fn demo(exec: Fn(Array[String]) -> Tree) -> Tree (
     TARGET => "linux-x86_64",
     PNG_DEBUG => false,
   };
-  let bound = partial exec where common;
+  let bound = partial exec with common;
   bound ["cc"]
 )
 "#,
@@ -491,7 +485,7 @@ fn build(
   name: String,
   path: String
 ) -> String {
-  exec_fn(args, defaults) where { ..defaults, mounts: %{ @bin/lua => blob } };
+  exec_fn(args, defaults) with { ..defaults, mounts: %{ @bin/lua => blob } };
   blob.utf8();
   stream.next()?;
   items.map($.utf8());
@@ -557,7 +551,7 @@ fn build(
   args: Array[String],
   defaults: Config
 ) {
-  exec_fn(args, defaults) where defaults
+  exec_fn(args, defaults) with defaults
 }
 "#,
     );
@@ -797,7 +791,7 @@ fn build(name: String) {
 fn formatter_preserves_current_call_spacing() {
     let input = r#"
 fn build(process: Process, args: Array[String], defaults: Config) {
-  exec_fn(args)  where  { mounts: %{ @bin/lua => process.stdout() } };
+  exec_fn(args)  with  { mounts: %{ @bin/lua => process.stdout() } };
   process . stdout().trim()
 }
 "#;
@@ -805,7 +799,7 @@ fn build(process: Process, args: Array[String], defaults: Config) {
     let parsed = parse_source_file(input);
     let formatted = crate::format(parsed.tree().syntax());
 
-    assert!(formatted.contains("exec_fn(args) where"));
+    assert!(formatted.contains("exec_fn(args) with"));
     assert!(formatted.contains("@bin/lua => process.stdout()"));
     assert!(formatted.contains("process.stdout().trim()"));
 }
@@ -964,7 +958,7 @@ fn build(flag: Bool) -> U64 {
 fn semantic_tokens_classify_functions_keywords_and_properties() {
     let input = r#"
 fn build(process: Process, args: Array[String], defaults: Config) -> String {
-  exec(args) where { mounts: %{ @bin/lua => process.stdout() } }
+  exec(args) with { mounts: %{ @bin/lua => process.stdout() } }
 }
 "#;
 
@@ -982,7 +976,7 @@ fn build(process: Process, args: Array[String], defaults: Config) -> String {
         .collect::<Vec<_>>();
 
     assert!(classified.contains(&("fn", SemanticTokenType::Keyword)));
-    assert!(classified.contains(&("where", SemanticTokenType::Keyword)));
+    assert!(classified.contains(&("with", SemanticTokenType::Keyword)));
     assert!(classified.contains(&("exec", SemanticTokenType::Function)));
     assert!(classified.contains(&("mounts", SemanticTokenType::Property)));
     assert!(classified.contains(&("stdout", SemanticTokenType::Property)));

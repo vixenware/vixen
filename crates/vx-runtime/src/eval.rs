@@ -613,8 +613,8 @@ impl Evaluator<'_> {
             // the arguments bound (lazily) to its parameters.
             ExprKind::Call(c) => self.call(c.callee, c.args.iter().map(|a| a.expr), env),
 
-            // `exec(command) where { observer: (run) => … }` — the language surface
-            // for the exec spine. The only `where`-decorated callable wired so far.
+            // `exec(command) with { observer: (run) => … }` — the language surface
+            // for the exec spine. The only `with`-decorated callable wired so far.
             ExprKind::Where(w) => self.eval_where(w, env),
 
             // A CLI literal `@[ ${cmd} args… ]`: the leading hole carries the
@@ -995,7 +995,7 @@ impl Evaluator<'_> {
         result
     }
 
-    /// `exec(command) where { observer: (run) => … }` — the eval surface of the exec
+    /// `exec(command) with { observer: (run) => … }` — the eval surface of the exec
     /// spine. Recognise the exec shape, project the command to its execution argv,
     /// bundle the observer's *static reachable closure* (its code, not a forced
     /// value), and dispatch the `observe` RPC to an executor **over vox** — parking
