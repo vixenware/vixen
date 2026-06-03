@@ -35,10 +35,9 @@ use crate::graph::{BinKind, DemandGraph, KernelOp, Node, NodeId, NodeKind, Span}
 ///
 /// `discover` is deliberately **absent**: it is *deprecated* — host facts now come
 /// from standing capability advertisement + predicate-based executor selection
-/// (`docs/design/runners-and-control-plane.md` §6), not an inline `discover`. The
-/// `discover`-using fixtures (`cc-version`, `remote-libpng`) are stale/aspirational
-/// and are **not** a target; a `discover(...)` call simply falls through as an
-/// ordinary call here.
+/// (`docs/design/runners-and-control-plane.md` §6), not an inline `discover`.
+/// `discover` is not a target; any remaining `discover(...)` call simply falls
+/// through as an ordinary call here.
 const BOUNDARY_CALLS: &[&str] = &["exec", "acquire", "Http", "http"];
 
 /// Turn `entry`'s body, in `source`, inside out — through the real front-end.
