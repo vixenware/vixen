@@ -172,6 +172,30 @@ pub fn command_value(package: &str, grammar: &str, binary: &str, args: Vec<Strin
     command_value_from(grammar_coord_value(package, grammar), binary, args)
 }
 
+/// Build the `HostOutput` value `host.exec` returns: `{ exit_code, stdout, stderr,
+/// fingerprint }`, all scalar fields. `fingerprint` is the Blake3 of the binary that
+/// ran (exec implies hash) — the probe threads it onto its `Command`.
+fn host_output_value(o: crate::host::HostExec) -> Value {
+    Value::Struct(vec![
+        (
+            "exit_code".to_string(),
+            Thunk::done(Value::U64(o.exit_code as u64)),
+        ),
+        (
+            "stdout".to_string(),
+            Thunk::done(Value::Str(Rc::from(o.stdout.as_str()))),
+        ),
+        (
+            "stderr".to_string(),
+            Thunk::done(Value::Str(Rc::from(o.stderr.as_str()))),
+        ),
+        (
+            "fingerprint".to_string(),
+            Thunk::done(Value::Str(Rc::from(o.fingerprint.as_str()))),
+        ),
+    ])
+}
+
 /// A runtime value. Compound fields are [`Thunk`]s, so they stay unforced until
 /// demanded (`r[eval.pending]`/`r[eval.forcing]`).
 #[derive(Debug, Clone)]
@@ -1271,6 +1295,30 @@ impl Evaluator<'_> {
                 match crate::host::which(name) {
                     Some(p) => Ok(Value::Str(Rc::from(p.as_str()))),
                     None => Err(poison(format!("host tool `{name}` not found"))),
+                }
+            }
+            // `host.exec(args)` — run a discovered tool. Blake3-hashes the binary it
+            // runs (exec implies hash), so the `HostOutput { exit_code, stdout, stderr,
+            // fingerprint }` it returns carries the tool's content identity for the
+            // probe to put on its `Command`. POISONS if the binary can't be read/spawned.
+            ("exec", Value::Struct(_)) => {
+                let [Value::Array(items)] = argv.as_slice() else {
+                    return Err(poison(format!(
+                        "host.exec expects one Array[String] arg, got {argv:?}"
+                    )));
+                };
+                let args = items
+                    .iter()
+                    .map(|t| match self.force(t)? {
+                        Value::Str(s) => Ok(s.to_string()),
+                        other => Err(poison(format!(
+                            "host.exec args must be strings, got {other:?}"
+                        ))),
+                    })
+                    .collect::<Result<Vec<_>, _>>()?;
+                match crate::host::exec(&args) {
+                    Ok(o) => Ok(host_output_value(o)),
+                    Err(e) => Err(poison(format!("host.exec: {e}"))),
                 }
             }
             (m, r) => Err(poison(format!("unknown method `{m}` on {r:?}"))),

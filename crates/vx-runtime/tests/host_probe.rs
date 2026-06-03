@@ -79,3 +79,41 @@ fn host_os_field_reads() {
         Outcome::Poisoned { reason, .. } => panic!("host.os read poisoned: {reason}"),
     }
 }
+
+/// `host.exec` runs a discovered tool and — *implying `host.hash`* — returns the
+/// `blake3:…` fingerprint of the binary alongside its captured output. `sh` is on
+/// every `$PATH`, so this exercises the real spawn + hash without assuming a
+/// toolchain.
+#[test]
+fn host_exec_runs_a_tool_and_fingerprints_the_binary() {
+    let run = |src: &str| -> Outcome {
+        let fe = compile_source(src, "probe").expect("host exec program compiles");
+        let body = fn_body(&fe, "probe");
+        eval_body(
+            &fe.program,
+            &fe.env,
+            body,
+            vec![local_host_value()],
+            KernelMode::Off,
+        )
+    };
+
+    // The captured output crosses back: `sh -c 'printf hi'` writes `hi` to stdout.
+    match run("fn probe(host: Host) -> String ( \
+           host.exec([host.which(\"sh\"), \"-c\", \"printf hi\"]).stdout )")
+    {
+        Outcome::Clean(Value::Str(s)) => assert_eq!(&*s, "hi", "sh's stdout crosses back"),
+        other => panic!("expected stdout `hi`, got {other:?}"),
+    }
+
+    // exec implies hash: the binary that ran is fingerprinted (blake3 of sh's bytes).
+    match run("fn probe(host: Host) -> String ( \
+           host.exec([host.which(\"sh\"), \"-c\", \"true\"]).fingerprint )")
+    {
+        Outcome::Clean(Value::Str(s)) => assert!(
+            s.starts_with("blake3:") && s.len() > "blake3:".len(),
+            "fingerprint is a blake3 digest, got {s:?}"
+        ),
+        other => panic!("expected a blake3 fingerprint, got {other:?}"),
+    }
+}

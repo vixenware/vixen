@@ -45,6 +45,42 @@ pub fn which(name: &str) -> Option<String> {
     None
 }
 
+/// What `host.exec` observed: the captured output + exit code, plus the
+/// **fingerprint** of the binary that ran. `host.exec` *implies `host.hash`* —
+/// running `args[0]` depends on its exact bytes, so we hash it as part of the same
+/// observation (one call yields the tool's version *and* its content identity).
+pub struct HostExec {
+    pub exit_code: i64,
+    pub stdout: String,
+    pub stderr: String,
+    /// `blake3:<hex>` of the binary at `args[0]` — the probe puts this on the
+    /// `Command` it builds, so the toolchain is content-identified, not path-keyed.
+    pub fingerprint: String,
+}
+
+/// Run a discovered tool and observe it. `args[0]` is the program (an absolute path,
+/// typically from `which`); the rest are its argv. Blake3-hashes the binary first
+/// (`exec` implies `hash`), then runs it, returning the captured output + exit code
+/// alongside that `blake3:…` fingerprint. Blocking — a probe runs to completion.
+pub fn exec(args: &[String]) -> Result<HostExec, String> {
+    let program = args
+        .first()
+        .ok_or_else(|| "host.exec needs a program".to_string())?;
+    // exec implies hash: fingerprint the binary we are about to run.
+    let bytes = std::fs::read(program).map_err(|e| format!("read `{program}`: {e}"))?;
+    let fingerprint = format!("blake3:{}", blake3::hash(&bytes).to_hex());
+    let out = std::process::Command::new(program)
+        .args(&args[1..])
+        .output()
+        .map_err(|e| format!("exec `{program}`: {e}"))?;
+    Ok(HostExec {
+        exit_code: out.status.code().map(i64::from).unwrap_or(-1),
+        stdout: String::from_utf8_lossy(&out.stdout).into_owned(),
+        stderr: String::from_utf8_lossy(&out.stderr).into_owned(),
+        fingerprint,
+    })
+}
+
 /// Whether `p` is a regular file the current user can execute. On Unix this checks
 /// any execute bit; elsewhere a regular file is treated as runnable.
 fn is_executable_file(p: &Path) -> bool {

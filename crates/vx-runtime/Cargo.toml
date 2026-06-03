@@ -26,6 +26,9 @@ vx-types = { workspace = true }
 # form, no I/O). The runtime Command value (what a CLI literal evaluates to and exec
 # consumes) wraps its EffectiveCommand with the execution argv + the outputs.
 command-model = { path = "../../crates-plus/command-model" }
+# `host.exec` Blake3-hashes the binary it runs (exec implies hash — running a tool
+# depends on its exact bytes), so the probe's CToolchain carries that fingerprint.
+blake3 = { workspace = true }
 # The copy-and-patch JIT substrate (executable memory + AArch64 relocation
 # patching). Only the runtime surface (ExecBuf, patch_branch26) — the smoke test,
 # arithmetic stencils, and kernel→stencil-chain lowering stay in this crate.

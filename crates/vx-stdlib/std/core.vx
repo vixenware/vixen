@@ -37,6 +37,17 @@ struct Host {
   arch: String,
 }
 
+/// What `host.exec` returns: the captured output + exit code, plus the
+/// **fingerprint** of the binary that ran. `host.exec` *implies `host.hash`* —
+/// running a tool depends on its exact bytes — so one call yields the tool's output
+/// *and* its content identity (`blake3:…`), which the probe puts on its `Command`.
+struct HostOutput {
+  exit_code: U64,
+  stdout: String,
+  stderr: String,
+  fingerprint: String,
+}
+
 enum Option[T] {
   Some(T),
   None,
@@ -361,6 +372,11 @@ namespace Tree {
 namespace Host {
   /// Resolve a tool or executable name on the executor host.
   fn which(self, name: String) -> String;
+  /// Run a discovered tool (`args[0]` is the program, the rest its argv) and observe
+  /// it. Implies `host.hash`: the returned `HostOutput` carries the `blake3:…`
+  /// fingerprint of the binary that ran, so running a tool to read its version also
+  /// content-identifies it.
+  fn exec(self, args: Array[String]) -> HostOutput;
 }
 
 /// Halt execution with an error message (testing/debugging primitive).
