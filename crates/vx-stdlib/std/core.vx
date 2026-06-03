@@ -73,6 +73,21 @@ type ExecInput = String | Path | Blob | Tree | ExecPath;
 /// Values that can occupy a tree entry or explicit exec mount.
 type TreeEntry = Blob | Tree;
 
+/// A host-backed sandbox exemption — a read-only hole in the sandbox for host
+/// filesystem state that ordinary VFS tracking can't justify. Not a mount: it is
+/// chosen by authored Vixen code and rechecked by the runtime on the concrete
+/// runner. `ReadSubpath` permits reads under `root`; `ExecSubpath` additionally
+/// permits executing a discovered tool. Both are read-only — host state is a
+/// build input, never a sink.
+enum SandboxExemption {
+  struct ExecSubpath {
+    root: String,
+  },
+  struct ReadSubpath {
+    root: String,
+  },
+}
+
 /// The settled outcome of a *successful* run — what `run.ok` yields. Forcing
 /// `run.ok` poisons (with the failure model's report) on **any** non-success
 /// (nonzero exit or a signal); reaching this record at all means the process

@@ -52,9 +52,10 @@ fn metadata(path: String) -> Map[String, String];
 /// consumes (§4–5).
 ///
 /// The observer is evaluated **executor-side** against the `Run` (§6–7); its
-/// authority is exactly that `Run`. The default — `(run) => run.ok.out` — gates on
-/// success and returns the whole write-set tree. If the observer returns
-/// `Stream[T]`, `exec` itself returns `Stream[T]`.
+/// authority is exactly that `Run`. It is **required** — there is no default. A
+/// common observer is `(run) => run.ok.out`, which gates on success and returns
+/// the whole write-set tree. If the observer returns `Stream[T]`, `exec` itself
+/// returns `Stream[T]`.
 fn exec[T](
   command: Command,
 ) with {
@@ -66,7 +67,9 @@ fn exec[T](
   writable: Array[Path] = [],
   /// Additional directories to create under writable roots before launch.
   create_dirs: Array[Path] = [],
-  /// Executor-side observer evaluated with sandbox authority — defaults to the
-  /// success-gated write-set tree.
-  observer: Fn(Run) -> T = (run) => run.ok.out,
+  /// Host-backed sandbox exemptions supplementing those the command carries.
+  exemptions: Array[SandboxExemption] = [],
+  /// Executor-side observer evaluated against the run; returns the build value.
+  /// Required — there is no default.
+  observer: Fn(Run) -> T,
 } -> T;

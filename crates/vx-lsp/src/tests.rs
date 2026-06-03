@@ -217,7 +217,7 @@ fn build(cmd: Command) {
     let run_doc = state.documentation_for(run).unwrap();
 
     assert!(run_doc.contains("`observer` callback slot."));
-    assert!(run_doc.contains("Executor-side observer evaluated with sandbox authority"));
+    assert!(run_doc.contains("Executor-side observer evaluated against the run"));
 }
 
 #[test]
