@@ -4062,8 +4062,32 @@ dependencies = [
  "vx-ir",
  "vx-package",
  "vx-parser",
+ "vx-runtime-graph",
  "vx-stdlib",
  "vx-types",
+]
+
+[[package]]
+name = "vx-runtime-core"
+version = "0.1.0"
+dependencies = [
+ "vx-runtime-graph",
+]
+
+[[package]]
+name = "vx-runtime-driver"
+version = "0.1.0"
+dependencies = [
+ "vx-runtime-core",
+ "vx-runtime-graph",
+]
+
+[[package]]
+name = "vx-runtime-graph"
+version = "0.1.0"
+dependencies = [
+ "facet",
+ "facet-json",
 ]
 
 [[package]]

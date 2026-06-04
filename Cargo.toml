@@ -14,6 +14,9 @@ members = [
   "crates/vx-lsp",
 
   ## eval crates
+  "crates/vx-runtime-graph",
+  "crates/vx-runtime-core",
+  "crates/vx-runtime-driver",
   "crates/vx-runtime",
 
   ## runtime support
