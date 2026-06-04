@@ -153,27 +153,4 @@ mod tests {
             other => panic!("expected poison, got {other:?}"),
         }
     }
-
-    #[test]
-    fn source_boundary_tripwire() {
-        let source = [include_str!("lib.rs"), include_str!("../Cargo.toml")].join("\n");
-        let banned = [
-            "vx_".to_string() + "ir",
-            "Expr".to_string() + "Kind",
-            "Stmt".to_string() + "Kind",
-            "Pattern".to_string() + "Kind",
-            "Vir".to_string() + "Program",
-            "Body".to_string() + "Id",
-            "fn ".to_string() + "force",
-            ".".to_string() + "force(",
-            "eval_".to_string() + "inner",
-            "eval_".to_string() + "expr",
-        ];
-        for needle in banned {
-            assert!(
-                !source.contains(&needle),
-                "driver crate source contains banned evaluator affordance `{needle}`"
-            );
-        }
-    }
 }

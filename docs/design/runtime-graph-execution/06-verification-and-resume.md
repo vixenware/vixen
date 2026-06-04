@@ -25,6 +25,7 @@ and must be removed from public execution paths.
    git status --short
    cargo check -p vx-runtime-graph -p vx-runtime-core -p vx-runtime-driver -p vx-runtime
    cargo nextest run -p vx-runtime-graph -p vx-runtime-core -p vx-runtime-driver -p vx-runtime
+   cargo nextest run -p vx-runtime execution_crates_stay_source_blind
    ```
 
 4. Run the forbidden-symbol scan:
@@ -75,7 +76,16 @@ Core/driver scan must be clean:
 rg -n 'vx[_-]ir|ExprKind|ExprId|StmtKind|PatternKind|PatternId|VirProgram|BodyId|node_exprs|exprmap|eval_inner|eval_expr|walk_expr|legacy_eval|fn force|\.force\(' crates/vx-runtime-core crates/vx-runtime-driver
 ```
 
-Once repo-level guardrails are added, run that check too.
+The repo-level guardrail test is:
+
+```bash
+cargo nextest run -p vx-runtime execution_crates_stay_source_blind
+```
+
+It scans `crates/vx-runtime-core/src`, `crates/vx-runtime-core/Cargo.toml`,
+`crates/vx-runtime-driver/src`, and `crates/vx-runtime-driver/Cargo.toml`.
+Add future execution crates to the guarded list before relying on this check for
+them.
 
 ### Runtime-path verification
 
@@ -149,4 +159,3 @@ rg -n 'vx[_-]ir|ExprKind|ExprId|StmtKind|PatternKind|PatternId|VirProgram|BodyId
 
 The first grep may still find analyzer/lowerer terms in `vx-runtime` until those
 modules are split, but it must not find execution-path source fallback.
-

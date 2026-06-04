@@ -91,20 +91,29 @@ node_to_expr(node) -> ExprId
 
 ## Tripwire requirements
 
-The crate-local tripwires are useful but not enough. The next guardrail work
-should add a repo-level test or xtask check that scans:
+The crate-local tripwires are useful but not enough. The guardrail check is now
+`crates/vx-runtime/tests/source_blind_guardrails.rs`, which scans:
 
 - `crates/vx-runtime-core/src`
 - `crates/vx-runtime-core/Cargo.toml`
 - `crates/vx-runtime-driver/src`
 - `crates/vx-runtime-driver/Cargo.toml`
-- any future execution crate or module
+- any future execution crate or module once it is added to `GUARDED_CRATES`
 
-It should fail on the forbidden symbol list above.
+It fails on the forbidden symbol list above.
 
 The check should be mechanically boring and hard to miss. A simple Rust test or
 xtask command is acceptable. It is not a substitute for type boundaries, but it
 catches the predictable "temporary fallback" edits.
+
+Run it directly with:
+
+```bash
+cargo nextest run -p vx-runtime execution_crates_stay_source_blind
+```
+
+If a new execution crate is added, add it to `GUARDED_CRATES` in that test in
+the same commit as the new crate. Otherwise the source-blind boundary has a gap.
 
 ## Dependency rules
 
@@ -171,6 +180,6 @@ Run before and after every phase touching runtime execution:
 ```bash
 cargo check -p vx-runtime-graph -p vx-runtime-core -p vx-runtime-driver -p vx-runtime
 cargo nextest run -p vx-runtime-graph -p vx-runtime-core -p vx-runtime-driver -p vx-runtime
+cargo nextest run -p vx-runtime execution_crates_stay_source_blind
 rg -n 'vx[_-]ir|ExprKind|ExprId|StmtKind|PatternKind|PatternId|VirProgram|BodyId|node_exprs|exprmap|eval_inner|eval_expr|walk_expr|legacy_eval|fn force|\.force\(' crates/vx-runtime-core crates/vx-runtime-driver
 ```
-

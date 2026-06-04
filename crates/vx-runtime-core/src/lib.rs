@@ -370,27 +370,4 @@ mod tests {
         let second = step(&graph, NodeId(3), ReadyInputs::new(&values));
         assert_eq!(second, Step::Need(NeedSet::Nodes(vec![NodeId(1)])));
     }
-
-    #[test]
-    fn source_boundary_tripwire() {
-        let source = [include_str!("lib.rs"), include_str!("../Cargo.toml")].join("\n");
-        let banned = [
-            "vx_".to_string() + "ir",
-            "Expr".to_string() + "Kind",
-            "Stmt".to_string() + "Kind",
-            "Pattern".to_string() + "Kind",
-            "Vir".to_string() + "Program",
-            "Body".to_string() + "Id",
-            "fn ".to_string() + "force",
-            ".".to_string() + "force(",
-            "eval_".to_string() + "inner",
-            "eval_".to_string() + "expr",
-        ];
-        for needle in banned {
-            assert!(
-                !source.contains(&needle),
-                "core crate source contains banned evaluator affordance `{needle}`"
-            );
-        }
-    }
 }

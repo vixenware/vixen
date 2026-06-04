@@ -68,11 +68,15 @@ Do not trust this paragraph as status; verify it in code before continuing.
 Expected latest structural checkpoint:
 
 - Commit `4c55d433` exists: `Fence graph execution away from VIR`.
+- Commit `bfcc1493` exists: `Document graph runtime demolition roadmap`.
 - `Cargo.toml` includes `crates/vx-runtime-graph`,
   `crates/vx-runtime-core`, and `crates/vx-runtime-driver`.
 - `crates/vx-runtime-core/Cargo.toml` has no `vx-ir` dependency.
 - `crates/vx-runtime-driver/Cargo.toml` has no `vx-ir` dependency.
 - `crates/vx-runtime/src/graph.rs` only re-exports `vx_runtime_graph`.
+- `crates/vx-runtime/tests/source_blind_guardrails.rs` scans
+  `vx-runtime-core` and `vx-runtime-driver` source/manifests for forbidden
+  source-evaluator affordances.
 - `vx-runtime::eval` still contains the legacy tree-walker and must be cut over.
 
 Verification commands:
@@ -80,6 +84,7 @@ Verification commands:
 ```bash
 cargo check -p vx-runtime-graph -p vx-runtime-core -p vx-runtime-driver -p vx-runtime
 cargo nextest run -p vx-runtime-graph -p vx-runtime-core -p vx-runtime-driver -p vx-runtime
+cargo nextest run -p vx-runtime execution_crates_stay_source_blind
 rg -n 'vx[_-]ir|ExprKind|StmtKind|PatternKind|VirProgram|BodyId|fn force|\.force\(|eval_inner|eval_expr' crates/vx-runtime-core crates/vx-runtime-driver
 ```
 
@@ -138,4 +143,3 @@ When resuming this task after context compaction:
 - Do not store `node_exprs` or `exprmap` in execution crates.
 - Do not implement a general `force` API to make tests pass.
 - Do not use labels for semantics once structured payloads exist.
-
