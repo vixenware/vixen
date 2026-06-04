@@ -78,8 +78,9 @@ Expected latest structural checkpoint:
 - `crates/vx-runtime/src/graph.rs` only re-exports `vx_runtime_graph`.
 - `crates/vx-runtime/tests/source_blind_guardrails.rs` scans
   `vx-runtime-core` and `vx-runtime-driver` source/manifests for forbidden
-  source-evaluator affordances, and scans `vx-runtime/src` for the deleted
-  runtime tree-walker affordances.
+  source-evaluator affordances, scans `vx-runtime/src` for the deleted runtime
+  tree-walker affordances, and guards the temporary scratch observe executor from
+  being renamed back into a production-looking `ObserveService`.
 - `vx-runtime::eval::{run, run_with_dispatches, run_in_mode}` enter through
   `graph_exec::run_source` and `vx-runtime-driver`.
 - `vx-runtime-graph::NodeKind::Const` carries `ConstValue`; core execution and
@@ -158,7 +159,7 @@ Latest verified red/green shape:
 - `cargo check -p vx-runtime-graph -p vx-runtime-core -p vx-runtime-driver -p vx-runtime`
   passes with no old-evaluator dead-code warnings.
 - `cargo nextest run -p vx-runtime -E 'binary(source_blind_guardrails)' --no-fail-fast`:
-  2/2 passed.
+  3/3 passed.
 - `cargo nextest run -p vx-runtime -E 'binary(exec_on_strands)' --no-fail-fast`:
   8/8 passed, including `undemanded_exec_in_tuple_does_not_dispatch`,
   exact-L1 reuse for identical demanded backtick invocations, observer identity
@@ -186,10 +187,10 @@ Latest verified red/green shape:
   call memo reuse, resolved-argument disambiguation, closure capture memo reuse,
   function-entry disambiguation for shared code identities, and proof that
   unresolved arguments or captures are not demanded to build a call memo key.
-- `cargo nextest run -p vx-runtime --no-fail-fast`: 153 run, 153 passed,
+- `cargo nextest run -p vx-runtime --no-fail-fast`: 154 run, 154 passed,
   0 failed, 0 skipped.
 - `cargo nextest run -p vx-runtime-graph -p vx-runtime-core -p vx-runtime-driver -p vx-runtime --no-fail-fast`:
-  170 run, 170 passed, 0 skipped.
+  171 run, 171 passed, 0 skipped.
 - The forbidden-symbol scan over `crates/vx-runtime-core` and
   `crates/vx-runtime-driver` returns no matches.
 - The deleted tree-walker affordance scan over `crates/vx-runtime/src` returns

@@ -87,8 +87,9 @@ It scans `crates/vx-runtime-core/src`, `crates/vx-runtime-core/Cargo.toml`,
 `crates/vx-runtime-driver/src`, and `crates/vx-runtime-driver/Cargo.toml` for
 source-blindness. It also scans `crates/vx-runtime/src` for the deleted
 tree-walker affordances and asserts `crates/vx-runtime/src/dispatch.rs` remains
-absent. Add future execution crates to the guarded list before relying on this
-check for them.
+absent. It also guards the current scratch observe implementation from being
+presented as the real executor `ObserveService`. Add future execution crates to
+the guarded list before relying on this check for them.
 
 ### Runtime-path verification
 
@@ -149,7 +150,7 @@ Latest focused verification:
 - `cargo check -p vx-runtime-graph -p vx-runtime-core -p vx-runtime-driver -p vx-runtime`
   passes with no old-evaluator dead-code warnings.
 - `cargo nextest run -p vx-runtime -E 'binary(source_blind_guardrails)' --no-fail-fast`:
-  2/2 passed.
+  3/3 passed.
 - `cargo nextest run -p vx-runtime -E 'binary(exec_on_strands)' --no-fail-fast`:
   8/8 passed, including cold exec non-demand, exact backtick exec L1 reuse,
   observer-identity non-aliasing, executable-fingerprint non-aliasing,
@@ -176,10 +177,10 @@ Latest focused verification:
   call memo reuse, resolved-argument disambiguation, closure capture memo reuse,
   function-entry disambiguation for shared code identities, and proof that
   unresolved arguments or captures are not demanded to build a call memo key.
-- `cargo nextest run -p vx-runtime --no-fail-fast`: 153 run, 153 passed,
+- `cargo nextest run -p vx-runtime --no-fail-fast`: 154 run, 154 passed,
   0 failed, 0 skipped.
 - `cargo nextest run -p vx-runtime-graph -p vx-runtime-core -p vx-runtime-driver -p vx-runtime --no-fail-fast`:
-  170 run, 170 passed, 0 skipped.
+  171 run, 171 passed, 0 skipped.
 - The forbidden-symbol scan over `vx-runtime-core` and `vx-runtime-driver`
   returns no matches.
 - The deleted tree-walker affordance scan over `vx-runtime/src` returns no

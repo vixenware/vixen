@@ -92,19 +92,21 @@ pub trait Observe {
     async fn observe(&self, request: ObserveRequest) -> Observed;
 }
 
-/// The executor side — a fresh mirror per call: run the command, build the `Run`,
-/// install the bundle, evaluate the observer against the `Run`. Never compiles,
-/// never allocates an id. Holds the latest run's **output producer**, served on
-/// inbound `Producing` virtual connections so the orchestrator can pull `run.*.out`.
+/// Temporary in-process scratch executor used by the current runtime tests.
+///
+/// This is deliberately not the real executor service: it spawns directly in a
+/// scratch directory and captures files best-effort. The production boundary must
+/// move process execution to the daemon/executor layer, where sandbox and CAS-VFS
+/// mount-run-flush are owned.
 #[derive(Clone, Default)]
-pub struct ObserveService {
+struct ScratchObserveService {
     /// The producer serving the latest run's outputs. Set by `observe` once the
     /// command finishes; read by the `Producing` virtual-connection acceptor. One
     /// slot for now (one exec at a time); a per-run id arrives with concurrency.
     outputs: Arc<Mutex<Option<ProducerService>>>,
 }
 
-impl Observe for ObserveService {
+impl Observe for ScratchObserveService {
     async fn observe(&self, request: ObserveRequest) -> Observed {
         // Run the command in a fresh scratch dir so its filesystem writes are the
         // run's output tree. (Slice-1 capture: every file under the scratch dir. The
@@ -191,16 +193,20 @@ fn capture_outputs(root: &Path, dir: &Path, producer: &remote::Producer) {
     }
 }
 
-/// Stand up an [`ObserveService`] over an in-process vox memory link and return a
-/// client. The bundle + command cross as vox bytes — colocated today, a remote
-/// executor tomorrow, the same service either way.
+/// Stand up the temporary scratch observe implementation over an in-process vox
+/// memory link and return a client.
+///
+/// The bundle + command still cross as vox bytes, which keeps strand/boundary
+/// behavior close to the future executor path. The implementation behind the
+/// service is intentionally quarantined because it is not sandbox/CAS-VFS
+/// execution.
 pub async fn local_observer() -> ObserveClient {
     let (client_link, server_link) = vox::memory_link_pair(64);
     tokio::spawn(async move {
         // One service instance, shared (via its `outputs` Arc) between the root
         // `Observe` connection and the `Producing` virtual connections the
         // orchestrator opens to pull this run's outputs.
-        let service = ObserveService::default();
+        let service = ScratchObserveService::default();
         let acceptor = vox::acceptor_fn(
             move |request: &vox::ConnectionRequest, connection: vox::PendingConnection| {
                 match request.service() {

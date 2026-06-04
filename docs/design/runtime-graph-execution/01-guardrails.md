@@ -123,6 +123,15 @@ The check should be mechanically boring and hard to miss. A simple Rust test or
 xtask command is acceptable. It is not a substitute for type boundaries, but it
 catches the predictable "temporary fallback" edits.
 
+The guardrail binary also protects the exec ownership boundary while the runner
+cut is incomplete. `vx-runtime` may temporarily host an in-process scratch observe
+implementation for tests, but it must not name that implementation
+`ObserveService` or present it as the real executor service. The real process
+execution service belongs to the daemon/executor side, where sandbox policy,
+CAS-VFS mounts, read/write witnesses, and output flushing are available. This
+guardrail does not make the scratch path correct; it prevents the gap from being
+rebranded as the architecture.
+
 Run it directly with:
 
 ```bash

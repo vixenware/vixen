@@ -140,6 +140,12 @@ Current progress:
 - Observe dispatch happens from graph boundary materialization through
   `dispatch_observe`, then the resulting graph node is seeded and the same demand
   loop resumes.
+- Current graph `exec` dispatch does not yet run through `vx-runner`'s
+  sandbox/CAS-VFS mount-run-flush spine. It still sends the minimal
+  `ObserveRequest { program, args, observer }`; the quarantined
+  `ScratchObserveService` runs the command in a scratch directory and evaluates
+  the observer over that result. This is a known gap, not the final exec
+  architecture.
 - A top-level data observer result becomes graph output structure. A top-level
   producing tree result becomes `NodeOutput::OutputTree` plus a runtime remote
   handle entry keyed by the exec node.
@@ -154,6 +160,31 @@ Current progress:
   undemanded tuple slot stays cold even though the source entry has no observe
   client available.
 
+Next executor/control-plane cut:
+
+- Do not make `vx-runtime` depend on `vx-runner` or execute the runner protocol
+  directly. `vx-runtime` should surface an exec boundary need plus the
+  materialized request-shaping graph payload. The daemon/orchestrator layer owns
+  placement, runner RPC, retries, and cache/index lookup.
+- Replace the minimal runtime-local `ObserveRequest { program, args, observer }`
+  with a protocol payload that can carry the projected `Command`, resolved
+  observer bundle/captures, env, CAS tree mounts, writable output roots,
+  exemptions, and verification obligations. The stable protocol type belongs in
+  a boundary/protocol crate (`vx-services` or a narrower crate), not in the
+  graph evaluator.
+- The selected executor daemon lowers that payload into its local
+  sandbox/CAS-VFS mount-run-flush operation. It mounts inputs, runs the process
+  under the VFS access path plus sandbox policy, records read/write witnesses,
+  flushes output roots back to CAS, and builds the `Run` value for observer
+  evaluation.
+- Observer evaluation may reuse the graph evaluator, but process execution and
+  scratch/VFS capture must live in the executor implementation, not in
+  `vx-runtime::observe`.
+- The executor returns only the observer result or store-backed tree/blob
+  handles across the graph boundary. The orchestrator/runtime must not infer
+  read sets by inspecting source or by broadening the pre-run cache key after the
+  fact.
+
 ### Observer execution
 
 Observer payload should be graph/executable code, not source callback:
@@ -167,8 +198,9 @@ values as graph nodes and drives observer root demand.
 
 Current progress:
 
-- `ObserveService` still receives an observer bundle, but evaluating that bundle
-  calls `eval_body_wire`, which now enters graph body execution.
+- The quarantined scratch observe implementation still receives an observer
+  bundle, but evaluating that bundle calls `eval_body_wire`, which now enters
+  graph body execution.
 - `Run` is bound as a graph external struct argument. Demanding `run.ok` or
   `run.stream` materializes native boundary fields only when reached.
 - Graph observer results cross to `WireValue` through graph/native boundary
@@ -349,6 +381,24 @@ Current slice:
 - Cache records are encoded with `facet-json`, and file paths are derived from a
   blake3 hash of the Facet JSON cache key.
 - This is not the final CAS-backed L2 and it does not record read-set witnesses.
+
+Final cache/store shape:
+
+- `vx-store` is the durable content-addressed substrate for blobs, trees, and
+  serialized cache records. It stores immutable content by hash; it does not by
+  itself answer "which output corresponds to this pre-run input key?"
+- The cache/index layer therefore sits beside the store:
+  `pre_run_input_key_digest -> candidate cache record NodeHash(es)`. The indexed
+  key is still computed before running. The stored record hash is discovered when
+  the cache record is written. This index is daemon/control-plane state, not
+  evaluator state.
+- Cache record bodies should live in `vx-store` once they are portable values.
+  Records can point at CAS `Tree`/`Blob` identities for large outputs instead of
+  embedding bytes. The runtime seeds graph outputs from records only after the
+  record and any referenced content are available.
+- The current `BoundaryL2Cache` local JSON files are a temporary compatibility
+  layer for proving input-key semantics. Replacing that storage with `vx-store`
+  must not change cache-key law, demand origins, or read-set semantics.
 
 ### 5. Read-set provenance
 

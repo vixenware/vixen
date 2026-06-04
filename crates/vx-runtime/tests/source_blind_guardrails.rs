@@ -44,6 +44,9 @@ const RUNTIME_TREE_WALKER_NEEDLES: &[&str] = &[
     "dispatch_scalar",
 ];
 
+const RUNTIME_EXEC_OWNERSHIP_NEEDLES: &[&str] =
+    &["pub struct ObserveService", "struct ObserveService"];
+
 #[test]
 fn execution_crates_stay_source_blind() {
     let root = workspace_root();
@@ -86,6 +89,21 @@ fn runtime_tree_walker_affordances_stay_deleted() {
         RUNTIME_TREE_WALKER_NEEDLES,
         "runtime tree-walker affordances must stay deleted",
         "deleted tree-walker affordance",
+    );
+}
+
+#[test]
+fn runtime_exec_spawning_stays_quarantined() {
+    let root = workspace_root();
+    let mut files = Vec::new();
+    collect_rs_files(&root.join("crates/vx-runtime/src"), &mut files);
+
+    assert_no_forbidden_needles(
+        &root,
+        files,
+        RUNTIME_EXEC_OWNERSHIP_NEEDLES,
+        "runtime exec ownership gaps must stay explicitly quarantined",
+        "production-sounding observe executor affordance",
     );
 }
 
