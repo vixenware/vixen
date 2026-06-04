@@ -216,6 +216,9 @@ Observed result:
 - Graph variants carry structured tag and field-name payloads. Unit, tuple, and
   struct variant construction execute through graph core, and variant match
   payload bindings are wired as projection nodes.
+- `expr?` emits a graph `Fallible` node paired with a `CaughtFailure` node. The
+  driver performs a catch-mode demand for the inner node, memoizes a caught
+  failure if that demand poisons, and graph core reifies `Ok`/`Err` variants.
 - The graph driver reports graph kernel executions for the transitional
   `dispatches` counter.
 - Public `Outcome` conversion can wrap a graph-root lazy array/tuple as old
@@ -229,30 +232,25 @@ cargo nextest run -p vx-runtime-graph -p vx-runtime-core -p vx-runtime-driver -p
 ```
 
 Observed result after direct/closure call graph expansion, graph string length,
-literal/binding/variant graph match, graph variants, graph kernel execution
-counting, and lazy public compound materialization:
-141 tests run, 140 passed, 1 failed, 0 skipped.
+literal/binding/variant graph match, graph variants, graph failure/catch,
+graph kernel execution counting, and lazy public compound materialization:
+141 tests run, 141 passed, 0 failed, 0 skipped.
 
-The red surface is honest graph-driver fallout from the source-entry cut:
-
-- `vx-runtime::lang_suite lang_suite`
-
-Several failures still stop with explicit messages like:
-
-```text
-graph unsupported at node NodeId(...): opaque kernel is not executable in core
-```
+The current broad runtime subset is green. This does not mean demolition is
+complete: body/crossing/observer paths listed above still use the legacy
+evaluator and remain targets.
 
 Graph poison source spans are now threaded from the graph node into `CorePoison`
 and then into the public `Outcome`; `i6_eval_outcome_carries_the_source_span`
 passes through graph driver.
 
 The `.vx` language harness now runs through graph driver for source entries. It
-fails 9 of 68 Vixen-language cases. Direct calls, closure calls/function values,
+passes 68 of 68 Vixen-language cases. Direct calls, closure calls/function values,
 arithmetic kernel cases, control-flow kernel cases, simple call laziness,
 `String.len()`, literal/wildcard/binding `match`, and variant construction/match
-now pass. Remaining failures are concentrated in failure unions and catch. Those
-failures are explicit graph unsupported errors and are not a fallback.
+now pass. Failure unions and catch also execute through graph `Fallible` and
+`CaughtFailure` nodes. Interpolated strings remain an explicit unsupported
+source-entry graph shape and are covered by the source-entry unsupported guard.
 
 ## Verification commands
 

@@ -918,15 +918,29 @@ impl Builder<'_> {
                 self.emit(NodeKind::LazyData, label.into(), span, inputs)
             }
 
-            // `expr?` — the fallible (Option-returning) variant; a kernel over expr.
+            // `expr?` — a graph-level catch. The fallible node demands its inner in
+            // catch mode; if that demand poisons, the driver memoizes the paired
+            // caught-failure node and the fallible node returns `Err(Failure { .. })`.
             ExprKind::Fallible(fx) => {
                 let inner = self.walk(fx.expr);
-                self.emit(
-                    NodeKind::Kernel(KernelOp::Opaque),
+                let fallible = self.emit(
+                    NodeKind::Fallible {
+                        caught_failure: NodeId(u32::MAX),
+                    },
                     "?".into(),
                     span,
                     vec![inner],
-                )
+                );
+                let failure = self.emit(
+                    NodeKind::CaughtFailure,
+                    "Failure".into(),
+                    span,
+                    vec![fallible],
+                );
+                self.nodes[fallible.0 as usize].kind = NodeKind::Fallible {
+                    caught_failure: failure,
+                };
+                fallible
             }
 
             // A coercion is a transparent single-child wrapper: forward to its

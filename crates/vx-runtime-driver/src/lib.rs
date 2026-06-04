@@ -140,6 +140,19 @@ impl Driver {
                         self.resolve_node(needed)?;
                     }
                 }
+                Step::Catch(req) => match self.resolve_node(req.input) {
+                    Ok(_) => {}
+                    Err(DriverError::Poison(poison)) => {
+                        self.memo.insert(
+                            req.caught_failure,
+                            NodeOutput::Failure {
+                                err: poison.err,
+                                context: poison.context,
+                            },
+                        );
+                    }
+                    Err(other) => return Err(other),
+                },
                 Step::Boundary(req) => return Err(DriverError::Boundary(req.node)),
                 Step::Poison(poison) => return Err(DriverError::Poison(poison)),
                 Step::Unsupported(reason) => return Err(DriverError::Unsupported(reason)),

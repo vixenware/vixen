@@ -25,6 +25,17 @@ pub enum NodeOutput {
         field_names: Vec<String>,
         fields: Vec<NodeId>,
     },
+    Failure {
+        err: Box<NodeOutput>,
+        context: CoreFailureContext,
+    },
+    FailureContext(CoreFailureContext),
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Default)]
+pub struct CoreFailureContext {
+    pub span: Option<Span>,
+    pub demand_path: Vec<Span>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -32,6 +43,8 @@ pub struct CorePoison {
     pub node: NodeId,
     pub reason: String,
     pub span: Option<Span>,
+    pub err: Box<NodeOutput>,
+    pub context: CoreFailureContext,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -46,6 +59,12 @@ pub struct BoundaryRequest {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
+pub struct CatchRequest {
+    pub input: NodeId,
+    pub caught_failure: NodeId,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub enum NeedSet {
     Nodes(Vec<NodeId>),
 }
@@ -54,6 +73,7 @@ pub enum NeedSet {
 pub enum Step {
     Need(NeedSet),
     Ready(NodeOutput),
+    Catch(CatchRequest),
     Boundary(BoundaryRequest),
     Poison(CorePoison),
     Unsupported(UnsupportedNode),
@@ -96,6 +116,10 @@ pub fn step(graph: &DemandGraph, node: NodeId, inputs: ReadyInputs<'_>) -> Step 
         NodeKind::Kernel(op) => kernel(graph, node, n.inputs.as_slice(), *op, inputs),
         NodeKind::Closure => unsupported(node, "closure value is not executable in core yet"),
         NodeKind::Match { arms } => match_node(node, n.inputs.as_slice(), arms, inputs),
+        NodeKind::Fallible { caught_failure } => {
+            fallible(node, n.inputs.as_slice(), *caught_failure, inputs)
+        }
+        NodeKind::CaughtFailure => caught_failure(node, n.inputs.as_slice(), inputs),
         NodeKind::Boundary => Step::Boundary(BoundaryRequest { node }),
         NodeKind::Bomb => poisoned(graph, node, "bomb demanded"),
         NodeKind::Fail => fail(graph, node, n.inputs.as_slice(), inputs),
@@ -127,7 +151,19 @@ fn project(
     };
     let fields = match container_output {
         NodeOutput::LazyData { fields, .. } | NodeOutput::Variant { fields, .. } => fields,
-        _ => return unsupported(node, "project container is not lazy data or variant"),
+        NodeOutput::Failure { err, context } => {
+            return match index {
+                0 => Step::Ready((**err).clone()),
+                1 => Step::Ready(NodeOutput::FailureContext(context.clone())),
+                _ => unsupported(node, "failure project index out of bounds"),
+            };
+        }
+        _ => {
+            return unsupported(
+                node,
+                "project container is not lazy data, variant, or failure",
+            );
+        }
     };
     let Some(&field) = fields.get(index as usize) else {
         return unsupported(node, "project index out of bounds");
@@ -160,6 +196,45 @@ fn match_node(
         Some(output) => Step::Ready(output.clone()),
         None => Step::Need(NeedSet::Nodes(vec![arm.body])),
     }
+}
+
+fn fallible(
+    node: NodeId,
+    raw_inputs: &[NodeId],
+    caught_failure: NodeId,
+    inputs: ReadyInputs<'_>,
+) -> Step {
+    let Some(&inner) = raw_inputs.first() else {
+        return unsupported(node, "fallible node has no inner expression");
+    };
+    if inputs.get(caught_failure).is_some() {
+        return Step::Ready(NodeOutput::Variant {
+            tag: "Err".to_string(),
+            field_names: vec!["0".to_string()],
+            fields: vec![caught_failure],
+        });
+    }
+    if inputs.get(inner).is_some() {
+        return Step::Ready(NodeOutput::Variant {
+            tag: "Ok".to_string(),
+            field_names: vec!["0".to_string()],
+            fields: vec![inner],
+        });
+    }
+    Step::Catch(CatchRequest {
+        input: inner,
+        caught_failure,
+    })
+}
+
+fn caught_failure(node: NodeId, raw_inputs: &[NodeId], inputs: ReadyInputs<'_>) -> Step {
+    let Some(&fallible) = raw_inputs.first() else {
+        return unsupported(node, "caught-failure node has no fallible owner");
+    };
+    if inputs.get(fallible).is_some() {
+        return unsupported(node, "fallible expression did not catch a failure");
+    }
+    Step::Need(NeedSet::Nodes(vec![fallible]))
 }
 
 fn pattern_matches(pattern: &MatchPattern, output: &NodeOutput) -> bool {
@@ -293,8 +368,10 @@ fn fail(graph: &DemandGraph, node: NodeId, raw_inputs: &[NodeId], inputs: ReadyI
         return poisoned(graph, node, "fail");
     };
     match inputs.get(message_node) {
-        Some(NodeOutput::Str(reason)) => poisoned(graph, node, reason.clone()),
-        Some(_) => poisoned(graph, node, "fail"),
+        Some(NodeOutput::Failure { err, context }) => {
+            poison_with_context(node, (**err).clone(), context.clone())
+        }
+        Some(output) => poison_with_err(graph, node, output.clone()),
         None => Step::Need(NeedSet::Nodes(vec![message_node])),
     }
 }
@@ -345,11 +422,41 @@ fn bin_kernel(
 }
 
 fn poisoned(graph: &DemandGraph, node: NodeId, reason: impl Into<String>) -> Step {
+    let reason = reason.into();
+    poison_with_err(graph, node, NodeOutput::Str(reason))
+}
+
+fn poison_with_err(graph: &DemandGraph, node: NodeId, err: NodeOutput) -> Step {
+    let span = graph.nodes.get(node.0 as usize).and_then(|node| node.span);
+    let context = CoreFailureContext {
+        span,
+        demand_path: Vec::new(),
+    };
+    poison_with_context(node, err, context)
+}
+
+fn poison_with_context(node: NodeId, err: NodeOutput, context: CoreFailureContext) -> Step {
+    let reason = output_reason(&err);
     Step::Poison(CorePoison {
         node,
-        reason: reason.into(),
-        span: graph.nodes.get(node.0 as usize).and_then(|node| node.span),
+        reason,
+        span: context.span,
+        err: Box::new(err),
+        context,
     })
+}
+
+fn output_reason(output: &NodeOutput) -> String {
+    match output {
+        NodeOutput::Str(s) => s.clone(),
+        NodeOutput::U64(n) => n.to_string(),
+        NodeOutput::Bool(b) => b.to_string(),
+        NodeOutput::Unit => "()".to_string(),
+        NodeOutput::LazyData { label, .. } => label.clone(),
+        NodeOutput::Variant { tag, .. } => tag.clone(),
+        NodeOutput::Failure { err, .. } => output_reason(err),
+        NodeOutput::FailureContext(_) => "failure context".to_string(),
+    }
 }
 
 fn two_inputs(_node: NodeId, raw_inputs: &[NodeId]) -> Option<(NodeId, NodeId)> {

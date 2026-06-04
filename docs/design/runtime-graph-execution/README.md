@@ -91,10 +91,14 @@ Expected latest structural checkpoint:
   `NodeKind::Match` payloads.
 - Variant construction carries tag and field-name payloads. Core can construct
   variant outputs, project payload fields, and select match arms by variant tag.
+- `expr?` executes as graph-level catch/reify through `NodeKind::Fallible` and a
+  paired `NodeKind::CaughtFailure`. The driver catches poison from the inner
+  demand and memoizes `Failure { err, context }` as graph output.
 - `vx-runtime-driver` reports graph kernel executions for the transitional
   public dispatch counter.
-- `graph_exec` can expose graph-root lazy arrays/tuples as old public `Value`
-  thunks whose fields demand graph nodes through `PublicValueField`.
+- `graph_exec` can expose graph-root lazy arrays/tuples/variants and caught
+  failures as old public `Value` thunks whose fields demand graph nodes through
+  `PublicValueField`.
 - `vx-runtime::eval` still contains the legacy tree-walker for `eval_body*`,
   observer execution, mirror tests, and other not-yet-cut public body paths.
 

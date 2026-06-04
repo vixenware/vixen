@@ -300,9 +300,16 @@ Implement:
 
 Current implemented slice:
 
-- `CorePoison` carries the demanded graph node and the node's source span.
-- `graph_exec` converts that span into the public `Outcome::Poisoned` while the
-  old public value/outcome API is still being used as a temporary adapter.
+- `CorePoison` carries the demanded graph node, typed graph `err` output, source
+  span, and graph failure context.
+- `NodeKind::Fallible` and `NodeKind::CaughtFailure` reify `expr?` as
+  `Ok(value)` or `Err(Failure { err, context })`.
+- The graph driver catches poison from the fallible inner demand and memoizes the
+  caught-failure node.
+- Projection over a caught failure exposes `err` and `context` fields.
+- `fail f` over a caught failure re-raises the original `err` and context.
+- `graph_exec` converts graph failure outputs into the old public `Value` and
+  `Outcome` API while that adapter still exists.
 
 Vixen tests targeted:
 

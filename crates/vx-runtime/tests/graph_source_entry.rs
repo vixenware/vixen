@@ -54,12 +54,11 @@ fn source_entry_reports_assert_eq_poison() {
 #[test]
 fn source_entry_reports_unsupported_graph_shape() {
     let err = run_in_mode(
-        "fn checked(x: U64) -> U64 ( if x > 0 ( x ) else ( fail \"no\" ) )\n\
-         fn main() -> U64 ( match checked(0)? ( Ok(v) => v, Err(Failure { err: e }) => 7 ) )",
+        "fn main() -> String ( \"hello ${42}\" )",
         "main",
         KernelMode::Off,
     )
-    .expect_err("failure catch is still an unsupported graph shape");
+    .expect_err("interpolated strings are still an unsupported graph shape");
     assert!(
         err.contains("graph unsupported"),
         "unexpected graph error: {err}"

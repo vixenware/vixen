@@ -88,6 +88,10 @@ pub enum NodeKind {
     Match {
         arms: Vec<MatchArm>,
     },
+    Fallible {
+        caught_failure: NodeId,
+    },
+    CaughtFailure,
     Boundary,
     Bomb,
     Fail,
@@ -147,6 +151,16 @@ impl DemandGraph {
                 NodeKind::Match { .. } => {
                     if let Some(&scrutinee) = node.inputs.first() {
                         stack.push(scrutinee);
+                    }
+                }
+                NodeKind::Fallible { .. } => {
+                    if let Some(&inner) = node.inputs.first() {
+                        stack.push(inner);
+                    }
+                }
+                NodeKind::CaughtFailure => {
+                    if let Some(&fallible) = node.inputs.first() {
+                        stack.push(fallible);
                     }
                 }
                 _ => stack.extend(node.inputs.iter().copied()),

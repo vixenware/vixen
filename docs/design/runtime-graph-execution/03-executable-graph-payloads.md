@@ -227,6 +227,26 @@ FailPayload {
 
 Demanding `fail` may demand the message/error node only to construct the poison.
 
+Fallible catch payload:
+
+```text
+FalliblePayload {
+  inner: NodeId,
+  caught_failure: NodeId,
+}
+```
+
+Current progress:
+
+- Graph has `NodeKind::Fallible { caught_failure }` and `NodeKind::CaughtFailure`.
+- Core poison carries typed graph error output plus failure context, not only a
+  display string.
+- Driver handles a catch-mode step by demanding the inner node and memoizing the
+  paired caught-failure node if that demand poisons.
+- Core reifies success as `Ok(inner)` and caught poison as
+  `Err(Failure { err, context })` through graph outputs.
+- `fail f` over a caught `Failure` re-raises the same typed `err` and context.
+
 ### Methods and intrinsics
 
 Method payload:

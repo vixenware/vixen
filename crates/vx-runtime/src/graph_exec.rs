@@ -1,7 +1,7 @@
 use std::cell::RefCell;
 use std::rc::Rc;
 
-use vx_runtime_core::{CorePoison, NodeOutput, UnsupportedNode};
+use vx_runtime_core::{CoreFailureContext, CorePoison, NodeOutput, UnsupportedNode};
 use vx_runtime_driver::{DemandRequest, Driver, DriverError};
 use vx_runtime_graph::NodeId;
 
@@ -71,6 +71,19 @@ fn value_from_output(output: NodeOutput, driver: SharedDriver) -> Result<Value, 
                 .collect();
             Ok(Value::Variant { tag, fields })
         }
+        NodeOutput::Failure { err, context } => Ok(Value::Struct(vec![
+            (
+                "err".to_string(),
+                ready_output_thunk(*err, Rc::clone(&driver)),
+            ),
+            (
+                "context".to_string(),
+                ready_output_thunk(NodeOutput::FailureContext(context), Rc::clone(&driver)),
+            ),
+        ])),
+        NodeOutput::FailureContext(context) => Ok(Value::FailureContext(Rc::new(
+            failure_context_from_core(context),
+        ))),
     }
 }
 
@@ -82,6 +95,12 @@ fn graph_field_thunk(driver: SharedDriver, node: NodeId) -> Thunk {
         };
         let output = result.map_err(poison_from_driver_error)?;
         value_from_output(output, Rc::clone(&driver)).map_err(poison_from_string)
+    })
+}
+
+fn ready_output_thunk(output: NodeOutput, driver: SharedDriver) -> Thunk {
+    Thunk::native(move || {
+        value_from_output(output.clone(), Rc::clone(&driver)).map_err(poison_from_string)
     })
 }
 
@@ -98,11 +117,38 @@ fn poison_from_driver_error(error: DriverError) -> Poison {
 
 fn poison_from_core(poison: CorePoison) -> Poison {
     Poison {
-        err: Value::Str(Rc::from(poison.reason)),
-        context: FailureContext {
-            span: poison.span,
-            demand_path: Vec::new(),
-        },
+        err: poison_err_from_output(*poison.err)
+            .unwrap_or_else(|| Value::Str(Rc::from(poison.reason))),
+        context: failure_context_from_core(poison.context),
+    }
+}
+
+fn failure_context_from_core(context: CoreFailureContext) -> FailureContext {
+    FailureContext {
+        span: context.span,
+        demand_path: context.demand_path,
+    }
+}
+
+fn poison_err_from_output(output: NodeOutput) -> Option<Value> {
+    match output {
+        NodeOutput::U64(n) => Some(Value::U64(n)),
+        NodeOutput::Bool(b) => Some(Value::Bool(b)),
+        NodeOutput::Str(s) => Some(Value::Str(Rc::from(s))),
+        NodeOutput::Unit => Some(Value::Unit),
+        NodeOutput::Variant {
+            tag,
+            field_names,
+            fields,
+        } if field_names.is_empty() && fields.is_empty() => Some(Value::Variant {
+            tag,
+            fields: Vec::new(),
+        }),
+        NodeOutput::Failure { err, .. } => poison_err_from_output(*err),
+        NodeOutput::FailureContext(context) => Some(Value::FailureContext(Rc::new(
+            failure_context_from_core(context),
+        ))),
+        NodeOutput::LazyData { .. } | NodeOutput::Variant { .. } => None,
     }
 }
 
