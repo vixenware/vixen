@@ -1,0 +1,95 @@
+# Vixen skill tree
+#
+# This is a PLACEHOLDER skeleton so the system stands up and renders. The real
+# content gets filled in by interviewing Amos about Vixen: what it is, where it
+# is now, and which paths lead to milestones worth funding.
+#
+# Schema:
+#   meta:        title / subtitle shown in the top bar
+#   categories:  id -> { label, color }  (drives node accent + legend + minimap)
+#   nodes:       list of skills
+#     id:        unique slug, referenced by `requires`
+#     title:     short name on the node
+#     status:    done | in_progress | planned | idea
+#     category:  key into `categories`
+#     summary:   one-liner shown on the node
+#     detail:    longer prose in the side panel
+#     payoff:    why this milestone helps convince companies to fund Vixen
+#     requires:  ids of prerequisite skills (the edges of the tree)
+
+meta:
+  title: Vixen — Skill Tree
+  subtitle: Paths to fundable milestones (placeholder — to be filled in)
+
+categories:
+  foundation:
+    label: Foundation
+    color: "#5b8def"
+  runtime:
+    label: Runtime
+    color: "#ff7a45"
+  product:
+    label: Product
+    color: "#7ee2a8"
+  proof:
+    label: Proof point
+    color: "#c792ea"
+
+nodes:
+  - id: language-frontend
+    title: Language front-end
+    status: done
+    category: foundation
+    summary: Parser, IR, type & capability checking land.
+    detail: >
+      The VIR front-end (build / type_collect / resolve / type_check / cap_check /
+      capture) is in place and stays — only the back-end is being replaced.
+    payoff: A real language with a real front-end is a credible base, not a toy.
+
+  - id: demand-runtime
+    title: Demand-driven runtime
+    status: in_progress
+    category: runtime
+    summary: Lazy demand sea + eager kernel islands; no tree-walker.
+    detail: >
+      The evaluator is being rebuilt around a demand graph: values are node
+      references, forcing is the only way scalars appear, commands run on executors.
+    payoff: Demand-driven, content-addressed evaluation is the technical bet that
+      makes the rest of the story (caching, distribution) possible.
+    requires: [language-frontend]
+
+  - id: exec-primitive
+    title: exec — the build primitive
+    status: in_progress
+    category: runtime
+    summary: Run a discovered tool; output crosses back as a tree handle.
+    detail: Placeholder — refine with Amos.
+    payoff: Placeholder — refine with Amos.
+    requires: [demand-runtime]
+
+  - id: distribution
+    title: Distributed execution
+    status: planned
+    category: runtime
+    summary: Runners + control plane execute work off the local machine.
+    detail: Placeholder — refine with Amos.
+    payoff: Placeholder — refine with Amos.
+    requires: [exec-primitive]
+
+  - id: real-build
+    title: Build a real project
+    status: planned
+    category: proof
+    summary: End-to-end build of something non-trivial (e.g. a C/Rust target).
+    detail: Placeholder — refine with Amos.
+    payoff: A demoable, real build is the single most convincing proof point.
+    requires: [exec-primitive]
+
+  - id: hosted-product
+    title: Hosted product
+    status: idea
+    category: product
+    summary: app.vixen.rs — the commercial surface.
+    detail: Placeholder — refine with Amos.
+    payoff: Placeholder — refine with Amos.
+    requires: [distribution, real-build]
