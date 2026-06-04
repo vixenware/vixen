@@ -23,7 +23,7 @@ model, but they are not part of the core language syntax.
 >
 > ```vixen
 > fn main(workspace: Tree) with { ..VixenMain } -> Tree (
->   Tree { "target/release" => exec [stable.rustc, workspace "src/main.rs", "-o", "out/app"] }
+>   `${stable.rustc} ${workspace "src/main.rs"} -o out/app`
 > )
 > ```
 >
@@ -144,19 +144,18 @@ model, but they are not part of the core language syntax.
 > r[store.path]
 >
 > Path-shaped values are ordinary strings. There is no distinct
-> path-literal syntax: in `exec [rustc, workspace "src/main.rs", "-o",
-> "out/app"]` all four literals are plain strings. What distinguishes a
-> "path" from "text" is **provenance**, not quoting — the runtime tracks
-> which strings originated as `Tree` projections (or were derived from
-> them) and uses that provenance for cache keying and implicit sandbox
-> mounting.
+> path-literal syntax: the argument tokens of an invocation are all plain
+> strings. What distinguishes a "path" from "text" is **provenance**, not
+> quoting — the runtime tracks which strings originated as `Tree`
+> projections (or were derived from them) and uses that provenance for
+> cache keying and implicit sandbox mounting.
 >
 > `Path` is the type a path-shaped value carries when its provenance is
 > known; it is a normalized slash-delimited string. `Path(s)` parses and
 > normalizes a string, poisoning if it is not a valid normalized path;
 > `path.to_string()` recovers the spelling; `path.join`, `path.split`, and
 > similar live on the value type. Sub-paths are built with the `/`
-> operator or with backtick interpolation (`` `out/${name}.o` ``).
+> operator or with string interpolation (`"out/${name}.o"`).
 > Provenance is preserved through `Path` joins and lost through arbitrary
 > string transforms the runtime can't track — the result is then a plain
 > `String`.
@@ -173,76 +172,124 @@ model, but they are not part of the core language syntax.
 
 ## Exec
 
-> r[exec.signature]
+Running an external tool is the core build operation, so it gets the core
+syntax: a **command invocation** in backticks (`r[expr.command]`). Four nouns
+make up the model — *command*, *tool*, *invocation*, *run* — and the
+compile-time/run-time line runs *through* them.
+
+> r[exec.command]
 >
-> `exec` runs an external process on an executor — a sandboxed runner
-> with a virtual filesystem. `exec` is a builtin function available in
-> the standard environment, not a reserved keyword or special form. It
-> uses ordinary call syntax and can be shadowed by user bindings. It is
-> generic over `T`.
+> A **command** is the *grammar* of a tool's command line: which flags exist,
+> their value domains, which positions are inputs vs. outputs, which flags are
+> legal in which mode, and the version/feature predicates on them. It is a
+> **constant** — static data, the same regardless of which concrete tool is
+> installed. Two builds of clang share one command; `gcc` and `clang` are
+> *different* commands with their own native flags ("build C, don't care which
+> compiler" is a separate facility layered on top that dispatches across
+> commands — not a shared command). The command classifies each argument
+> token's `Kind` — `Input` (mounted read-only, content-hashed into the cache
+> key), `Output` (writable target), `Text` (never mounted), `InOut` — so the
+> sandbox mount set and the cache identity fall out of it (`r[exec.arg]`).
+
+> r[exec.tool]
 >
-> Its argument is a **`Command`**, written as a CLI literal
-> `@[ ${cmd} args… ]`: the leading interpolated value is the command —
-> advertised by a capability, bundling its grammar, binary, fingerprint,
-> and the exemptions it needs — and the following tokens are checked
-> against that grammar (there is no grammar name after `@`, and no
-> separate grammar to import). The grammar classifies each token's `Kind`,
-> so the sandbox mount set and the cache identity fall out of the command
-> (see `r[exec.arg]`).
+> A **tool** is a concrete, runnable program. It bundles a `command` with an
+> **executor identity**, the **binary** (its path on that executor plus its
+> content fingerprint), and the **parameters** a probe read off the machine
+> (version, enabled features, the sandbox exemptions it needs). A tool is a
+> *mixed* value: its `command` is a compile-time constant; its executor /
+> binary / parameters are runtime, filled when a provider is injected.
 >
-> The orchestrator does not run the process or inspect the sandbox
-> directly. It serializes the full payload — the command, the observer
-> closure (the canonical AST of everything it closes over), and the
-> verification obligations carried by the inputs — and ships it to an
-> executor. The executor runs the process, evaluates the observer there,
-> rechecks the relevant host obligations on the concrete runner instance,
-> and returns only the observer's produced value back across the boundary.
+> Build code does not construct tools — it **requests** them and the
+> orchestrator injects one. `Gcc where (target == "x86_64-unknown-linux-gnu")`
+> yields a tool whose concrete provider is resolved at dispatch
+> (`r[ability.request]`).
+
+> r[exec.invocation]
+>
+> An **invocation** is a backtick command literal (`r[expr.command]`):
 >
 > ```vixen
-> fn exec[T](
->   command: Command,                       // a @[ ${cmd} args… ] literal
-> ) with {
->   env: Map[String, ExecInput] = %{},      // values for the grammar's declared env channels
->   mounts: Map[Path, TreeEntry] = %{},     // extra content not implied by the command
->   writable: Array[Path] = [],             // output roots the grammar can't classify
->   create_dirs: Array[Path] = [],
->   exemptions: Array[SandboxExemption] = [],   // extra host holes (the command carries its own)
->   observer: Fn(Run) -> T,
-> } -> T
+> `$gcc -c ${workspace "hello.c"} -o out/hello.o`
 > ```
 >
-> There is no `executor:` kwarg and no effect annotation on the observer.
-> Routing is type-driven and **falls out of provenance**: the runtime
-> chooses an executor from the ability values (e.g. a `CToolchain` /
-> `RustToolchain`) flowing into the command, by predicate match — there is
-> no stringly-typed executor selector.
+> The leading hole is a **tool**; the tokens after it are its arguments,
+> checked and classified by the tool's `command`. Forcing the invocation's
+> value runs it on the tool's executor and yields the observer's result —
+> the default observer is `run.ok.out` (`r[exec.observer.simple]`). A trailing
+> `with { … }` supplies the non-defaults:
+>
+> ```vixen
+> with {
+>   env: Map[String, ExecInput] = %{},      // values for the command's declared env channels
+>   mounts: Map[Path, TreeEntry] = %{},     // extra content not implied by the command
+>   writable: Array[Path] = [],             // output roots the command can't classify
+>   create_dirs: Array[Path] = [],
+>   exemptions: Array[SandboxExemption] = [],   // extra host holes (the tool carries its own)
+>   observer: Fn(Run) -> T = (run) => run.ok.out,
+> }
+> ```
+>
+> There is no `exec` function and no `executor:` kwarg. Routing **falls out of
+> provenance**: the executor is the one the tool's provider was injected on
+> (`r[ability.request]`) — no stringly-typed selector.
+
+> r[exec.dispatch]
+>
+> The orchestrator does not run the process or inspect the sandbox directly.
+> It serializes the full payload — the invocation, the observer closure (the
+> canonical AST of everything it closes over), and the verification
+> obligations carried by the tool — and ships it to the executor. The
+> executor runs the process, evaluates the observer there, rechecks the host
+> obligations on the concrete runner (`r[exec.verifier]`), and returns only
+> the observer's produced value back across the boundary.
+
+> r[exec.validate.static]
+>
+> An invocation is validated in **two tiers**; the first runs at *check time*,
+> on the author's machine, offline. Because a command is a constant
+> (`r[exec.command]`), the compiler obtains it by **const-evaluating the tool's
+> command** — `gcc.command` — and validates the argument tokens against it:
+> unknown flag, value outside a fixed domain, flag illegal in the active mode,
+> a hole whose type doesn't fit its position. No probe, no executor, no
+> network — the command does not depend on which concrete tool is chosen.
+>
+> Const-evaluation succeeds wherever the command is statically determined —
+> through a `let`, through `Gcc where (…)` (the predicate selects the
+> *provider*, not the command), through field access. Where it is *not*
+> determined — e.g. `` `${if cond then gcc else clang} …` ``, whose command is
+> unknown until a runtime choice — the invocation cannot be checked statically
+> and is a **compile error** (a runtime value where a compile-time constant is
+> required). Code generic over "some tool" likewise has no statically-known
+> command: it may pass arguments through, but not write checked flags.
+
+> r[exec.validate.runtime]
+>
+> The second tier runs at *exec time*, on the concrete executor, against the
+> tool's runtime **parameters**. The same constant command carries
+> version/feature predicates ("`-ffoo` exists as of version 14"); the injected
+> provider supplies the actual version/features; the runtime checks the
+> invocation against them and emits *parameterised* diagnostics — e.g. "this
+> exec failed; the clang on executor E is 13.x, which lacks `-ffoo`, which may
+> explain it." One constant command, validated twice: structurally at author
+> time, parameterised at exec time.
 
 > r[exec.arg]
 >
-> A command is a CLI literal `@[ ${cmd} tokens… ]` (`r[exec.signature]`):
-> the leading interpolated value is the command (advertised by a
-> capability), and the grammar it carries classifies every following
-> token's `Kind` — `Input` (mounted read-only, content-hashed into the
-> key), `Output` (writable target), `Text` (never mounted), `InOut`. So the
-> **mount set and the cache identity fall out of the grammar**, with no
-> hand-wired input list.
+> The tool's `command` classifies every argument token's `Kind` — `Input`
+> (mounted read-only, content-hashed into the key), `Output` (writable
+> target), `Text` (never mounted), `InOut`. So the **mount set and the cache
+> identity fall out of the command**, with no hand-wired input list.
 >
-> The surface types interpolated into a hole (or passed to the
-> `env` / `mounts` kwargs):
+> The surface types a hole (or the `env` / `mounts` kwargs) accepts:
 >
 > ```vixen
 > type ExecInput = String | Path | Blob | Tree | ExecPath
 > type TreeEntry = Blob | Tree   // explicit mounts / tree entries
 > ```
 >
-> The detailed classification mechanics below (`ExecPath`, auto-mount,
-> interpolation, spread) are the **command-model layer**, being reconciled
-> with the `@[ ${cmd} ]` / no-separate-grammars decision (coordinated with
-> `command-model.md` / `cli-literal.md`).
->
-> A plain `String` is a literal argument. A plain `Path` names a VFS
-> location directly. `Blob`, `Tree`, and `ExecPath` carry implicit mount
-> obligations.
+> A plain `String` is a literal argument. A plain `Path` names a VFS location
+> directly. `Blob`, `Tree`, and `ExecPath` carry implicit mount obligations.
 
 > r[exec.exemptions]
 >
@@ -274,7 +321,7 @@ model, but they are not part of the core language syntax.
 
 > r[exec.arg.path]
 >
-> `ExecPath` is a provenance-bearing path used only by `exec`-facing
+> `ExecPath` is a provenance-bearing path used only by invocation-facing
 > APIs. Ordinary path operations use `Path`; `ExecPath` exists to carry
 > hidden "mount this content first" information across normalization:
 >
@@ -293,13 +340,13 @@ model, but they are not part of the core language syntax.
 > ```
 >
 > These variants are explanatory. User code usually creates them by
-> passing a `Tree` or `Blob` directly to `exec`, or by projecting into a
+> passing a `Tree` or `Blob` directly into an invocation, or by projecting into a
 > tree (`tree "include/lua.h"`), whose result carries the tree's mount
 > provenance.
 
 > r[exec.arg.auto-mount]
 >
-> Passing a `Tree` directly to `exec` is sugar for:
+> Passing a `Tree` directly into an invocation hole is sugar for:
 >
 > ```vixen
 > InTree { tree: some_tree, suffix: /* empty relative path */ }
@@ -308,7 +355,7 @@ model, but they are not part of the core language syntax.
 > `exec` mounts the tree at a synthetic VFS root chosen by the runtime.
 > If the tree contains exactly one file entry, `exec` passes that file's
 > path to the process directly. Otherwise it passes the mount root path.
-> This makes singleton output trees convenient to feed into later `exec`
+> This makes singleton output trees convenient to feed into later invocations
 > calls without extra path extraction, while keeping plural trees explicit.
 > Passing a `Blob`
 > directly is sugar for:
@@ -327,12 +374,12 @@ model, but they are not part of the core language syntax.
 > Mount provenance is carried by projecting a `Tree`, not by a special
 > literal. `tree "include/lua.h"` returns an `ExecPath` rooted in that
 > tree's mounted content — equivalent to
-> `InTree { tree, suffix: "include/lua.h" }`. Backtick interpolation
-> builds plain path strings:
+> `InTree { tree, suffix: "include/lua.h" }`. String interpolation builds
+> plain path strings:
 >
 > ```vixen
 > tree "include/lua.h"          // ExecPath, carries tree provenance
-> `out/${name}.o`               // plain String, no provenance
+> "out/${name}.o"               // plain String, no provenance
 > ```
 >
 > A value built purely from `String` / `Path` pieces is a plain path with
@@ -380,11 +427,11 @@ model, but they are not part of the core language syntax.
 > additional directories to create under those roots before launch.
 >
 > ```vixen
-> exec [cc, "-c", "src/hello.c", "-o", "out/obj/hello.o"] with {
+> `$cc -c src/hello.c -o out/obj/hello.o` with {
 >   mounts: %{ "src" => source },
 >   writable: ["out"],
 >   create_dirs: ["out/obj"],
->   observer: (proc, vfs) => vfs.subtree("out"),
+>   observer: (run) => run.ok.out.subtree("out"),
 > }
 > ```
 >
@@ -598,6 +645,70 @@ model, but they are not part of the core language syntax.
 > Observations from expressions that do not flow into the returned value
 > do not contribute obligations. Such unused expression statements are a
 > static error.
+
+## Abilities
+
+> r[ability.spec]
+>
+> An **ability** (a capability) is a **spec** — a struct type a package
+> declares, e.g. `@vixen/c`'s `CToolchain` or `@vixen/gcc`'s `Gcc`. Its
+> fields are of two kinds:
+>
+> - **tool fields** carry a static `command` (`r[exec.command]`) — the
+>   grammar a build script checks its invocations against. The command is a
+>   compile-time constant, the same for every provider of the spec.
+> - **provider attributes** — `version`, `target`, `provider`, `sysroot`,
+>   the binary path + fingerprint — are runtime data, filled by a probe on a
+>   concrete machine.
+>
+> Build code is written against the **spec**, never a concrete provider: you
+> author `` `$gcc -c …` `` against `Gcc`'s command and never name a
+> particular gcc. This is dependency injection — depend on the interface,
+> not the implementation — and the static/runtime split of
+> `r[exec.validate.static]` / `r[exec.validate.runtime]` *is* this split: the
+> command is the static contract, the provider attributes are the injected
+> runtime.
+
+> r[ability.request]
+>
+> Build code requests an ability with `Type where (predicate)`:
+>
+> ```vixen
+> let gcc = Gcc where (target == "x86_64-unknown-linux-gnu" && version >= 11)
+> ```
+>
+> The free identifiers in the predicate desugar to the spec's **provider
+> attributes** — you constrain `version`, `target`, `provider`, never the
+> command (the command is fixed by the spec, not chosen). `Type where (…)`
+> produces a **predicate-identified** value: a thunk whose identity is the
+> constraint, not yet bound to a concrete provider. There is no `.request`
+> verb and no stringly-typed executor selector — `where` is the single
+> fleet-routing surface from user code. Policy (fallback ladders, conditional
+> resolution, multi-target fan-out) is ordinary Vixen control flow over these
+> values.
+
+> r[ability.advertise]
+>
+> An executor's `vx-daemon` runs its configured **probes**
+> (`r[discover.probe]`) against its own machine, producing concrete
+> providers — a `Gcc { version: 11.2, binary: …, … }` for the gcc it
+> actually has — and **advertises** them to the control plane (the fleet
+> registry, over Vox). A probe that doesn't apply returns `None` and
+> advertises nothing. The advertised set is what the machine *has*, not what
+> Vixen could route through it (`r[discover.daemon]`).
+
+> r[ability.match]
+>
+> When a request is demanded, the control plane **matches** its predicate
+> against the advertised providers and **injects** a concrete one — its
+> executor identity, binary + fingerprint, and parameters fill the tool's
+> runtime fields. Routing **falls out of provenance**: an invocation runs on
+> the executor its tool's provider was injected on; an invocation consuming
+> two abilities runs where one executor satisfies both. When several
+> providers match, the orchestrator chooses among them by fleet-scheduling
+> signals invisible to build code (load, latency, cache warmth). The
+> advertised value is a hypothesis until verified on the concrete runner
+> (`r[exec.verifier]`); drift re-routes.
 
 ## Executor discovery
 
