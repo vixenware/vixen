@@ -310,7 +310,7 @@ fn materialize_external_boundary(
         .remove(&node)
         .ok_or_else(|| format!("graph external boundary {node:?} has no thunk"))?;
     let value = thunk
-        .force_for_graph_boundary()
+        .materialize_for_graph_boundary()
         .map_err(|poison| poison.message())?;
     let output = {
         let mut driver = driver.borrow_mut();
@@ -706,7 +706,7 @@ fn provider_attr(provider: &Value, field: &str) -> Result<Value, String> {
         .map(|(_, thunk)| thunk)
         .ok_or_else(|| format!("capability provider has no `{field}` field"))?;
     thunk
-        .force_for_graph_boundary()
+        .materialize_for_graph_boundary()
         .map_err(|poison| poison.message())
 }
 

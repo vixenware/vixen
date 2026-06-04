@@ -1,17 +1,15 @@
-//! A demand-driven evaluator — the honest engine (rebuild-plan Phase 2/3,
-//! interpreter-first, correctness before speed).
+//! Public compatibility entry points for the graph-driven runtime.
 //!
-//! The point that every prior evaluator got wrong: **it is lazy.** Compound
-//! construction (tuples, structs, arrays) yields **thunks** for its fields, not
-//! forced values; only what is *demanded* (a projection, an operand of a
-//! computation, the final result) is forced. So `💣` detonates **only when
-//! forced** — drop it in an undemanded field and it stays inert; force it and it
-//! poisons. This is what makes the `.vx` unit tests meaningful *on the real
-//! engine* (not the eager `vx-rt`/`runtime_eval` being replaced).
+//! Source and body evaluation enter [`crate::graph_exec`], which drives
+//! `vx-runtime-driver` over a [`crate::graph::DemandGraph`]. The public
+//! [`Value`] and [`Thunk`] shapes remain as an API-edge adapter for tests,
+//! observer wire crossing, and host/provider values; they are not the
+//! orchestrator's execution currency. Inside execution, values are graph node
+//! outputs in the driver memo table.
 //!
-//! Scope: enough to run `tests/lang/*.vx` (the self-hosting unit tests) — calls
-//! are resolved to their function bodies, so `assert_eq` actually executes.
-//! Unhandled forms poison honestly rather than silently mis-evaluating.
+//! The demand tripwire is still the same: `💣` detonates only when graph demand
+//! reaches its node. Placing it in an undemanded tuple/struct slot should leave it
+//! dark.
 
 use std::cell::RefCell;
 use std::rc::Rc;
@@ -141,7 +139,7 @@ impl Thunk {
         done(value)
     }
 
-    pub(crate) fn force_for_graph_boundary(&self) -> Result<Value, Poison> {
+    pub(crate) fn materialize_for_graph_boundary(&self) -> Result<Value, Poison> {
         let state = {
             let mut cell = self.0.borrow_mut();
             match &*cell {
@@ -177,8 +175,8 @@ enum ThunkState {
     Done(Result<Value, Poison>),
 }
 
-/// A runtime value. Compound fields are [`Thunk`]s, so they stay unforced until
-/// demanded (`r[eval.pending]`/`r[eval.forcing]`).
+/// Public compatibility value. Compound fields are API-edge [`Thunk`]s; graph
+/// execution itself carries node outputs in driver memo state.
 #[derive(Debug, Clone)]
 pub enum Value {
     U64(u64),
@@ -383,7 +381,7 @@ fn wire_graph_value(value: &Value) -> Result<WireValue, Poison> {
 fn wire_graph_thunks(fields: &[Thunk]) -> Result<Vec<WireValue>, Poison> {
     fields
         .iter()
-        .map(|field| wire_graph_value(&field.force_for_graph_boundary()?))
+        .map(|field| wire_graph_value(&field.materialize_for_graph_boundary()?))
         .collect()
 }
 
@@ -393,7 +391,7 @@ fn wire_graph_fields(fields: &[(String, Thunk)]) -> Result<Vec<(String, WireValu
         .map(|(name, field)| {
             Ok((
                 name.clone(),
-                wire_graph_value(&field.force_for_graph_boundary()?)?,
+                wire_graph_value(&field.materialize_for_graph_boundary()?)?,
             ))
         })
         .collect()
@@ -621,7 +619,7 @@ mod tests {
             .find(|(field, _)| field == name)
             .unwrap_or_else(|| panic!("field `{name}` missing in {value:?}"))
             .1
-            .force_for_graph_boundary()
+            .materialize_for_graph_boundary()
             .expect("graph boundary field")
     }
 
