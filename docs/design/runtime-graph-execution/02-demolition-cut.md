@@ -155,102 +155,87 @@ The demolition phase is complete when:
 
 ## Current demolition progress
 
-The first public source entry cut is in place:
+Public source and body entries now enter graph execution:
 
 ```text
 run / run_with_dispatches / run_in_mode
   -> graph_exec::run_source
   -> analyze_source
   -> Driver::drive(DemandRequest::root(graph.root))
+
+eval_body / eval_body_with_exec / eval_body_with_exec_and_providers
+  -> graph_exec::run_body
+  -> build_graph_indexed
+  -> Driver::drive(DemandRequest::root(graph.root))
+
+eval_body_wire / observer execution
+  -> graph_exec::run_body
+  -> graph-backed public value
+  -> graph/native boundary thunk crossing to WireValue
 ```
 
-This cut is intentionally partial. The following public body/crossing paths still
-use the legacy evaluator and remain demolition targets:
-
-- `eval_body`
-- `eval_body_with_exec`
-- `eval_body_with_exec_and_providers`
-- `eval_body_wire`
-- observer execution in `observe.rs`
-- mirror, host/intrinsic, exec, remote-tree, and strand tests that call
-  `eval_body*`
+`eval_body_with_exec` and `eval_body_with_exec_and_providers` are graph entries
+now, but their exec client and provider registry are not consumed yet. Backtick
+exec, `where`, imports, and remote tree body arguments therefore fail as explicit
+graph unsupported/boundary states instead of falling back.
 
 Current focused green evidence:
 
 ```bash
 cargo check -p vx-runtime-graph -p vx-runtime-core -p vx-runtime-driver -p vx-runtime
-cargo nextest run -p vx-runtime source_entry
+cargo nextest run -p vx-runtime -E 'binary(host_probe)'
+cargo nextest run -p vx-runtime -E 'test(observe_runs_a_real_command_and_returns_the_observer_value) | test(observe_crosses_the_output_tree_as_a_handle_marker) | binary(observe_on_strands)' --no-fail-fast
 cargo nextest run -p vx-runtime execution_crates_stay_source_blind
-cargo nextest run -p vx-runtime-core
-cargo nextest run -p vx-runtime lower::tests
-cargo nextest run -p vx-runtime --test coerce
 rg -n 'vx[_-]ir|ExprKind|ExprId|StmtKind|PatternKind|PatternId|VirProgram|BodyId|node_exprs|exprmap|eval_inner|eval_expr|walk_expr|legacy_eval|fn force|\.force\(' crates/vx-runtime-core crates/vx-runtime-driver
 ```
 
 Observed result:
 
-- `cargo check` passes.
-- `source_entry` passes 5/5: graph root constant, projection skipping a dead
-  bomb slot, graph `assert_eq` success, graph `assert_eq` poison, and explicit
-  unsupported graph call.
+- `cargo check` passes, with dead-code warnings from the old `dispatch.rs` and
+  `eval.rs` tree-walker. Those warnings are not acceptable as a final state; they
+  are current evidence that public production paths have moved away from that
+  code.
+- `host_probe` passes 3/3 through graph body execution. `host.which` and
+  `host.exec` lower to typed `HostMethod` graph boundary nodes and materialize
+  through the driver.
+- Observer crossing passes 4/4 for direct observe and observe-on-strands. The
+  executor binds `Run` as graph external input, demands `run.ok` or
+  `run.stream.out` through graph/native boundary thunks, and crosses the result
+  to `WireValue`.
 - `execution_crates_stay_source_blind` passes.
-- `vx-runtime-core` passes 4/4.
-- `lower::tests` passes 8/8.
-- `coerce` passes 2/2.
 - The raw forbidden-symbol scan returns no matches in core/driver.
-- Constant nodes now carry structured `ConstValue` payloads. Core execution and
-  executable lowering no longer parse constant display labels; literal parsing
-  lives only at the analyzer boundary.
-- Statically resolved direct function calls are graph-expanded at analysis time
-  with argument node refs bound to callee parameter patterns. This is not the
-  final function-template payload system, but runtime execution remains
-  source-blind.
-- Closure literals and named functions used as values produce graph `Closure`
-  nodes with capture node refs. Calls to those values are expanded at analysis
-  time when the callable template is known.
-- `String.len()` lowers to a source-blind graph `KernelOp::StrLen` and is
-  executed by graph core after demanding only the receiver.
-- Graph-level `match` carries structured arm payloads for literal, wildcard, and
-  binding patterns. Core demands the scrutinee and then only the selected arm
-  body.
-- Graph variants carry structured tag and field-name payloads. Unit, tuple, and
-  struct variant construction execute through graph core, and variant match
-  payload bindings are wired as projection nodes.
-- `expr?` emits a graph `Fallible` node paired with a `CaughtFailure` node. The
-  driver performs a catch-mode demand for the inner node, memoizes a caught
-  failure if that demand poisons, and graph core reifies `Ok`/`Err` variants.
-- The graph driver reports graph kernel executions for the transitional
-  `dispatches` counter.
-- Public `Outcome` conversion can wrap a graph-root lazy array/tuple as old
-  `Value` thunks. Forcing one of those fields issues a `PublicValueField`
-  demand through the driver.
+- Public graph-root arrays, tuples, structs, variants, caught failures, and
+  output-tree markers convert to old public `Value` shapes only at the API edge.
+  Their fields issue `PublicValueField` demands through the same
+  boundary-materializing driver loop.
 
-Current broad-suite result:
+Current broad runtime result:
 
 ```bash
-cargo nextest run -p vx-runtime-graph -p vx-runtime-core -p vx-runtime-driver -p vx-runtime --no-fail-fast
+cargo nextest run -p vx-runtime --no-fail-fast
 ```
 
-Observed result after direct/closure call graph expansion, graph string length,
-literal/binding/variant graph match, graph variants, graph failure/catch,
-graph kernel execution counting, and lazy public compound materialization:
-141 tests run, 141 passed, 0 failed, 0 skipped.
+Observed result: 134 tests run, 126 passed, 8 failed, 0 skipped.
 
-The current broad runtime subset is green. This does not mean demolition is
-complete: body/crossing/observer paths listed above still use the legacy
-evaluator and remain targets.
+Remaining red tests are graph gaps, not source fallback:
 
-Graph poison source spans are now threaded from the graph node into `CorePoison`
-and then into the public `Outcome`; `i6_eval_outcome_carries_the_source_span`
-passes through graph driver.
+- `cc_probe_builds_a_content_identified_ctoolchain`: graph unsupported unresolved
+  `import`.
+- `exec_over_vox_returns_the_observers_exit_value`: graph boundary for backtick
+  invocation dispatch is not wired yet.
+- `explicit_stream_observer_returns_a_forceable_output_tree`,
+  `bare_invocation_uses_the_default_observer`, and
+  `hello_world_compiles_through_a_requested_toolchain`: graph unsupported
+  unresolved call shape in command/backtick execution.
+- `remote_tree_via_eval` 3/3: `Value::Tree(HandleId)` body arguments are not
+  graph-seedable yet.
 
-The `.vx` language harness now runs through graph driver for source entries. It
-passes 68 of 68 Vixen-language cases. Direct calls, closure calls/function values,
-arithmetic kernel cases, control-flow kernel cases, simple call laziness,
-`String.len()`, literal/wildcard/binding `match`, and variant construction/match
-now pass. Failure unions and catch also execute through graph `Fallible` and
-`CaughtFailure` nodes. Interpolated strings remain an explicit unsupported
-source-entry graph shape and are covered by the source-entry unsupported guard.
+Graph poison source spans are threaded from graph node into `CorePoison` and then
+into public `Outcome`; `i6_eval_outcome_carries_the_source_span` passes through
+graph driver.
+
+The `.vx` language harness runs through graph driver for source entries and
+passes 68 of 68 Vixen-language cases.
 
 ## Verification commands
 

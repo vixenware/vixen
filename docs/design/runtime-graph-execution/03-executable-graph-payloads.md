@@ -268,6 +268,14 @@ Current progress:
 - `receiver.len()` with no arguments is recognized as graph `KernelOp::StrLen`.
 - Graph core demands only the receiver and returns its byte length when the
   receiver resolves to `NodeOutput::Str`.
+- `host.which(name)` and `host.exec(args)` are recognized as
+  `NodeKind::HostMethod { method: HostMethod::Which | HostMethod::Exec }`.
+  Core demands their receiver/direct argument inputs and then reports a boundary.
+  Runtime graph execution materializes those typed host boundaries in the driver
+  path instead of invoking source-level method dispatch.
+- `host.exec` returns a graph `NodeOutput::Struct` with field nodes for
+  `exit_code`, `stdout`, `stderr`, and `fingerprint`. Projection demands only the
+  selected field.
 
 ### Imports
 
@@ -298,6 +306,16 @@ BoundaryPayload {
 
 Demand rule: boundary execution is driven by legal boundary materialization
 demand, not arbitrary internal force.
+
+Current progress:
+
+- External body arguments are seeded as graph outputs. Struct/tuple/array/variant
+  fields become boundary nodes backed by the supplied native/resolved public
+  thunks.
+- The driver loop can materialize external field boundaries and typed host method
+  boundaries, then resume the original demand.
+- Graph-visible executor-local output trees use `NodeOutput::OutputTree` and
+  cross to `WireValue::Tree` at observer wire crossing.
 
 ### Kernel nodes
 

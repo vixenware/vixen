@@ -16,8 +16,13 @@ pub enum NodeOutput {
     Bool(bool),
     Str(String),
     Unit,
+    OutputTree,
     LazyData {
         label: String,
+        fields: Vec<NodeId>,
+    },
+    Struct {
+        field_names: Vec<String>,
         fields: Vec<NodeId>,
     },
     Variant {
@@ -120,6 +125,7 @@ pub fn step(graph: &DemandGraph, node: NodeId, inputs: ReadyInputs<'_>) -> Step 
             fallible(node, n.inputs.as_slice(), *caught_failure, inputs)
         }
         NodeKind::CaughtFailure => caught_failure(node, n.inputs.as_slice(), inputs),
+        NodeKind::HostMethod { .. } => boundary_after_inputs(node, n.inputs.as_slice(), inputs),
         NodeKind::Boundary => Step::Boundary(BoundaryRequest { node }),
         NodeKind::Bomb => poisoned(graph, node, "bomb demanded"),
         NodeKind::Fail => fail(graph, node, n.inputs.as_slice(), inputs),
@@ -150,7 +156,9 @@ fn project(
         return Step::Need(NeedSet::Nodes(vec![container]));
     };
     let fields = match container_output {
-        NodeOutput::LazyData { fields, .. } | NodeOutput::Variant { fields, .. } => fields,
+        NodeOutput::LazyData { fields, .. }
+        | NodeOutput::Struct { fields, .. }
+        | NodeOutput::Variant { fields, .. } => fields,
         NodeOutput::Failure { err, context } => {
             return match index {
                 0 => Step::Ready((**err).clone()),
@@ -161,7 +169,7 @@ fn project(
         _ => {
             return unsupported(
                 node,
-                "project container is not lazy data, variant, or failure",
+                "project container is not lazy data, struct, variant, or failure",
             );
         }
     };
@@ -235,6 +243,15 @@ fn caught_failure(node: NodeId, raw_inputs: &[NodeId], inputs: ReadyInputs<'_>) 
         return unsupported(node, "fallible expression did not catch a failure");
     }
     Step::Need(NeedSet::Nodes(vec![fallible]))
+}
+
+fn boundary_after_inputs(node: NodeId, raw_inputs: &[NodeId], inputs: ReadyInputs<'_>) -> Step {
+    let missing = missing(inputs.values, raw_inputs.iter().copied());
+    if missing.is_empty() {
+        Step::Boundary(BoundaryRequest { node })
+    } else {
+        Step::Need(NeedSet::Nodes(missing))
+    }
 }
 
 fn pattern_matches(pattern: &MatchPattern, output: &NodeOutput) -> bool {
@@ -452,7 +469,9 @@ fn output_reason(output: &NodeOutput) -> String {
         NodeOutput::U64(n) => n.to_string(),
         NodeOutput::Bool(b) => b.to_string(),
         NodeOutput::Unit => "()".to_string(),
+        NodeOutput::OutputTree => "output tree".to_string(),
         NodeOutput::LazyData { label, .. } => label.clone(),
+        NodeOutput::Struct { .. } => "struct".to_string(),
         NodeOutput::Variant { tag, .. } => tag.clone(),
         NodeOutput::Failure { err, .. } => output_reason(err),
         NodeOutput::FailureContext(_) => "failure context".to_string(),

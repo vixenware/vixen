@@ -77,7 +77,7 @@ impl Poison {
     /// variant shows its tag, anything else is debug-formatted. (The rich report
     /// derived from `err` + context is the failure model's job; this is the
     /// fallback used by the test harness's `Outcome`.)
-    fn message(&self) -> String {
+    pub(crate) fn message(&self) -> String {
         match &self.err {
             Value::Str(s) => s.to_string(),
             Value::Variant { tag, .. } => tag.clone(),
@@ -332,6 +332,30 @@ impl Thunk {
     /// natively-built struct value.
     pub fn done(value: Value) -> Thunk {
         done(value)
+    }
+
+    pub(crate) fn force_for_graph_boundary(&self) -> Result<Value, Poison> {
+        let state = {
+            let mut cell = self.0.borrow_mut();
+            match &*cell {
+                ThunkState::Done(result) => return result.clone(),
+                ThunkState::Forcing => {
+                    return Err(poison("circular external graph boundary".to_string()));
+                }
+                ThunkState::Native(_) => std::mem::replace(&mut *cell, ThunkState::Forcing),
+                ThunkState::Node(_) | ThunkState::Unforced { .. } => {
+                    return Err(poison(
+                        "legacy source thunk reached graph boundary materialization".to_string(),
+                    ));
+                }
+            }
+        };
+        let ThunkState::Native(intrinsic) = state else {
+            unreachable!("only native thunks are taken above");
+        };
+        let result = (intrinsic.0)();
+        *self.0.borrow_mut() = ThunkState::Done(result.clone());
+        result
     }
 }
 
@@ -1776,15 +1800,8 @@ pub fn eval_body(
     args: Vec<Value>,
     mode: KernelMode,
 ) -> Outcome {
-    eval_body_inner(
-        program,
-        env,
-        body,
-        args,
-        mode,
-        None,
-        ProviderRegistry::default(),
-    )
+    let _ = mode;
+    graph_body_outcome(program, env, body, args)
 }
 
 /// As [`eval_body`], but with the executor an `exec(…)` in `body` dispatches to —
@@ -1800,15 +1817,8 @@ pub fn eval_body_with_exec(
     mode: KernelMode,
     exec_client: ObserveClientId,
 ) -> Outcome {
-    eval_body_inner(
-        program,
-        env,
-        body,
-        args,
-        mode,
-        Some(exec_client),
-        ProviderRegistry::default(),
-    )
+    let _ = (mode, exec_client);
+    graph_body_outcome(program, env, body, args)
 }
 
 /// As [`eval_body_with_exec`], but also with the advertised capability `providers`
@@ -1824,36 +1834,19 @@ pub fn eval_body_with_exec_and_providers(
     exec_client: ObserveClientId,
     providers: ProviderRegistry,
 ) -> Outcome {
-    eval_body_inner(program, env, body, args, mode, Some(exec_client), providers)
+    let _ = (mode, exec_client, providers);
+    graph_body_outcome(program, env, body, args)
 }
 
-fn eval_body_inner(
+fn graph_body_outcome(
     program: &VirProgram,
     env: &TypeEnv,
     body: BodyId,
     args: Vec<Value>,
-    mode: KernelMode,
-    exec_client: Option<ObserveClientId>,
-    providers: ProviderRegistry,
 ) -> Outcome {
-    let ev = Evaluator {
-        program,
-        env,
-        current_body: Cell::new(body),
-        dispatch: Dispatcher::default(),
-        dispatches: Cell::new(0),
-        current_frame: Cell::new(None),
-        frames: RefCell::new(Vec::new()),
-        mode,
-        exec_client,
-        providers,
-    };
-    match ev.invoke_body_values(body, args, Env::new()) {
-        Ok(v) => Outcome::Clean(v),
-        Err(p) => Outcome::Poisoned {
-            reason: p.message(),
-            span: p.context.span,
-        },
+    match crate::graph_exec::run_body(program, env, body, args) {
+        Ok((outcome, _)) => outcome,
+        Err(reason) => Outcome::Poisoned { reason, span: None },
     }
 }
 
@@ -1870,21 +1863,54 @@ pub fn eval_body_wire(
     args: Vec<Value>,
     mode: KernelMode,
 ) -> Result<WireValue, String> {
-    let ev = Evaluator {
-        program,
-        env,
-        current_body: Cell::new(body),
-        dispatch: Dispatcher::default(),
-        dispatches: Cell::new(0),
-        current_frame: Cell::new(None),
-        frames: RefCell::new(Vec::new()),
-        mode,
-        exec_client: None,
-        providers: ProviderRegistry::default(),
-    };
-    ev.invoke_body_values(body, args, Env::new())
-        .and_then(|v| ev.to_wire(&v))
-        .map_err(|p| p.message())
+    let _ = mode;
+    match crate::graph_exec::run_body(program, env, body, args) {
+        Ok((Outcome::Clean(value), _)) => {
+            wire_graph_value(&value).map_err(|poison| poison.message())
+        }
+        Ok((Outcome::Poisoned { reason, .. }, _)) | Err(reason) => Err(reason),
+    }
+}
+
+fn wire_graph_value(value: &Value) -> Result<WireValue, Poison> {
+    Ok(match value {
+        Value::U64(n) => WireValue::U64(*n),
+        Value::Bool(b) => WireValue::Bool(*b),
+        Value::Str(s) => WireValue::Str(s.to_string()),
+        Value::Unit => WireValue::Unit,
+        Value::Tuple(fields) => WireValue::Tuple(wire_graph_thunks(fields)?),
+        Value::Array(fields) => WireValue::Array(wire_graph_thunks(fields)?),
+        Value::Struct(fields) => WireValue::Struct(wire_graph_fields(fields)?),
+        Value::Variant { tag, fields } => WireValue::Variant {
+            tag: tag.clone(),
+            fields: wire_graph_fields(fields)?,
+        },
+        Value::OutputTree => WireValue::Tree,
+        other => {
+            return Err(poison(format!(
+                "`exec` observer returned a value that cannot cross back: {other:?}"
+            )));
+        }
+    })
+}
+
+fn wire_graph_thunks(fields: &[Thunk]) -> Result<Vec<WireValue>, Poison> {
+    fields
+        .iter()
+        .map(|field| wire_graph_value(&field.force_for_graph_boundary()?))
+        .collect()
+}
+
+fn wire_graph_fields(fields: &[(String, Thunk)]) -> Result<Vec<(String, WireValue)>, Poison> {
+    fields
+        .iter()
+        .map(|(name, field)| {
+            Ok((
+                name.clone(),
+                wire_graph_value(&field.force_for_graph_boundary()?)?,
+            ))
+        })
+        .collect()
 }
 
 /// Reconstruct a [`Value`] from a [`WireValue`] — the orchestrator side of the value

@@ -47,6 +47,7 @@ fn kind_str(kind: &NodeKind) -> &'static str {
         NodeKind::Match { .. } => "Match",
         NodeKind::Fallible { .. } => "Fallible",
         NodeKind::CaughtFailure => "CaughtFailure",
+        NodeKind::HostMethod { .. } => "HostMethod",
         NodeKind::Boundary => "Boundary",
         NodeKind::Bomb => "Bomb",
         NodeKind::Fail => "Fail",

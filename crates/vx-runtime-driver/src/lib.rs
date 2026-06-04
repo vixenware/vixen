@@ -7,7 +7,7 @@
 use std::collections::HashMap;
 
 use vx_runtime_core::{CorePoison, NeedSet, NodeOutput, ReadyInputs, Step, UnsupportedNode};
-use vx_runtime_graph::{DemandGraph, NodeId, NodeKind};
+use vx_runtime_graph::{DemandGraph, Node, NodeId, NodeKind};
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum DemandOrigin {
@@ -97,6 +97,31 @@ impl Driver {
     pub fn with_seed(mut self, node: NodeId, output: NodeOutput) -> Self {
         self.memo.insert(node, output);
         self
+    }
+
+    pub fn seed(&mut self, node: NodeId, output: NodeOutput) {
+        self.memo.insert(node, output);
+    }
+
+    pub fn push_node(&mut self, kind: NodeKind, label: String, inputs: Vec<NodeId>) -> NodeId {
+        let id = NodeId(self.graph.nodes.len() as u32);
+        self.graph.nodes.push(Node {
+            id,
+            kind,
+            span: None,
+            label,
+            ty: "?".to_string(),
+            inputs,
+        });
+        id
+    }
+
+    pub fn node(&self, node: NodeId) -> Option<&Node> {
+        self.graph.nodes.get(node.0 as usize)
+    }
+
+    pub fn output(&self, node: NodeId) -> Option<&NodeOutput> {
+        self.memo.get(&node)
     }
 
     pub fn drive(&mut self, request: DemandRequest) -> Result<NodeOutput, DriverError> {

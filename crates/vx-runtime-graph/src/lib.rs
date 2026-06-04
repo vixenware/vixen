@@ -69,6 +69,13 @@ pub enum MatchPattern {
     Unsupported(String),
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Facet)]
+#[repr(C)]
+pub enum HostMethod {
+    Which,
+    Exec,
+}
+
 /// What a graph node is.
 #[derive(Debug, Clone, PartialEq, Eq, Facet)]
 #[repr(C)]
@@ -92,6 +99,9 @@ pub enum NodeKind {
         caught_failure: NodeId,
     },
     CaughtFailure,
+    HostMethod {
+        method: HostMethod,
+    },
     Boundary,
     Bomb,
     Fail,

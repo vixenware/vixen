@@ -121,6 +121,12 @@ Acceptance:
 Current progress:
 
 - Let aliases bind names to graph node refs.
+- Public body arguments are seeded into the body graph. Scalar arguments become
+  ready graph outputs; tuple/array/struct/variant arguments become graph outputs
+  whose fields are external boundary nodes.
+- Native/resolved external field thunks are materialized only when graph demand
+  reaches their boundary nodes. Legacy expression thunks that leak into this path
+  poison with an explicit graph-boundary error instead of evaluating source.
 - Statically resolved direct calls expand at analysis time. Callee params bind
   to the caller's argument node refs, so unused arguments remain undemanded.
 - Closure calls and named functions used as values expand when the analyzer can
@@ -310,6 +316,16 @@ Current implemented slice:
 - `fail f` over a caught failure re-raises the original `err` and context.
 - `graph_exec` converts graph failure outputs into the old public `Value` and
   `Outcome` API while that adapter still exists.
+
+Current API-edge adapter:
+
+- `Outcome::Clean(Value)` remains as the public compatibility shape, but it is
+  now constructed from graph `NodeOutput` after root demand.
+- Public tuple/array/struct/variant fields are graph/native boundary thunks.
+  Forcing one issues `DemandRequest::PublicValueField` through the same driver
+  loop that can materialize external and host boundary nodes.
+- Executor-local output trees use a graph `OutputTree` marker and cross to
+  `WireValue::Tree` during observer wire crossing.
 
 Vixen tests targeted:
 

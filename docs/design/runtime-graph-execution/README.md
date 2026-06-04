@@ -99,8 +99,15 @@ Expected latest structural checkpoint:
 - `graph_exec` can expose graph-root lazy arrays/tuples/variants and caught
   failures as old public `Value` thunks whose fields demand graph nodes through
   `PublicValueField`.
-- `vx-runtime::eval` still contains the legacy tree-walker for `eval_body*`,
-  observer execution, mirror tests, and other not-yet-cut public body paths.
+- `eval_body`, `eval_body_with_exec`, `eval_body_with_exec_and_providers`, and
+  `eval_body_wire` enter graph body execution. External body arguments are
+  seeded as graph outputs with external boundary field nodes.
+- `host.which` and `host.exec` lower to typed graph host-method boundaries and
+  materialize through the graph driver.
+- Observer execution uses graph body execution and graph/native wire crossing.
+- `vx-runtime::eval` still contains the legacy tree-walker code, now producing
+  dead-code warnings. It remains a demolition target; it must not become a
+  fallback or oracle.
 
 Verification commands:
 

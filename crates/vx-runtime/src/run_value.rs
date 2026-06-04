@@ -90,7 +90,26 @@ fn live_face() -> Value {
     // `out` is the producing write-set tree — a remote handle leaf (`Value::OutputTree`),
     // which `to_wire` crosses back as a `Producing` handle. So `run.stream.out` resolves
     // to the output tree now; `run.stream.stdout`/`.stderr` land with streams.
-    Value::Struct(vec![("out".to_string(), Thunk::done(Value::OutputTree))])
+    Value::Struct(vec![
+        (
+            "stdout".to_string(),
+            unsupported_stream_field("run.stream.stdout"),
+        ),
+        (
+            "stderr".to_string(),
+            unsupported_stream_field("run.stream.stderr"),
+        ),
+        ("out".to_string(), Thunk::done(Value::OutputTree)),
+    ])
+}
+
+fn unsupported_stream_field(name: &'static str) -> Thunk {
+    Thunk::native(move || {
+        Err(Poison {
+            err: Value::Str(Rc::from(format!("{name} is not wired yet").as_str())),
+            context: Default::default(),
+        })
+    })
 }
 
 /// Bytes as a value — provisional, rendered lossily as a string until a real `Bytes`

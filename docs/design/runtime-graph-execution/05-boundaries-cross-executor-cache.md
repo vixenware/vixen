@@ -75,6 +75,17 @@ Demand:
 
 Do not hide host methods inside source-level method dispatch.
 
+Current progress:
+
+- `host.which` and `host.exec` lower to typed graph `HostMethod` nodes.
+- Core demands receiver/direct inputs, then reports the host method as a
+  boundary.
+- Runtime graph execution materializes the boundary by demanding argv/name
+  payload nodes through `DemandRequest::BoundaryPayload`, running the host
+  operation, and memoizing the graph output.
+- `host.exec` returns a graph struct with `exit_code`, `stdout`, `stderr`, and
+  `fingerprint` fields.
+
 ### CLI invocation/backtick/exec
 
 Graph payloads needed:
@@ -112,6 +123,19 @@ Observer payload should be graph/executable code, not source callback:
 
 Executor links the same graph evaluator semantics. It binds executor-local
 values as graph nodes and drives observer root demand.
+
+Current progress:
+
+- `ObserveService` still receives an observer bundle, but evaluating that bundle
+  calls `eval_body_wire`, which now enters graph body execution.
+- `Run` is bound as a graph external struct argument. Demanding `run.ok` or
+  `run.stream` materializes native boundary fields only when reached.
+- Graph observer results cross to `WireValue` through graph/native boundary
+  thunks. The old evaluator's `to_wire` method is not used by the public
+  observer path.
+- The executor-local `run.stream` value now matches the stdlib `Live` layout:
+  `stdout`, `stderr`, then `out`. The stream fields poison explicitly if
+  demanded before streaming lands; `out` crosses as `WireValue::Tree`.
 
 ## Cross-executor remote values
 
@@ -212,6 +236,25 @@ Read-set is discovered after running. It supports reuse/rerun avoidance; it is
 never used as the primary key. If an implementation tries to key by read-set, it
 must already have run the command and is therefore wrong.
 
+## Current boundary/cross-executor checkpoint
+
+Verified green:
+
+- `cargo nextest run -p vx-runtime -E 'binary(host_probe)'`: 3/3 passed.
+- `cargo nextest run -p vx-runtime -E 'test(observe_runs_a_real_command_and_returns_the_observer_value) | test(observe_crosses_the_output_tree_as_a_handle_marker) | binary(observe_on_strands)' --no-fail-fast`: 4/4 passed.
+- In the full `vx-runtime` package run, observe tests and observe-on-strands now
+  pass through graph execution.
+
+Still red:
+
+- Backtick/CLI invocation boundary dispatch is not structured/wired yet.
+- `import`/grammar/toolchain graph payloads are still unresolved in body
+  execution.
+- `Value::Tree(HandleId)` remote tree body arguments are not seedable into graph
+  execution yet.
+
+No input-keyed L1/L2 cache has been implemented in this checkpoint.
+
 ## Acceptance criteria
 
 Boundary/cross-executor phase is complete when:
@@ -223,4 +266,3 @@ Boundary/cross-executor phase is complete when:
 - boundary payload materialization is explicit in driver.
 - cache keys are computed before running.
 - read-set is recorded after running and not included in key.
-

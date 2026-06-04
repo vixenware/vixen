@@ -104,8 +104,14 @@ Expected long-term:
 Current partial state:
 
 - `run`, `run_with_dispatches`, and `run_in_mode` call graph driver.
-- `eval_body*`, observer execution, and mirror/exec/remote body tests still call
-  the legacy evaluator.
+- `eval_body`, `eval_body_with_exec`, `eval_body_with_exec_and_providers`, and
+  `eval_body_wire` call graph body execution. Exec clients/provider registries
+  are accepted by the public signature but are not wired to graph boundary
+  dispatch yet.
+- Observer execution calls graph body execution and graph/native wire crossing.
+- Mirror, host, intrinsic, observer, and observe-on-strands tests exercise graph
+  body paths. Backtick exec, import/toolchain, and remote-tree body tests still
+  fail as explicit graph gaps.
 - The `.vx` harness uses `run_in_mode`, so source-language tests now exercise the
   graph driver and fail explicitly where graph payloads are unsupported.
 

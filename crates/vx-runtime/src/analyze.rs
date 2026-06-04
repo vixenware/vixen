@@ -26,11 +26,11 @@ use vx_ir::item::ItemKind;
 use vx_ir::pattern::PatternKind;
 use vx_ir::scope::DefTarget;
 use vx_ir::stmt::StmtKind;
-use vx_types::{TypeEnv, TypeId};
+use vx_types::{Ty, TypeDef, TypeEnv, TypeId};
 
 use crate::graph::{
-    BinKind, ConstValue, DemandGraph, KernelOp, MatchArm, MatchPattern, Node, NodeId, NodeKind,
-    Span,
+    BinKind, ConstValue, DemandGraph, HostMethod, KernelOp, MatchArm, MatchPattern, Node, NodeId,
+    NodeKind, Span,
 };
 
 /// Intrinsic/boundary call names — effectful or non-deterministic, so the kernel
@@ -297,9 +297,6 @@ impl Builder<'_> {
         arg_exprs: &[ExprId],
         span: Span,
     ) -> Option<NodeId> {
-        if !arg_exprs.is_empty() {
-            return None;
-        }
         let ExprKind::Field(field) = &self.program.arena[callee].kind else {
             return None;
         };
@@ -307,13 +304,39 @@ impl Builder<'_> {
             return None;
         };
         match name.as_str() {
-            "len" => {
+            "len" if arg_exprs.is_empty() => {
                 let receiver = self.walk(field.receiver);
                 Some(self.emit(
                     NodeKind::Kernel(KernelOp::StrLen),
                     ".len()".into(),
                     span,
                     vec![receiver],
+                ))
+            }
+            "which" => {
+                let mut inputs = Vec::with_capacity(1 + arg_exprs.len());
+                inputs.push(self.walk(field.receiver));
+                inputs.extend(arg_exprs.iter().map(|&arg| self.walk(arg)));
+                Some(self.emit(
+                    NodeKind::HostMethod {
+                        method: HostMethod::Which,
+                    },
+                    ".which()".into(),
+                    span,
+                    inputs,
+                ))
+            }
+            "exec" => {
+                let mut inputs = Vec::with_capacity(1 + arg_exprs.len());
+                inputs.push(self.walk(field.receiver));
+                inputs.extend(arg_exprs.iter().map(|&arg| self.walk(arg)));
+                Some(self.emit(
+                    NodeKind::HostMethod {
+                        method: HostMethod::Exec,
+                    },
+                    ".exec()".into(),
+                    span,
+                    inputs,
                 ))
             }
             _ => None,
@@ -722,6 +745,7 @@ impl Builder<'_> {
                             .field_names
                             .get(&container)
                             .and_then(|ns| ns.iter().position(|n| n == name))
+                            .or_else(|| self.field_index_by_receiver_type(recv, name))
                             .unwrap_or(0) as u32;
                         (idx, format!(".{name}"))
                     }
@@ -1050,6 +1074,20 @@ impl Builder<'_> {
                 .unwrap_or_else(|| fallback.to_string()),
             _ => fallback.to_string(),
         }
+    }
+
+    fn field_index_by_receiver_type(&self, receiver: ExprId, name: &str) -> Option<usize> {
+        let ty = self.program.arena[receiver].ty?;
+        let Ty::Struct(struct_ty) = self.env.get_ty(ty) else {
+            return None;
+        };
+        let TypeDef::Struct(struct_def) = self.env.get_def(struct_ty.def) else {
+            return None;
+        };
+        struct_def
+            .fields
+            .iter()
+            .position(|field| field.name == name)
     }
 
     /// If `e` is an integer literal, its value (for projection indices).
