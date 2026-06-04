@@ -116,6 +116,10 @@ Current partial state:
   around expanded body roots. Core demands only the body-root input; argument
   inputs are retained for graph identity and future call-memo keys without being
   strict call-boundary dependencies.
+- Direct zero-argument call nodes carry a direct function code identity and share
+  a per-run driver call memo. Calls with arguments and closure calls do not use
+  that memo yet, because their correct keys require resolved argument and capture
+  values without making the call boundary strict.
 - Observer execution calls graph body execution and graph/native wire crossing.
 - Mirror, host, intrinsic, observer, observe-on-strands, backtick exec,
   exec-output-tree, remote-tree body, import/toolchain, and requested-toolchain
@@ -152,13 +156,14 @@ Latest focused verification:
   backtick exec in a lazy tuple slot stays cold with no observe client.
 - `cargo nextest run -p vx-runtime -E 'binary(cc_probe) | binary(hello_world)' --no-fail-fast`:
   2/2 passed.
-- `cargo nextest run -p vx-runtime-driver --no-fail-fast`: 5/5 passed,
-  including poison memoization, boundary in-progress cleanup, and call-node
-  non-strict argument edges.
+- `cargo nextest run -p vx-runtime-driver --no-fail-fast`: 7/7 passed,
+  including poison memoization, boundary in-progress cleanup, call-node
+  non-strict argument edges, zero-arg direct call memo reuse, and proof that
+  argument-bearing calls do not use the zero-arg memo.
 - `cargo nextest run -p vx-runtime --no-fail-fast`: 142 run, 142 passed,
   0 failed, 0 skipped.
 - `cargo nextest run -p vx-runtime-graph -p vx-runtime-core -p vx-runtime-driver -p vx-runtime --no-fail-fast`:
-  152 run, 152 passed, 0 skipped.
+  154 run, 154 passed, 0 skipped.
 - The forbidden-symbol scan over `vx-runtime-core` and `vx-runtime-driver`
   returns no matches.
 - The deleted tree-walker affordance scan over `vx-runtime/src` returns no

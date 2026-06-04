@@ -260,6 +260,15 @@ Rules:
 - only resolved values participate
 - no read-set in key
 
+Current progress:
+
+- Direct zero-argument calls have a per-run driver memo keyed by direct function
+  code identity. That key is available before running the body and requires no
+  argument demand.
+- Calls with arguments and closure calls deliberately do not use this memo yet.
+  Their correct keys require resolved argument and capture values, and that work
+  must not make the call boundary strict.
+
 ### 3. Boundary L1 input-keyed cache
 
 Exec key:
@@ -288,8 +297,9 @@ Current progress:
 - Observer bundles now have a content identity suitable for the observer-code
   part of a backtick exec key.
 - Function calls now leave a source-blind graph `Call` node around the expanded
-  body root, so a future function-call memo has a runtime node to attach to.
-  There is no function-call cache storage yet.
+  body root. Direct zero-argument calls have a per-run memo keyed by direct
+  function code identity; argument-valued calls and closure calls do not have
+  call-memo storage yet.
 - Backtick exec has a local in-process exact L1 for successful observer values
   and output-tree handles. The current key covers the command coordinate, binary,
   rendered argv, and observer identity for the materialized request; full
@@ -364,12 +374,14 @@ Newly green boundary payloads:
   capability metadata and materialize by selecting an advertised provider.
 - Per-run node memo is explicit driver state for in-progress, ready, and poisoned
   nodes.
+- Direct zero-argument function calls have a local per-run call memo keyed by
+  direct function code identity.
 - `host.exec` has a local input-keyed L1 cache.
 - Backtick exec has a local exact L1 cache for the current materialized request
   identity.
 
-No function-call memo, persistent L2 cache, or read-set provenance has been
-implemented in this checkpoint.
+No argument-valued function-call memo, closure-call memo, persistent L2 cache, or
+read-set provenance has been implemented in this checkpoint.
 
 ## Acceptance criteria
 

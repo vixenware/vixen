@@ -94,6 +94,7 @@ pub enum NodeKind {
     Closure,
     Call {
         function: String,
+        code_identity: Option<String>,
         arg_count: u32,
     },
     Match {

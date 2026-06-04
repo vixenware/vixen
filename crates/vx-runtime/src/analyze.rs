@@ -229,6 +229,7 @@ struct Builder<'a> {
 struct CallableTemplate {
     body: BodyId,
     captures: HashMap<BindingId, NodeId>,
+    code_identity: Option<String>,
 }
 
 impl Builder<'_> {
@@ -308,7 +309,7 @@ impl Builder<'_> {
         }
     }
 
-    fn direct_function_body(&self, callee: ExprId) -> Option<BodyId> {
+    fn direct_function_template(&self, callee: ExprId) -> Option<CallableTemplate> {
         let ExprKind::NameRef(name) = &self.program.arena[callee].kind else {
             return None;
         };
@@ -316,7 +317,11 @@ impl Builder<'_> {
             return None;
         };
         match &self.program.arena[item].kind {
-            ItemKind::Function(function) => Some(function.body),
+            ItemKind::Function(function) => Some(CallableTemplate {
+                body: function.body,
+                captures: HashMap::new(),
+                code_identity: Some(format!("fn:{}", name.name)),
+            }),
             _ => None,
         }
     }
@@ -327,11 +332,18 @@ impl Builder<'_> {
         label: String,
         span: Span,
         captures: HashMap<BindingId, NodeId>,
+        code_identity: Option<String>,
     ) -> NodeId {
         let inputs = captures.values().copied().collect();
         let node = self.emit(NodeKind::Closure, label, span, inputs);
-        self.callables
-            .insert(node, CallableTemplate { body, captures });
+        self.callables.insert(
+            node,
+            CallableTemplate {
+                body,
+                captures,
+                code_identity,
+            },
+        );
         node
     }
 
@@ -550,6 +562,8 @@ impl Builder<'_> {
         let saved_param_bindings = self.param_bindings.clone();
         let saved_memo = self.memo.clone();
 
+        let code_identity = template.code_identity.clone();
+
         self.active_bodies.push(body);
         for (binding, node) in template.captures {
             self.bindings.insert(binding, node);
@@ -570,6 +584,7 @@ impl Builder<'_> {
         self.emit(
             NodeKind::Call {
                 function: callee_name.to_string(),
+                code_identity,
                 arg_count: args.len() as u32,
             },
             format!("{callee_name}(…)"),
@@ -836,18 +851,11 @@ impl Builder<'_> {
                         self.emit(NodeKind::Boundary, format!("{callee_name}()"), span, inputs)
                     }
                     _ => {
-                        if let Some(body) = self.direct_function_body(callee) {
+                        if let Some(template) = self.direct_function_template(callee) {
                             let args: Vec<NodeId> =
                                 arg_exprs.into_iter().map(|x| self.walk(x)).collect();
-                            let expanded = self.expand_callable(
-                                CallableTemplate {
-                                    body,
-                                    captures: HashMap::new(),
-                                },
-                                &args,
-                                span,
-                                &callee_name,
-                            );
+                            let expanded =
+                                self.expand_callable(template, &args, span, &callee_name);
                             self.memo.insert(e, expanded);
                             return expanded;
                         }
@@ -954,7 +962,7 @@ impl Builder<'_> {
             ExprKind::Closure(cl) => {
                 let body = cl.body;
                 let captures = self.captures_for_body(body);
-                self.emit_callable_value(body, "(…)=>".into(), span, captures)
+                self.emit_callable_value(body, "(…)=>".into(), span, captures, None)
             }
 
             // An interpolated string is a kernel over its embedded expressions.
@@ -1174,6 +1182,7 @@ impl Builder<'_> {
                             n.name.clone(),
                             span,
                             HashMap::new(),
+                            Some(format!("fn:{}", n.name)),
                         ),
                         _ => self.emit(NodeKind::Unresolved, n.name.clone(), span, vec![]),
                     },
@@ -1484,8 +1493,9 @@ mod tests {
                     &node.kind,
                     NodeKind::Call {
                         function,
+                        code_identity: Some(code_identity),
                         arg_count: 1
-                    } if function == "id"
+                    } if function == "id" && code_identity == "fn:id"
                 )
             }),
             "direct calls must leave a source-blind Call node for runtime memo hooks: {:?}",
@@ -1510,6 +1520,7 @@ mod tests {
                     &node.kind,
                     NodeKind::Call {
                         function,
+                        code_identity: None,
                         arg_count: 1
                     } if function == "f"
                 )
