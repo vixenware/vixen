@@ -1,5 +1,12 @@
 import { useMemo } from "react";
-import { Background, BackgroundVariant, Controls, ReactFlow, type Edge } from "@xyflow/react";
+import {
+  Background,
+  BackgroundVariant,
+  Controls,
+  MarkerType,
+  ReactFlow,
+  type Edge,
+} from "@xyflow/react";
 import "@xyflow/react/dist/style.css";
 
 import { SkillNode } from "./SkillNode";
@@ -37,6 +44,10 @@ export default function App() {
         minZoom={0.1}
         maxZoom={2}
         proOptions={{ hideAttribution: true }}
+        defaultEdgeOptions={{
+          type: "smoothstep",
+          markerEnd: { type: MarkerType.ArrowClosed, width: 16, height: 16, color: "#6b7896" },
+        }}
       >
         <Background variant={BackgroundVariant.Dots} gap={28} size={1} color="#2a2f3a" />
         <Controls showInteractive={false} />

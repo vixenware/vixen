@@ -1,26 +1,253 @@
-# Vixen Build roadmap.
+# Vixen Build — roadmap.
 #
-# Each node is a unit of work: a title and a short description.
-# `after:` lists the work that must come first — that's the sequencing.
+# Each node is a unit of work: title + short description.
+# `after:` = what must come first (the sequencing / arrows).
 #
-# This is a STUB. The real work items and their order come from Amos.
-# No sequencing is implied below (no `after:` edges yet).
+# THE WIRING IS TENTATIVE — Amos's to correct. Milestones came from the
+# interview; the edges are my best guess at order, nothing sacred.
 
-title: Vixen Build — roadmap
+title: Vixen Build — roadmap (tentative wiring)
 
 nodes:
-  - id: demand-runtime
-    title: Demand-driven runtime
-    description: The lazy evaluator that everything runs on.
+  # ---- acquire & mount ----
+  - id: acquire
+    title: acquire
+    description: Fetch an artifact by hash over HTTP and extract it into the store. One primitive, for toolchains and crate sources.
 
-  - id: exec
-    title: exec
-    description: Run a tool in a sandbox and get its output back.
+  - id: mount-explicit
+    title: Mount a tree explicitly
+    description: Mount an acquired tree into a build by naming it.
+    after: [acquire]
 
-  - id: cache-aws-sdk-s3
-    title: Cache the aws-sdk-s3 build
-    description: Replace its build scripts; cache the whole build.
+  - id: mount-implicit
+    title: Implicit mounts
+    description: A path knows its tree, so referring to it mounts that tree automatically.
+    after: [mount-explicit]
 
-  - id: remote-execution
-    title: Remote build execution
-    description: Place build steps on other machines.
+  # ---- reading the cargo project ----
+  - id: parse-manifest
+    title: Parse Cargo.toml
+    description: Read an existing manifest into a Vixen structure.
+
+  - id: parse-lockfile
+    title: Parse Cargo.lock
+    description: Read an existing lockfile into a Vixen data structure.
+
+  - id: resolve-deps
+    title: Resolve dependencies
+    description: Version-solve the dependency graph from manifest and lockfile.
+    after: [parse-manifest, parse-lockfile]
+
+  # ---- first compile, C/C++ first ----
+  - id: run-clang-once
+    title: Run clang once, full machinery
+    description: Declared inputs, in the sandbox, sources from the VFS, hermetic toolchain from the store, across the orchestrator-to-executor service boundary.
+    after: [mount-explicit]
+
+  - id: build-c-exe
+    title: Build a small C executable
+    description: Compile and link a tiny C program end to end.
+    after: [run-clang-once]
+
+  - id: build-lua
+    title: Build the Lua interpreter
+    description: Build a whole real C library end to end.
+    after: [build-c-exe]
+
+  - id: run-rustc-once
+    title: Run rustc once, full machinery
+    description: The same machinery as clang, now for Rust.
+    after: [run-clang-once]
+
+  - id: compile-crate-chain
+    title: Compile a crate and a dependent
+    description: One crate to an rlib, then a second crate that depends on it.
+    after: [run-rustc-once, resolve-deps]
+
+  - id: run-build-script
+    title: Run a build.rs
+    description: Execute a build script under the full machinery.
+    after: [compile-crate-chain]
+
+  - id: proc-macro
+    title: Compile and use a proc-macro
+    description: Build a proc-macro crate and use it from a dependent.
+    after: [compile-crate-chain]
+
+  - id: link-binary
+    title: Link a final binary
+    description: Produce a runnable binary from compiled crates.
+    after: [compile-crate-chain]
+
+  # ---- caching ----
+  - id: cache-hit
+    title: Cache hit on a compile
+    description: Re-run a single compile and skip it via the cache.
+    after: [run-clang-once]
+
+  - id: cache-cross-machine
+    title: Cross-machine cache hit
+    description: Reuse an output produced on another machine.
+    after: [cache-hit]
+
+  - id: cache-invalidate
+    title: Invalidate on input change
+    description: Re-run when a declared input actually changes.
+    after: [cache-hit]
+
+  - id: coarse-fine
+    title: Coarse vs fine key
+    description: Skip the rebuild when the workspace changed but the real inputs did not.
+    after: [cache-invalidate]
+
+  # ---- build-script replacement ----
+  - id: replace-build-rs
+    title: Replace a build.rs
+    description: Swap a crate's build script for a declarative Vixen build file.
+    after: [run-build-script]
+
+  - id: cache-buildscript-crate
+    title: Cache a build-script crate
+    description: Cache a crate that has a build script, the wall sccache hits.
+    after: [replace-build-rs, cache-hit]
+
+  - id: ship-fixups
+    title: Distribute fixups
+    description: Author and share build-file replacements for crates, reusably.
+    after: [replace-build-rs]
+
+  # ---- capability & identity ----
+  - id: cap-advertise
+    title: Executor advertises a capability
+    description: An executor announces what it can do.
+    after: [run-clang-once]
+
+  - id: orch-exec-identity
+    title: Orchestrator and executor identity
+    description: Authentication and trust between the orchestrator and executors.
+    after: [cap-advertise]
+
+  - id: toolchain-exemption
+    title: Host-present toolchain via exemption
+    description: Use a toolchain already on the executor, via an advertised exemption.
+    after: [orch-exec-identity]
+
+  # ---- scheduler ----
+  - id: limit-concurrency
+    title: Limit concurrency
+    description: Run at most N computations at once.
+    after: [run-clang-once]
+
+  - id: prioritize
+    title: Prioritize computations
+    description: Decide what to run next.
+    after: [limit-concurrency]
+
+  - id: inventory
+    title: Executor inventory
+    description: Track which executors exist and their capacity.
+    after: [cap-advertise]
+
+  - id: executor-selection
+    title: Executor selection
+    description: Pick where a computation runs.
+    after: [inventory]
+
+  # ---- observability ----
+  - id: build-materials
+    title: Emit build materials
+    description: At the end, list everything that went into a build.
+    after: [run-clang-once]
+
+  - id: execution-trace
+    title: Capture an execution trace
+    description: Record the whole run somewhere outside the store, viewable locally and collectible remotely.
+    after: [run-clang-once]
+
+  - id: diff-builds
+    title: Diff two builds
+    description: Compare the materials and traces of two builds.
+    after: [build-materials, execution-trace]
+
+  - id: abs-rel-paths
+    title: Absolute vs relative paths
+    description: Handle path forms across tools, using the trace to find leaks.
+    after: [execution-trace]
+
+  # ---- platform, local store, results ----
+  - id: productionize-platforms
+    title: Productionize per platform
+    description: Make the VFS and sandbox product-ready and resilient on Linux, Mac, and Windows.
+    after: [run-clang-once]
+
+  - id: local-eviction
+    title: Local store eviction
+    description: Evict from the local store when it grows too large.
+    after: [cache-hit]
+
+  - id: read-write-through
+    title: Read-through vs write-through
+    description: Decide what lives in the local store versus remote.
+    after: [cache-hit]
+
+  - id: surface-results
+    title: Surface results locally
+    description: Decide how built artifacts appear on disk, for the user and other tools.
+    after: [build-c-exe]
+
+  # ---- remote demos ----
+  - id: remote-build
+    title: Build remotely
+    description: Ask another machine to do the build.
+    after: [executor-selection]
+
+  - id: remote-tests
+    title: Run tests remotely
+    description: Run a project's tests on another machine.
+    after: [remote-build]
+
+  - id: remote-bench
+    title: Run benchmarks remotely
+    description: Run benchmarks on another machine.
+    after: [remote-build]
+
+  - id: remote-check
+    title: Run a check remotely
+    description: Run a check on another machine.
+    after: [remote-build]
+
+  - id: remote-shell
+    title: Open a remote shell
+    description: Drop into a shell with the full build environment.
+    after: [remote-build]
+
+  - id: remote-debug
+    title: Remote debugging session
+    description: Debug a build or program on another machine.
+    after: [remote-build]
+
+  # ---- distribution & runtime ----
+  - id: package-manager
+    title: Package manager
+    description: Distribute Vixen's Rust and C/C++ support, toolchains, and command grammars. Self-hostable.
+    after: [acquire]
+
+  - id: jit
+    title: Runtime JIT
+    description: JIT-compile the runtime for speed.
+
+  # ---- the target ----
+  - id: scope-s3
+    title: Scope aws-sdk-s3
+    description: Map its dependency tree and find the hard crates.
+    after: [resolve-deps]
+
+  - id: build-s3-cold
+    title: Build aws-sdk-s3 cold
+    description: Build it end to end from scratch.
+    after: [run-build-script, proc-macro, scope-s3]
+
+  - id: cache-s3
+    title: Cache aws-sdk-s3
+    description: Make a warm build nearly free.
+    after: [build-s3-cold, cache-buildscript-crate, coarse-fine]
