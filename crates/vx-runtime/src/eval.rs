@@ -144,32 +144,23 @@ fn grammar_package_value(package: &str, set: &command_model::GrammarSet) -> Valu
     )
 }
 
-/// Build an (applied) command value `{ grammar, binary, args }` from a grammar
-/// coordinate value carried forward verbatim — the internal core of `command_value`.
-fn command_value_from(grammar: Value, binary: &str, args: Vec<String>) -> Value {
+/// Build a **tool** value `{ command, binary }` (`r[exec.tool]`) — the leading hole
+/// of a backtick invocation. `command` is a coordinate `{ package, name }` locating
+/// the command's grammar on the arena (`r[exec.command]`); `binary` is the program
+/// to run. The executor identity, content fingerprint, and probed parameters fill in
+/// when an ability provider is injected (`r[ability.match]`). Exposed for tests and
+/// capability probes that synthesize tools directly.
+pub fn tool_value(package: &str, command: &str, binary: &str) -> Value {
     Value::Struct(vec![
-        ("grammar".to_string(), Thunk::done(grammar)),
+        (
+            "command".to_string(),
+            Thunk::done(grammar_coord_value(package, command)),
+        ),
         (
             "binary".to_string(),
             Thunk::done(Value::Str(Rc::from(binary))),
         ),
-        (
-            "args".to_string(),
-            Thunk::done(Value::Array(
-                args.into_iter()
-                    .map(|a| Thunk::done(Value::Str(Rc::from(a.as_str()))))
-                    .collect(),
-            )),
-        ),
     ])
-}
-
-/// Build an (applied) command value `{ grammar, binary, args }`: a record whose
-/// `grammar` is a coordinate `{ package, name }` locating the grammar on the arena.
-/// This is what `@[ ${cmd} … ]` evaluates to; exposed for tests and capability
-/// probes that synthesize commands directly.
-pub fn command_value(package: &str, grammar: &str, binary: &str, args: Vec<String>) -> Value {
-    command_value_from(grammar_coord_value(package, grammar), binary, args)
 }
 
 /// Build the `HostOutput` value `host.exec` returns: `{ exit_code, stdout, stderr,
@@ -813,38 +804,89 @@ impl Evaluator<'_> {
     /// the value (it lives on the arena, keyed by the coordinate); classifying the
     /// literal against the grammar is the type-checker's job, and the
     /// inputs/outputs/exec-argv are derived on demand from this record.
+    /// Evaluate a bare backtick invocation: run it with the default observer
+    /// `run.ok.out` (`r[exec.observer.simple]`). Forcing the invocation is what runs
+    /// it — there is no `exec` function (`r[exec.invocation]`).
     fn eval_cli_literal(&self, cli: &CliLiteralExpr, env: &Env) -> Result<Value, Poison> {
+        self.run_invocation(cli, None, env)
+    }
+
+    /// Run a backtick command invocation (`r[exec.invocation]`): read its leading
+    /// **tool**, render the argument tokens, and dispatch the run to the tool's
+    /// executor over vox, returning the observer's value. `observer` is the body of an
+    /// explicit `with { observer: … }` closure, or `None` for the default
+    /// `run.ok.out`. Must run on a strand with an observe client registered (so the
+    /// dispatch can park, freeing its worker); off a strand — or with no executor —
+    /// it poisons honestly rather than blocking.
+    fn run_invocation(
+        &self,
+        cli: &CliLiteralExpr,
+        observer: Option<BodyId>,
+        env: &Env,
+    ) -> Result<Value, Poison> {
         let Some((lead, rest)) = cli.args.split_first() else {
-            return Err(poison("empty CLI literal".into()));
+            return Err(poison("empty command invocation".into()));
         };
-        // The leading argument must be a single `${command}` hole.
-        let cmd_expr = match lead.pieces.as_slice() {
+        // The leading argument must be a single `$tool` / `${tool}` hole.
+        let tool_expr = match lead.pieces.as_slice() {
             [StringPart::Expr(id)] => *id,
             _ => {
                 return Err(poison(
-                    "`@[ … ]` must lead with a single `${command}` hole".into(),
+                    "a command invocation must lead with a single `$tool` hole".into(),
                 ));
             }
         };
-        // Read the leading command's grammar coordinate (carried forward verbatim) and
-        // its program.
-        let (grammar, binary) = self.read_command_record(&self.eval(cmd_expr, env)?)?;
-        // Render the remaining arguments to argv strings (static text verbatim, holes
-        // forced to a scalar).
+        // Read the leading tool — its program to run. (Its command coordinate is
+        // carried for static validation + argument classification; the run itself
+        // needs only the binary until input mounting lands.)
+        let (_command, binary) = self.read_tool(&self.eval(tool_expr, env)?)?;
+        // Render the remaining argument tokens to argv strings (static text verbatim,
+        // holes forced to a scalar).
         let mut args = Vec::with_capacity(rest.len());
         for arg in rest {
             args.push(self.render_cli_arg(arg, env)?);
         }
-        Ok(command_value_from(grammar, &binary, args))
+        let command = ExecCommand {
+            program: binary,
+            args,
+        };
+
+        // Ship the observer's static reachable closure (its code, not a forced value);
+        // `None` is the default `run.ok.out`, applied natively on the executor.
+        let bundle = observer.map(|body| vx_ir::reachable(&self.program.arena, self.env, body));
+        let client = self.exec_client.ok_or_else(|| {
+            poison(
+                "a command invocation must run on a strand with an observe executor \
+                 registered (no executor available)"
+                    .into(),
+            )
+        })?;
+        let observed = dispatch_observe(
+            client,
+            ObserveRequest {
+                observer: bundle,
+                command,
+            },
+        );
+
+        // The result, with handles already crossed by the boss: a data value rebuilds
+        // (`from_wire`); a returned producing tree is a registered `HandleId` that
+        // `force_remote` pulls (`run.*.out` over vox); a poison detonates here (I6
+        // across the boundary).
+        match &*observed {
+            ObserveOutcome::Value(wire) => from_wire(wire),
+            ObserveOutcome::Tree(handle) => Ok(Value::Tree(*handle)),
+            ObserveOutcome::Poisoned(reason) => Err(poison(reason.clone())),
+        }
     }
 
-    /// Read a command record `{ grammar, binary, … }` — the shape a capability builds
-    /// and `@[ ${cmd} … ]` leads with — into its grammar coordinate value (carried
-    /// forward as-is) and its program string.
-    fn read_command_record(&self, val: &Value) -> Result<(Value, String), Poison> {
+    /// Read a **tool** value `{ command, binary }` (`r[exec.tool]`) — the shape a
+    /// capability provides and a backtick invocation leads with — into its command
+    /// coordinate (carried forward as-is) and its binary path.
+    fn read_tool(&self, val: &Value) -> Result<(Value, String), Poison> {
         let Value::Struct(fields) = val else {
             return Err(poison(format!(
-                "the leading hole of `@[ … ]` must be a command record, got {val:?}"
+                "the leading hole of a command invocation must be a tool, got {val:?}"
             )));
         };
         let field = |want: &str| {
@@ -852,14 +894,18 @@ impl Evaluator<'_> {
                 .iter()
                 .find(|(n, _)| n == want)
                 .map(|(_, th)| th)
-                .ok_or_else(|| poison(format!("command record has no `{want}` field")))
+                .ok_or_else(|| poison(format!("tool value has no `{want}` field")))
         };
-        let grammar = self.force(field("grammar")?)?;
+        let command = self.force(field("command")?)?;
         let binary = match self.force(field("binary")?)? {
             Value::Str(s) => s.to_string(),
-            other => return Err(poison(format!("`binary` must be a String, got {other:?}"))),
+            other => {
+                return Err(poison(format!(
+                    "tool `binary` must be a String, got {other:?}"
+                )));
+            }
         };
-        Ok((grammar, binary))
+        Ok((command, binary))
     }
 
     /// Render one CLI-literal argument to a string: static text verbatim, each
@@ -1021,132 +1067,44 @@ impl Evaluator<'_> {
         result
     }
 
-    /// `exec(command) with { observer: (run) => … }` — the eval surface of the exec
-    /// spine. Recognise the exec shape, project the command to its execution argv,
-    /// bundle the observer's *static reachable closure* (its code, not a forced
-    /// value), and dispatch the `observe` RPC to an executor **over vox** — parking
-    /// the strand until the boss drives the call and it returns. The orchestrator
-    /// ships code; the executor runs the command, builds a `Run`, evaluates the
-    /// observer there, and returns the result (`crate::observe`).
-    ///
-    /// eval must be running on a strand (so `dispatch_observe` can park, freeing its
-    /// worker): an `exec` reached off a strand — or with no executor registered —
-    /// poisons honestly rather than blocking.
+    /// A backtick invocation with explicit `with { observer: (run) => … }` keywords
+    /// (`r[exec.invocation]`): run it with the supplied observer instead of the
+    /// default `run.ok.out`. `with` does not evaluate the invocation to a value first
+    /// — forcing the invocation *is* the run, and these keywords just carry the
+    /// observer (and, later, env / mounts / writable) into it.
     fn eval_where(&self, w: &WhereExpr, env: &Env) -> Result<Value, Poison> {
-        // The only `where`-decorated callable wired so far is `exec(command)`: the
-        // callee is a `Call` whose own callee is the `exec` name (mirroring the
-        // `discover` recognition in `call`).
-        let ExprKind::Call(call) = &self.program.arena[w.callee].kind else {
+        // The only `with`-decorated form wired so far is a backtick invocation; the
+        // callee is the `CliLiteral` itself — there is no `exec` function
+        // (`r[exec.invocation]`).
+        let ExprKind::CliLiteral(cli) = &self.program.arena[w.callee].kind else {
             return Err(poison(
-                "`where` keyword arguments are only supported on `exec` so far".into(),
+                "`with` keyword arguments are only supported on a command invocation so far".into(),
             ));
         };
-        let is_exec = matches!(
-            &self.program.arena[call.callee].kind,
-            ExprKind::NameRef(n) if n.name == "exec"
-        );
-        if !is_exec {
-            return Err(poison(
-                "`where` keyword arguments are only supported on `exec` so far".into(),
-            ));
-        }
-
-        // The command — evaluate the single positional arg to a `Command` value and
-        // project it to the minimal `ExecCommand` (program + args) the RPC carries.
-        let command_expr = call
-            .args
-            .first()
-            .ok_or_else(|| poison("`exec` expects a command argument".into()))?
-            .expr;
-        let command = self.exec_command(&self.eval(command_expr, env)?)?;
-
-        // The observer — ship its body's reachable closure, not a forced value.
-        let observer_body = self.observer_body(w.keywords)?;
-        let bundle = vx_ir::reachable(&self.program.arena, self.env, observer_body);
-
-        // Dispatch over vox on the strand. The boss drives `observe()`; the strand
-        // parks (`AwaitingObserve`) until it lands. eval knows only the client id.
-        let client = self.exec_client.ok_or_else(|| {
-            poison(
-                "`exec` must run on a strand with an observe executor registered \
-                 (no executor available)"
-                    .into(),
-            )
-        })?;
-        let observed = dispatch_observe(client, ObserveRequest { bundle, command });
-
-        // The result, with handles already crossed by the boss: a data value rebuilds
-        // (`from_wire`); a returned producing tree is a registered `HandleId` that
-        // `force_remote` pulls (`run.stream.out.file(@p)` over vox); a poison detonates
-        // here (I6 across the boundary).
-        match &*observed {
-            ObserveOutcome::Value(wire) => from_wire(wire),
-            ObserveOutcome::Tree(handle) => Ok(Value::Tree(*handle)),
-            ObserveOutcome::Poisoned(reason) => Err(poison(reason.clone())),
-        }
+        let observer = self.observer_body(w.keywords)?;
+        self.run_invocation(cli, Some(observer), env)
     }
 
-    /// Project a command record `{ binary, args, … }` to the minimal [`ExecCommand`]
-    /// the `observe` RPC carries: the program (the record's `binary`) and the applied
-    /// `args`. Poisons if the value is not a command record. (The grammar-classified
-    /// inputs/outputs that drive the sandbox mount set are derived separately, when
-    /// input mounting lands.)
-    fn exec_command(&self, v: &Value) -> Result<ExecCommand, Poison> {
-        let Value::Struct(fields) = v else {
-            return Err(poison(format!("`exec` expects a Command, got {v:?}")));
-        };
-        let field = |want: &str| {
-            fields
-                .iter()
-                .find(|(n, _)| n == want)
-                .map(|(_, th)| th)
-                .ok_or_else(|| poison(format!("command record has no `{want}` field")))
-        };
-        let program = match self.force(field("binary")?)? {
-            Value::Str(s) => s.to_string(),
-            other => {
-                return Err(poison(format!(
-                    "command `binary` must be a String, got {other:?}"
-                )));
-            }
-        };
-        let args = match self.force(field("args")?)? {
-            Value::Array(items) => items
-                .iter()
-                .map(|t| match self.force(t)? {
-                    Value::Str(s) => Ok(s.to_string()),
-                    other => Err(poison(format!(
-                        "command arg must be a String, got {other:?}"
-                    ))),
-                })
-                .collect::<Result<Vec<_>, _>>()?,
-            other => {
-                return Err(poison(format!(
-                    "command `args` must be an Array, got {other:?}"
-                )));
-            }
-        };
-        Ok(ExecCommand { program, args })
-    }
-
-    /// The observer body from an `exec` `where` record: find the `observer` keyword
-    /// (which must be a closure) and return its `BodyId`. Slice-1 requires an
-    /// explicit observer; the signature's default (`(run) => run.ok.out`) is a later
-    /// refinement (it lives in the sig, not the call's keyword record).
+    /// The observer body from an invocation's `with { observer: … }` record: find the
+    /// `observer` keyword (which must be a closure) and return its `BodyId`. A bare
+    /// invocation has no such record and uses the default `run.ok.out`
+    /// (`r[exec.observer.simple]`).
     fn observer_body(&self, keywords: ExprId) -> Result<BodyId, Poison> {
         let ExprKind::Record(rec) = &self.program.arena[keywords].kind else {
             return Err(poison(
-                "`exec`'s `where` clause must be a keyword record".into(),
+                "an invocation's `with` clause must be a keyword record".into(),
             ));
         };
         let observer = rec
             .fields
             .iter()
             .find(|f| f.name == "observer")
-            .ok_or_else(|| poison("`exec`'s `where` clause needs an `observer`".into()))?;
+            .ok_or_else(|| poison("this `with` clause needs an `observer`".into()))?;
         match &self.program.arena[observer.value].kind {
             ExprKind::Closure(c) => Ok(c.body),
-            _ => Err(poison("`exec`'s `observer` must be a closure".into())),
+            _ => Err(poison(
+                "an invocation's `observer` must be a closure".into(),
+            )),
         }
     }
 
@@ -1883,96 +1841,56 @@ mod tests {
         );
     }
 
-    /// Pull `(binary, args)` out of a command record value — the `{ grammar, binary,
-    /// args }` shape `@[ … ]` produces — forcing each field.
-    fn read_command(ev: &Evaluator, v: &Value) -> (String, Vec<String>) {
-        let Value::Struct(fields) = v else {
-            panic!("expected a command record, got {v:?}");
-        };
-        let force_field = |want: &str| {
-            let th = &fields
-                .iter()
-                .find(|(n, _)| n == want)
-                .unwrap_or_else(|| panic!("no `{want}` field"))
-                .1;
-            ev.force(th).expect("force field")
-        };
-        let Value::Str(binary) = force_field("binary") else {
-            panic!("binary is a string");
-        };
-        let Value::Array(items) = force_field("args") else {
-            panic!("args is an array");
-        };
-        let args = items
-            .iter()
-            .map(|t| match ev.force(t).expect("force arg") {
-                Value::Str(s) => s.to_string(),
-                other => panic!("arg must be a string, got {other:?}"),
-            })
-            .collect();
-        (binary.to_string(), args)
-    }
-
-    /// The CLI-literal resolver, on the real eval path: `` `$cmd -c x.c -o x.o` ``
-    /// forces the leading hole to a command record, carries its grammar **coordinate**
-    /// forward, and applies the literal's args. The coordinate resolves on the arena,
-    /// and the cc grammar classifies `x.c` as an input and the `-o` target an output.
-    #[test]
-    fn cli_literal_projects_the_command_grammar() {
+    /// Build a throwaway [`Evaluator`] over a trivial program — enough to `force`
+    /// already-resolved (`Thunk::done`) values in the value-shape tests below, which
+    /// never touch the program/graph.
+    fn shape_evaluator<'a>(program: &'a VirProgram, env: &'a TypeEnv) -> Evaluator<'a> {
         use crate::dispatch::Dispatcher;
-        use command_model::examples;
         use std::cell::Cell;
-        use std::collections::BTreeMap;
-        use vx_ir::item::ItemKind;
-        use vx_ir::pattern::PatternKind;
-
-        let src = "fn t(cmd: Command) -> Command ( `$cmd -c x.c -o x.o` )";
-        let (mut program, tenv) = crate::analyze::front_end(src).expect("front-end");
-        // The grammar set lives on the arena, keyed by import spec; the command value
-        // carries only its coordinate.
-        program
-            .arena
-            .grammars
-            .insert("@vixen/grammar-cc".to_string(), examples());
-
-        // Locate `t`, its body, `cmd`'s binding, and the CLI-literal root expr.
-        let primary = *program.source_units.first().unwrap();
-        let body = program.arena[primary]
+        let unit = *program.source_units.first().expect("a source unit");
+        let body = program.arena[unit]
             .items
             .iter()
             .find_map(|&id| match &program.arena[id].kind {
-                ItemKind::Function(f) if f.name == "t" => Some(f.body),
+                vx_ir::item::ItemKind::Function(f) => Some(f.body),
                 _ => None,
             })
-            .expect("fn t");
-        let cmd_bid = match &program.arena[program.arena[body].params[0].pattern].kind {
-            PatternKind::Binding(pb) => pb.binding,
-            other => panic!("cmd must be a binding pattern, got {other:?}"),
-        };
-        let root = program.arena[body].root_expr;
-
-        // Bind `cmd` to an (unapplied) cc command record — grammar coordinate + program.
-        let cmd = command_value("@vixen/grammar-cc", "cc", "cc", vec![]);
-        let mut start = Env::new();
-        start.insert(cmd_bid, Thunk::done(cmd));
-
-        let ev = Evaluator {
-            program: &program,
-            env: &tenv,
+            .expect("a function body to host the evaluator");
+        Evaluator {
+            program,
+            env,
             current_body: Cell::new(body),
             dispatch: Dispatcher::default(),
             dispatches: Cell::new(0),
             mode: KernelMode::Off,
             exec_client: None,
-        };
-        let applied = ev.eval(root, &start).expect("eval cli literal");
-        let (binary, args) = read_command(&ev, &applied);
-        assert_eq!(binary, "cc");
-        assert_eq!(args, vec!["-c", "x.c", "-o", "x.o"]);
+        }
+    }
 
-        // The coordinate resolves on the arena and the grammar classifies the argv.
-        let mut argv = vec![binary];
-        argv.extend(args);
+    /// A **tool** value (`r[exec.tool]`) carries its command as a coordinate
+    /// `{ package, name }` (`r[exec.command]`) — the grammar data is *not* inlined.
+    /// The coordinate resolves on the arena, and the cc grammar classifies `x.c` as
+    /// an input and the `-o` target an output. (Running an invocation is exercised on
+    /// a strand in `exec_on_strands`; here we check the static Tool → Command linkage
+    /// the checker const-evaluates in `r[exec.validate.static]`.)
+    #[test]
+    fn tool_carries_its_command_coordinate() {
+        use command_model::examples;
+        use std::collections::BTreeMap;
+
+        let (program, tenv) = crate::analyze::front_end("fn t() ( 0 )").expect("front-end");
+        let ev = shape_evaluator(&program, &tenv);
+
+        // A tool: its command is a coordinate locating the cc grammar on the arena.
+        let tool = tool_value("@vixen/grammar-cc", "cc", "cc");
+        let (command, binary) = ev.read_tool(&tool).expect("read tool");
+        assert_eq!(binary, "cc");
+        let (name, pkg) = read_grammar_coord(&ev, &command);
+        assert_eq!(name, "cc", "the tool's command names the cc grammar");
+        assert_eq!(pkg, "@vixen/grammar-cc", "...located by its import spec");
+
+        // The coordinate resolves on the arena and the grammar classifies an argv.
+        let argv = ["cc", "-c", "x.c", "-o", "x.o"].map(String::from).to_vec();
         let projected = crate::command::project(&examples(), "cc", &argv, &BTreeMap::new())
             .expect("cc grammar projects");
         assert!(
@@ -1984,10 +1902,6 @@ mod tests {
             projected.outputs.iter().any(|o| o.path == "x.o"),
             "the -o target is an output: {:?}",
             projected.outputs
-        );
-        assert_eq!(
-            projected.execution_argv,
-            vec!["cc", "-c", "x.c", "-o", "x.o"]
         );
     }
 
@@ -2051,15 +1965,13 @@ mod tests {
         (get("name"), get("package"))
     }
 
-    /// The whole grammar-as-value path from real `.vx`: import a grammar, build a
-    /// command record `{ grammar: g.cc, binary: "cc" }`, and have `` `$cmd …` ``
-    /// carry its coordinate forward — no test-injected value, no grammar name in the
-    /// syntax. The set the import loaded onto the arena then classifies the argv.
+    /// The whole grammar-as-value path from real `.vx`: import a grammar and build a
+    /// **tool** `{ command: g.cc, binary: "cc" }` — no test-injected value, no grammar
+    /// name in the syntax. The tool's `command` is the imported coordinate; the set
+    /// the import loaded onto the arena then classifies an argv.
     #[test]
-    fn cli_literal_from_imported_grammar_projects() {
+    fn tool_from_imported_grammar_projects() {
         use crate::compile::{NoopObserver, semantic_front_end};
-        use crate::dispatch::Dispatcher;
-        use std::cell::Cell;
         use vx_ir::item::ItemKind;
         use vx_package::CompositeResolver;
 
@@ -2067,8 +1979,7 @@ mod tests {
         let resolver = CompositeResolver::new(root);
         let src = "fn t() ( \
                    let g = import \"@vixen/grammar-cc\"; \
-                   let cmd = { grammar: g.cc, binary: \"cc\" }; \
-                   `$cmd -c x.c -o x.o` )";
+                   { command: g.cc, binary: \"cc\" } )";
         let fe = semantic_front_end(src, &resolver, &mut NoopObserver).expect("front-end");
 
         let primary = *fe.program.source_units.first().unwrap();
@@ -2082,29 +1993,23 @@ mod tests {
             .expect("fn t");
         let root_expr = fe.program.arena[body].root_expr;
 
-        let ev = Evaluator {
-            program: &fe.program,
-            env: &fe.env,
-            current_body: Cell::new(body),
-            dispatch: Dispatcher::default(),
-            dispatches: Cell::new(0),
-            mode: KernelMode::Off,
-            exec_client: None,
-        };
-        let applied = ev.eval(root_expr, &Env::new()).expect("eval");
-        let (binary, args) = read_command(&ev, &applied);
+        let ev = shape_evaluator(&fe.program, &fe.env);
+        ev.current_body.set(body);
+        let tool = ev.eval(root_expr, &Env::new()).expect("eval tool");
+        let (command, binary) = ev.read_tool(&tool).expect("read tool");
         assert_eq!(binary, "cc");
-        assert_eq!(args, vec!["-c", "x.c", "-o", "x.o"]);
+        let (name, pkg) = read_grammar_coord(&ev, &command);
+        assert_eq!(name, "cc");
+        assert_eq!(pkg, "@vixen/grammar-cc");
 
-        // The grammar set the import loaded onto the arena classifies the argv.
+        // The grammar set the import loaded onto the arena classifies a hand-built argv.
         let set = fe
             .program
             .arena
             .grammars
             .get("@vixen/grammar-cc")
             .expect("grammar set on arena");
-        let mut argv = vec![binary];
-        argv.extend(args);
+        let argv = ["cc", "-c", "x.c", "-o", "x.o"].map(String::from).to_vec();
         let projected =
             crate::command::project(set, "cc", &argv, &std::collections::BTreeMap::new())
                 .expect("cc grammar projects");
@@ -2117,10 +2022,6 @@ mod tests {
             projected.outputs.iter().any(|o| o.path == "x.o"),
             "x.o is an output: {:?}",
             projected.outputs
-        );
-        assert_eq!(
-            projected.execution_argv,
-            vec!["cc", "-c", "x.c", "-o", "x.o"]
         );
     }
 }

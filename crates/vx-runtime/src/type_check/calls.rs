@@ -289,14 +289,75 @@ fn infer_static_namespace_call_sig(
     None
 }
 
+/// Doc shown on an invocation observer's `run` parameter (LSP hover). The observer is
+/// `Fn(Run) -> T`, so the invocation's type is `T`; the default is `run.ok.out`.
+const OBSERVER_SLOT_DOC: &str = "Executor-side observer evaluated against the run; returns the value the invocation \
+     yields. Defaults to `run.ok.out` (the success-gated output tree).";
+
+/// Type a backtick invocation decorated with `with { observer, … }`
+/// (`r[exec.invocation]`). The observer is `Fn(Run) -> T`, so the invocation's type is
+/// `T`; with no observer the default `run.ok.out` yields a `Tree`. Binds the observer
+/// closure's parameter to `Run` so its body checks against the real `Run`; the other
+/// keywords (env / mounts / writable / …) are inferred as plain record fields.
+fn infer_invocation(tc: &mut TypeChecker, w: &WhereExpr) -> TypeId {
+    // Check the invocation tokens (each hole is inferred + position-checked).
+    tc.infer_expr(w.callee);
+
+    let run_ty = tc.nominal_ty("Run");
+    let tree_ty = tc.nominal_ty("Tree");
+
+    // The observer field — its closure expr + body — if the `with` record supplies one.
+    let observer = match &tc.arena[w.keywords].kind {
+        ExprKind::Record(rec) => rec
+            .fields
+            .iter()
+            .find(|f| f.name == "observer")
+            .and_then(|f| match &tc.arena[f.value].kind {
+                ExprKind::Closure(c) => Some((f.value, c.body)),
+                _ => None,
+            }),
+        _ => None,
+    };
+
+    let result = match observer {
+        Some((closure_expr, body)) => {
+            // Bind `run: Run`, then infer the observer closure explicitly — `infer_record`
+            // skips closure fields (they need their params bound first), so this is what
+            // types its body (`run.ok.out` → the invocation's type).
+            super::closures::bind_closure_params(
+                tc,
+                body,
+                &[run_ty],
+                Some(OBSERVER_SLOT_DOC),
+                "observer",
+            );
+            tc.infer_expr(closure_expr);
+            let ret_expr = tc.arena[body].root_expr;
+            tc.arena[ret_expr].ty.unwrap_or(tree_ty)
+        }
+        // No observer → the default `run.ok.out` yields a `Tree`.
+        None => tree_ty,
+    };
+
+    // Type the rest of the keyword record (its closure fields, already typed above, are
+    // skipped) so every field carries a type — the arena invariant.
+    tc.infer_expr(w.keywords);
+    result
+}
+
 pub(crate) fn infer_where(tc: &mut TypeChecker, w: &WhereExpr) -> TypeId {
-    // A `with` either decorates a Call (`exec(...) with {...}`) or a
-    // PartialApp (`partial exec with {...}` / `partial exec with common`).
-    // In both cases we need to inspect the underlying function's signature so
-    // we can bind closure parameter types from callback slots and feed the
-    // closure body's return type back into type-parameter substitution.
+    // A `with` decorates a backtick **invocation** (`` `$tool …` with {...} ``), a
+    // Call, or a PartialApp (`partial f with {...}`). For an invocation the observer
+    // determines the type (`infer_invocation`); for the others we inspect the
+    // underlying function's signature to bind callback params and feed the closure
+    // body's return type back into type-parameter substitution.
 
     let callee_kind = tc.arena[w.callee].kind.clone();
+
+    // A backtick invocation: the observer is `Fn(Run) -> T` and the result is `T`.
+    if matches!(callee_kind, ExprKind::CliLiteral(_)) {
+        return infer_invocation(tc, w);
+    }
     let (sig, kind) = match &callee_kind {
         ExprKind::Call(call) => match underlying_call_sig(tc, call) {
             Some(sig) => (sig, WhereCalleeKind::Call(call.clone())),

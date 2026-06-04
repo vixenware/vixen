@@ -30,8 +30,8 @@ namespace CToolchain (
     // `exec` defaults its observer to `(run) => run.ok.out` — the settled output
     // tree, success-gated — so we don't spell it out.
     let tree = match self.style (
-      Style.Gcc  => exec(`${self.cc} -c ${src} -o ${obj}`),
-      Style.Msvc => exec(`${self.cc} /c ${src} /Fo:${obj}`),
+      Style.Gcc  => `${self.cc} -c ${src} -o ${obj}`,
+      Style.Msvc => `${self.cc} /c ${src} /Fo:${obj}`,
     );
     tree.file(obj)
   )
@@ -40,8 +40,8 @@ namespace CToolchain (
   // the source list into the grammar's repeatable source position.
   fn executable(self, srcs: Array[Path], out: Path) -> Blob (
     let tree = match self.style (
-      Style.Gcc  => exec(`${self.cc} ${..srcs} -o ${out}`),
-      Style.Msvc => exec(`${self.cc} ${..srcs} /Fe:${out}.exe`),
+      Style.Gcc  => `${self.cc} ${..srcs} -o ${out}`,
+      Style.Msvc => `${self.cc} ${..srcs} /Fe:${out}.exe`,
     );
     tree.file(out)
   )

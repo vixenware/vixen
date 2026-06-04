@@ -48,8 +48,24 @@ fn ok_gate(o: &ProcOutcome) -> Result<Value, Poison> {
     }
 }
 
-/// An `Exit` struct value. Carried minimally for now — the byte/tree/duration value
-/// representations land with the streaming + handle work.
+/// The default observer `run.ok.out` reduced to its gate: `Ok` means the run
+/// succeeded, so its output tree is the result (and crosses back as a handle);
+/// `Err` is the gate's failure message. The executor runs this natively when an
+/// invocation ships no observer bundle (`r[exec.observer.simple]`).
+pub fn ok_gate_result(o: &ProcOutcome) -> Result<(), String> {
+    match o.exit_code {
+        0 => Ok(()),
+        code => Err(format!(
+            "`run.ok` poisoned: the process exited with status {code}"
+        )),
+    }
+}
+
+/// An `Exit` struct value. Carried minimally for now — the spec's `out` (the gated
+/// write-set tree, `run.ok.out`) is served natively for the *default* observer
+/// (`ok_gate_result`); adding it as a forceable `Exit` field waits on the nested
+/// producing-tree crossing (`from_wire` still poisons on an inline tree). The
+/// byte/duration representations land with the streaming work.
 fn exit_value(o: &ProcOutcome) -> Value {
     Value::Struct(vec![
         ("stdout".to_string(), Thunk::done(bytes_value(&o.stdout))),

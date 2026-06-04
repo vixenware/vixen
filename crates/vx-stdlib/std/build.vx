@@ -41,35 +41,11 @@ fn exists(path: String) -> Bool;
 /// Read basic metadata for a local path.
 fn metadata(path: String) -> Map[String, String];
 
-/// Run a sandboxed process on an executor and return the observer result.
-///
-/// `exec` takes a **`Command`** — a `` `${cmd} args…` `` invocation whose leading
-/// interpolated command carries the grammar (there is no grammar name and no
-/// separate grammar import; see the wiki: "The exec primitive" §4). The grammar
-/// classifies each argument's `Kind`, so the VFS mount set (inputs) and the
-/// writable roots (outputs) fall out of the command. There is **no `executor:`
-/// kwarg**: routing falls out of the provenance of the ability values the command
-/// consumes (§4–5).
-///
-/// The observer is evaluated **executor-side** against the `Run` (§6–7); its
-/// authority is exactly that `Run`. It is **required** — there is no default. A
-/// common observer is `(run) => run.ok.out`, which gates on success and returns
-/// the whole write-set tree. If the observer returns `Stream[T]`, `exec` itself
-/// returns `Stream[T]`.
-fn exec[T](
-  command: Command,
-) with {
-  /// Value source for grammar-declared environment channels.
-  env: Map[String, ExecInput] = %{},
-  /// Extra VFS mounts not already implied by the command's classified inputs.
-  mounts: Map[Path, TreeEntry] = %{},
-  /// Writable roots supplementing the grammar-derived outputs.
-  writable: Array[Path] = [],
-  /// Additional directories to create under writable roots before launch.
-  create_dirs: Array[Path] = [],
-  /// Host-backed sandbox exemptions supplementing those the command carries.
-  exemptions: Array[SandboxExemption] = [],
-  /// Executor-side observer evaluated against the run; returns the build value.
-  /// Required — there is no default.
-  observer: Fn(Run) -> T,
-} -> T;
+// Running a tool is a backtick **invocation** (`r[expr.command]`), not a function:
+// `` `$tool args…` `` whose leading hole is a tool, the tokens after it its
+// arguments. Forcing the invocation runs it on the tool's executor and yields the
+// observer's result — the default observer is `run.ok.out` (`r[exec.observer.simple]`).
+// A trailing `with { env, mounts, writable, create_dirs, exemptions, observer }`
+// supplies the non-defaults (`r[exec.invocation]`). There is no `exec` function and
+// no `executor:` kwarg — routing falls out of the tool's provider provenance
+// (`r[ability.match]`).

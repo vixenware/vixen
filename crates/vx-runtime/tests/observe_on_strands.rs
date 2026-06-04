@@ -29,7 +29,7 @@ fn observer_bundle() -> vx_ir::Bundle {
 
 fn request(program: &str) -> ObserveRequest {
     ObserveRequest {
-        bundle: observer_bundle(),
+        observer: Some(observer_bundle()),
         command: ExecCommand {
             program: program.to_string(),
             args: vec![],

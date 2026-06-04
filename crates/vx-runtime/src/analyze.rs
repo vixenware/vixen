@@ -38,7 +38,10 @@ use crate::graph::{BinKind, DemandGraph, KernelOp, Node, NodeId, NodeKind, Span}
 /// (`docs/design/runners-and-control-plane.md` §6), not an inline `discover`.
 /// `discover` is not a target; any remaining `discover(...)` call simply falls
 /// through as an ordinary call here.
-const BOUNDARY_CALLS: &[&str] = &["exec", "acquire", "Http", "http"];
+///
+/// `exec` is likewise **absent**: running a tool is a backtick *invocation*
+/// (`r[expr.command]`), not a call — its boundary is the `CliLiteral` arm below.
+const BOUNDARY_CALLS: &[&str] = &["acquire", "Http", "http"];
 
 /// Turn `entry`'s body, in `source`, inside out — through the real front-end.
 /// Errors only if the source doesn't parse or the entry isn't found; unhandled
@@ -375,10 +378,27 @@ impl Builder<'_> {
                 let inputs = exprs.into_iter().map(|x| self.walk(x)).collect();
                 self.emit(
                     NodeKind::Kernel(KernelOp::Opaque),
-                    "`…`".into(),
+                    "\"…\"".into(),
                     span,
                     inputs,
                 )
+            }
+
+            // A backtick command invocation (`r[expr.command]`): forcing it runs an
+            // external process, so it is a Boundary. Its inputs are the holes — the
+            // leading `$tool` and each `${arg}` — so the graph reaches them.
+            ExprKind::CliLiteral(cli) => {
+                let inputs = cli
+                    .args
+                    .iter()
+                    .flat_map(|arg| arg.pieces.iter())
+                    .filter_map(|p| match p {
+                        StringPart::Expr(x) => Some(*x),
+                        StringPart::Text(_) => None,
+                    })
+                    .map(|x| self.walk(x))
+                    .collect();
+                self.emit(NodeKind::Boundary, "`…`".into(), span, inputs)
             }
 
             // Bare invocation `f!` — a no-arg call.

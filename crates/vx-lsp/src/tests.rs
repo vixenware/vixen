@@ -127,7 +127,7 @@ fn build(ws: Path) -> Tree {
 fn inferred_def_type_uses_closure_parameter_types() {
     let text = r#"
 fn build(cmd: Command) {
-  exec(cmd) with {
+  `$cmd` with {
     observer: (run) => run.ok.out,
   };
 }
@@ -152,7 +152,7 @@ fn build(cmd: Command) {
 fn inferred_def_type_uses_specialized_exec_return_type() {
     let text = r#"
 fn build(cmd: Command) {
-  let output = exec(cmd) with {
+  let output = `$cmd` with {
     observer: (run) => run.ok.out,
   };
 
@@ -175,37 +175,10 @@ fn build(cmd: Command) {
 }
 
 #[test]
-fn inferred_def_type_uses_specialized_partial_exec_return_type() {
-    let text = r#"
-fn build() {
-  let common = {
-    observer: (run) => run.ok.out,
-  };
-  let cexec = partial exec with common;
-
-  cexec
-}
-"#;
-
-    let state = DocumentState::new_with_uri(text.to_string(), None);
-    let cexec = definition_named(&state, "cexec");
-
-    assert_eq!(
-        state.inferred_def_type(cexec).map(|ty| state
-            .types()
-            .env
-            .get_ty(ty)
-            .display_with_env(&state.types().env)
-            .to_string()),
-        Some(String::from("Fn(Command) -> Tree"))
-    );
-}
-
-#[test]
 fn documentation_for_uses_callback_slot_docs() {
     let text = r#"
 fn build(cmd: Command) {
-  exec(cmd) with {
+  `$cmd` with {
     observer: (run) => run.ok.out,
   };
 }

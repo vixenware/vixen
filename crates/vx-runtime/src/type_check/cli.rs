@@ -152,9 +152,11 @@ pub(crate) fn infer_cli_literal(
         tc.push_diagnostic(IrDiagnostic::Cli { span, kind });
     }
 
-    // The literal's own value (a `Command`) is not modeled in the type system
-    // yet, so it occupies no concrete type.
-    tc.poison()
+    // A bare invocation runs with the default observer `run.ok.out`
+    // (`r[exec.observer.simple]`), so its value is the success-gated output `Tree`. A
+    // `with { observer: … }` overrides this with the observer's return type (handled
+    // in `infer_where`).
+    tc.nominal_ty("Tree")
 }
 
 /// Find the [`GrammarSet`] that `@name` resolves to: `name` must be a binding in

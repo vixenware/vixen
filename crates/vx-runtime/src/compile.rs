@@ -124,7 +124,7 @@ mod tests {
 
     const SOURCE_EXEC_STDOUT: &str = r#"
 fn probe(cmd: Command) -> Bytes (
-  exec(cmd) with {
+  `$cmd` with {
     observer: (run) => run.ok.stdout
   }
 )
@@ -132,7 +132,7 @@ fn probe(cmd: Command) -> Bytes (
 
     const SOURCE_EXEC_WRITABLE: &str = r#"
 fn probe(cmd: Command) -> Tree (
-  exec(cmd) with {
+  `$cmd` with {
     writable: ["out"],
     create_dirs: ["out"],
     observer: (run) => run.ok.out
@@ -317,7 +317,7 @@ fn probe() -> Bool (
     }
 
     #[test]
-    fn semantic_pipeline_resolves_exec_and_observer_from_stdlib() {
+    fn semantic_pipeline_resolves_invocation_and_observer_from_stdlib() {
         let mut program = semantically_analyze(SOURCE_EXEC_STDOUT);
         let mut types = collect_types_vir(&mut program.arena);
         let resolve_errors = resolve_names(&mut program.arena);
@@ -328,16 +328,17 @@ fn probe() -> Bool (
         let tc_result = type_check_vir(&mut program.arena, &mut types);
         assert!(
             tc_result.errors.is_empty(),
-            "expected exec source to type-check, got {:?}",
+            "expected the invocation source to type-check, got {:?}",
             tc_result.errors
         );
         super::compile_source(SOURCE_EXEC_STDOUT, "probe")
-            .expect("exec source should compile through the front-end");
+            .expect("invocation source should compile through the front-end");
     }
 
     #[test]
-    fn semantic_pipeline_resolves_exec_writable_keywords_from_stdlib() {
-        super::compile_source(SOURCE_EXEC_WRITABLE, "probe")
-            .expect("exec source with writable keywords should compile through the front-end");
+    fn semantic_pipeline_resolves_invocation_writable_keywords_from_stdlib() {
+        super::compile_source(SOURCE_EXEC_WRITABLE, "probe").expect(
+            "invocation source with writable keywords should compile through the front-end",
+        );
     }
 }

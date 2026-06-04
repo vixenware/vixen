@@ -29,10 +29,13 @@ pub struct ExecCommand {
     pub args: Vec<String>,
 }
 
-/// What the executor needs to observe: the observer bundle + the command to run.
+/// What the executor needs to observe: the command to run plus the observer to
+/// evaluate against its `Run`. `observer` is `None` for the default observer
+/// `run.ok.out` (`r[exec.observer.simple]`) — applied natively on the executor
+/// (gate on success, yield the output tree) so a bare invocation ships no closure.
 #[derive(facet::Facet, Debug, Clone)]
 pub struct ObserveRequest {
-    pub bundle: Bundle,
+    pub observer: Option<Bundle>,
     pub command: ExecCommand,
 }
 
@@ -136,22 +139,26 @@ impl Observe for ObserveService {
         let _ = std::fs::remove_dir_all(&scratch);
         *self.outputs.lock().unwrap() = Some(service);
 
-        // Build the `Run` (its `.ok` gate forces on the real exit code) and evaluate
-        // the observer against it on a fresh mirror, deep-forcing its result into a
-        // `WireValue` to cross back. The whole value crosses — not a lossy projection;
-        // a returned `run.*.out` crosses as `WireValue::Tree` (a handle into the
-        // producer above).
-        let run = run_value::build(proc);
-        let (program, env) = request.bundle.install();
-        match eval_body_wire(
-            &program,
-            &env,
-            request.bundle.entry,
-            vec![run],
-            KernelMode::Off,
-        ) {
-            Ok(value) => Observed::Value(value),
-            Err(reason) => Observed::Poisoned(reason),
+        // Apply the observer against the run. With a bundle, build the `Run` (its
+        // `.ok` gate forces on the real exit code) and evaluate the observer against
+        // it on a fresh mirror, deep-forcing its result into a `WireValue` to cross
+        // back — the whole value, not a lossy projection; a returned `run.*.out`
+        // crosses as `WireValue::Tree` (a handle into the producer above). Without a
+        // bundle, apply the default `run.ok.out` natively: gate on success, then the
+        // output tree crosses back as that same handle.
+        match request.observer {
+            Some(bundle) => {
+                let run = run_value::build(proc);
+                let (program, env) = bundle.install();
+                match eval_body_wire(&program, &env, bundle.entry, vec![run], KernelMode::Off) {
+                    Ok(value) => Observed::Value(value),
+                    Err(reason) => Observed::Poisoned(reason),
+                }
+            }
+            None => match run_value::ok_gate_result(&proc) {
+                Ok(()) => Observed::Value(WireValue::Tree),
+                Err(reason) => Observed::Poisoned(reason),
+            },
         }
     }
 }
@@ -271,7 +278,7 @@ mod tests {
         // verbatim (empty stdout/stderr for `true`), not a "clean" placeholder.
         let ok = client
             .observe(ObserveRequest {
-                bundle: bundle.clone(),
+                observer: Some(bundle.clone()),
                 command: cmd("true"),
             })
             .await
@@ -288,7 +295,7 @@ mod tests {
         // `false` exits 1 → run.ok poisons.
         let bad = client
             .observe(ObserveRequest {
-                bundle,
+                observer: Some(bundle),
                 command: cmd("false"),
             })
             .await
@@ -322,7 +329,7 @@ mod tests {
         let client = local_observer().await;
         let observed = client
             .observe(ObserveRequest {
-                bundle,
+                observer: Some(bundle),
                 command: cmd("true"),
             })
             .await
@@ -362,7 +369,7 @@ mod tests {
         // Run a command that writes a file into its scratch dir.
         client
             .observe(ObserveRequest {
-                bundle,
+                observer: Some(bundle),
                 command: ExecCommand {
                     program: "sh".to_string(),
                     args: vec!["-c".to_string(), "printf CONTENT > out.txt".to_string()],
