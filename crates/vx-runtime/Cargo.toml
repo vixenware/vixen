@@ -19,6 +19,8 @@ rustdoc-args = ["--html-in-header", "arborium-header.html"]
 facet = { workspace = true }
 facet-json = { workspace = true }
 vx-runtime-graph = { path = "../vx-runtime-graph" }
+vx-runtime-core = { path = "../vx-runtime-core" }
+vx-runtime-driver = { path = "../vx-runtime-driver" }
 vx-ir = { workspace = true }
 vx-parser = { workspace = true }
 vx-stdlib = { workspace = true }

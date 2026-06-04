@@ -4,12 +4,9 @@
 //! runner discovers every annotated function and runs each through `eval` — the
 //! tests are `.vx`, the runner is the only Rust.
 //!
-//! Each test is run in **every available [`KernelMode`]** — pure tree-walk
-//! (`Off`), the kernel interpreter (`Interp`), and on native the JIT (`Jit`) —
-//! and the outcomes must be **identical across all of them**. That cross-mode
-//! parity is the oracle: `Off` is the ground truth the kernel is checked against,
-//! and the interpreter is the ground truth the JIT is checked against, applied to
-//! every test for free.
+//! Each test is run in every available [`KernelMode`] while the runtime is being
+//! cut over. The modes are retained as public API shape during the rebuild; they
+//! are not a license to run a source tree-walker as the truth engine.
 //!
 //! Annotations (read by the harness; inert metadata to the language):
 //! - `#[test]` — must evaluate **clean** (no poison) in every mode.
@@ -19,7 +16,8 @@
 //!   in `Interp` mode), proving it took the kernel path rather than tree-walking.
 //!
 //! `assert`/`assert_eq` come from the stdlib prelude; `💣` is the over-forcing
-//! tripwire. The detonation site (the poison reason) is the report.
+//! tripwire. The detonation site or explicit graph unsupported error is the
+//! report.
 
 use std::fs;
 use std::path::{Path, PathBuf};

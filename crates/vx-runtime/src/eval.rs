@@ -258,18 +258,16 @@ pub enum Outcome {
     Poisoned { reason: String, span: Option<Span> },
 }
 
-/// Which execution path dispatchable scalar regions take. The `.vx` harness runs
-/// every test in each available mode and asserts the outcomes agree: `Off` (pure
-/// tree-walk) is the ground-truth oracle for the kernel, and the interpreter is
-/// the oracle for the JIT.
+/// Which execution path dispatchable scalar regions take in the legacy body
+/// evaluator. The public source entry no longer uses this enum to select a
+/// source tree-walker; it enters through the graph driver.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum KernelMode {
-    /// Never dispatch — every expression tree-walks. The simplest evaluator, and
-    /// the oracle the kernel path is checked against.
+    /// Legacy body evaluator: never dispatch scalar subexpressions.
     Off,
-    /// Dispatch scalar regions to the kernel interpreter; never the JIT.
+    /// Legacy body evaluator: dispatch scalar regions to the kernel interpreter.
     Interp,
-    /// Dispatch, preferring the native JIT (interpreter fallback). The default.
+    /// Legacy body evaluator: dispatch, preferring the native JIT when available.
     Jit,
 }
 
@@ -1758,42 +1756,11 @@ pub fn run_with_dispatches(source: &str, entry: &str) -> Result<(Outcome, u64), 
 }
 
 /// Evaluate `entry` in `source` under an explicit [`KernelMode`], reporting the
-/// outcome and the kernel-dispatch count. The self-hosting `.vx` harness calls
-/// this once per available mode and asserts the outcomes agree (cross-mode
-/// parity = the kernel and JIT oracles). `assert`/`assert_eq` resolve from the
-/// stdlib prelude — no string prepending.
+/// outcome and the kernel-dispatch count. This public source entry is graph-driven;
+/// `mode` is retained while legacy body-evaluation entry points are cut over.
 pub fn run_in_mode(source: &str, entry: &str, mode: KernelMode) -> Result<(Outcome, u64), String> {
-    let (program, env) = crate::analyze::front_end(source)?;
-    let primary = *program.source_units.first().ok_or("no source unit")?;
-    let body = program.arena[primary]
-        .items
-        .iter()
-        .copied()
-        .find_map(|id| match &program.arena[id].kind {
-            ItemKind::Function(f) if f.name == entry => Some(f.body),
-            _ => None,
-        })
-        .ok_or_else(|| format!("function `{entry}` not found"))?;
-    let ev = Evaluator {
-        program: &program,
-        env: &env,
-        current_body: Cell::new(body),
-        dispatch: Dispatcher::default(),
-        dispatches: Cell::new(0),
-        current_frame: Cell::new(None),
-        frames: RefCell::new(Vec::new()),
-        mode,
-        exec_client: None,
-        providers: ProviderRegistry::default(),
-    };
-    let outcome = match ev.force_root(body, Env::new()) {
-        Ok(v) => Outcome::Clean(v),
-        Err(p) => Outcome::Poisoned {
-            reason: p.message(),
-            span: p.context.span,
-        },
-    };
-    Ok((outcome, ev.dispatches.get()))
+    let _ = mode;
+    crate::graph_exec::run_source(source, entry)
 }
 
 /// Evaluate `body` with `args` bound to its parameters, in an already-built

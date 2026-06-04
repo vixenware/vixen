@@ -13,14 +13,15 @@
 //! - [`analyze`] — VIR → the [`graph`] demand graph (with the expr/binding indices
 //!   [`dispatch`] needs).
 //! - [`graph`] — the demand graph: lazy nodes, spans, bombs.
+//! - `graph_exec` — source entry → graph driver. This is the new public source
+//!   execution path while the rest of the runtime is being cut over.
 //! - [`lower`] — a scalar region of the graph → [`kernel`] IR (`NotLowerable` when
 //!   it isn't pure-scalar).
-//! - [`kernel`] — the kernel IR + its interpreter, which is the **oracle** the JIT
-//!   is checked against.
+//! - [`kernel`] — the kernel IR + its interpreter, used by the JIT path.
 //! - [`jit`] — the native copy-and-patch JIT (native target only; the interpreter
 //!   is the path elsewhere).
-//! - [`dispatch`] — decides whether a (sub-)expression runs as a kernel and builds
-//!   the plan; [`eval`] is the tree-walker that consults it.
+//! - [`dispatch`] — legacy scalar-kernel planning for the old evaluator while it
+//!   is being removed.
 //! - [`strand`] — the demand-driven scheduler (our own, **not** tokio tasks; the
 //!   I1–I7 contract on the strand-scheduler wiki page).
 //! - [`remote`] — cross-executor values as progressive per-part handles over vox.
@@ -37,6 +38,7 @@ pub mod dispatch;
 pub mod error_union;
 pub mod eval;
 pub mod graph;
+mod graph_exec;
 pub mod host;
 pub mod kernel;
 pub mod lower;

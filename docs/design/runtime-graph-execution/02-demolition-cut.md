@@ -153,6 +153,84 @@ The demolition phase is complete when:
   errors.
 - There is no source-expression fallback path in public runtime execution.
 
+## Current demolition progress
+
+The first public source entry cut is in place:
+
+```text
+run / run_with_dispatches / run_in_mode
+  -> graph_exec::run_source
+  -> analyze_source
+  -> Driver::drive(DemandRequest::root(graph.root))
+```
+
+This cut is intentionally partial. The following public body/crossing paths still
+use the legacy evaluator and remain demolition targets:
+
+- `eval_body`
+- `eval_body_with_exec`
+- `eval_body_with_exec_and_providers`
+- `eval_body_wire`
+- observer execution in `observe.rs`
+- mirror, host/intrinsic, exec, remote-tree, and strand tests that call
+  `eval_body*`
+
+Current focused green evidence:
+
+```bash
+cargo check -p vx-runtime-graph -p vx-runtime-core -p vx-runtime-driver -p vx-runtime
+cargo nextest run -p vx-runtime source_entry
+cargo nextest run -p vx-runtime execution_crates_stay_source_blind
+rg -n 'vx[_-]ir|ExprKind|ExprId|StmtKind|PatternKind|PatternId|VirProgram|BodyId|node_exprs|exprmap|eval_inner|eval_expr|walk_expr|legacy_eval|fn force|\.force\(' crates/vx-runtime-core crates/vx-runtime-driver
+```
+
+Observed result:
+
+- `cargo check` passes.
+- `source_entry` passes 3/3: graph root constant, projection skipping a dead
+  bomb slot, and explicit unsupported graph call.
+- `execution_crates_stay_source_blind` passes.
+- The raw forbidden-symbol scan returns no matches in core/driver.
+
+Current broad-suite result:
+
+```bash
+cargo nextest run -p vx-runtime-graph -p vx-runtime-core -p vx-runtime-driver -p vx-runtime --no-fail-fast
+```
+
+Observed result: 138 tests run, 125 passed, 13 failed, 0 skipped.
+
+The red surface is honest graph-driver fallout from the source-entry cut:
+
+- `eval::tests::asserts_dispatch_to_the_kernel`
+- `eval::tests::bool_returning_kernel_wraps_as_bool`
+- `eval::tests::conditionally_used_param_declines_dispatch`
+- `eval::tests::block_tail_sub_expression_dispatches_with_a_param`
+- `eval::tests::i6_eval_outcome_carries_the_source_span`
+- `eval::tests::non_scalar_args_fall_back_to_tree_walk`
+- `eval::tests::scalar_function_dispatches_and_computes`
+- `eval::tests::sub_expression_dispatches_not_just_whole_bodies`
+- `eval::tests::unused_param_stays_lazy_through_dispatch`
+- `vx-runtime::coerce string_array_coerces_to_path_array_end_to_end`
+- `vx-runtime::coerce string_literal_coerces_to_path_end_to_end`
+- `vx-runtime::eval_on_strands clean_program_evaluates_to_clean_on_a_strand`
+- `vx-runtime::lang_suite lang_suite`
+
+Most failures stop with explicit messages like:
+
+```text
+graph unsupported at node NodeId(...): opaque kernel is not executable in core
+```
+
+`i6_eval_outcome_carries_the_source_span` is a graph poison-context gap: divide
+by zero now poisons through core, but the source span has not yet been threaded
+from graph node spans into `Outcome`.
+
+The `.vx` language harness now runs through graph driver for source entries. It
+fails 65 of 68 Vixen-language cases because calls such as `assert`/`assert_eq`,
+function calls, match, variants, strings, and failure context are still opaque or
+unsupported graph payloads. That is expected for this cut and is not a fallback.
+
 ## Verification commands
 
 Use these after demolition:
@@ -163,4 +241,3 @@ cargo nextest run -p vx-runtime-graph -p vx-runtime-core -p vx-runtime-driver -p
 rg -n 'run_in_mode|eval_body|eval_body_wire|eval_body_with_exec|eval_inner|Evaluator::eval|\.eval\(' crates/vx-runtime/src crates/vx-runtime/tests
 rg -n 'vx[_-]ir|ExprKind|ExprId|StmtKind|PatternKind|PatternId|VirProgram|BodyId|node_exprs|exprmap|eval_inner|eval_expr|walk_expr|legacy_eval|fn force|\.force\(' crates/vx-runtime-core crates/vx-runtime-driver
 ```
-

@@ -101,6 +101,14 @@ Expected long-term:
 - `eval_inner` is deleted or unreachable
 - tests do not instantiate old evaluator as engine
 
+Current partial state:
+
+- `run`, `run_with_dispatches`, and `run_in_mode` call graph driver.
+- `eval_body*`, observer execution, and mirror/exec/remote body tests still call
+  the legacy evaluator.
+- The `.vx` harness uses `run_in_mode`, so source-language tests now exercise the
+  graph driver and fail explicitly where graph payloads are unsupported.
+
 ### Vixen-language verification
 
 The `.vx` suite is important because it expresses language behavior:

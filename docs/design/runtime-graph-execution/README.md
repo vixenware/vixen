@@ -77,7 +77,10 @@ Expected latest structural checkpoint:
 - `crates/vx-runtime/tests/source_blind_guardrails.rs` scans
   `vx-runtime-core` and `vx-runtime-driver` source/manifests for forbidden
   source-evaluator affordances.
-- `vx-runtime::eval` still contains the legacy tree-walker and must be cut over.
+- `vx-runtime::eval::{run, run_with_dispatches, run_in_mode}` enter through
+  `graph_exec::run_source` and `vx-runtime-driver`.
+- `vx-runtime::eval` still contains the legacy tree-walker for `eval_body*`,
+  observer execution, mirror tests, and other not-yet-cut public body paths.
 
 Verification commands:
 
@@ -94,7 +97,8 @@ fix that before adding language behavior.
 ## Roadmap overview
 
 1. **Demolition cut**: Public runtime entry points use the graph driver. The old
-   expression walker is unreachable or deleted. Expect honest red tests.
+   expression walker is unreachable or deleted. Source entry points are cut over;
+   body/observer entries remain. Expect honest red tests.
 2. **Guardrails**: Expand crate-local tripwires into repo-level checks for
    forbidden dependencies and tree-walker affordances.
 3. **Executable graph payloads**: Replace display labels and source ids with
