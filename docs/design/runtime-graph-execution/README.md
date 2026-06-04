@@ -79,6 +79,8 @@ Expected latest structural checkpoint:
   source-evaluator affordances.
 - `vx-runtime::eval::{run, run_with_dispatches, run_in_mode}` enter through
   `graph_exec::run_source` and `vx-runtime-driver`.
+- `vx-runtime-graph::NodeKind::Const` carries `ConstValue`; core execution and
+  executable lowering no longer parse constant labels for semantics.
 - `vx-runtime::eval` still contains the legacy tree-walker for `eval_body*`,
   observer execution, mirror tests, and other not-yet-cut public body paths.
 

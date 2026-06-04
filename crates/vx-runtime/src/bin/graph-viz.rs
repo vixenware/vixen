@@ -37,7 +37,7 @@ struct ViewGraph {
 
 fn kind_str(kind: &NodeKind) -> &'static str {
     match kind {
-        NodeKind::Const => "Const",
+        NodeKind::Const(_) => "Const",
         NodeKind::Param => "Param",
         NodeKind::Kernel(_) => "Kernel",
         NodeKind::LazyData => "LazyData",

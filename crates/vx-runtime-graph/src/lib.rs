@@ -40,11 +40,23 @@ pub enum KernelOp {
     Opaque,
 }
 
+/// A literal value carried by a [`NodeKind::Const`] node.
+#[derive(Debug, Clone, PartialEq, Eq, Facet)]
+#[repr(C)]
+pub enum ConstValue {
+    U64(u64),
+    Bool(bool),
+    Str(String),
+    Unit,
+    Float(String),
+    Unsupported(String),
+}
+
 /// What a graph node is.
 #[derive(Debug, Clone, PartialEq, Eq, Facet)]
 #[repr(C)]
 pub enum NodeKind {
-    Const,
+    Const(ConstValue),
     Param,
     Kernel(KernelOp),
     LazyData,
@@ -97,7 +109,7 @@ impl DemandGraph {
             }
             reached[i] = true;
             let node = &self.nodes[i];
-            match node.kind {
+            match &node.kind {
                 NodeKind::LazyData => {}
                 NodeKind::Project { .. } => {
                     stack.push(node.inputs[0]);
@@ -114,14 +126,14 @@ impl DemandGraph {
     /// Fold projections through known lazy-data constructors.
     pub fn resolved_value(&self, n: NodeId) -> Option<NodeId> {
         let node = &self.nodes[n.0 as usize];
-        match node.kind {
+        match &node.kind {
             NodeKind::Project { index } => {
                 let raw_container = node.inputs[0];
                 let container = self.resolved_value(raw_container).unwrap_or(raw_container);
                 let cnode = &self.nodes[container.0 as usize];
-                match cnode.kind {
+                match &cnode.kind {
                     NodeKind::LazyData => {
-                        let slot = *cnode.inputs.get(index as usize)?;
+                        let slot = *cnode.inputs.get(*index as usize)?;
                         Some(self.resolved_value(slot).unwrap_or(slot))
                     }
                     _ => Some(container),
@@ -138,7 +150,7 @@ pub fn example_bomb_pair() -> DemandGraph {
         nodes: vec![
             Node {
                 id: NodeId(0),
-                kind: NodeKind::Const,
+                kind: NodeKind::Const(ConstValue::U64(42)),
                 span: None,
                 label: "42".to_string(),
                 ty: "U64".to_string(),

@@ -181,6 +181,8 @@ Current focused green evidence:
 cargo check -p vx-runtime-graph -p vx-runtime-core -p vx-runtime-driver -p vx-runtime
 cargo nextest run -p vx-runtime source_entry
 cargo nextest run -p vx-runtime execution_crates_stay_source_blind
+cargo nextest run -p vx-runtime-core
+cargo nextest run -p vx-runtime lower::tests
 rg -n 'vx[_-]ir|ExprKind|ExprId|StmtKind|PatternKind|PatternId|VirProgram|BodyId|node_exprs|exprmap|eval_inner|eval_expr|walk_expr|legacy_eval|fn force|\.force\(' crates/vx-runtime-core crates/vx-runtime-driver
 ```
 
@@ -191,7 +193,12 @@ Observed result:
   bomb slot, graph `assert_eq` success, graph `assert_eq` poison, and explicit
   unsupported graph call.
 - `execution_crates_stay_source_blind` passes.
+- `vx-runtime-core` passes 4/4.
+- `lower::tests` passes 8/8.
 - The raw forbidden-symbol scan returns no matches in core/driver.
+- Constant nodes now carry structured `ConstValue` payloads. Core execution and
+  executable lowering no longer parse constant display labels; literal parsing
+  lives only at the analyzer boundary.
 
 Current broad-suite result:
 
@@ -199,7 +206,8 @@ Current broad-suite result:
 cargo nextest run -p vx-runtime-graph -p vx-runtime-core -p vx-runtime-driver -p vx-runtime --no-fail-fast
 ```
 
-Observed result after assertion kernel payloads and graph poison span threading:
+Observed result after assertion kernel payloads, graph poison span threading, and
+structured constant graph payloads:
 141 tests run, 129 passed, 12 failed, 0 skipped.
 
 The red surface is honest graph-driver fallout from the source-entry cut:

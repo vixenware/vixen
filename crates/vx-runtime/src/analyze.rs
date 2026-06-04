@@ -28,7 +28,7 @@ use vx_ir::scope::DefTarget;
 use vx_ir::stmt::StmtKind;
 use vx_types::{TypeEnv, TypeId};
 
-use crate::graph::{BinKind, DemandGraph, KernelOp, Node, NodeId, NodeKind, Span};
+use crate::graph::{BinKind, ConstValue, DemandGraph, KernelOp, Node, NodeId, NodeKind, Span};
 
 /// Intrinsic/boundary call names — effectful or non-deterministic, so the kernel
 /// partition cuts here (a call to one of these is a `Boundary`, not a `Kernel`).
@@ -252,12 +252,8 @@ impl Builder<'_> {
             ExprKind::Bomb => self.emit(NodeKind::Bomb, "💣".into(), span, vec![]),
 
             ExprKind::Literal(lit) => {
-                let label = match &lit.value {
-                    LitKind::Int { raw } | LitKind::Float { raw } => raw.clone(),
-                    LitKind::String { raw } => format!("{raw:?}"),
-                    LitKind::Bool(b) => b.to_string(),
-                };
-                self.emit(NodeKind::Const, label, span, vec![])
+                let (value, label) = const_value_and_label(&lit.value);
+                self.emit(NodeKind::Const(value), label, span, vec![])
             }
 
             // Lazy data — fields referenced, not forced.
@@ -492,7 +488,7 @@ impl Builder<'_> {
                         self.memo.insert(e, v);
                         return v;
                     }
-                    None => self.emit(NodeKind::Const, "()".into(), span, vec![]),
+                    None => self.emit(NodeKind::Const(ConstValue::Unit), "()".into(), span, vec![]),
                 }
             }
 
@@ -669,6 +665,20 @@ fn bin_kind(op: BinOp) -> KernelOp {
     }
 }
 
+fn const_value_and_label(lit: &LitKind) -> (ConstValue, String) {
+    match lit {
+        LitKind::Int { raw } => (
+            raw.parse::<u64>()
+                .map(ConstValue::U64)
+                .unwrap_or_else(|_| ConstValue::Unsupported(raw.clone())),
+            raw.clone(),
+        ),
+        LitKind::Float { raw } => (ConstValue::Float(raw.clone()), raw.clone()),
+        LitKind::String { raw } => (ConstValue::Str(raw.clone()), format!("{raw:?}")),
+        LitKind::Bool(b) => (ConstValue::Bool(*b), b.to_string()),
+    }
+}
+
 fn to_span(span: vx_parser::SourceSpan) -> Span {
     Span {
         start: span.start(),
@@ -743,7 +753,7 @@ mod tests {
             .nodes
             .iter()
             .enumerate()
-            .any(|(i, n)| n.kind == NodeKind::Const && n.label == "42" && reached[i]);
+            .any(|(i, n)| matches!(n.kind, NodeKind::Const(ConstValue::U64(42))) && reached[i]);
         assert!(
             leaf_reached,
             "the demanded inner 42 (s.a.a) must be reached"

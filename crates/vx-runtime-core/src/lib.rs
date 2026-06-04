@@ -6,7 +6,7 @@
 
 use std::collections::HashMap;
 
-use vx_runtime_graph::{BinKind, DemandGraph, KernelOp, NodeId, NodeKind, Span};
+use vx_runtime_graph::{BinKind, ConstValue, DemandGraph, KernelOp, NodeId, NodeKind, Span};
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum NodeOutput {
@@ -68,9 +68,9 @@ pub fn step(graph: &DemandGraph, node: NodeId, inputs: ReadyInputs<'_>) -> Step 
         return unsupported(node, "node index out of bounds");
     };
     match &n.kind {
-        NodeKind::Const => match const_output(&n.label) {
+        NodeKind::Const(value) => match const_output(value) {
             Some(output) => Step::Ready(output),
-            None => unsupported(node, format!("unsupported const `{}`", n.label)),
+            None => unsupported(node, format!("unsupported const `{value:?}`")),
         },
         NodeKind::Param => unsupported(node, "parameter has no supplied value"),
         NodeKind::LazyData => Step::Ready(NodeOutput::LazyData {
@@ -291,39 +291,14 @@ fn missing(
         .collect()
 }
 
-fn const_output(label: &str) -> Option<NodeOutput> {
-    if let Ok(n) = label.parse::<u64>() {
-        return Some(NodeOutput::U64(n));
+fn const_output(value: &ConstValue) -> Option<NodeOutput> {
+    match value {
+        ConstValue::U64(n) => Some(NodeOutput::U64(*n)),
+        ConstValue::Bool(b) => Some(NodeOutput::Bool(*b)),
+        ConstValue::Str(s) => Some(NodeOutput::Str(s.clone())),
+        ConstValue::Unit => Some(NodeOutput::Unit),
+        ConstValue::Float(_) | ConstValue::Unsupported(_) => None,
     }
-    match label {
-        "true" => Some(NodeOutput::Bool(true)),
-        "false" => Some(NodeOutput::Bool(false)),
-        "()" => Some(NodeOutput::Unit),
-        _ if label.len() >= 2 && label.starts_with('"') && label.ends_with('"') => {
-            Some(NodeOutput::Str(unquote(&label[1..label.len() - 1])))
-        }
-        _ => None,
-    }
-}
-
-fn unquote(inner: &str) -> String {
-    let mut out = String::with_capacity(inner.len());
-    let mut chars = inner.chars();
-    while let Some(c) = chars.next() {
-        if c != '\\' {
-            out.push(c);
-            continue;
-        }
-        match chars.next() {
-            Some('n') => out.push('\n'),
-            Some('t') => out.push('\t'),
-            Some('r') => out.push('\r'),
-            Some('0') => out.push('\0'),
-            Some(other) => out.push(other),
-            None => {}
-        }
-    }
-    out
 }
 
 fn unsupported(node: NodeId, reason: impl Into<String>) -> Step {
@@ -360,7 +335,7 @@ mod tests {
             nodes: vec![
                 Node {
                     id: NodeId(0),
-                    kind: NodeKind::Const,
+                    kind: NodeKind::Const(ConstValue::Bool(true)),
                     span: None,
                     label: "true".to_string(),
                     ty: "Bool".to_string(),
@@ -368,7 +343,7 @@ mod tests {
                 },
                 Node {
                     id: NodeId(1),
-                    kind: NodeKind::Const,
+                    kind: NodeKind::Const(ConstValue::U64(1)),
                     span: None,
                     label: "1".to_string(),
                     ty: "U64".to_string(),
@@ -407,7 +382,7 @@ mod tests {
             nodes: vec![
                 Node {
                     id: NodeId(0),
-                    kind: NodeKind::Const,
+                    kind: NodeKind::Const(ConstValue::U64(42)),
                     span: None,
                     label: "42".to_string(),
                     ty: "U64".to_string(),
@@ -415,7 +390,7 @@ mod tests {
                 },
                 Node {
                     id: NodeId(1),
-                    kind: NodeKind::Const,
+                    kind: NodeKind::Const(ConstValue::U64(42)),
                     span: None,
                     label: "42".to_string(),
                     ty: "U64".to_string(),

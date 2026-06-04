@@ -23,7 +23,7 @@ use std::collections::HashSet;
 use std::rc::Rc;
 
 use crate::eval::Value;
-use crate::graph::{BinKind, DemandGraph, KernelOp, Node, NodeId, NodeKind};
+use crate::graph::{BinKind, ConstValue, DemandGraph, KernelOp, Node, NodeId, NodeKind};
 use crate::kernel::{Block, Kernel, Op, OpKind, Slot, Term, Word};
 
 /// Why a region wasn't lowered to the scalar kernel IR — the kind of node that
@@ -136,7 +136,7 @@ impl<'g> Lowerer<'g> {
                 Ok(())
             }
             // Const / 💣 / fail: leaves (fail's message is ignored by the Fail op).
-            NodeKind::Const | NodeKind::Bomb | NodeKind::Fail => Ok(()),
+            NodeKind::Const(_) | NodeKind::Bomb | NodeKind::Fail => Ok(()),
             NodeKind::Kernel(KernelOp::Bin(_)) => {
                 let (a, b) = (node.inputs[0], node.inputs[1]);
                 self.collect_params(a, seen)?;
@@ -169,8 +169,8 @@ impl<'g> Lowerer<'g> {
                 .expect("param was collected in phase 1")
                 as Slot),
 
-            NodeKind::Const => {
-                let imm = const_word(&node.label)?;
+            NodeKind::Const(value) => {
+                let imm = const_word(value)?;
                 let dst = self.alloc();
                 self.cur.push(Op {
                     kind: OpKind::Const,
@@ -194,7 +194,10 @@ impl<'g> Lowerer<'g> {
                 let imm = node
                     .inputs
                     .first()
-                    .and_then(|&m| const_value(&self.node(m).label))
+                    .and_then(|&m| match &self.node(m).kind {
+                        NodeKind::Const(value) => const_value(value),
+                        _ => None,
+                    })
                     .map(|v| {
                         self.value_pool.push(v);
                         (self.value_pool.len() - 1) as Word
@@ -304,59 +307,28 @@ impl<'g> Lowerer<'g> {
     }
 }
 
-/// A scalar constant's word value, parsed from the literal's raw text (the same
-/// raw `vx_ir` stores and `eval.rs` parses). `Err` for non-scalar literals
-/// (string, float) — they aren't single words.
-fn const_word(label: &str) -> Result<Word, NotLowerable> {
-    if let Ok(n) = label.parse::<u64>() {
-        return Ok(n);
-    }
-    match label {
-        "true" => Ok(1),
-        "false" => Ok(0),
-        other => Err(NotLowerable(format!("non-scalar constant `{other}`"))),
+/// A scalar constant's word value from the structured graph payload. `Err` for
+/// non-scalar literals (string, float); they are not single words.
+fn const_word(value: &ConstValue) -> Result<Word, NotLowerable> {
+    match value {
+        ConstValue::U64(n) => Ok(*n),
+        ConstValue::Bool(true) => Ok(1),
+        ConstValue::Bool(false) => Ok(0),
+        other => Err(NotLowerable(format!("non-scalar constant `{other:?}`"))),
     }
 }
 
-/// Reconstruct the runtime [`Value`] of a literal `Const` node from its graph
-/// label — the inverse of analyze's labelling — so a `fail`'s message can be
-/// pooled into the kernel's side table. `None` for a non-literal label (a name, a
-/// computed value), which falls back to a generic poison.
-fn const_value(label: &str) -> Option<Value> {
-    if let Ok(n) = label.parse::<u64>() {
-        return Some(Value::U64(n));
+/// Reconstruct the runtime [`Value`] of a literal `Const` node from its
+/// structured graph payload, so a `fail`'s message can be pooled into the
+/// kernel's side table.
+fn const_value(value: &ConstValue) -> Option<Value> {
+    match value {
+        ConstValue::U64(n) => Some(Value::U64(*n)),
+        ConstValue::Bool(b) => Some(Value::Bool(*b)),
+        ConstValue::Str(s) => Some(Value::Str(Rc::from(s.as_str()))),
+        ConstValue::Unit => Some(Value::Unit),
+        ConstValue::Float(_) | ConstValue::Unsupported(_) => None,
     }
-    match label {
-        "true" => Some(Value::Bool(true)),
-        "false" => Some(Value::Bool(false)),
-        // A string literal is debug-quoted by analyze (`format!("{raw:?}")`).
-        _ if label.len() >= 2 && label.starts_with('"') && label.ends_with('"') => Some(
-            Value::Str(Rc::from(unquote(&label[1..label.len() - 1]).as_str())),
-        ),
-        _ => None,
-    }
-}
-
-/// Undo the escapes a debug-quoted string label carries, recovering the literal's
-/// actual text.
-fn unquote(inner: &str) -> String {
-    let mut out = String::with_capacity(inner.len());
-    let mut chars = inner.chars();
-    while let Some(c) = chars.next() {
-        if c != '\\' {
-            out.push(c);
-            continue;
-        }
-        match chars.next() {
-            Some('n') => out.push('\n'),
-            Some('t') => out.push('\t'),
-            Some('r') => out.push('\r'),
-            Some('0') => out.push('\0'),
-            Some(other) => out.push(other), // `\"`, `\\`, and any other escape
-            None => {}
-        }
-    }
-    out
 }
 
 /// Map the graph's scalar [`BinKind`] to the executable [`OpKind`].

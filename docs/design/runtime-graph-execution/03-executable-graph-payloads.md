@@ -34,18 +34,29 @@ structured payloads.
 
 ### Constants
 
-Replace string labels for semantics with:
+String labels must not carry constant semantics. The graph representation now
+uses `ConstValue` for constants:
 
 ```text
-ConstPayload::U64(u64)
-ConstPayload::Bool(bool)
-ConstPayload::String(interned/string handle)
-ConstPayload::Unit
-ConstPayload::Bytes/blob handle, later
+ConstValue::U64(u64)
+ConstValue::Bool(bool)
+ConstValue::Str(String)
+ConstValue::Unit
+ConstValue::Float(String)
+ConstValue::Unsupported(String)
 ```
 
-The core stepper should not parse labels like `"42"` or `"true"` once structured
-constants exist.
+`vx-runtime-core` and executable lowering consume those payloads directly. They
+do not parse labels like `"42"` or `"true"`. The analyzer is still allowed to
+parse VIR literals while translating source into graph nodes.
+
+Current limits:
+
+- Float literals are structured but not executable in core yet.
+- Unsupported literal spellings stay explicit as graph payloads instead of
+  silently becoming display-label semantics.
+- Strings are represented as graph constants, but the broader string/method
+  runtime remains part of the pure-execution phase.
 
 ### Lazy data
 
