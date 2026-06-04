@@ -223,6 +223,14 @@ Already conceptually present in driver. Every node has:
 
 This is Tier 1 in-memory memo for one run.
 
+Current progress:
+
+- `vx-runtime-driver` now represents this tier as explicit per-node memo state:
+  `InProgress`, `Ready(NodeOutput)`, or `Poison(CorePoison)`.
+- Driver tests assert that a demanded bomb memoizes poison, and that a boundary
+  request does not leave its node stuck `InProgress` before boundary
+  materialization seeds the result.
+
 ### 2. Function-call memo
 
 Key:
@@ -292,8 +300,11 @@ Newly green boundary payloads:
   graph values.
 - `where` capability requests lower to graph boundary nodes with typed
   capability metadata and materialize by selecting an advertised provider.
+- Per-run node memo is explicit driver state for in-progress, ready, and poisoned
+  nodes.
 
-No input-keyed L1/L2 cache has been implemented in this checkpoint.
+No function-call memo or input-keyed L1/L2 cache has been implemented in this
+checkpoint.
 
 ## Acceptance criteria
 

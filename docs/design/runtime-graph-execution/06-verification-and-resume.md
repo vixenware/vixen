@@ -138,10 +138,12 @@ Latest focused verification:
   1/1 passed.
 - `cargo nextest run -p vx-runtime -E 'binary(cc_probe) | binary(hello_world)' --no-fail-fast`:
   2/2 passed.
+- `cargo nextest run -p vx-runtime-driver --no-fail-fast`: 4/4 passed,
+  including poison memoization and boundary in-progress cleanup.
 - `cargo nextest run -p vx-runtime --no-fail-fast`: 135 run, 135 passed,
   0 failed, 0 skipped.
 - `cargo nextest run -p vx-runtime-graph -p vx-runtime-core -p vx-runtime-driver -p vx-runtime --no-fail-fast`:
-  142 run, 142 passed, 0 skipped.
+  144 run, 144 passed, 0 skipped.
 - The forbidden-symbol scan over `vx-runtime-core` and `vx-runtime-driver`
   returns no matches.
 - The deleted tree-walker affordance scan over `vx-runtime/src` returns no

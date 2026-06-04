@@ -47,6 +47,20 @@ NodeOutput {
 }
 ```
 
+Current progress:
+
+- `vx-runtime-driver` stores an explicit per-node memo state:
+  `InProgress`, `Ready(NodeOutput)`, or `Poison(CorePoison)`.
+- Core still sees only a snapshot of ready node outputs through `ReadyInputs`;
+  in-progress and poisoned memo entries are not presented as ready values.
+- A demanded poison is memoized at the detonating node. Re-demanding that node
+  returns the memoized poison instead of recomputing the node.
+- Boundary requests clear the requesting node's `InProgress` state before
+  returning to the graph executor, so legal boundary materialization can seed the
+  node and resume the same demand.
+- `Value` and `Thunk` remain public/API-edge shapes. They are not used as the
+  driver memo currency.
+
 Things to remove from execution:
 
 - expression-capturing thunks (deleted in the demolition checkpoint)

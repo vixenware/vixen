@@ -79,9 +79,23 @@ pub enum DriverError {
     Stalled(NodeId),
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum MemoState {
+    InProgress,
+    Ready,
+    Poison,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+enum NodeMemo {
+    InProgress,
+    Ready(NodeOutput),
+    Poison(CorePoison),
+}
+
 pub struct Driver {
     graph: DemandGraph,
-    memo: HashMap<NodeId, NodeOutput>,
+    memo: HashMap<NodeId, NodeMemo>,
     kernel_executions: u64,
 }
 
@@ -95,12 +109,12 @@ impl Driver {
     }
 
     pub fn with_seed(mut self, node: NodeId, output: NodeOutput) -> Self {
-        self.memo.insert(node, output);
+        self.seed(node, output);
         self
     }
 
     pub fn seed(&mut self, node: NodeId, output: NodeOutput) {
-        self.memo.insert(node, output);
+        self.memo.insert(node, NodeMemo::Ready(output));
     }
 
     pub fn push_node(&mut self, kind: NodeKind, label: String, inputs: Vec<NodeId>) -> NodeId {
@@ -121,7 +135,10 @@ impl Driver {
     }
 
     pub fn output(&self, node: NodeId) -> Option<&NodeOutput> {
-        self.memo.get(&node)
+        match self.memo.get(&node) {
+            Some(NodeMemo::Ready(output)) => Some(output),
+            Some(NodeMemo::InProgress | NodeMemo::Poison(_)) | None => None,
+        }
     }
 
     pub fn drive(&mut self, request: DemandRequest) -> Result<NodeOutput, DriverError> {
@@ -133,17 +150,30 @@ impl Driver {
         self.memo.contains_key(&node)
     }
 
+    pub fn memo_state(&self, node: NodeId) -> Option<MemoState> {
+        self.memo.get(&node).map(|memo| match memo {
+            NodeMemo::InProgress => MemoState::InProgress,
+            NodeMemo::Ready(_) => MemoState::Ready,
+            NodeMemo::Poison(_) => MemoState::Poison,
+        })
+    }
+
     pub fn kernel_executions(&self) -> u64 {
         self.kernel_executions
     }
 
     fn resolve_node(&mut self, node: NodeId) -> Result<NodeOutput, DriverError> {
-        if let Some(output) = self.memo.get(&node) {
-            return Ok(output.clone());
+        match self.memo.get(&node) {
+            Some(NodeMemo::Ready(output)) => return Ok(output.clone()),
+            Some(NodeMemo::Poison(poison)) => return Err(DriverError::Poison(poison.clone())),
+            Some(NodeMemo::InProgress) => return Err(DriverError::Stalled(node)),
+            None => {}
         }
 
+        self.memo.insert(node, NodeMemo::InProgress);
         loop {
-            let step = vx_runtime_core::step(&self.graph, node, ReadyInputs::new(&self.memo));
+            let ready_inputs = self.ready_outputs();
+            let step = vx_runtime_core::step(&self.graph, node, ReadyInputs::new(&ready_inputs));
             match step {
                 Step::Ready(output) => {
                     if self
@@ -154,15 +184,19 @@ impl Driver {
                     {
                         self.kernel_executions += 1;
                     }
-                    self.memo.insert(node, output.clone());
+                    self.memo.insert(node, NodeMemo::Ready(output.clone()));
                     return Ok(output);
                 }
                 Step::Need(NeedSet::Nodes(nodes)) => {
                     if nodes.is_empty() {
+                        self.clear_in_progress(node);
                         return Err(DriverError::Stalled(node));
                     }
                     for needed in nodes {
-                        self.resolve_node(needed)?;
+                        if let Err(error) = self.resolve_node(needed) {
+                            self.clear_in_progress(node);
+                            return Err(error);
+                        }
                     }
                 }
                 Step::Catch(req) => match self.resolve_node(req.input) {
@@ -170,18 +204,46 @@ impl Driver {
                     Err(DriverError::Poison(poison)) => {
                         self.memo.insert(
                             req.caught_failure,
-                            NodeOutput::Failure {
+                            NodeMemo::Ready(NodeOutput::Failure {
                                 err: poison.err,
                                 context: poison.context,
-                            },
+                            }),
                         );
                     }
-                    Err(other) => return Err(other),
+                    Err(other) => {
+                        self.clear_in_progress(node);
+                        return Err(other);
+                    }
                 },
-                Step::Boundary(req) => return Err(DriverError::Boundary(req.node)),
-                Step::Poison(poison) => return Err(DriverError::Poison(poison)),
-                Step::Unsupported(reason) => return Err(DriverError::Unsupported(reason)),
+                Step::Boundary(req) => {
+                    self.clear_in_progress(node);
+                    return Err(DriverError::Boundary(req.node));
+                }
+                Step::Poison(poison) => {
+                    self.memo.insert(node, NodeMemo::Poison(poison.clone()));
+                    return Err(DriverError::Poison(poison));
+                }
+                Step::Unsupported(reason) => {
+                    self.clear_in_progress(node);
+                    return Err(DriverError::Unsupported(reason));
+                }
             }
+        }
+    }
+
+    fn ready_outputs(&self) -> HashMap<NodeId, NodeOutput> {
+        self.memo
+            .iter()
+            .filter_map(|(&node, memo)| match memo {
+                NodeMemo::Ready(output) => Some((node, output.clone())),
+                NodeMemo::InProgress | NodeMemo::Poison(_) => None,
+            })
+            .collect()
+    }
+
+    fn clear_in_progress(&mut self, node: NodeId) {
+        if matches!(self.memo.get(&node), Some(NodeMemo::InProgress)) {
+            self.memo.remove(&node);
         }
     }
 }
@@ -213,5 +275,48 @@ mod tests {
             DriverError::Poison(p) => assert_eq!(p.node, NodeId(1)),
             other => panic!("expected poison, got {other:?}"),
         }
+    }
+
+    #[test]
+    fn demanded_bomb_memoizes_poison() {
+        let graph = vx_runtime_graph::example_bomb_pair();
+        let mut driver = Driver::new(graph);
+        let first = driver
+            .drive(DemandRequest::test_probe(NodeId(1)))
+            .expect_err("first bomb demand poisons");
+        assert_eq!(driver.memo_state(NodeId(1)), Some(MemoState::Poison));
+
+        let second = driver
+            .drive(DemandRequest::test_probe(NodeId(1)))
+            .expect_err("memoized bomb demand poisons again");
+        assert_eq!(second, first);
+    }
+
+    #[test]
+    fn boundary_request_does_not_leave_node_in_progress() {
+        let graph = DemandGraph {
+            nodes: vec![Node {
+                id: NodeId(0),
+                kind: NodeKind::Boundary,
+                span: None,
+                label: "boundary".to_string(),
+                ty: "?".to_string(),
+                inputs: Vec::new(),
+            }],
+            root: NodeId(0),
+        };
+        let mut driver = Driver::new(graph);
+        assert_eq!(
+            driver.drive(DemandRequest::root(NodeId(0))),
+            Err(DriverError::Boundary(NodeId(0)))
+        );
+        assert_eq!(driver.memo_state(NodeId(0)), None);
+
+        driver.seed(NodeId(0), NodeOutput::Unit);
+        assert_eq!(
+            driver.drive(DemandRequest::root(NodeId(0))),
+            Ok(NodeOutput::Unit)
+        );
+        assert_eq!(driver.memo_state(NodeId(0)), Some(MemoState::Ready));
     }
 }
