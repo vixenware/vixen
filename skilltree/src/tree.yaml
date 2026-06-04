@@ -1,367 +1,409 @@
-# Vixen skill tree — the AWS funding map
+# Vixen skill tree — the road to Vixen Build's full vision (for AWS)
 #
-# Audience: AWS (Rust build performance pain, CI + dev workstations; Linux now,
-# macOS present, Windows by next year). Prior attempts there: Bazel, a bespoke
-# system (Argon, scrapped), and sccache today — useful but can't reuse cache
-# across larger swathes of the build graph.
+# Audience: AWS. Rust build performance pain, CI + dev workstations. Linux now,
+# macOS present, Windows by next year. Prior attempts there: Bazel, a bespoke
+# system (Argon, scrapped), sccache today (useful, can't reuse across larger
+# swathes of the graph).
 #
-# The tree reads left -> right: foundations -> de-risking work -> the three
-# fundable "interesting points":
-#   1. contrib-funded      targeted upstream contributions (lowest trust needed)
-#   2. ccc-funded          cargo-cloud-cache proves value vs sccache (Phase 1)
-#   3. vixen-build-funded  Vixen Build funded at AWS scale (the long game)
+# The MAIN lane is Vixen Build to its full vision. The money shot for Amazon:
+# replace a crate's build.rs with a Vixen build file, then cache the ENTIRE
+# aws-sdk build. Plus "caching in general" and "remote build execution".
 #
-# `payoff` on each node is framed as "why AWS cares" — tie to sccache's ceiling,
-# Celina's kill-on-arrival concerns, Jess's "show me something concrete", and the
-# don't-be-another-Argon credibility problem.
+# RDR / upstream patches are a SEPARATE minor lane (teal) — fundable on their
+# own, not on the Vixen Build critical path.
 #
-# NOTE: several nodes are flagged [CONFIRM] in their detail — Amos to correct
-# scope/status. Status values: done | in_progress | planned | idea.
+# Status reflects Amos's read of reality:
+#   done         shipped / solid
+#   in_progress  actively being built right now
+#   planned      known, not started yet
+#   idea         not started AND the approach is still open
+#
+# Reads left -> right: language/runtime -> exec engine -> caching + cargo
+# semantics -> the money shots -> Vixen Build funded at AWS.
+#
+# Nodes flagged [CONFIRM] need Amos to correct scope/status/placement.
 
 meta:
   title: Vixen — Skill Tree
-  subtitle: Paths to AWS funding — targeted contributions, cargo-cloud-cache (Phase 1), and Vixen Build
+  subtitle: The road to Vixen Build's full vision — replace build scripts, cache the whole aws-sdk, build remotely (the AWS funding map)
 
 categories:
   foundation:
-    label: Foundation
+    label: Language & runtime
     color: "#5b8def"
-  contrib:
-    label: Targeted contribution
-    color: "#4cc9b0"
-  ccc:
-    label: cargo-cloud-cache (Phase 1)
+  exec:
+    label: Execution engine
     color: "#ff7a45"
-  derisk:
-    label: De-risk (kill-on-arrival)
+  cache:
+    label: Caching
     color: "#e5544b"
-  build:
-    label: Vixen Build (long game)
+  cargo:
+    label: Cargo in Vixen
     color: "#c792ea"
-  proof:
-    label: Proof / funding
+  moneyshot:
+    label: Money shot / proof
     color: "#ffd166"
+  contrib:
+    label: Upstream contributions (side lane)
+    color: "#4cc9b0"
 
 nodes:
-  # ---------------------------------------------------------------- foundations
+  # ---------------------------------------------------- language & runtime
   - id: lang-frontend
     title: Language front-end
     status: done
     category: foundation
-    summary: Parser, IR, type & capability checking — the VIR front-end.
+    summary: Parser, IR, types, capabilities — plus a lot of language support.
     detail: >
-      build / type_collect / resolve / type_check / cap_check / capture. It stays;
-      only the evaluator back-end is being replaced. [CONFIRM status=done]
-    payoff: A real typed language with a real front-end signals this isn't a weekend toy.
+      The VIR front-end (build / type_collect / resolve / type_check / cap_check /
+      capture) and much of the language support is in place. It stays; only the
+      evaluator back-end is being replaced.
+    payoff: A real typed language with a real front-end — this isn't a weekend toy.
 
   - id: demand-runtime
     title: Demand-driven runtime
     status: in_progress
     category: foundation
-    summary: Lazy demand sea + eager kernel islands; no tree-walker.
+    summary: Lazy demand sea, eager kernel islands — no tree-walker.
     detail: >
       Values are node references; forcing is the only way a scalar appears; commands
-      run on executors; everything content-addressed. Mid-rebuild (old eager
-      evaluator being removed).
-    payoff: Demand-driven + content-addressed evaluation is the bet that makes
-      correct cross-graph cache reuse possible at all — the thing sccache can't do.
+      run on executors; everything is content-addressed. Mid-rebuild (the old eager
+      evaluator is being removed).
+    payoff: Demand-driven evaluation is the bet that makes correct cache reuse across
+      the graph possible at all — the thing sccache structurally cannot do.
+    requires: [lang-frontend]
 
+  - id: intrinsic-http
+    title: HTTP fetch intrinsic
+    status: planned
+    category: foundation
+    summary: Fetch crates and sources from the network. Not started.
+    detail: >
+      A Rust intrinsic for HTTP fetching, so the build graph can acquire registry
+      indexes, crate tarballs, and toolchains.
+    payoff: No real Rust build without fetching dependencies — a hard prerequisite
+      for doing cargo's job inside Vixen.
+    requires: [demand-runtime]
+
+  - id: intrinsic-deser
+    title: JSON / YAML / TOML deserialize
+    status: planned
+    category: foundation
+    summary: Read Cargo.toml, Cargo.lock, registry JSON. Not started.
+    detail: >
+      Structured deserialization intrinsics (facet-based) so the build can read
+      manifests, lockfiles, and registry metadata as typed values.
+    payoff: Cargo's whole input is TOML + registry JSON. Can't model a cargo build
+      without parsing them into the graph.
+    requires: [demand-runtime]
+
+  - id: intrinsic-pubgrub
+    title: Dependency resolution (pubgrub)
+    status: planned
+    category: foundation
+    summary: Version solving over the dependency graph. Not started.
+    detail: >
+      A pubgrub-style resolver so Vixen can compute the same dependency graph cargo
+      would, from manifests + lockfile.
+    payoff: Getting the resolved graph exactly right is what makes a Vixen build of a
+      real workspace match cargo's — and therefore trustworthy.
+    requires: [demand-runtime, intrinsic-deser]
+
+  # ---------------------------------------------------------- execution engine
   - id: exec
     title: exec — the build primitive
     status: in_progress
-    category: foundation
-    summary: Run a discovered tool in a sandbox; output crosses back as a tree.
+    category: exec
+    summary: Run a tool in a sandbox; output crosses back as a tree. Actively building.
     detail: >
-      The single build primitive: ship a payload to an executor, run it sandboxed,
-      evaluate the observer locally, return only produced values. [CONFIRM status]
-    payoff: One auditable primitive for "run a compiler step" is what makes
-      placement, sandboxing, and cache keys uniform instead of ad hoc.
+      The single build primitive, being done right now. Involves structured
+      commands, merkle trees, closure shipping, streams, and remote handles —
+      ship a payload to an executor, run it sandboxed, return only produced values.
+    payoff: One auditable primitive for every compiler step makes placement,
+      sandboxing, and cache keys uniform instead of ad hoc.
     requires: [demand-runtime]
 
-  - id: cache-store
-    title: Content-addressed store
+  - id: merkle-trees
+    title: Merkle trees
     status: in_progress
-    category: foundation
-    summary: The shared cache backend (vx-store) both products read/write.
+    category: exec
+    summary: Content-addressed tree hashing for inputs and outputs.
     detail: >
-      Storage infrastructure, separate from any execution model — CCC and Vixen
-      Build can both hit it. [CONFIRM status / how far vx-store is]
-    payoff: A real content-addressed store is the substrate for "never rebuild what
-      someone already built" — and for on-prem mirrors AWS will require.
+      Build inputs and outputs are merkle trees — content-addressed, so identity is
+      a hash and equality is cheap.
+    payoff: Content addressing is the foundation of "never rebuild what someone
+      already built" — and of correct, shareable cache keys.
     requires: [demand-runtime]
+
+  - id: closure-shipping
+    title: Closure shipping
+    status: in_progress
+    category: exec
+    summary: Ship a computation to a remote executor.
+    detail: >
+      Serialize and ship a closure (the work to run) to an executor elsewhere, so
+      the same build step can run off-machine.
+    payoff: The mechanism behind remote build execution — move the work to where the
+      capacity (or the toolchain) is.
+    requires: [exec]
+
+  - id: streams
+    title: Streams
+    status: in_progress
+    category: exec
+    summary: Stream command output as it is produced.
+    detail: A command's output stream is a real value that crosses back as it runs.
+    payoff: Live build output and pipelined consumption — not a black box that
+      returns only when finished.
+    requires: [exec]
+
+  - id: remote-handles
+    title: Remote handles
+    status: in_progress
+    category: exec
+    summary: Values that are handles to remotely-produced trees.
+    detail: >
+      A produced tree can stay on the executor and cross back as a handle, pulled
+      lazily over a virtual connection only when forced.
+    payoff: Lets large artifacts live where they were built instead of being copied
+      everywhere — essential for distributed builds to be fast.
+    requires: [exec, closure-shipping]
 
   - id: control-plane
     title: Runners + control plane
     status: planned
-    category: foundation
-    summary: Long-lived capability-advertising executor daemons; predicate placement.
+    category: exec
+    summary: Capability-advertising executor daemons; predicate placement.
     detail: >
-      Executors detect what their host has installed and advertise it; the
-      orchestrator places each exec by predicate. Local orchestrator + LAN
-      executors must work with no cloud at all.
-    payoff: Distributes build work across CI + dev machines without GitHub-runner
-      ephemerality — and runs fully on-prem, which AWS will demand.
+      Long-lived executor daemons detect what their host has installed and advertise
+      it; the orchestrator places each exec by predicate. Must work fully local
+      (LAN executors, no cloud).
+    payoff: Turns CI + dev machines into one build fabric — and runs fully on-prem,
+      which AWS will require.
     requires: [exec]
 
-  # ---------------------------------------------------- targeted contributions
+  - id: remote-execution
+    title: Remote build execution
+    status: planned
+    category: exec
+    summary: Run real build steps on remote executors.
+    detail: >
+      Closure shipping + remote handles + the control plane, composed — place build
+      steps on other machines and pull results back lazily.
+    payoff: A money shot AWS named directly. Spread a build across a fleet instead of
+      hammering one workstation or one CI runner.
+    requires: [remote-handles, control-plane]
+
+  # ----------------------------------------------------------------- caching
+  - id: durable-fn-cache
+    title: Durable function-invocation cache
+    status: idea
+    category: cache
+    summary: Cache invocations durably — not just in-memory in an executor.
+    detail: >
+      A scheme to cache function invocations durably across runs and machines,
+      rather than only as in-memory memo state inside one executor. The approach is
+      still up in the air.
+    payoff: This is "caching in general" — the thing that makes a second build, on a
+      second machine, nearly free. The core of the whole value proposition.
+    requires: [merkle-trees, exec]
+
+  - id: coarse-fine-key
+    title: Coarse / fine cache key
+    status: idea
+    category: cache
+    summary: Reconcile workspace-level input hashes with what actually changed.
+    detail: >
+      The contradiction to solve. If the whole workspace changes, the coarse input
+      hash changes — do we rerun? It depends. The previous cache key knows which
+      keys actually changed; if those files are still the same, we skip the build.
+    payoff: Solving this is what separates "fast when nothing changed" from "fast
+      when one file in a huge workspace changed" — exactly AWS's daily case.
+    requires: [durable-fn-cache]
+
+  - id: store-tiers
+    title: Store tiers
+    status: idea
+    category: cache
+    summary: Tiered content-addressed storage. Not started.
+    detail: Local / shared / remote tiers of the content store, with promotion between them.
+    payoff: Big artifacts need a storage hierarchy that's fast locally and shared
+      across the org — the substrate for cross-machine reuse.
+    requires: [durable-fn-cache]
+
+  - id: on-prem
+    title: On-prem deployment
+    status: idea
+    category: cache
+    summary: Run the store + registry inside AWS infra. Not started.
+    detail: >
+      [CONFIRM exact AWS constraints] Self-hosted store/registry, no third-party
+      cloud in the path. Vixen must be fully usable with no commercial cloud.
+    payoff: AWS will not ship build artifacts to an outside cloud. On-prem is table
+      stakes, not a later tier.
+    requires: [store-tiers]
+
+  # -------------------------------------------------------------- cargo in vixen
+  - id: cargo-build-semantics
+    title: Cargo-build semantics in Vixen
+    status: planned
+    category: cargo
+    summary: Define what "build this cargo workspace" means in Vixen. Not started.
+    detail: >
+      Actually defining the semantics of a cargo build inside Vixen — profiles,
+      features, units, the compile graph — driven by the resolved dependency graph.
+    payoff: The bridge from "interesting language" to "builds the Rust code AWS
+      actually has". Nothing about Rust matters to them until this exists.
+    requires: [intrinsic-http, intrinsic-deser, intrinsic-pubgrub]
+
+  - id: build-script-replacement
+    title: Replace build.rs with a Vixen file
+    status: planned
+    category: cargo
+    summary: Swap a crate's build script for a pure, cacheable Vixen build file.
+    detail: >
+      Replace a crate's build.rs with a Vixen build file — turning an opaque,
+      side-effecting script into a pure, content-addressed, cacheable graph node.
+    payoff: Build scripts are the wall sccache hits. Replacing them is precisely what
+      lets the cache cover the parts of the graph it currently can't.
+    requires: [cargo-build-semantics]
+
+  - id: fixup-distribution
+    title: Fixup distribution
+    status: planned
+    category: cargo
+    summary: Distribute Vixen build-file replacements ("fixups") for crates.
+    detail: >
+      A way to author and distribute the Vixen build-file replacements for crates
+      whose build scripts need fixing up — a shared, reusable set of fixups.
+    payoff: One fixup, written once, makes every consumer of that crate cacheable.
+      How the build-script win scales across a whole dependency tree.
+    requires: [build-script-replacement]
+
+  - id: proc-macros
+    title: Proc-macro support
+    status: planned
+    category: cargo
+    summary: Procedural macros compiled and cached correctly.
+    detail: Celina's concern — proc macros are compiled host code inside the graph.
+    payoff: Ubiquitous in AWS's Rust. A build system that can't handle them isn't a
+      Rust build system.
+    requires: [cargo-build-semantics]
+
+  - id: native-deps
+    title: Native dependencies
+    status: planned
+    category: cargo
+    summary: C / system libraries, -sys crates, linkers, sysroots.
+    detail: >
+      Celina's concern — native deps drag in host toolchains and absolute paths.
+      Ties to hermetic vs host-present toolchains and to build-script replacement.
+    payoff: AWS's real graphs aren't pure Rust. Native deps are where naive build
+      systems lose correctness — getting them right is a credibility proof.
+    requires: [cargo-build-semantics]
+
+  - id: private-registries
+    title: Private registries
+    status: planned
+    category: cargo
+    summary: Resolve and cache from internal / private crate registries.
+    detail: Celina's concern — AWS uses private registries, not just crates.io.
+    payoff: No enterprise build runs against crates.io alone. Must speak their registry.
+    requires: [cargo-build-semantics, intrinsic-http]
+
+  - id: platforms
+    title: Linux + macOS + Windows
+    status: planned
+    category: cargo
+    summary: Linux now, macOS present, Windows by next year.
+    detail: AWS — Linux is the main platform, macOS very present, Windows likely required next year.
+    payoff: Matches AWS's actual platform matrix. Windows on the roadmap shows we
+      build for their reality, not just ours.
+    requires: [cargo-build-semantics]
+
+  # ----------------------------------------------------------- money shots / proof
+  - id: cache-aws-sdk
+    title: Cache the entire aws-sdk build
+    status: idea
+    category: moneyshot
+    summary: The Amazon money shot — fix the build scripts, cache the whole thing.
+    detail: >
+      Replace the aws-sdk crates' build scripts with Vixen build files and cache the
+      entire aws-sdk build end to end. The concrete, undeniable demonstration.
+    payoff: This is THE money shot for Amazon — a giant, build-script-heavy workspace
+      they know intimately, suddenly cacheable. Hard to argue with.
+    requires: [fixup-distribution, durable-fn-cache, coarse-fine-key]
+
+  - id: remote-build-demo
+    title: Remote build execution demo
+    status: idea
+    category: moneyshot
+    summary: Build a real Rust workspace across a fleet of machines.
+    detail: Drive a real cargo-shaped build with steps placed on remote executors.
+    payoff: The second money shot AWS named — turn CI + idle dev machines into one
+      build fabric, off the single-workstation critical path.
+    requires: [remote-execution, cargo-build-semantics]
+
+  - id: concrete-proof
+    title: Concrete proof of value
+    status: idea
+    category: moneyshot
+    summary: The runnable "show me something real" Jess asked for.
+    detail: >
+      [CONFIRM target workspace + metric] A reproducible artifact a skeptic can run —
+      not slides — showing the speedup on an AWS-representative workload.
+    payoff: Jess asked for something concrete that proves the value. This is what
+      converts post-Argon skepticism into a funded milestone.
+    requires: [cache-aws-sdk]
+
+  - id: proven-at-scale
+    title: Proven at AWS scale
+    status: idea
+    category: moneyshot
+    summary: Clears the real concerns on AWS's real graphs and platforms.
+    detail: >
+      The collaboration half of the ask — AWS feedback on whether it works at scale,
+      with every kill-on-arrival concern answered.
+    payoff: Collaboration AWS values as much as money, and the only way to know Vixen
+      Build survives contact with a graph their size.
+    requires: [concrete-proof, remote-build-demo, proc-macros, native-deps, private-registries, platforms, on-prem]
+
+  - id: vixen-build-funded
+    title: Vixen Build funded at AWS
+    status: idea
+    category: moneyshot
+    summary: The full vision — funded, on-prem, cross-platform, proven.
+    detail: The capstone — AWS funds Vixen Build as the path past sccache.
+    payoff: The outcome the whole map builds toward, because every concern has a
+      concrete answer and the aws-sdk demo already happened.
+    requires: [proven-at-scale]
+
+  # -------------------------------------------------- upstream contributions (side lane)
   - id: rdr
     title: RDR
     status: planned
     category: contrib
-    summary: Targeted upstream contribution named in the AWS call.
+    summary: A targeted upstream contribution named in the AWS call.
     detail: >
-      [CONFIRM] Need the exact expansion/scope of "RDR" from Amos — listed
-      alongside Cargo/rustc/sccache patches as a low-risk fundable contribution.
-    payoff: Incremental upstream work AWS can fund with near-zero trust required —
-      no bespoke system to adopt, immediate value to their existing toolchain.
+      [CONFIRM] Need the exact expansion / scope of "RDR" from Amos — a low-risk
+      upstream contribution, in its own lane, not on the Vixen Build critical path.
+    payoff: Incremental upstream work AWS can fund with near-zero trust — value to
+      their existing toolchain, no new system to adopt.
 
   - id: cargo-rustc-patches
     title: Cargo / rustc / sccache patches
     status: planned
     category: contrib
-    summary: Targeted upstream patches that make Rust builds faster today.
-    detail: >
-      Direct contributions to the tools AWS already runs, fixing concrete
-      build-perf pain without asking them to switch anything.
-    payoff: >
-      The lowest-friction ask: fund work on tools they already trust and run.
-      Proves we can deliver upstream before they bet on anything bigger.
+    summary: Targeted upstream patches that speed up Rust builds today.
+    detail: Direct contributions to the tools AWS already runs, in their own lane.
+    payoff: The lowest-friction ask — fund work on tools they already trust, proving
+      we deliver before any bigger bet.
 
   - id: contrib-funded
-    title: Targeted contributions funded
+    title: Upstream contributions funded
     status: idea
-    category: proof
-    summary: AWS funds upstream RDR + Cargo/rustc/sccache work.
-    detail: The easiest "yes" — no new system to adopt, just paid upstream impact.
-    payoff: First dollars in, relationship established, and a track record that
-      de-risks the larger CCC and Vixen Build asks.
+    category: contrib
+    summary: AWS funds the upstream lane (RDR + patches).
+    detail: A parallel, low-risk funding path that builds the relationship early.
+    payoff: First dollars and a track record, independent of Vixen Build's timeline.
     requires: [rdr, cargo-rustc-patches]
-
-  # --------------------------------------------------------- cargo-cloud-cache
-  - id: ccc-core
-    title: cargo-cloud-cache (CCC)
-    status: planned
-    category: ccc
-    summary: A Cargo fork — the Phase 1 product.
-    detail: >
-      A drop-in Cargo fork that talks to the content-addressed store. The minimal
-      shape that AWS can run on a real workspace. [CONFIRM current state]
-    payoff: Ships as a Cargo fork — adoptable with no workflow change, the opposite
-      of "rewrite your build in a bespoke DSL" (the Argon failure mode).
-    requires: [cache-store]
-
-  - id: ccc-graph-reuse
-    title: Reuse across the graph
-    status: planned
-    category: ccc
-    summary: Hit the cache for larger swathes of the build graph than sccache.
-    detail: >
-      The whole point: avoid rebuilding large portions of the dependency graph,
-      not just individual crate compilations sccache can key on.
-    payoff: This is the exact gap AWS named — sccache helps but can't avoid
-      rebuilding big portions of the graph. Closing it is the headline benchmark.
-    requires: [ccc-core]
-
-  - id: ccc-cross-machine
-    title: Cross-machine cache hits
-    status: planned
-    category: ccc
-    summary: CI and local/dev workstations share one warm cache.
-    detail: >
-      A build on a dev laptop hits artifacts produced in CI (and vice versa) —
-      both halves of AWS's pain (CI + workstation) served by one cache.
-    payoff: Developers stop rebuilding what CI already built. Directly attacks the
-      "local/dev workstation builds are slow" half of the problem.
-    requires: [ccc-graph-reuse]
-
-  - id: absolute-paths
-    title: Absolute-path handling
-    status: planned
-    category: derisk
-    summary: Make cache keys robust to absolute paths in the build.
-    detail: >
-      Celina's concern: absolute paths embedded in compilation leak machine-specific
-      state into artifacts and break cache sharing. [CONFIRM exact failure mode]
-    payoff: A named kill-on-arrival concern. Without it, cross-machine hits silently
-      miss or, worse, return wrong artifacts — answering it builds trust.
-    requires: [ccc-core]
-
-  - id: ccc-on-prem-mirror
-    title: On-prem mirror / deployment
-    status: planned
-    category: derisk
-    summary: Run the cache + registry mirror inside AWS's own infra.
-    detail: >
-      Celina's concern: on-prem mirrors and private deployment. Vixen Build must be
-      fully usable with no commercial cloud. [CONFIRM AWS deployment constraints]
-    payoff: AWS will not send build artifacts to a third-party cloud. On-prem from
-      day one is table stakes, not a later tier.
-    requires: [ccc-core]
-
-  - id: beat-sccache
-    title: "Benchmark: beat sccache"
-    status: planned
-    category: proof
-    summary: Measured cache hits where sccache is forced to rebuild.
-    detail: >
-      A reproducible benchmark on a representative Rust workspace showing CCC
-      reusing graph regions sccache cannot. [CONFIRM target workspace / metric]
-    payoff: A number AWS can verify. Turns "trust us" into "here is the speedup on
-      your kind of workload."
-    requires: [ccc-graph-reuse]
-
-  - id: concrete-demo
-    title: Concrete proof of value
-    status: planned
-    category: proof
-    summary: The "show me something real" Jess asked for.
-    detail: >
-      An end-to-end demo on an AWS-representative project — not slides — that a
-      skeptic can run. [CONFIRM what project / which audience]
-    payoff: Jess explicitly asked for something concrete that proves the value.
-      This is the artifact that converts skepticism into a funded milestone.
-    requires: [beat-sccache]
-
-  - id: ccc-funded
-    title: CCC proves value — funded
-    status: idea
-    category: proof
-    summary: AWS funds cargo-cloud-cache as Phase 1.
-    detail: The wedge lands — a working Cargo fork with a verified speedup, on-prem.
-    payoff: Revenue + a real production user, and the credibility that unlocks the
-      Vixen Build conversation.
-    requires: [concrete-demo, ccc-cross-machine, absolute-paths, ccc-on-prem-mirror]
-
-  # ----------------------------------------------------------- Vixen Build
-  - id: vixen-build-core
-    title: Vixen Build — builds a real project
-    status: planned
-    category: build
-    summary: The demand-driven build system builds a non-trivial Rust workspace.
-    detail: >
-      Beyond caching Cargo: Vixen's own build graph driving a real end-to-end build.
-      [CONFIRM how close this is]
-    payoff: The long game — a build system that's correct and distributed by
-      construction, not a cache bolted onto Cargo.
-    requires: [exec, cache-store]
-
-  - id: distributed-build
-    title: Distributed execution
-    status: idea
-    category: build
-    summary: Place build work across CI + dev machines via the control plane.
-    detail: Orchestrator places each exec on advertised executors, local or remote.
-    payoff: Turns a pool of machines into one build fabric — the structural win over
-      per-job CI runners and single-machine builds.
-    requires: [control-plane, vixen-build-core]
-
-  - id: build-scripts
-    title: build.rs support
-    status: planned
-    category: derisk
-    summary: Handle build scripts correctly under caching/distribution.
-    detail: Celina's concern — build scripts run arbitrary code with side effects.
-    payoff: Real Rust workspaces are full of build.rs. If these break or mis-cache,
-      Vixen Build is dead on arrival at AWS.
-    requires: [vixen-build-core]
-
-  - id: proc-macros
-    title: Proc-macro support
-    status: planned
-    category: derisk
-    summary: Procedural macros compiled and cached correctly.
-    detail: Celina's concern — proc macros are compiled host code in the graph.
-    payoff: Ubiquitous in AWS's Rust. A build system that can't handle them isn't a
-      Rust build system.
-    requires: [vixen-build-core]
-
-  - id: native-deps
-    title: Native dependencies
-    status: planned
-    category: derisk
-    summary: C/system libraries, -sys crates, linkers, sysroots.
-    detail: >
-      Celina's concern — native deps drag in host toolchains and absolute paths.
-      Ties to hermetic vs host-present toolchain handling.
-    payoff: AWS's real graphs aren't pure Rust. Native deps are where naive build
-      systems lose correctness — getting them right is a credibility proof.
-    requires: [vixen-build-core]
-
-  - id: private-registries
-    title: Private registries
-    status: planned
-    category: derisk
-    summary: Resolve and cache from internal/private crate registries.
-    detail: Celina's concern — AWS uses private registries, not just crates.io.
-    payoff: No enterprise builds against crates.io alone. Must speak their registry.
-    requires: [vixen-build-core]
-
-  - id: cache-correctness
-    title: Cache correctness
-    status: planned
-    category: derisk
-    summary: Read-set validity — never a wrong hit, never a missed invalidation.
-    detail: >
-      Cache key = inputs computed before running; read-set = post-hoc validity, never
-      the key. A wrong cache hit is worse than a slow build.
-    payoff: One incorrect artifact destroys trust permanently. Provable correctness
-      is the single most important thing a skeptic checks.
-    requires: [vixen-build-core]
-
-  - id: fixup-distribution
-    title: Fixup distribution
-    status: planned
-    category: derisk
-    summary: Distributing build fixups / overrides across the fleet.
-    detail: >
-      [CONFIRM] Celina raised "fixup distribution" — need Amos to pin down exactly
-      what this means (build-script fixups? patch/override propagation?).
-    payoff: A concern AWS named directly; answering it specifically shows we listened.
-    requires: [vixen-build-core]
-
-  - id: platforms
-    title: Linux + macOS + Windows
-    status: planned
-    category: derisk
-    summary: Linux now, macOS present, Windows by next year.
-    detail: >
-      AWS: Linux is the main platform, macOS very present, Windows most likely
-      required next year.
-    payoff: Matches AWS's actual platform matrix. Windows on the roadmap signals we
-      build for their reality, not just ours.
-    requires: [vixen-build-core]
-
-  - id: not-another-argon
-    title: Not another Argon
-    status: idea
-    category: proof
-    summary: Overcome bespoke-build-system skepticism — by having shipped CCC first.
-    detail: >
-      AWS scrapped a bespoke system (Argon); they are rightly wary. The answer is
-      sequencing: CCC ships and proves value before Vixen Build is asked for.
-    payoff: Reframes Vixen Build from "trust our new system" to "the team that
-      already shipped you a working speedup is now going further."
-    requires: [ccc-funded]
-
-  - id: prove-at-scale
-    title: Proven at AWS scale
-    status: idea
-    category: proof
-    summary: Vixen Build clears the real concerns on a real AWS workload.
-    detail: >
-      The collaboration half of the ask: AWS feedback on whether it works at scale,
-      across their actual graphs and platforms.
-    payoff: Collaboration AWS values as much as money — and the only way to know
-      Vixen Build survives contact with a graph their size.
-    requires: [build-scripts, proc-macros, native-deps, cache-correctness, distributed-build]
-
-  - id: vixen-build-funded
-    title: Vixen Build funded at AWS
-    status: idea
-    category: proof
-    summary: The long game lands — funded, on-prem, cross-platform, proven.
-    detail: The capstone — Vixen Build adopted and funded as the path past sccache.
-    payoff: >
-      The outcome the whole tree builds toward: AWS funding the demand-driven
-      build system because every kill-on-arrival concern has a concrete answer.
-    requires: [prove-at-scale, not-another-argon, platforms, private-registries, ccc-on-prem-mirror]
