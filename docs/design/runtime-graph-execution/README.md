@@ -86,6 +86,7 @@ Expected latest structural checkpoint:
 - Closure literals and named functions used as values produce source-blind graph
   `Closure` nodes and known closure/function-value calls expand into graph nodes
   at analysis time.
+- `String.len()` executes through source-blind graph `KernelOp::StrLen`.
 - `vx-runtime-driver` reports graph kernel executions for the transitional
   public dispatch counter.
 - `graph_exec` can expose graph-root lazy arrays/tuples as old public `Value`

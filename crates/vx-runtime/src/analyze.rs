@@ -288,6 +288,35 @@ impl Builder<'_> {
             .collect()
     }
 
+    fn method_kernel_call(
+        &mut self,
+        callee: ExprId,
+        arg_exprs: &[ExprId],
+        span: Span,
+    ) -> Option<NodeId> {
+        if !arg_exprs.is_empty() {
+            return None;
+        }
+        let ExprKind::Field(field) = &self.program.arena[callee].kind else {
+            return None;
+        };
+        let FieldKey::Name(name) = &field.field else {
+            return None;
+        };
+        match name.as_str() {
+            "len" => {
+                let receiver = self.walk(field.receiver);
+                Some(self.emit(
+                    NodeKind::Kernel(KernelOp::StrLen),
+                    ".len()".into(),
+                    span,
+                    vec![receiver],
+                ))
+            }
+            _ => None,
+        }
+    }
+
     fn callable_template(&mut self, callee: ExprId) -> Option<CallableTemplate> {
         let node = self.walk(callee);
         self.callables.get(&node).cloned()
@@ -516,6 +545,11 @@ impl Builder<'_> {
                     _ => "call".to_string(),
                 };
                 let arg_exprs: Vec<ExprId> = c.args.iter().map(|a| a.expr).collect();
+
+                if let Some(method_node) = self.method_kernel_call(callee, &arg_exprs, span) {
+                    self.memo.insert(e, method_node);
+                    return method_node;
+                }
 
                 match callee_name.as_str() {
                     "assert" => {

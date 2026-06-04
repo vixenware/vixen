@@ -35,6 +35,7 @@ pub enum KernelOp {
     Bin(BinKind),
     Not,
     If,
+    StrLen,
     Assert,
     AssertEq,
     Opaque,

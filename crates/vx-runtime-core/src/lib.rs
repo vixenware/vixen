@@ -180,6 +180,18 @@ fn kernel(
                 None => Step::Need(NeedSet::Nodes(vec![selected])),
             }
         }
+        KernelOp::StrLen => {
+            let Some(&receiver) = raw_inputs.first() else {
+                return unsupported(node, "string length kernel needs one receiver");
+            };
+            let Some(output) = inputs.get(receiver) else {
+                return Step::Need(NeedSet::Nodes(vec![receiver]));
+            };
+            match output {
+                NodeOutput::Str(s) => Step::Ready(NodeOutput::U64(s.len() as u64)),
+                _ => unsupported(node, "string length kernel needs string receiver"),
+            }
+        }
         KernelOp::Assert => {
             let Some(&condition) = raw_inputs.first() else {
                 return unsupported(node, "assert kernel needs one input");

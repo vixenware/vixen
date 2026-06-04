@@ -220,6 +220,12 @@ Pure methods can lower into kernels or pure nodes. Effectful methods become
 boundary nodes. Host methods such as `which`/`exec` are boundary-ish and should
 not be hidden inside source eval.
 
+Current progress:
+
+- `receiver.len()` with no arguments is recognized as graph `KernelOp::StrLen`.
+- Graph core demands only the receiver and returns its byte length when the
+  receiver resolves to `NodeOutput::Str`.
+
 ### Imports
 
 Import payload:
