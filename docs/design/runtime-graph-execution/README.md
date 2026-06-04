@@ -125,6 +125,10 @@ Expected latest structural checkpoint:
   runtime metadata. Demand on that boundary selects an advertised provider,
   demands only provider attributes needed by the predicate, and memoizes the
   selected provider as graph output.
+- Boundary payload demand is tokenized: the driver returns a non-clone
+  `BoundaryDemand` when a boundary is reached, and runtime boundary
+  materializers must borrow that token to create request-shaping payload demands.
+  There is no public free `DemandRequest::boundary_payload(node)` constructor.
 - The old `vx-runtime::eval` source tree-walker and `dispatch.rs` scalar planner
   are deleted. The remaining `Thunk` type is an API-edge graph/native boundary
   wrapper with only `Done`, `Native`, and `Forcing` states; it cannot capture

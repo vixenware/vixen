@@ -57,6 +57,8 @@ Forbidden in `vx-runtime-core` and `vx-runtime-driver`:
 - `legacy_eval`
 - generic `fn force`
 - `.force(`
+- public free boundary-payload demand constructors such as
+  `pub fn boundary_payload`
 
 Some of those names may be valid in analyzer or lowerer modules. They are not
 valid in source-blind execution crates.
@@ -165,9 +167,15 @@ external demand requests. Core can only report `Need(nodes)`; driver decides
 whether satisfying that need is legal in the context of the original external
 demand.
 
+Boundary payload demand is not an ambient constructor. When the driver reaches a
+boundary it returns a non-clone `BoundaryDemand` token. Boundary materialization
+may borrow that token to create request-shaping payload demands with
+`boundary.payload(node)`. Runtime code should not be able to mint
+`BoundaryPayload` demands from a bare `NodeId`.
+
 Do not make `DemandRequest` fields public. Do not add blanket conversion from
-`NodeId` to `DemandRequest`. Do not expose `resolve_node` publicly as a generic
-force operation.
+`NodeId` to `DemandRequest`. Do not expose a free `boundary_payload(node)`
+constructor. Do not expose `resolve_node` publicly as a generic force operation.
 
 ## What counts as failure
 

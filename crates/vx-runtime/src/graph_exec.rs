@@ -6,7 +6,7 @@ use vx_ir::build::VirProgram;
 use vx_ir::ids::{BodyId, PatternId};
 use vx_ir::pattern::PatternKind;
 use vx_runtime_core::{CoreFailureContext, CorePoison, NodeOutput, UnsupportedNode};
-use vx_runtime_driver::{DemandRequest, Driver, DriverError};
+use vx_runtime_driver::{BoundaryDemand, DemandRequest, Driver, DriverError};
 use vx_runtime_graph::{ConstValue, HostMethod, NodeId, NodeKind};
 use vx_types::TypeEnv;
 
@@ -214,7 +214,8 @@ fn drive_graph(
                 unsupported.node, unsupported.reason
             ));
         }
-        Err(DriverError::Boundary(node)) => {
+        Err(DriverError::Boundary(boundary)) => {
+            let node = boundary.node();
             return Err(format!(
                 "graph boundary at node {node:?}: boundary dispatch is not wired yet"
             ));
@@ -238,16 +239,16 @@ fn drive_request(
             driver.drive(request)
         };
         match result {
-            Err(DriverError::Boundary(node)) => {
+            Err(DriverError::Boundary(boundary)) => {
                 if materialize_boundary(
                     Rc::clone(&driver),
                     Rc::clone(&externals),
                     runtime.clone(),
-                    node,
+                    &boundary,
                 )? {
                     continue;
                 }
-                return Ok(Err(DriverError::Boundary(node)));
+                return Ok(Err(DriverError::Boundary(boundary)));
             }
             other => return Ok(other),
         }
@@ -258,8 +259,9 @@ fn materialize_boundary(
     driver: SharedDriver,
     externals: ExternalThunks,
     runtime: RuntimeBoundaries,
-    node: NodeId,
+    boundary: &BoundaryDemand,
 ) -> Result<bool, String> {
+    let node = boundary.node();
     if externals.borrow().contains_key(&node) {
         materialize_external_boundary(driver, externals, runtime, node)?;
         return Ok(true);
@@ -267,12 +269,12 @@ fn materialize_boundary(
 
     let exec = runtime.meta.execs.get(&node).cloned();
     if let Some(exec) = exec {
-        materialize_exec_invocation(driver, externals, runtime, node, &exec)?;
+        materialize_exec_invocation(driver, externals, runtime, boundary, &exec)?;
         return Ok(true);
     }
 
     if runtime.meta.tree_files.contains_key(&node) {
-        materialize_tree_file(driver, externals, runtime, node)?;
+        materialize_tree_file(driver, externals, runtime, boundary)?;
         return Ok(true);
     }
 
@@ -293,7 +295,7 @@ fn materialize_boundary(
         return Ok(false);
     };
 
-    materialize_host_method(driver, externals, runtime, node, method)?;
+    materialize_host_method(driver, externals, runtime, boundary, method)?;
     Ok(true)
 }
 
@@ -322,9 +324,10 @@ fn materialize_exec_invocation(
     driver: SharedDriver,
     externals: ExternalThunks,
     runtime: RuntimeBoundaries,
-    node: NodeId,
+    boundary: &BoundaryDemand,
     invocation: &ExecInvocationMeta,
 ) -> Result<(), String> {
+    let node = boundary.node();
     let client = runtime.exec_client.ok_or_else(|| {
         "a command invocation must run on a strand with an observe executor registered \
          (no executor available)"
@@ -338,12 +341,14 @@ fn materialize_exec_invocation(
         Rc::clone(&driver),
         Rc::clone(&externals),
         runtime.clone(),
+        boundary,
         tool_node,
     )?;
     let tool = tool_request(
         Rc::clone(&driver),
         Rc::clone(&externals),
         runtime.clone(),
+        boundary,
         tool,
     )?;
     let mut args = Vec::with_capacity(rest.len());
@@ -352,6 +357,7 @@ fn materialize_exec_invocation(
             Rc::clone(&driver),
             Rc::clone(&externals),
             runtime.clone(),
+            boundary,
             arg,
         )?);
     }
@@ -437,6 +443,7 @@ fn tool_request(
     driver: SharedDriver,
     externals: ExternalThunks,
     runtime: RuntimeBoundaries,
+    boundary: &BoundaryDemand,
     tool: NodeOutput,
 ) -> Result<ToolRequest, String> {
     let NodeOutput::Struct {
@@ -462,15 +469,17 @@ fn tool_request(
         Rc::clone(&driver),
         Rc::clone(&externals),
         runtime.clone(),
+        boundary,
         command,
     )?;
     let (command_package, command_name) = command_coordinate(
         Rc::clone(&driver),
         Rc::clone(&externals),
         runtime.clone(),
+        boundary,
         command,
     )?;
-    let binary = demand_payload(driver, externals, runtime, binary)?;
+    let binary = demand_payload(driver, externals, runtime, boundary, binary)?;
     let binary = expect_string(binary, "tool `binary`")?;
     Ok(ToolRequest {
         command_package,
@@ -483,6 +492,7 @@ fn command_coordinate(
     driver: SharedDriver,
     externals: ExternalThunks,
     runtime: RuntimeBoundaries,
+    boundary: &BoundaryDemand,
     command: NodeOutput,
 ) -> Result<(String, String), String> {
     let NodeOutput::Struct {
@@ -509,12 +519,13 @@ fn command_coordinate(
             Rc::clone(&driver),
             Rc::clone(&externals),
             runtime.clone(),
+            boundary,
             package,
         )?,
         "tool `command.package`",
     )?;
     let name = expect_string(
-        demand_payload(driver, externals, runtime, name)?,
+        demand_payload(driver, externals, runtime, boundary, name)?,
         "tool `command.name`",
     )?;
     Ok((package, name))
@@ -542,6 +553,7 @@ fn render_cli_arg(
     driver: SharedDriver,
     externals: ExternalThunks,
     runtime: RuntimeBoundaries,
+    boundary: &BoundaryDemand,
     arg: &CliArgTemplate,
 ) -> Result<String, String> {
     let mut rendered = String::new();
@@ -553,6 +565,7 @@ fn render_cli_arg(
                     Rc::clone(&driver),
                     Rc::clone(&externals),
                     runtime.clone(),
+                    boundary,
                     *node,
                 )?;
                 match output {
@@ -572,8 +585,9 @@ fn materialize_tree_file(
     driver: SharedDriver,
     externals: ExternalThunks,
     runtime: RuntimeBoundaries,
-    node: NodeId,
+    boundary: &BoundaryDemand,
 ) -> Result<(), String> {
+    let node = boundary.node();
     let inputs = {
         let driver = driver.borrow();
         driver
@@ -592,6 +606,7 @@ fn materialize_tree_file(
         Rc::clone(&driver),
         Rc::clone(&externals),
         runtime.clone(),
+        boundary,
         *receiver,
     )?;
     if !matches!(receiver_output, NodeOutput::OutputTree) {
@@ -606,7 +621,13 @@ fn materialize_tree_file(
         .copied()
         .ok_or_else(|| format!("tree.file receiver node {receiver:?} has no remote handle"))?;
     let path = expect_string(
-        demand_payload(Rc::clone(&driver), Rc::clone(&externals), runtime, *path)?,
+        demand_payload(
+            Rc::clone(&driver),
+            Rc::clone(&externals),
+            runtime,
+            boundary,
+            *path,
+        )?,
         "tree.file path",
     )?;
     let value = match &*force_remote(handle, PartKey::TreePath(path.clone())) {
@@ -703,9 +724,10 @@ fn materialize_host_method(
     driver: SharedDriver,
     externals: ExternalThunks,
     runtime: RuntimeBoundaries,
-    node: NodeId,
+    boundary: &BoundaryDemand,
     method: HostMethod,
 ) -> Result<(), String> {
+    let node = boundary.node();
     let inputs = {
         let driver = driver.borrow();
         driver
@@ -716,8 +738,8 @@ fn materialize_host_method(
     };
 
     match method {
-        HostMethod::Which => materialize_host_which(driver, externals, runtime, node, inputs),
-        HostMethod::Exec => materialize_host_exec(driver, externals, runtime, node, inputs),
+        HostMethod::Which => materialize_host_which(driver, externals, runtime, boundary, inputs),
+        HostMethod::Exec => materialize_host_exec(driver, externals, runtime, boundary, inputs),
     }
 }
 
@@ -725,9 +747,10 @@ fn materialize_host_which(
     driver: SharedDriver,
     externals: ExternalThunks,
     runtime: RuntimeBoundaries,
-    node: NodeId,
+    boundary: &BoundaryDemand,
     inputs: Vec<NodeId>,
 ) -> Result<(), String> {
+    let node = boundary.node();
     let [receiver, name] = inputs.as_slice() else {
         return Err(format!(
             "host.which graph node expects receiver and name, got {} inputs",
@@ -738,10 +761,17 @@ fn materialize_host_which(
         Rc::clone(&driver),
         Rc::clone(&externals),
         runtime.clone(),
+        boundary,
         *receiver,
     )?)?;
     let name = expect_string(
-        demand_payload(Rc::clone(&driver), Rc::clone(&externals), runtime, *name)?,
+        demand_payload(
+            Rc::clone(&driver),
+            Rc::clone(&externals),
+            runtime,
+            boundary,
+            *name,
+        )?,
         "host.which name",
     )?;
     let path = crate::host::which(&name).ok_or_else(|| format!("host tool `{name}` not found"))?;
@@ -753,9 +783,10 @@ fn materialize_host_exec(
     driver: SharedDriver,
     externals: ExternalThunks,
     runtime: RuntimeBoundaries,
-    node: NodeId,
+    boundary: &BoundaryDemand,
     inputs: Vec<NodeId>,
 ) -> Result<(), String> {
+    let node = boundary.node();
     let [receiver, argv] = inputs.as_slice() else {
         return Err(format!(
             "host.exec graph node expects receiver and argv array, got {} inputs",
@@ -766,12 +797,14 @@ fn materialize_host_exec(
         Rc::clone(&driver),
         Rc::clone(&externals),
         runtime.clone(),
+        boundary,
         *receiver,
     )?)?;
     let argv = demand_payload(
         Rc::clone(&driver),
         Rc::clone(&externals),
         runtime.clone(),
+        boundary,
         *argv,
     )?;
     let fields = expect_array_fields(argv, "host.exec argv")?;
@@ -781,6 +814,7 @@ fn materialize_host_exec(
             Rc::clone(&driver),
             Rc::clone(&externals),
             runtime.clone(),
+            boundary,
             field,
         )?;
         args.push(expect_string(value, "host.exec argv element")?);
@@ -824,14 +858,10 @@ fn demand_payload(
     driver: SharedDriver,
     externals: ExternalThunks,
     runtime: RuntimeBoundaries,
+    boundary: &BoundaryDemand,
     node: NodeId,
 ) -> Result<NodeOutput, String> {
-    match drive_request(
-        driver,
-        externals,
-        runtime,
-        DemandRequest::boundary_payload(node),
-    )? {
+    match drive_request(driver, externals, runtime, boundary.payload(node))? {
         Ok(output) => Ok(output),
         Err(error) => Err(driver_error_message(error)),
     }
@@ -1245,9 +1275,12 @@ fn poison_from_driver_error(error: DriverError) -> Poison {
     match error {
         DriverError::Poison(poison) => poison_from_core(poison),
         DriverError::Unsupported(unsupported) => poison_from_unsupported(unsupported),
-        DriverError::Boundary(node) => poison_from_string(format!(
-            "graph boundary at node {node:?}: boundary dispatch is not wired yet"
-        )),
+        DriverError::Boundary(boundary) => {
+            let node = boundary.node();
+            poison_from_string(format!(
+                "graph boundary at node {node:?}: boundary dispatch is not wired yet"
+            ))
+        }
         DriverError::Stalled(node) => poison_from_string(format!("graph stalled at node {node:?}")),
     }
 }
@@ -1259,7 +1292,8 @@ fn driver_error_message(error: DriverError) -> String {
             "graph unsupported at node {:?}: {}",
             unsupported.node, unsupported.reason
         ),
-        DriverError::Boundary(node) => {
+        DriverError::Boundary(boundary) => {
+            let node = boundary.node();
             format!("graph boundary at node {node:?}: boundary dispatch is not wired yet")
         }
         DriverError::Stalled(node) => format!("graph stalled at node {node:?}"),

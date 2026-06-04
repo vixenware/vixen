@@ -33,14 +33,6 @@ impl DemandRequest {
         }
     }
 
-    pub fn boundary_payload(node: NodeId) -> Self {
-        Self {
-            node,
-            origin: DemandOrigin::BoundaryPayload,
-            _sealed: private::Sealed,
-        }
-    }
-
     pub fn public_value_field(node: NodeId) -> Self {
         Self {
             node,
@@ -66,16 +58,43 @@ impl DemandRequest {
     }
 }
 
+#[derive(Debug, PartialEq, Eq)]
+pub struct BoundaryDemand {
+    node: NodeId,
+    _sealed: private::Sealed,
+}
+
+impl BoundaryDemand {
+    fn new(node: NodeId) -> Self {
+        Self {
+            node,
+            _sealed: private::Sealed,
+        }
+    }
+
+    pub fn node(&self) -> NodeId {
+        self.node
+    }
+
+    pub fn payload(&self, node: NodeId) -> DemandRequest {
+        DemandRequest {
+            node,
+            origin: DemandOrigin::BoundaryPayload,
+            _sealed: private::Sealed,
+        }
+    }
+}
+
 mod private {
     #[derive(Debug, Clone, Copy, PartialEq, Eq)]
     pub struct Sealed;
 }
 
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, PartialEq, Eq)]
 pub enum DriverError {
     Poison(CorePoison),
     Unsupported(UnsupportedNode),
-    Boundary(NodeId),
+    Boundary(BoundaryDemand),
     Stalled(NodeId),
 }
 
@@ -217,7 +236,7 @@ impl Driver {
                 },
                 Step::Boundary(req) => {
                     self.clear_in_progress(node);
-                    return Err(DriverError::Boundary(req.node));
+                    return Err(DriverError::Boundary(BoundaryDemand::new(req.node)));
                 }
                 Step::Poison(poison) => {
                     self.memo.insert(node, NodeMemo::Poison(poison.clone()));
@@ -306,9 +325,16 @@ mod tests {
             root: NodeId(0),
         };
         let mut driver = Driver::new(graph);
+        let boundary = driver
+            .drive(DemandRequest::root(NodeId(0)))
+            .expect_err("root demand reaches the boundary");
+        let DriverError::Boundary(boundary) = boundary else {
+            panic!("expected boundary demand, got {boundary:?}");
+        };
+        assert_eq!(boundary.node(), NodeId(0));
         assert_eq!(
-            driver.drive(DemandRequest::root(NodeId(0))),
-            Err(DriverError::Boundary(NodeId(0)))
+            boundary.payload(NodeId(1)).origin(),
+            DemandOrigin::BoundaryPayload
         );
         assert_eq!(driver.memo_state(NodeId(0)), None);
 

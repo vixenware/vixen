@@ -116,6 +116,10 @@ Current partial state:
 - Mirror, host, intrinsic, observer, observe-on-strands, backtick exec,
   exec-output-tree, remote-tree body, import/toolchain, and requested-toolchain
   capability tests exercise graph body paths.
+- Boundary payload demand is authorized by a non-clone `BoundaryDemand` returned
+  from the driver on `DriverError::Boundary`; materializers borrow it to create
+  request-shaping payload demands. There is no public free
+  `DemandRequest::boundary_payload(node)` constructor.
 - The `.vx` harness uses `run_in_mode`, so source-language tests now exercise the
   graph driver and fail explicitly where graph payloads are unsupported.
 - The old `Evaluator`, `eval_inner`, `force_node`, expression-capturing
