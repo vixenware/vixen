@@ -288,8 +288,11 @@ ImportPayload {
 }
 ```
 
-Import is dynamic enough that some imports may remain boundary/unresolved until
-package resolution semantics are fully graphified.
+Grammar-package imports currently lower to graph lazy records: the package value
+has one field per grammar, and each field is a graph value with `package` and
+`name` fields. General module/package imports remain dynamic enough that some
+imports may stay boundary/unresolved until package resolution semantics are fully
+graphified.
 
 ### Boundary nodes
 

@@ -51,6 +51,7 @@ const BOUNDARY_CALLS: &[&str] = &["acquire", "Http", "http"];
 pub(crate) struct GraphRuntimeMeta {
     pub(crate) execs: HashMap<NodeId, ExecInvocationMeta>,
     pub(crate) tree_files: HashMap<NodeId, TreeFileMeta>,
+    pub(crate) capabilities: HashMap<NodeId, CapabilityRequestMeta>,
 }
 
 #[derive(Debug, Clone)]
@@ -72,6 +73,12 @@ pub(crate) enum CliArgPiece {
 
 #[derive(Debug, Clone)]
 pub(crate) struct TreeFileMeta;
+
+#[derive(Debug, Clone)]
+pub(crate) struct CapabilityRequestMeta {
+    pub(crate) spec: String,
+    pub(crate) constraint: crate::ability::Constraint,
+}
 
 /// Turn `entry`'s body, in `source`, inside out — through the real front-end.
 /// Errors only if the source doesn't parse or the entry isn't found; unhandled
@@ -390,6 +397,33 @@ impl Builder<'_> {
         }
     }
 
+    fn capability_request(&mut self, w: &vx_ir::expr::WhereExpr, span: Span) -> NodeId {
+        let ExprKind::NameRef(name) = &self.program.arena[w.callee].kind else {
+            let callee = self.walk(w.callee);
+            return self.emit(
+                NodeKind::Unresolved,
+                "a `where` constraint must apply to a capability spec".into(),
+                span,
+                vec![callee],
+            );
+        };
+        match crate::ability::extract(&self.program.arena, w.keywords) {
+            Ok(constraint) => {
+                let spec = name.name.clone();
+                let node = self.emit(NodeKind::Boundary, format!("{spec} where"), span, vec![]);
+                self.runtime_meta
+                    .capabilities
+                    .insert(node, CapabilityRequestMeta { spec, constraint });
+                node
+            }
+            Err(reason) => {
+                let c = self.walk(w.callee);
+                let k = self.walk(w.keywords);
+                self.emit(NodeKind::Unresolved, reason, span, vec![c, k])
+            }
+        }
+    }
+
     fn method_kernel_call(
         &mut self,
         callee: ExprId,
@@ -556,9 +590,7 @@ impl Builder<'_> {
             PatternKind::Struct(sp) => {
                 for (fallback, field) in sp.fields.iter().enumerate() {
                     let index = self
-                        .field_names
-                        .get(&node)
-                        .and_then(|names| names.iter().position(|name| name == &field.name))
+                        .field_index_by_node(node, &field.name)
                         .unwrap_or(fallback) as u32;
                     let field_node = self.emit(
                         NodeKind::Project { index },
@@ -849,9 +881,7 @@ impl Builder<'_> {
                     FieldKey::Index(i) => (*i, format!("[{i}]")),
                     FieldKey::Name(name) => {
                         let idx = self
-                            .field_names
-                            .get(&container)
-                            .and_then(|ns| ns.iter().position(|n| n == name))
+                            .field_index_by_node(container, name)
                             .or_else(|| self.field_index_by_receiver_type(recv, name))
                             .unwrap_or(0) as u32;
                         (idx, format!(".{name}"))
@@ -887,7 +917,9 @@ impl Builder<'_> {
             // `exec [...] with { observer, mounts, ... }` — the build boundary.
             // References the underlying call and the keyword-config record.
             ExprKind::Where(w) => {
-                if !w.is_constraint
+                if w.is_constraint {
+                    self.capability_request(w, span)
+                } else if !w.is_constraint
                     && let ExprKind::CliLiteral(cli) = &prog.arena[w.callee].kind
                 {
                     match self.observer_body(w.keywords) {
@@ -994,6 +1026,21 @@ impl Builder<'_> {
                 let inputs = exprs.into_iter().map(|x| self.walk(x)).collect();
                 self.emit(NodeKind::LazyData, "%{…}".into(), span, inputs)
             }
+
+            // `import "@vixen/grammar-cc"` as a graph value: a lazy record with one
+            // field per grammar coordinate in the package.
+            ExprKind::Import(imp) => match prog.arena.grammars.get(&imp.path) {
+                Some(set) => self.grammar_package_value(&imp.path, set, span),
+                None => self.emit(
+                    NodeKind::Unresolved,
+                    format!(
+                        "import `{}` is not a grammar package (only grammar imports are values yet)",
+                        imp.path
+                    ),
+                    span,
+                    vec![],
+                ),
+            },
 
             // Partial application `partial f(a, _)` — produces a kernel/closure.
             ExprKind::PartialApp(pa) => {
@@ -1153,10 +1200,60 @@ impl Builder<'_> {
     /// names (so `.field` projections resolve to the right slot).
     fn lazy_record(&mut self, label: String, fields: Vec<(String, ExprId)>, span: Span) -> NodeId {
         let names: Vec<String> = fields.iter().map(|(n, _)| n.clone()).collect();
-        let inputs = fields.into_iter().map(|(_, v)| self.walk(v)).collect();
+        let inputs: Vec<NodeId> = fields.into_iter().map(|(_, v)| self.walk(v)).collect();
+        self.lazy_record_nodes(label, names.into_iter().zip(inputs).collect(), span)
+    }
+
+    fn lazy_record_nodes(
+        &mut self,
+        label: String,
+        fields: Vec<(String, NodeId)>,
+        span: Span,
+    ) -> NodeId {
+        let names: Vec<String> = fields.iter().map(|(name, _)| name.clone()).collect();
+        let inputs = fields.into_iter().map(|(_, node)| node).collect();
         let id = self.emit(NodeKind::LazyData, label, span, inputs);
         self.field_names.insert(id, names);
         id
+    }
+
+    fn grammar_package_value(
+        &mut self,
+        package: &str,
+        set: &command_model::GrammarSet,
+        span: Span,
+    ) -> NodeId {
+        let fields = set
+            .grammars
+            .iter()
+            .map(|grammar| {
+                (
+                    grammar.name.clone(),
+                    self.grammar_coord_value(package, &grammar.name, span),
+                )
+            })
+            .collect();
+        self.lazy_record_nodes(format!("import {package:?}"), fields, span)
+    }
+
+    fn grammar_coord_value(&mut self, package: &str, name: &str, span: Span) -> NodeId {
+        let package = self.emit(
+            NodeKind::Const(ConstValue::Str(package.to_string())),
+            package.to_string(),
+            span,
+            vec![],
+        );
+        let name = self.emit(
+            NodeKind::Const(ConstValue::Str(name.to_string())),
+            name.to_string(),
+            span,
+            vec![],
+        );
+        self.lazy_record_nodes(
+            "grammar".into(),
+            vec![("package".into(), package), ("name".into(), name)],
+            span,
+        )
     }
 
     fn variant_value(&mut self, tag: String, fields: Vec<(String, ExprId)>, span: Span) -> NodeId {
@@ -1196,6 +1293,34 @@ impl Builder<'_> {
             .fields
             .iter()
             .position(|field| field.name == name)
+    }
+
+    fn field_index_by_node(&self, node: NodeId, name: &str) -> Option<usize> {
+        let resolved = self.resolved_graph_node(node).unwrap_or(node);
+        self.field_names
+            .get(&resolved)
+            .and_then(|names| names.iter().position(|field| field == name))
+    }
+
+    fn resolved_graph_node(&self, node: NodeId) -> Option<NodeId> {
+        let graph_node = self.nodes.get(node.0 as usize)?;
+        match &graph_node.kind {
+            NodeKind::Project { index } => {
+                let raw_container = *graph_node.inputs.first()?;
+                let container = self
+                    .resolved_graph_node(raw_container)
+                    .unwrap_or(raw_container);
+                let container_node = self.nodes.get(container.0 as usize)?;
+                match &container_node.kind {
+                    NodeKind::LazyData => {
+                        let slot = *container_node.inputs.get(*index as usize)?;
+                        Some(self.resolved_graph_node(slot).unwrap_or(slot))
+                    }
+                    _ => None,
+                }
+            }
+            _ => Some(node),
+        }
     }
 
     /// If `e` is an integer literal, its value (for projection indices).

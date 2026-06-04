@@ -165,6 +165,7 @@ run / run_with_dispatches / run_in_mode
 
 eval_body / eval_body_with_exec / eval_body_with_exec_and_providers
   -> graph_exec::run_body / graph_exec::run_body_with_exec
+     / graph_exec::run_body_with_exec_and_providers
   -> build_graph_indexed_with_meta
   -> Driver::drive(DemandRequest::root(graph.root))
 
@@ -175,12 +176,11 @@ eval_body_wire / observer execution
 ```
 
 `eval_body_with_exec` and `eval_body_with_exec_and_providers` are graph entries.
-The exec client is now consumed by graph boundary materialization; provider
-registries are still accepted by the public API but not wired to graph
-capability injection yet. Backtick exec, observe-returned output trees,
-`tree.file(path)`, and remote tree body arguments now execute through graph
-boundary materialization. Imports and one requested-toolchain `where`/capability
-boundary still fail as explicit graph gaps instead of falling back.
+The exec client and provider registry are now consumed by graph boundary
+materialization. Backtick exec, observe-returned output trees, `tree.file(path)`,
+remote tree body arguments, grammar-package imports, and requested-toolchain
+`where`/capability injection now execute through graph lowering plus graph
+boundary materialization.
 
 Current focused green evidence:
 
@@ -217,6 +217,10 @@ Observed result:
   handle, and `.file(path)` pulls only the demanded path.
 - `remote_tree_via_eval` passes 3/3 with remote `Tree` body arguments seeded into
   graph execution.
+- `cc_probe` passes through graph grammar-package import values and graph field
+  projection of the imported grammar coordinate.
+- `hello_world` passes through requested-toolchain capability injection and
+  backtick observe dispatch on the graph path.
 - `lang_suite` passes through `run_in_mode` graph execution.
 - `execution_crates_stay_source_blind` passes.
 - The raw forbidden-symbol scan returns no matches in core/driver.
@@ -231,15 +235,10 @@ Current broad runtime result:
 cargo nextest run -p vx-runtime --no-fail-fast
 ```
 
-Observed result: 135 tests run, 133 passed, 2 failed, 0 skipped.
-
-Remaining red tests are graph gaps, not source fallback:
-
-- `cc_probe_builds_a_content_identified_ctoolchain`: graph unsupported unresolved
-  `import`.
-- `hello_world_compiles_through_a_requested_toolchain`: a remaining graph
-  boundary in the requested-toolchain path is not wired yet; this is currently
-  the `where`/capability/toolchain side, not backtick observe dispatch.
+Observed result: 135 tests run, 135 passed, 0 failed, 0 skipped. The former red
+`cc_probe_builds_a_content_identified_ctoolchain` and
+`hello_world_compiles_through_a_requested_toolchain` cases are now green through
+graph execution.
 
 Graph poison source spans are threaded from graph node into `CorePoison` and then
 into public `Outcome`; `i6_eval_outcome_carries_the_source_span` passes through

@@ -10,7 +10,10 @@ use vx_runtime_driver::{DemandRequest, Driver, DriverError};
 use vx_runtime_graph::{ConstValue, HostMethod, NodeId, NodeKind};
 use vx_types::TypeEnv;
 
-use crate::analyze::{CliArgPiece, CliArgTemplate, ExecInvocationMeta, GraphRuntimeMeta};
+use crate::ability::{AttrLit, CmpOp, Constraint, ProviderRegistry};
+use crate::analyze::{
+    CapabilityRequestMeta, CliArgPiece, CliArgTemplate, ExecInvocationMeta, GraphRuntimeMeta,
+};
 use crate::eval::{FailureContext, Outcome, Poison, Thunk, Value, from_wire};
 use crate::observe::{ExecCommand, ObserveRequest};
 use crate::remote::{Part, PartKey};
@@ -22,6 +25,7 @@ type ExternalThunks = Rc<RefCell<HashMap<NodeId, Thunk>>>;
 #[derive(Clone)]
 struct RuntimeBoundaries {
     exec_client: Option<ObserveClientId>,
+    providers: ProviderRegistry,
     meta: Rc<GraphRuntimeMeta>,
     remote_trees: Rc<RefCell<HashMap<NodeId, HandleId>>>,
 }
@@ -30,6 +34,7 @@ impl Default for RuntimeBoundaries {
     fn default() -> Self {
         Self {
             exec_client: None,
+            providers: ProviderRegistry::default(),
             meta: Rc::new(GraphRuntimeMeta::default()),
             remote_trees: Rc::new(RefCell::new(HashMap::new())),
         }
@@ -69,6 +74,27 @@ pub(crate) fn run_body_with_exec(
         args,
         RuntimeBoundaries {
             exec_client: Some(exec_client),
+            ..RuntimeBoundaries::default()
+        },
+    )
+}
+
+pub(crate) fn run_body_with_exec_and_providers(
+    program: &VirProgram,
+    env: &TypeEnv,
+    body: BodyId,
+    args: Vec<Value>,
+    exec_client: ObserveClientId,
+    providers: ProviderRegistry,
+) -> Result<(Outcome, u64), String> {
+    run_body_with_boundaries(
+        program,
+        env,
+        body,
+        args,
+        RuntimeBoundaries {
+            exec_client: Some(exec_client),
+            providers,
             ..RuntimeBoundaries::default()
         },
     )
@@ -209,6 +235,12 @@ fn materialize_boundary(
 
     if runtime.meta.tree_files.contains_key(&node) {
         materialize_tree_file(driver, externals, runtime, node)?;
+        return Ok(true);
+    }
+
+    let capability = runtime.meta.capabilities.get(&node).cloned();
+    if let Some(capability) = capability {
+        materialize_capability_request(driver, externals, runtime, node, &capability)?;
         return Ok(true);
     }
 
@@ -428,6 +460,88 @@ fn materialize_tree_file(
     };
     driver.borrow_mut().seed(node, value);
     Ok(())
+}
+
+fn materialize_capability_request(
+    driver: SharedDriver,
+    externals: ExternalThunks,
+    runtime: RuntimeBoundaries,
+    node: NodeId,
+    request: &CapabilityRequestMeta,
+) -> Result<(), String> {
+    let providers: Vec<Value> = runtime.providers.providers(&request.spec).to_vec();
+    for provider in providers {
+        if capability_satisfied(&request.constraint, &provider)? {
+            let output = {
+                let mut driver = driver.borrow_mut();
+                node_output_from_value_in_driver(
+                    &mut driver,
+                    Rc::clone(&externals),
+                    runtime.clone(),
+                    node,
+                    provider,
+                )?
+            };
+            driver.borrow_mut().seed(node, output);
+            return Ok(());
+        }
+    }
+    Err(format!(
+        "no advertised provider of `{}` satisfies the requested constraint",
+        request.spec
+    ))
+}
+
+fn capability_satisfied(constraint: &Constraint, provider: &Value) -> Result<bool, String> {
+    match constraint {
+        Constraint::Always => Ok(true),
+        Constraint::All(children) => {
+            for child in children {
+                if !capability_satisfied(child, provider)? {
+                    return Ok(false);
+                }
+            }
+            Ok(true)
+        }
+        Constraint::Any(children) => {
+            for child in children {
+                if capability_satisfied(child, provider)? {
+                    return Ok(true);
+                }
+            }
+            Ok(false)
+        }
+        Constraint::Cmp { field, op, value } => {
+            let attr = provider_attr(provider, field)?;
+            Ok(capability_attr_satisfies(&attr, *op, value))
+        }
+    }
+}
+
+fn provider_attr(provider: &Value, field: &str) -> Result<Value, String> {
+    let Value::Struct(fields) = provider else {
+        return Err(format!(
+            "capability provider must be a struct, got {provider:?}"
+        ));
+    };
+    let thunk = fields
+        .iter()
+        .find(|(name, _)| name == field)
+        .map(|(_, thunk)| thunk)
+        .ok_or_else(|| format!("capability provider has no `{field}` field"))?;
+    thunk
+        .force_for_graph_boundary()
+        .map_err(|poison| poison.message())
+}
+
+fn capability_attr_satisfies(attr: &Value, op: CmpOp, value: &AttrLit) -> bool {
+    let ordering = match (attr, value) {
+        (Value::U64(actual), AttrLit::Int(want)) => actual.cmp(want),
+        (Value::Str(actual), AttrLit::Str(want)) => actual.as_ref().cmp(want.as_str()),
+        (Value::Bool(actual), AttrLit::Bool(want)) => actual.cmp(want),
+        _ => return false,
+    };
+    op.holds(ordering)
 }
 
 fn materialize_host_method(

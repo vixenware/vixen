@@ -113,6 +113,14 @@ Expected latest structural checkpoint:
 - Top-level producing trees returned by observe cross as remote handles attached
   to graph `OutputTree` nodes. Demanding `tree.file(path)` is a separate graph
   boundary that materializes only that path through strand remote-part demand.
+- Grammar-package imports lower to graph lazy records whose fields are grammar
+  coordinate graph values. Named projection follows graph projection resolution
+  before choosing field slots, so chained import/tool projections stay typed by
+  graph node identity rather than by source fallback.
+- `where` capability constraints lower to graph boundary nodes with typed
+  runtime metadata. Demand on that boundary selects an advertised provider,
+  demands only provider attributes needed by the predicate, and memoizes the
+  selected provider as graph output.
 - `vx-runtime::eval` still contains the legacy tree-walker code, now producing
   dead-code warnings. It remains a demolition target; it must not become a
   fallback or oracle.
@@ -129,11 +137,12 @@ Latest verified red/green shape:
   3/3 passed.
 - `cargo nextest run -p vx-runtime -E 'binary(lang_suite)' --no-fail-fast`:
   1/1 passed.
-- `cargo nextest run -p vx-runtime --no-fail-fast`: 135 run, 133 passed, 2
-  failed. Remaining failures are `cc_probe_builds_a_content_identified_ctoolchain`
-  (`import` graph payload unresolved) and
-  `hello_world_compiles_through_a_requested_toolchain` (a remaining graph
-  boundary, currently `where`/capability/toolchain side, is not wired).
+- `cargo nextest run -p vx-runtime -E 'binary(cc_probe) | binary(hello_world)' --no-fail-fast`:
+  2/2 passed.
+- `cargo nextest run -p vx-runtime --no-fail-fast`: 135 run, 135 passed,
+  0 failed, 0 skipped.
+- `cargo nextest run -p vx-runtime-graph -p vx-runtime-core -p vx-runtime-driver -p vx-runtime --no-fail-fast`:
+  142 run, 142 passed, 0 skipped.
 - The forbidden-symbol scan over `crates/vx-runtime-core` and
   `crates/vx-runtime-driver` returns no matches.
 

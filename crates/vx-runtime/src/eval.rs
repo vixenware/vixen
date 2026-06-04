@@ -1834,8 +1834,18 @@ pub fn eval_body_with_exec_and_providers(
     exec_client: ObserveClientId,
     providers: ProviderRegistry,
 ) -> Outcome {
-    let _ = (mode, providers);
-    graph_body_outcome(program, env, body, args, Some(exec_client))
+    let _ = mode;
+    match crate::graph_exec::run_body_with_exec_and_providers(
+        program,
+        env,
+        body,
+        args,
+        exec_client,
+        providers,
+    ) {
+        Ok((outcome, _)) => outcome,
+        Err(reason) => Outcome::Poisoned { reason, span: None },
+    }
 }
 
 fn graph_body_outcome(

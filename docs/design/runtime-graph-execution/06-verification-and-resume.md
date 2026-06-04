@@ -106,14 +106,13 @@ Current partial state:
 - `run`, `run_with_dispatches`, and `run_in_mode` call graph driver.
 - `eval_body`, `eval_body_with_exec`, `eval_body_with_exec_and_providers`, and
   `eval_body_wire` call graph body execution. `eval_body_with_exec` passes its
-  observe client to graph boundary materialization. Provider registries are still
-  accepted by the public signature but are not wired to graph capability
-  injection yet.
+  observe client to graph boundary materialization.
+  `eval_body_with_exec_and_providers` passes its provider registry to graph
+  capability boundary materialization.
 - Observer execution calls graph body execution and graph/native wire crossing.
 - Mirror, host, intrinsic, observer, observe-on-strands, backtick exec,
-  exec-output-tree, and remote-tree body tests exercise graph body paths.
-  Import/toolchain and one requested-toolchain capability boundary still fail as
-  explicit graph gaps.
+  exec-output-tree, remote-tree body, import/toolchain, and requested-toolchain
+  capability tests exercise graph body paths.
 - The `.vx` harness uses `run_in_mode`, so source-language tests now exercise the
   graph driver and fail explicitly where graph payloads are unsupported.
 
@@ -129,9 +128,12 @@ Latest focused verification:
   3/3 passed.
 - `cargo nextest run -p vx-runtime -E 'binary(lang_suite)' --no-fail-fast`:
   1/1 passed.
-- `cargo nextest run -p vx-runtime --no-fail-fast`: 135 run, 133 passed, 2
-  failed: `cc_probe_builds_a_content_identified_ctoolchain` and
-  `hello_world_compiles_through_a_requested_toolchain`.
+- `cargo nextest run -p vx-runtime -E 'binary(cc_probe) | binary(hello_world)' --no-fail-fast`:
+  2/2 passed.
+- `cargo nextest run -p vx-runtime --no-fail-fast`: 135 run, 135 passed,
+  0 failed, 0 skipped.
+- `cargo nextest run -p vx-runtime-graph -p vx-runtime-core -p vx-runtime-driver -p vx-runtime --no-fail-fast`:
+  142 run, 142 passed, 0 skipped.
 - The forbidden-symbol scan over `vx-runtime-core` and `vx-runtime-driver`
   returns no matches.
 

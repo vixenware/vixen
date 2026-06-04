@@ -280,16 +280,18 @@ Verified green:
   3/3 passed.
 - `cargo nextest run -p vx-runtime -E 'binary(remote_tree_via_eval)' --no-fail-fast`:
   3/3 passed.
+- `cargo nextest run -p vx-runtime -E 'binary(cc_probe) | binary(hello_world)' --no-fail-fast`:
+  2/2 passed.
 - In the full `vx-runtime` package run, observe, observe-on-strands, exec,
-  output-tree, and remote-tree eval tests now pass through graph execution.
+  output-tree, remote-tree eval, grammar import/toolchain, and
+  requested-toolchain capability tests now pass through graph execution.
 
-Still red:
+Newly green boundary payloads:
 
-- `import`/grammar/toolchain graph payloads are still unresolved in body
-  execution.
-- A remaining graph boundary in the requested-toolchain hello-world path is not
-  wired yet; this is currently the `where`/capability/toolchain side of boundary
-  execution.
+- Grammar-package imports lower to graph lazy records with grammar-coordinate
+  graph values.
+- `where` capability requests lower to graph boundary nodes with typed
+  capability metadata and materialize by selecting an advertised provider.
 
 No input-keyed L1/L2 cache has been implemented in this checkpoint.
 
