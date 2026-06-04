@@ -29,6 +29,7 @@ struct RuntimeBoundaries {
     meta: Rc<GraphRuntimeMeta>,
     remote_trees: Rc<RefCell<HashMap<NodeId, HandleId>>>,
     host_exec_cache: Rc<RefCell<HashMap<HostExecCacheKey, crate::host::HostExec>>>,
+    exec_invocation_cache: Rc<RefCell<HashMap<ExecInvocationCacheKey, CachedExecOutcome>>>,
 }
 
 impl Default for RuntimeBoundaries {
@@ -39,6 +40,7 @@ impl Default for RuntimeBoundaries {
             meta: Rc::new(GraphRuntimeMeta::default()),
             remote_trees: Rc::new(RefCell::new(HashMap::new())),
             host_exec_cache: Rc::new(RefCell::new(HashMap::new())),
+            exec_invocation_cache: Rc::new(RefCell::new(HashMap::new())),
         }
     }
 }
@@ -47,6 +49,34 @@ impl Default for RuntimeBoundaries {
 struct HostExecCacheKey {
     argv: Vec<String>,
     program_fingerprint: String,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
+struct ExecInvocationCacheKey {
+    command_package: String,
+    command_name: String,
+    program: String,
+    args: Vec<String>,
+    observer: ObserverCacheIdentity,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
+enum ObserverCacheIdentity {
+    Default,
+    Bundle(String),
+}
+
+#[derive(Debug, Clone)]
+enum CachedExecOutcome {
+    Value(crate::observe::WireValue),
+    Tree(HandleId),
+}
+
+#[derive(Debug)]
+struct ToolRequest {
+    command_package: String,
+    command_name: String,
+    binary: String,
 }
 
 pub(crate) fn run_source(source: &str, entry: &str) -> Result<(Outcome, u64), String> {
@@ -310,7 +340,7 @@ fn materialize_exec_invocation(
         runtime.clone(),
         tool_node,
     )?;
-    let binary = tool_binary(
+    let tool = tool_request(
         Rc::clone(&driver),
         Rc::clone(&externals),
         runtime.clone(),
@@ -326,21 +356,58 @@ fn materialize_exec_invocation(
         )?);
     }
 
+    let cache_key = exec_invocation_cache_key(&tool, args.clone(), invocation);
+    let cached = {
+        runtime
+            .exec_invocation_cache
+            .borrow()
+            .get(&cache_key)
+            .cloned()
+    };
+    if let Some(cached) = cached {
+        seed_exec_outcome(driver, externals, runtime, node, cached)?;
+        return Ok(());
+    }
+
     let observed = dispatch_observe(
         client,
         ObserveRequest {
             observer: invocation.observer.clone(),
             command: ExecCommand {
-                program: binary,
-                args,
+                program: tool.binary,
+                args: args.clone(),
             },
         },
     );
+    let cacheable = cacheable_from_observed(&observed)?;
+    runtime
+        .exec_invocation_cache
+        .borrow_mut()
+        .insert(cache_key, cacheable.clone());
+    seed_exec_outcome(driver, externals, runtime, node, cacheable)?;
+    Ok(())
+}
+
+fn cacheable_from_observed(observed: &ObserveOutcome) -> Result<CachedExecOutcome, String> {
+    match observed {
+        ObserveOutcome::Value(wire) => Ok(CachedExecOutcome::Value(wire.clone())),
+        ObserveOutcome::Tree(handle) => Ok(CachedExecOutcome::Tree(*handle)),
+        ObserveOutcome::Poisoned(reason) => Err(reason.clone()),
+    }
+}
+
+fn seed_exec_outcome(
+    driver: SharedDriver,
+    externals: ExternalThunks,
+    runtime: RuntimeBoundaries,
+    node: NodeId,
+    outcome: CachedExecOutcome,
+) -> Result<(), String> {
     let output = {
         let mut driver = driver.borrow_mut();
-        match &*observed {
-            ObserveOutcome::Value(wire) => {
-                let value = from_wire(wire).map_err(|poison| poison.message())?;
+        match outcome {
+            CachedExecOutcome::Value(wire) => {
+                let value = from_wire(&wire).map_err(|poison| poison.message())?;
                 node_output_from_value_in_driver(
                     &mut driver,
                     Rc::clone(&externals),
@@ -349,11 +416,10 @@ fn materialize_exec_invocation(
                     value,
                 )?
             }
-            ObserveOutcome::Tree(handle) => {
-                runtime.remote_trees.borrow_mut().insert(node, *handle);
+            CachedExecOutcome::Tree(handle) => {
+                runtime.remote_trees.borrow_mut().insert(node, handle);
                 NodeOutput::OutputTree
             }
-            ObserveOutcome::Poisoned(reason) => return Err(reason.clone()),
         }
     };
     driver.borrow_mut().seed(node, output);
@@ -367,12 +433,12 @@ fn command_tool_node(arg: &CliArgTemplate) -> Result<NodeId, String> {
     }
 }
 
-fn tool_binary(
+fn tool_request(
     driver: SharedDriver,
     externals: ExternalThunks,
     runtime: RuntimeBoundaries,
     tool: NodeOutput,
-) -> Result<String, String> {
+) -> Result<ToolRequest, String> {
     let NodeOutput::Struct {
         field_names,
         fields,
@@ -382,13 +448,94 @@ fn tool_binary(
             "the leading hole of a command invocation must be a tool, got {tool:?}"
         ));
     };
+    let command = field_names
+        .iter()
+        .position(|name| name == "command")
+        .and_then(|index| fields.get(index).copied())
+        .ok_or_else(|| "tool value has no `command` field".to_string())?;
     let binary = field_names
         .iter()
         .position(|name| name == "binary")
         .and_then(|index| fields.get(index).copied())
         .ok_or_else(|| "tool value has no `binary` field".to_string())?;
+    let command = demand_payload(
+        Rc::clone(&driver),
+        Rc::clone(&externals),
+        runtime.clone(),
+        command,
+    )?;
+    let (command_package, command_name) = command_coordinate(
+        Rc::clone(&driver),
+        Rc::clone(&externals),
+        runtime.clone(),
+        command,
+    )?;
     let binary = demand_payload(driver, externals, runtime, binary)?;
-    expect_string(binary, "tool `binary`")
+    let binary = expect_string(binary, "tool `binary`")?;
+    Ok(ToolRequest {
+        command_package,
+        command_name,
+        binary,
+    })
+}
+
+fn command_coordinate(
+    driver: SharedDriver,
+    externals: ExternalThunks,
+    runtime: RuntimeBoundaries,
+    command: NodeOutput,
+) -> Result<(String, String), String> {
+    let NodeOutput::Struct {
+        field_names,
+        fields,
+    } = command
+    else {
+        return Err(format!(
+            "tool `command` must be a grammar coordinate, got {command:?}"
+        ));
+    };
+    let package = field_names
+        .iter()
+        .position(|name| name == "package")
+        .and_then(|index| fields.get(index).copied())
+        .ok_or_else(|| "tool `command` has no `package` field".to_string())?;
+    let name = field_names
+        .iter()
+        .position(|field| field == "name")
+        .and_then(|index| fields.get(index).copied())
+        .ok_or_else(|| "tool `command` has no `name` field".to_string())?;
+    let package = expect_string(
+        demand_payload(
+            Rc::clone(&driver),
+            Rc::clone(&externals),
+            runtime.clone(),
+            package,
+        )?,
+        "tool `command.package`",
+    )?;
+    let name = expect_string(
+        demand_payload(driver, externals, runtime, name)?,
+        "tool `command.name`",
+    )?;
+    Ok((package, name))
+}
+
+fn exec_invocation_cache_key(
+    tool: &ToolRequest,
+    args: Vec<String>,
+    invocation: &ExecInvocationMeta,
+) -> ExecInvocationCacheKey {
+    let observer = match &invocation.observer {
+        Some(bundle) => ObserverCacheIdentity::Bundle(bundle.content_identity()),
+        None => ObserverCacheIdentity::Default,
+    };
+    ExecInvocationCacheKey {
+        command_package: tool.command_package.clone(),
+        command_name: tool.command_name.clone(),
+        program: tool.binary.clone(),
+        args,
+        observer,
+    }
 }
 
 fn render_cli_arg(

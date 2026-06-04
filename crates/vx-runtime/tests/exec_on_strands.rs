@@ -12,6 +12,9 @@
 //! `Exit` struct that crossed back, not a placeholder. (`observe_on_strands` drives
 //! `dispatch_observe` directly; `observe`'s own test asserts the crossed `WireValue`.)
 
+use std::rc::Rc;
+use std::sync::atomic::{AtomicU64, Ordering};
+
 use vx_ir::item::ItemKind;
 use vx_runtime::compile::compile_source;
 use vx_runtime::eval::{
@@ -119,6 +122,18 @@ fn cold_exec_outcome(binary: &str) -> Option<Outcome> {
     s.outcome(strand)
 }
 
+fn exec_cache_marker(name: &str) -> String {
+    static NEXT_MARKER: AtomicU64 = AtomicU64::new(0);
+    std::env::temp_dir()
+        .join(format!(
+            "vx-exec-cache-{name}-{}-{}",
+            std::process::id(),
+            NEXT_MARKER.fetch_add(1, Ordering::Relaxed)
+        ))
+        .to_string_lossy()
+        .into_owned()
+}
+
 /// `true` exits 0 → the observer's `run.ok` forces to an `Exit` → that whole struct
 /// crosses back and `exec(…)` evaluates to it (verified worker-side). The whole path
 /// — `with`-hook, command projection, observer bundling, observe + value crossing
@@ -156,5 +171,134 @@ fn undemanded_exec_in_tuple_does_not_dispatch() {
         cold_exec_outcome("false"),
         Some(Outcome::Clean),
         "only pair[1] is demanded, so the failing exec in pair[0] must stay cold"
+    );
+}
+
+#[test]
+fn identical_backtick_exec_boundaries_share_the_l1_entry() {
+    let marker = exec_cache_marker("same");
+    let _ = std::fs::remove_file(&marker);
+    let script = format!("printf x >> {marker}; printf CONTENT > out.txt");
+    let fe = compile_source(
+        "fn t(cmd: Command, script: String) ( \
+           let first = `$cmd -c ${script}`; \
+           let second = `$cmd -c ${script}`; \
+           assert_eq(first.file(\"out.txt\"), second.file(\"out.txt\")) )",
+        "t",
+    )
+    .expect("exec cache program compiles");
+    let entry = fe
+        .program
+        .arena
+        .items
+        .iter()
+        .find_map(|it| match &it.kind {
+            ItemKind::Function(f) if f.name == "t" => Some(f.body),
+            _ => None,
+        })
+        .expect("fn t");
+
+    let s = Scheduler::new(&[4]);
+    let client = s.block_on(local_observer());
+    let cid = s.register_observe_client(client);
+
+    let program = fe.program;
+    let env = fe.env;
+    let strand = s.spawn(ResourceId(0), move || {
+        let cmd = tool_value("@vixen/grammar-cc", "cc", "sh");
+        let script = Value::Str(Rc::from(script.as_str()));
+        match eval_body_with_exec(
+            &program,
+            &env,
+            entry,
+            vec![cmd, script],
+            KernelMode::Off,
+            cid,
+        ) {
+            EvalOutcome::Clean(Value::Unit) => Outcome::Clean,
+            EvalOutcome::Clean(other) => {
+                Outcome::Poisoned(format!("expected both cached exec results, got {other:?}"))
+            }
+            EvalOutcome::Poisoned { reason, .. } => Outcome::Poisoned(reason),
+        }
+    });
+    s.demand(strand);
+    s.run();
+    assert_eq!(
+        s.outcome(strand),
+        Some(Outcome::Clean),
+        "both demanded invocation nodes resolve"
+    );
+
+    let count = std::fs::read_to_string(&marker).expect("exec cache marker file");
+    let _ = std::fs::remove_file(&marker);
+    assert_eq!(
+        count, "x",
+        "the second identical backtick exec must reuse the L1 result"
+    );
+}
+
+#[test]
+fn observer_identity_is_part_of_the_backtick_exec_l1_key() {
+    let marker = exec_cache_marker("observer");
+    let _ = std::fs::remove_file(&marker);
+    let script = format!("printf x >> {marker}; printf out");
+    let fe = compile_source(
+        "fn id(exit: Exit) -> Exit ( exit ) \
+         fn t(cmd: Command, script: String) ( \
+           let direct = `$cmd -c ${script}` with { observer: (run) => run.ok }; \
+           let wrapped = `$cmd -c ${script}` with { observer: (run) => id(run.ok) }; \
+           assert_eq(direct.stdout, wrapped.stdout) )",
+        "t",
+    )
+    .expect("exec cache observer program compiles");
+    let entry = fe
+        .program
+        .arena
+        .items
+        .iter()
+        .find_map(|it| match &it.kind {
+            ItemKind::Function(f) if f.name == "t" => Some(f.body),
+            _ => None,
+        })
+        .expect("fn t");
+
+    let s = Scheduler::new(&[4]);
+    let client = s.block_on(local_observer());
+    let cid = s.register_observe_client(client);
+
+    let program = fe.program;
+    let env = fe.env;
+    let strand = s.spawn(ResourceId(0), move || {
+        let cmd = tool_value("@vixen/grammar-cc", "cc", "sh");
+        let script = Value::Str(Rc::from(script.as_str()));
+        match eval_body_with_exec(
+            &program,
+            &env,
+            entry,
+            vec![cmd, script],
+            KernelMode::Off,
+            cid,
+        ) {
+            EvalOutcome::Clean(Value::Unit) => Outcome::Clean,
+            EvalOutcome::Clean(other) => Outcome::Poisoned(format!(
+                "expected observer-specific exec results, got {other:?}"
+            )),
+            EvalOutcome::Poisoned { reason, .. } => Outcome::Poisoned(reason),
+        }
+    });
+    s.demand(strand);
+    s.run();
+    assert_eq!(
+        s.outcome(strand),
+        Some(Outcome::Clean),
+        "both observer-specific invocation nodes resolve"
+    );
+
+    let count = std::fs::read_to_string(&marker).expect("exec cache observer marker file");
+    let _ = std::fs::remove_file(&marker);
+    assert_eq!(
+        count, "xx",
+        "different observer bundles must not alias in the backtick exec L1"
     );
 }

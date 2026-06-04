@@ -128,9 +128,13 @@ Current progress:
   deterministic Facet JSON encoding of the packed `vx_ir::Bundle`. This is the
   observer-code component needed for an exec boundary cache key.
 - Demand on the exec boundary materializes only request-shaping inputs: the
-  leading tool node, its `binary` field, and each demanded argv hole. Merely
-  constructing an exec boundary or a lazy product containing one does not run the
-  command.
+  leading tool node, its command coordinate, its `binary` field, and each
+  demanded argv hole. Merely constructing an exec boundary or a lazy product
+  containing one does not run the command.
+- Successful backtick invocations now have an in-process exact L1 keyed by the
+  current materialized request identity: command coordinate, binary, rendered
+  argv, and observer identity. Cache hits seed the demanded graph node without
+  calling `dispatch_observe`.
 - Observe dispatch happens from graph boundary materialization through
   `dispatch_observe`, then the resulting graph node is seeded and the same demand
   loop resumes.
@@ -138,7 +142,9 @@ Current progress:
   producing tree result becomes `NodeOutput::OutputTree` plus a runtime remote
   handle entry keyed by the exec node.
 - `exec_on_strands` passes, including a cold-field tripwire where a failing exec
-  in tuple slot 0 stays undemanded while slot 1 is selected.
+  in tuple slot 0 stays undemanded while slot 1 is selected, an exact-L1 test
+  where two identical demanded backtick invocations dispatch once, and a
+  non-aliasing test where different observer bundles dispatch separately.
 - `exec_boundaries.vx` passes through `lang_suite`: a real backtick exec in an
   undemanded tuple slot stays cold even though the source entry has no observe
   client available.
@@ -281,8 +287,11 @@ Current progress:
   host boundaries demand both outputs but spawn only once.
 - Observer bundles now have a content identity suitable for the observer-code
   part of a backtick exec key.
-- Backtick exec, function calls, persistent L2 storage, and read-set provenance
-  do not have this cache yet.
+- Backtick exec has a local in-process exact L1 for successful observer values
+  and output-tree handles. The current key covers the command coordinate, binary,
+  rendered argv, and observer identity for the materialized request; full
+  env/mount/toolchain identities, function-call memo, persistent L2 storage, and
+  read-set provenance are still unimplemented.
 
 ### 4. L2 content-addressed storage
 
@@ -332,7 +341,8 @@ Verified green:
   passed, including stable, content-sensitive observer bundle identity.
 - `cargo nextest run -p vx-runtime -E 'test(observe_runs_a_real_command_and_returns_the_observer_value) | test(observe_crosses_the_output_tree_as_a_handle_marker) | binary(observe_on_strands)' --no-fail-fast`: 4/4 passed.
 - `cargo nextest run -p vx-runtime -E 'binary(exec_on_strands)' --no-fail-fast`:
-  3/3 passed.
+  5/5 passed, including cold exec non-demand, exact backtick exec L1 reuse, and
+  observer-identity non-aliasing.
 - `cargo nextest run -p vx-runtime -E 'binary(exec_output_tree)' --no-fail-fast`:
   3/3 passed.
 - `cargo nextest run -p vx-runtime -E 'binary(remote_tree_via_eval)' --no-fail-fast`:
@@ -352,9 +362,11 @@ Newly green boundary payloads:
 - Per-run node memo is explicit driver state for in-progress, ready, and poisoned
   nodes.
 - `host.exec` has a local input-keyed L1 cache.
+- Backtick exec has a local exact L1 cache for the current materialized request
+  identity.
 
-No function-call memo, backtick exec L1, persistent L2 cache, or read-set
-provenance has been implemented in this checkpoint.
+No function-call memo, persistent L2 cache, or read-set provenance has been
+implemented in this checkpoint.
 
 ## Acceptance criteria
 
