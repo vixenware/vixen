@@ -1801,7 +1801,7 @@ pub fn eval_body(
     mode: KernelMode,
 ) -> Outcome {
     let _ = mode;
-    graph_body_outcome(program, env, body, args)
+    graph_body_outcome(program, env, body, args, None)
 }
 
 /// As [`eval_body`], but with the executor an `exec(…)` in `body` dispatches to —
@@ -1817,8 +1817,8 @@ pub fn eval_body_with_exec(
     mode: KernelMode,
     exec_client: ObserveClientId,
 ) -> Outcome {
-    let _ = (mode, exec_client);
-    graph_body_outcome(program, env, body, args)
+    let _ = mode;
+    graph_body_outcome(program, env, body, args, Some(exec_client))
 }
 
 /// As [`eval_body_with_exec`], but also with the advertised capability `providers`
@@ -1834,8 +1834,8 @@ pub fn eval_body_with_exec_and_providers(
     exec_client: ObserveClientId,
     providers: ProviderRegistry,
 ) -> Outcome {
-    let _ = (mode, exec_client, providers);
-    graph_body_outcome(program, env, body, args)
+    let _ = (mode, providers);
+    graph_body_outcome(program, env, body, args, Some(exec_client))
 }
 
 fn graph_body_outcome(
@@ -1843,8 +1843,13 @@ fn graph_body_outcome(
     env: &TypeEnv,
     body: BodyId,
     args: Vec<Value>,
+    exec_client: Option<ObserveClientId>,
 ) -> Outcome {
-    match crate::graph_exec::run_body(program, env, body, args) {
+    let result = match exec_client {
+        Some(client) => crate::graph_exec::run_body_with_exec(program, env, body, args, client),
+        None => crate::graph_exec::run_body(program, env, body, args),
+    };
+    match result {
         Ok((outcome, _)) => outcome,
         Err(reason) => Outcome::Poisoned { reason, span: None },
     }

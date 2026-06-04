@@ -164,8 +164,8 @@ run / run_with_dispatches / run_in_mode
   -> Driver::drive(DemandRequest::root(graph.root))
 
 eval_body / eval_body_with_exec / eval_body_with_exec_and_providers
-  -> graph_exec::run_body
-  -> build_graph_indexed
+  -> graph_exec::run_body / graph_exec::run_body_with_exec
+  -> build_graph_indexed_with_meta
   -> Driver::drive(DemandRequest::root(graph.root))
 
 eval_body_wire / observer execution
@@ -174,10 +174,13 @@ eval_body_wire / observer execution
   -> graph/native boundary thunk crossing to WireValue
 ```
 
-`eval_body_with_exec` and `eval_body_with_exec_and_providers` are graph entries
-now, but their exec client and provider registry are not consumed yet. Backtick
-exec, `where`, imports, and remote tree body arguments therefore fail as explicit
-graph unsupported/boundary states instead of falling back.
+`eval_body_with_exec` and `eval_body_with_exec_and_providers` are graph entries.
+The exec client is now consumed by graph boundary materialization; provider
+registries are still accepted by the public API but not wired to graph
+capability injection yet. Backtick exec, observe-returned output trees,
+`tree.file(path)`, and remote tree body arguments now execute through graph
+boundary materialization. Imports and one requested-toolchain `where`/capability
+boundary still fail as explicit graph gaps instead of falling back.
 
 Current focused green evidence:
 
@@ -185,6 +188,10 @@ Current focused green evidence:
 cargo check -p vx-runtime-graph -p vx-runtime-core -p vx-runtime-driver -p vx-runtime
 cargo nextest run -p vx-runtime -E 'binary(host_probe)'
 cargo nextest run -p vx-runtime -E 'test(observe_runs_a_real_command_and_returns_the_observer_value) | test(observe_crosses_the_output_tree_as_a_handle_marker) | binary(observe_on_strands)' --no-fail-fast
+cargo nextest run -p vx-runtime -E 'binary(exec_on_strands)' --no-fail-fast
+cargo nextest run -p vx-runtime -E 'binary(exec_output_tree)' --no-fail-fast
+cargo nextest run -p vx-runtime -E 'binary(remote_tree_via_eval)' --no-fail-fast
+cargo nextest run -p vx-runtime -E 'binary(lang_suite)' --no-fail-fast
 cargo nextest run -p vx-runtime execution_crates_stay_source_blind
 rg -n 'vx[_-]ir|ExprKind|ExprId|StmtKind|PatternKind|PatternId|VirProgram|BodyId|node_exprs|exprmap|eval_inner|eval_expr|walk_expr|legacy_eval|fn force|\.force\(' crates/vx-runtime-core crates/vx-runtime-driver
 ```
@@ -202,6 +209,15 @@ Observed result:
   executor binds `Run` as graph external input, demands `run.ok` or
   `run.stream.out` through graph/native boundary thunks, and crosses the result
   to `WireValue`.
+- Backtick exec passes through graph boundary materialization. The
+  `exec_on_strands` binary passes 3/3, including a cold exec in an undemanded
+  tuple field.
+- `exec_output_tree` passes 3/3. A top-level producing tree returned by observe
+  is represented as `NodeOutput::OutputTree` plus a graph-node-keyed remote
+  handle, and `.file(path)` pulls only the demanded path.
+- `remote_tree_via_eval` passes 3/3 with remote `Tree` body arguments seeded into
+  graph execution.
+- `lang_suite` passes through `run_in_mode` graph execution.
 - `execution_crates_stay_source_blind` passes.
 - The raw forbidden-symbol scan returns no matches in core/driver.
 - Public graph-root arrays, tuples, structs, variants, caught failures, and
@@ -215,20 +231,15 @@ Current broad runtime result:
 cargo nextest run -p vx-runtime --no-fail-fast
 ```
 
-Observed result: 134 tests run, 126 passed, 8 failed, 0 skipped.
+Observed result: 135 tests run, 133 passed, 2 failed, 0 skipped.
 
 Remaining red tests are graph gaps, not source fallback:
 
 - `cc_probe_builds_a_content_identified_ctoolchain`: graph unsupported unresolved
   `import`.
-- `exec_over_vox_returns_the_observers_exit_value`: graph boundary for backtick
-  invocation dispatch is not wired yet.
-- `explicit_stream_observer_returns_a_forceable_output_tree`,
-  `bare_invocation_uses_the_default_observer`, and
-  `hello_world_compiles_through_a_requested_toolchain`: graph unsupported
-  unresolved call shape in command/backtick execution.
-- `remote_tree_via_eval` 3/3: `Value::Tree(HandleId)` body arguments are not
-  graph-seedable yet.
+- `hello_world_compiles_through_a_requested_toolchain`: a remaining graph
+  boundary in the requested-toolchain path is not wired yet; this is currently
+  the `where`/capability/toolchain side, not backtick observe dispatch.
 
 Graph poison source spans are threaded from graph node into `CorePoison` and then
 into public `Outcome`; `i6_eval_outcome_carries_the_source_span` passes through

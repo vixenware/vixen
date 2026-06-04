@@ -105,15 +105,35 @@ Current partial state:
 
 - `run`, `run_with_dispatches`, and `run_in_mode` call graph driver.
 - `eval_body`, `eval_body_with_exec`, `eval_body_with_exec_and_providers`, and
-  `eval_body_wire` call graph body execution. Exec clients/provider registries
-  are accepted by the public signature but are not wired to graph boundary
-  dispatch yet.
+  `eval_body_wire` call graph body execution. `eval_body_with_exec` passes its
+  observe client to graph boundary materialization. Provider registries are still
+  accepted by the public signature but are not wired to graph capability
+  injection yet.
 - Observer execution calls graph body execution and graph/native wire crossing.
-- Mirror, host, intrinsic, observer, and observe-on-strands tests exercise graph
-  body paths. Backtick exec, import/toolchain, and remote-tree body tests still
-  fail as explicit graph gaps.
+- Mirror, host, intrinsic, observer, observe-on-strands, backtick exec,
+  exec-output-tree, and remote-tree body tests exercise graph body paths.
+  Import/toolchain and one requested-toolchain capability boundary still fail as
+  explicit graph gaps.
 - The `.vx` harness uses `run_in_mode`, so source-language tests now exercise the
   graph driver and fail explicitly where graph payloads are unsupported.
+
+Latest focused verification:
+
+- `cargo check -p vx-runtime-graph -p vx-runtime-core -p vx-runtime-driver -p vx-runtime`
+  passes with dead-code warnings from old evaluator/dispatch code.
+- `cargo nextest run -p vx-runtime -E 'binary(exec_on_strands)' --no-fail-fast`:
+  3/3 passed.
+- `cargo nextest run -p vx-runtime -E 'binary(exec_output_tree)' --no-fail-fast`:
+  3/3 passed.
+- `cargo nextest run -p vx-runtime -E 'binary(remote_tree_via_eval)' --no-fail-fast`:
+  3/3 passed.
+- `cargo nextest run -p vx-runtime -E 'binary(lang_suite)' --no-fail-fast`:
+  1/1 passed.
+- `cargo nextest run -p vx-runtime --no-fail-fast`: 135 run, 133 passed, 2
+  failed: `cc_probe_builds_a_content_identified_ctoolchain` and
+  `hello_world_compiles_through_a_requested_toolchain`.
+- The forbidden-symbol scan over `vx-runtime-core` and `vx-runtime-driver`
+  returns no matches.
 
 ### Vixen-language verification
 

@@ -19,7 +19,8 @@ use std::collections::HashMap;
 
 use vx_ir::build::VirProgram;
 use vx_ir::expr::{
-    ArrayElement, BinOp, ExprKind, FieldKey, LitKind, MapElement, PrefixOp, StringPart,
+    ArrayElement, BinOp, CliLiteralExpr, ExprKind, FieldKey, LitKind, MapElement, PrefixOp,
+    StringPart,
 };
 use vx_ir::ids::{BindingId, BodyId, ExprId, ItemId, PatternId};
 use vx_ir::item::ItemKind;
@@ -45,6 +46,32 @@ use crate::graph::{
 /// `exec` is likewise **absent**: running a tool is a backtick *invocation*
 /// (`r[expr.command]`), not a call — its boundary is the `CliLiteral` arm below.
 const BOUNDARY_CALLS: &[&str] = &["acquire", "Http", "http"];
+
+#[derive(Debug, Clone, Default)]
+pub(crate) struct GraphRuntimeMeta {
+    pub(crate) execs: HashMap<NodeId, ExecInvocationMeta>,
+    pub(crate) tree_files: HashMap<NodeId, TreeFileMeta>,
+}
+
+#[derive(Debug, Clone)]
+pub(crate) struct ExecInvocationMeta {
+    pub(crate) args: Vec<CliArgTemplate>,
+    pub(crate) observer: Option<vx_ir::Bundle>,
+}
+
+#[derive(Debug, Clone)]
+pub(crate) struct CliArgTemplate {
+    pub(crate) pieces: Vec<CliArgPiece>,
+}
+
+#[derive(Debug, Clone)]
+pub(crate) enum CliArgPiece {
+    Text(String),
+    Node(NodeId),
+}
+
+#[derive(Debug, Clone)]
+pub(crate) struct TreeFileMeta;
 
 /// Turn `entry`'s body, in `source`, inside out — through the real front-end.
 /// Errors only if the source doesn't parse or the entry isn't found; unhandled
@@ -120,6 +147,22 @@ pub(crate) fn build_graph_indexed(
     HashMap<NodeId, BindingId>,
     HashMap<BindingId, NodeId>,
 ) {
+    let (graph, expr_nodes, param_bindings, binding_nodes, _) =
+        build_graph_indexed_with_meta(program, env, body_id);
+    (graph, expr_nodes, param_bindings, binding_nodes)
+}
+
+pub(crate) fn build_graph_indexed_with_meta(
+    program: &VirProgram,
+    env: &TypeEnv,
+    body_id: BodyId,
+) -> (
+    DemandGraph,
+    HashMap<ExprId, NodeId>,
+    HashMap<NodeId, BindingId>,
+    HashMap<BindingId, NodeId>,
+    GraphRuntimeMeta,
+) {
     let params: Vec<PatternId> = program.arena[body_id]
         .params
         .iter()
@@ -136,6 +179,7 @@ pub(crate) fn build_graph_indexed(
         field_names: HashMap::new(),
         active_bodies: vec![body_id],
         callables: HashMap::new(),
+        runtime_meta: GraphRuntimeMeta::default(),
     };
     for pat in params {
         b.bind_pattern(pat);
@@ -145,7 +189,7 @@ pub(crate) fn build_graph_indexed(
         nodes: b.nodes,
         root,
     };
-    (graph, b.memo, b.param_bindings, b.bindings)
+    (graph, b.memo, b.param_bindings, b.bindings, b.runtime_meta)
 }
 
 struct Builder<'a> {
@@ -171,6 +215,7 @@ struct Builder<'a> {
     /// executable graph does not store VIR ids; this table is used only while
     /// expanding call sites into graph nodes.
     callables: HashMap<NodeId, CallableTemplate>,
+    runtime_meta: GraphRuntimeMeta,
 }
 
 #[derive(Clone)]
@@ -291,6 +336,60 @@ impl Builder<'_> {
             .collect()
     }
 
+    fn emit_exec_invocation(
+        &mut self,
+        cli: &CliLiteralExpr,
+        observer: Option<BodyId>,
+        span: Span,
+    ) -> NodeId {
+        let args = self.cli_arg_templates(cli);
+        let inputs = args
+            .iter()
+            .flat_map(|arg| arg.pieces.iter())
+            .filter_map(|piece| match piece {
+                CliArgPiece::Text(_) => None,
+                CliArgPiece::Node(node) => Some(*node),
+            })
+            .collect();
+        let node = self.emit(NodeKind::Boundary, "`…`".into(), span, inputs);
+        let observer = observer.map(|body| vx_ir::reachable(&self.program.arena, self.env, body));
+        self.runtime_meta
+            .execs
+            .insert(node, ExecInvocationMeta { args, observer });
+        node
+    }
+
+    fn cli_arg_templates(&mut self, cli: &CliLiteralExpr) -> Vec<CliArgTemplate> {
+        cli.args
+            .iter()
+            .map(|arg| CliArgTemplate {
+                pieces: arg
+                    .pieces
+                    .iter()
+                    .map(|piece| match piece {
+                        StringPart::Text(text) => CliArgPiece::Text(text.clone()),
+                        StringPart::Expr(expr) => CliArgPiece::Node(self.walk(*expr)),
+                    })
+                    .collect(),
+            })
+            .collect()
+    }
+
+    fn observer_body(&self, keywords: ExprId) -> Result<BodyId, String> {
+        let ExprKind::Record(record) = &self.program.arena[keywords].kind else {
+            return Err("an invocation's `with` clause must be a keyword record".into());
+        };
+        let observer = record
+            .fields
+            .iter()
+            .find(|field| field.name == "observer")
+            .ok_or_else(|| "this `with` clause needs an `observer`".to_string())?;
+        match &self.program.arena[observer.value].kind {
+            ExprKind::Closure(closure) => Ok(closure.body),
+            _ => Err("an invocation's `observer` must be a closure".into()),
+        }
+    }
+
     fn method_kernel_call(
         &mut self,
         callee: ExprId,
@@ -338,6 +437,14 @@ impl Builder<'_> {
                     span,
                     inputs,
                 ))
+            }
+            "file" => {
+                let mut inputs = Vec::with_capacity(1 + arg_exprs.len());
+                inputs.push(self.walk(field.receiver));
+                inputs.extend(arg_exprs.iter().map(|&arg| self.walk(arg)));
+                let node = self.emit(NodeKind::Boundary, ".file()".into(), span, inputs);
+                self.runtime_meta.tree_files.insert(node, TreeFileMeta);
+                Some(node)
             }
             _ => None,
         }
@@ -780,10 +887,23 @@ impl Builder<'_> {
             // `exec [...] with { observer, mounts, ... }` — the build boundary.
             // References the underlying call and the keyword-config record.
             ExprKind::Where(w) => {
-                let (callee, keywords) = (w.callee, w.keywords);
-                let c = self.walk(callee);
-                let k = self.walk(keywords);
-                self.emit(NodeKind::Boundary, "where".into(), span, vec![c, k])
+                if !w.is_constraint
+                    && let ExprKind::CliLiteral(cli) = &prog.arena[w.callee].kind
+                {
+                    match self.observer_body(w.keywords) {
+                        Ok(observer) => self.emit_exec_invocation(cli, Some(observer), span),
+                        Err(reason) => {
+                            let c = self.walk(w.callee);
+                            let k = self.walk(w.keywords);
+                            self.emit(NodeKind::Unresolved, reason, span, vec![c, k])
+                        }
+                    }
+                } else {
+                    let (callee, keywords) = (w.callee, w.keywords);
+                    let c = self.walk(callee);
+                    let k = self.walk(keywords);
+                    self.emit(NodeKind::Boundary, "where".into(), span, vec![c, k])
+                }
             }
 
             // A closure value: captures are node refs, not demanded values. The
@@ -816,19 +936,7 @@ impl Builder<'_> {
             // A backtick command invocation (`r[expr.command]`): forcing it runs an
             // external process, so it is a Boundary. Its inputs are the holes — the
             // leading `$tool` and each `${arg}` — so the graph reaches them.
-            ExprKind::CliLiteral(cli) => {
-                let inputs = cli
-                    .args
-                    .iter()
-                    .flat_map(|arg| arg.pieces.iter())
-                    .filter_map(|p| match p {
-                        StringPart::Expr(x) => Some(*x),
-                        StringPart::Text(_) => None,
-                    })
-                    .map(|x| self.walk(x))
-                    .collect();
-                self.emit(NodeKind::Boundary, "`…`".into(), span, inputs)
-            }
+            ExprKind::CliLiteral(cli) => self.emit_exec_invocation(cli, None, span),
 
             // Bare invocation `f!` — a no-arg call.
             ExprKind::Invoke(iv) => {

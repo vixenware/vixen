@@ -100,14 +100,42 @@ Expected latest structural checkpoint:
   failures as old public `Value` thunks whose fields demand graph nodes through
   `PublicValueField`.
 - `eval_body`, `eval_body_with_exec`, `eval_body_with_exec_and_providers`, and
-  `eval_body_wire` enter graph body execution. External body arguments are
+  `eval_body_wire` enter graph body execution. `eval_body_with_exec` passes the
+  observe client into graph boundary materialization. External body arguments are
   seeded as graph outputs with external boundary field nodes.
 - `host.which` and `host.exec` lower to typed graph host-method boundaries and
   materialize through the graph driver.
+- Backtick command invocations lower to graph boundary nodes plus runtime-local
+  typed metadata for CLI argument templates and observer bundles. Demand on the
+  exec boundary materializes only the request-shaping payload nodes, dispatches
+  observe, and memoizes the graph output.
 - Observer execution uses graph body execution and graph/native wire crossing.
+- Top-level producing trees returned by observe cross as remote handles attached
+  to graph `OutputTree` nodes. Demanding `tree.file(path)` is a separate graph
+  boundary that materializes only that path through strand remote-part demand.
 - `vx-runtime::eval` still contains the legacy tree-walker code, now producing
   dead-code warnings. It remains a demolition target; it must not become a
   fallback or oracle.
+
+Latest verified red/green shape:
+
+- `cargo check -p vx-runtime-graph -p vx-runtime-core -p vx-runtime-driver -p vx-runtime`
+  passes, with dead-code warnings from the old `dispatch.rs`/`eval.rs` code.
+- `cargo nextest run -p vx-runtime -E 'binary(exec_on_strands)' --no-fail-fast`:
+  3/3 passed, including `undemanded_exec_in_tuple_does_not_dispatch`.
+- `cargo nextest run -p vx-runtime -E 'binary(exec_output_tree)' --no-fail-fast`:
+  3/3 passed.
+- `cargo nextest run -p vx-runtime -E 'binary(remote_tree_via_eval)' --no-fail-fast`:
+  3/3 passed.
+- `cargo nextest run -p vx-runtime -E 'binary(lang_suite)' --no-fail-fast`:
+  1/1 passed.
+- `cargo nextest run -p vx-runtime --no-fail-fast`: 135 run, 133 passed, 2
+  failed. Remaining failures are `cc_probe_builds_a_content_identified_ctoolchain`
+  (`import` graph payload unresolved) and
+  `hello_world_compiles_through_a_requested_toolchain` (a remaining graph
+  boundary, currently `where`/capability/toolchain side, is not wired).
+- The forbidden-symbol scan over `crates/vx-runtime-core` and
+  `crates/vx-runtime-driver` returns no matches.
 
 Verification commands:
 

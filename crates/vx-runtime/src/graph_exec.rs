@@ -10,14 +10,40 @@ use vx_runtime_driver::{DemandRequest, Driver, DriverError};
 use vx_runtime_graph::{ConstValue, HostMethod, NodeId, NodeKind};
 use vx_types::TypeEnv;
 
-use crate::eval::{FailureContext, Outcome, Poison, Thunk, Value};
+use crate::analyze::{CliArgPiece, CliArgTemplate, ExecInvocationMeta, GraphRuntimeMeta};
+use crate::eval::{FailureContext, Outcome, Poison, Thunk, Value, from_wire};
+use crate::observe::{ExecCommand, ObserveRequest};
+use crate::remote::{Part, PartKey};
+use crate::strand::{HandleId, ObserveClientId, ObserveOutcome, dispatch_observe, force_remote};
 
 type SharedDriver = Rc<RefCell<Driver>>;
 type ExternalThunks = Rc<RefCell<HashMap<NodeId, Thunk>>>;
 
+#[derive(Clone)]
+struct RuntimeBoundaries {
+    exec_client: Option<ObserveClientId>,
+    meta: Rc<GraphRuntimeMeta>,
+    remote_trees: Rc<RefCell<HashMap<NodeId, HandleId>>>,
+}
+
+impl Default for RuntimeBoundaries {
+    fn default() -> Self {
+        Self {
+            exec_client: None,
+            meta: Rc::new(GraphRuntimeMeta::default()),
+            remote_trees: Rc::new(RefCell::new(HashMap::new())),
+        }
+    }
+}
+
 pub(crate) fn run_source(source: &str, entry: &str) -> Result<(Outcome, u64), String> {
     let graph = crate::analyze::analyze_source(source, entry)?;
-    drive_graph(graph, Vec::new(), HashMap::new())
+    drive_graph(
+        graph,
+        Vec::new(),
+        HashMap::new(),
+        RuntimeBoundaries::default(),
+    )
 }
 
 pub(crate) fn run_body(
@@ -26,7 +52,38 @@ pub(crate) fn run_body(
     body: BodyId,
     args: Vec<Value>,
 ) -> Result<(Outcome, u64), String> {
-    let (mut graph, _, _, binding_nodes) = crate::analyze::build_graph_indexed(program, env, body);
+    run_body_with_boundaries(program, env, body, args, RuntimeBoundaries::default())
+}
+
+pub(crate) fn run_body_with_exec(
+    program: &VirProgram,
+    env: &TypeEnv,
+    body: BodyId,
+    args: Vec<Value>,
+    exec_client: ObserveClientId,
+) -> Result<(Outcome, u64), String> {
+    run_body_with_boundaries(
+        program,
+        env,
+        body,
+        args,
+        RuntimeBoundaries {
+            exec_client: Some(exec_client),
+            ..RuntimeBoundaries::default()
+        },
+    )
+}
+
+fn run_body_with_boundaries(
+    program: &VirProgram,
+    env: &TypeEnv,
+    body: BodyId,
+    args: Vec<Value>,
+    mut runtime: RuntimeBoundaries,
+) -> Result<(Outcome, u64), String> {
+    let (mut graph, _, _, binding_nodes, meta) =
+        crate::analyze::build_graph_indexed_with_meta(program, env, body);
+    runtime.meta = Rc::new(meta);
     let params: Vec<PatternId> = program.arena[body]
         .params
         .iter()
@@ -49,16 +106,18 @@ pub(crate) fn run_body(
             &binding_nodes,
             &mut graph,
             &mut externals,
+            &runtime,
             &mut seeds,
         )?;
     }
-    drive_graph(graph, seeds, externals)
+    drive_graph(graph, seeds, externals, runtime)
 }
 
 fn drive_graph(
     graph: vx_runtime_graph::DemandGraph,
     seeds: Vec<(NodeId, NodeOutput)>,
     externals: HashMap<NodeId, Thunk>,
+    runtime: RuntimeBoundaries,
 ) -> Result<(Outcome, u64), String> {
     let root = graph.root;
     let mut driver = Driver::new(graph);
@@ -70,6 +129,7 @@ fn drive_graph(
     let result = drive_request(
         Rc::clone(&driver),
         Rc::clone(&externals),
+        runtime.clone(),
         DemandRequest::root(root),
     )?;
     let kernel_executions = driver.borrow().kernel_executions();
@@ -78,6 +138,7 @@ fn drive_graph(
             output,
             Rc::clone(&driver),
             Rc::clone(&externals),
+            runtime.clone(),
         )?),
         Err(DriverError::Poison(poison)) => Outcome::Poisoned {
             reason: poison.reason,
@@ -104,6 +165,7 @@ fn drive_graph(
 fn drive_request(
     driver: SharedDriver,
     externals: ExternalThunks,
+    runtime: RuntimeBoundaries,
     request: DemandRequest,
 ) -> Result<Result<NodeOutput, DriverError>, String> {
     loop {
@@ -113,7 +175,12 @@ fn drive_request(
         };
         match result {
             Err(DriverError::Boundary(node)) => {
-                if materialize_boundary(Rc::clone(&driver), Rc::clone(&externals), node)? {
+                if materialize_boundary(
+                    Rc::clone(&driver),
+                    Rc::clone(&externals),
+                    runtime.clone(),
+                    node,
+                )? {
                     continue;
                 }
                 return Ok(Err(DriverError::Boundary(node)));
@@ -126,10 +193,22 @@ fn drive_request(
 fn materialize_boundary(
     driver: SharedDriver,
     externals: ExternalThunks,
+    runtime: RuntimeBoundaries,
     node: NodeId,
 ) -> Result<bool, String> {
     if externals.borrow().contains_key(&node) {
-        materialize_external_boundary(driver, externals, node)?;
+        materialize_external_boundary(driver, externals, runtime, node)?;
+        return Ok(true);
+    }
+
+    let exec = runtime.meta.execs.get(&node).cloned();
+    if let Some(exec) = exec {
+        materialize_exec_invocation(driver, externals, runtime, node, &exec)?;
+        return Ok(true);
+    }
+
+    if runtime.meta.tree_files.contains_key(&node) {
+        materialize_tree_file(driver, externals, runtime, node)?;
         return Ok(true);
     }
 
@@ -144,13 +223,14 @@ fn materialize_boundary(
         return Ok(false);
     };
 
-    materialize_host_method(driver, externals, node, method)?;
+    materialize_host_method(driver, externals, runtime, node, method)?;
     Ok(true)
 }
 
 fn materialize_external_boundary(
     driver: SharedDriver,
     externals: ExternalThunks,
+    runtime: RuntimeBoundaries,
     node: NodeId,
 ) -> Result<(), String> {
     let thunk = externals
@@ -162,15 +242,198 @@ fn materialize_external_boundary(
         .map_err(|poison| poison.message())?;
     let output = {
         let mut driver = driver.borrow_mut();
-        node_output_from_value_in_driver(&mut driver, Rc::clone(&externals), value)?
+        node_output_from_value_in_driver(&mut driver, Rc::clone(&externals), runtime, node, value)?
     };
     driver.borrow_mut().seed(node, output);
+    Ok(())
+}
+
+fn materialize_exec_invocation(
+    driver: SharedDriver,
+    externals: ExternalThunks,
+    runtime: RuntimeBoundaries,
+    node: NodeId,
+    invocation: &ExecInvocationMeta,
+) -> Result<(), String> {
+    let client = runtime.exec_client.ok_or_else(|| {
+        "a command invocation must run on a strand with an observe executor registered \
+         (no executor available)"
+            .to_string()
+    })?;
+    let Some((lead, rest)) = invocation.args.split_first() else {
+        return Err("empty command invocation".into());
+    };
+    let tool_node = command_tool_node(lead)?;
+    let tool = demand_payload(
+        Rc::clone(&driver),
+        Rc::clone(&externals),
+        runtime.clone(),
+        tool_node,
+    )?;
+    let binary = tool_binary(
+        Rc::clone(&driver),
+        Rc::clone(&externals),
+        runtime.clone(),
+        tool,
+    )?;
+    let mut args = Vec::with_capacity(rest.len());
+    for arg in rest {
+        args.push(render_cli_arg(
+            Rc::clone(&driver),
+            Rc::clone(&externals),
+            runtime.clone(),
+            arg,
+        )?);
+    }
+
+    let observed = dispatch_observe(
+        client,
+        ObserveRequest {
+            observer: invocation.observer.clone(),
+            command: ExecCommand {
+                program: binary,
+                args,
+            },
+        },
+    );
+    let output = {
+        let mut driver = driver.borrow_mut();
+        match &*observed {
+            ObserveOutcome::Value(wire) => {
+                let value = from_wire(wire).map_err(|poison| poison.message())?;
+                node_output_from_value_in_driver(
+                    &mut driver,
+                    Rc::clone(&externals),
+                    runtime.clone(),
+                    node,
+                    value,
+                )?
+            }
+            ObserveOutcome::Tree(handle) => {
+                runtime.remote_trees.borrow_mut().insert(node, *handle);
+                NodeOutput::OutputTree
+            }
+            ObserveOutcome::Poisoned(reason) => return Err(reason.clone()),
+        }
+    };
+    driver.borrow_mut().seed(node, output);
+    Ok(())
+}
+
+fn command_tool_node(arg: &CliArgTemplate) -> Result<NodeId, String> {
+    match arg.pieces.as_slice() {
+        [CliArgPiece::Node(node)] => Ok(*node),
+        _ => Err("a command invocation must lead with a single `$tool` hole".into()),
+    }
+}
+
+fn tool_binary(
+    driver: SharedDriver,
+    externals: ExternalThunks,
+    runtime: RuntimeBoundaries,
+    tool: NodeOutput,
+) -> Result<String, String> {
+    let NodeOutput::Struct {
+        field_names,
+        fields,
+    } = tool
+    else {
+        return Err(format!(
+            "the leading hole of a command invocation must be a tool, got {tool:?}"
+        ));
+    };
+    let binary = field_names
+        .iter()
+        .position(|name| name == "binary")
+        .and_then(|index| fields.get(index).copied())
+        .ok_or_else(|| "tool value has no `binary` field".to_string())?;
+    let binary = demand_payload(driver, externals, runtime, binary)?;
+    expect_string(binary, "tool `binary`")
+}
+
+fn render_cli_arg(
+    driver: SharedDriver,
+    externals: ExternalThunks,
+    runtime: RuntimeBoundaries,
+    arg: &CliArgTemplate,
+) -> Result<String, String> {
+    let mut rendered = String::new();
+    for piece in &arg.pieces {
+        match piece {
+            CliArgPiece::Text(text) => rendered.push_str(text),
+            CliArgPiece::Node(node) => {
+                let output = demand_payload(
+                    Rc::clone(&driver),
+                    Rc::clone(&externals),
+                    runtime.clone(),
+                    *node,
+                )?;
+                match output {
+                    NodeOutput::Str(value) => rendered.push_str(&value),
+                    NodeOutput::U64(value) => rendered.push_str(&value.to_string()),
+                    other => {
+                        return Err(format!("can't render {other:?} as a CLI argument"));
+                    }
+                }
+            }
+        }
+    }
+    Ok(rendered)
+}
+
+fn materialize_tree_file(
+    driver: SharedDriver,
+    externals: ExternalThunks,
+    runtime: RuntimeBoundaries,
+    node: NodeId,
+) -> Result<(), String> {
+    let inputs = {
+        let driver = driver.borrow();
+        driver
+            .node(node)
+            .ok_or_else(|| format!("tree.file graph boundary {node:?} has no node"))?
+            .inputs
+            .clone()
+    };
+    let [receiver, path] = inputs.as_slice() else {
+        return Err(format!(
+            "tree.file graph node expects receiver and path, got {} inputs",
+            inputs.len()
+        ));
+    };
+    let receiver_output = demand_payload(
+        Rc::clone(&driver),
+        Rc::clone(&externals),
+        runtime.clone(),
+        *receiver,
+    )?;
+    if !matches!(receiver_output, NodeOutput::OutputTree) {
+        return Err(format!(
+            "tree.file receiver must be a producing Tree, got {receiver_output:?}"
+        ));
+    }
+    let handle = runtime
+        .remote_trees
+        .borrow()
+        .get(receiver)
+        .copied()
+        .ok_or_else(|| format!("tree.file receiver node {receiver:?} has no remote handle"))?;
+    let path = expect_string(
+        demand_payload(Rc::clone(&driver), Rc::clone(&externals), runtime, *path)?,
+        "tree.file path",
+    )?;
+    let value = match &*force_remote(handle, PartKey::TreePath(path.clone())) {
+        Part::Bytes(bytes) => NodeOutput::Str(String::from_utf8_lossy(bytes).into_owned()),
+        Part::Absent(reason) => return Err(format!("tree path `{path}` absent: {reason}")),
+    };
+    driver.borrow_mut().seed(node, value);
     Ok(())
 }
 
 fn materialize_host_method(
     driver: SharedDriver,
     externals: ExternalThunks,
+    runtime: RuntimeBoundaries,
     node: NodeId,
     method: HostMethod,
 ) -> Result<(), String> {
@@ -184,14 +447,15 @@ fn materialize_host_method(
     };
 
     match method {
-        HostMethod::Which => materialize_host_which(driver, externals, node, inputs),
-        HostMethod::Exec => materialize_host_exec(driver, externals, node, inputs),
+        HostMethod::Which => materialize_host_which(driver, externals, runtime, node, inputs),
+        HostMethod::Exec => materialize_host_exec(driver, externals, runtime, node, inputs),
     }
 }
 
 fn materialize_host_which(
     driver: SharedDriver,
     externals: ExternalThunks,
+    runtime: RuntimeBoundaries,
     node: NodeId,
     inputs: Vec<NodeId>,
 ) -> Result<(), String> {
@@ -204,10 +468,11 @@ fn materialize_host_which(
     ensure_host_receiver(demand_payload(
         Rc::clone(&driver),
         Rc::clone(&externals),
+        runtime.clone(),
         *receiver,
     )?)?;
     let name = expect_string(
-        demand_payload(Rc::clone(&driver), Rc::clone(&externals), *name)?,
+        demand_payload(Rc::clone(&driver), Rc::clone(&externals), runtime, *name)?,
         "host.which name",
     )?;
     let path = crate::host::which(&name).ok_or_else(|| format!("host tool `{name}` not found"))?;
@@ -218,6 +483,7 @@ fn materialize_host_which(
 fn materialize_host_exec(
     driver: SharedDriver,
     externals: ExternalThunks,
+    runtime: RuntimeBoundaries,
     node: NodeId,
     inputs: Vec<NodeId>,
 ) -> Result<(), String> {
@@ -230,13 +496,24 @@ fn materialize_host_exec(
     ensure_host_receiver(demand_payload(
         Rc::clone(&driver),
         Rc::clone(&externals),
+        runtime.clone(),
         *receiver,
     )?)?;
-    let argv = demand_payload(Rc::clone(&driver), Rc::clone(&externals), *argv)?;
+    let argv = demand_payload(
+        Rc::clone(&driver),
+        Rc::clone(&externals),
+        runtime.clone(),
+        *argv,
+    )?;
     let fields = expect_array_fields(argv, "host.exec argv")?;
     let mut args = Vec::with_capacity(fields.len());
     for field in fields {
-        let value = demand_payload(Rc::clone(&driver), Rc::clone(&externals), field)?;
+        let value = demand_payload(
+            Rc::clone(&driver),
+            Rc::clone(&externals),
+            runtime.clone(),
+            field,
+        )?;
         args.push(expect_string(value, "host.exec argv element")?);
     }
 
@@ -252,9 +529,15 @@ fn materialize_host_exec(
 fn demand_payload(
     driver: SharedDriver,
     externals: ExternalThunks,
+    runtime: RuntimeBoundaries,
     node: NodeId,
 ) -> Result<NodeOutput, String> {
-    match drive_request(driver, externals, DemandRequest::boundary_payload(node))? {
+    match drive_request(
+        driver,
+        externals,
+        runtime,
+        DemandRequest::boundary_payload(node),
+    )? {
         Ok(output) => Ok(output),
         Err(error) => Err(driver_error_message(error)),
     }
@@ -319,6 +602,7 @@ fn seed_pattern(
     binding_nodes: &HashMap<vx_ir::ids::BindingId, NodeId>,
     graph: &mut vx_runtime_graph::DemandGraph,
     externals: &mut HashMap<NodeId, Thunk>,
+    runtime: &RuntimeBoundaries,
     seeds: &mut Vec<(NodeId, NodeOutput)>,
 ) -> Result<(), String> {
     match &program.arena[pattern].kind {
@@ -327,7 +611,10 @@ fn seed_pattern(
                 .get(&binding.binding)
                 .copied()
                 .ok_or_else(|| format!("graph body has no node for binding `{}`", binding.name))?;
-            seeds.push((node, node_output_from_value(graph, externals, value)?));
+            seeds.push((
+                node,
+                node_output_from_value(graph, externals, runtime, node, value)?,
+            ));
             Ok(())
         }
         PatternKind::At(at) => {
@@ -337,7 +624,7 @@ fn seed_pattern(
                 .ok_or_else(|| format!("graph body has no node for binding `{}`", at.name))?;
             seeds.push((
                 node,
-                node_output_from_value(graph, externals, value.clone())?,
+                node_output_from_value(graph, externals, runtime, node, value.clone())?,
             ));
             seed_pattern(
                 program,
@@ -346,6 +633,7 @@ fn seed_pattern(
                 binding_nodes,
                 graph,
                 externals,
+                runtime,
                 seeds,
             )
         }
@@ -359,6 +647,8 @@ fn seed_pattern(
 fn node_output_from_value(
     graph: &mut vx_runtime_graph::DemandGraph,
     externals: &mut HashMap<NodeId, Thunk>,
+    runtime: &RuntimeBoundaries,
+    node: NodeId,
     value: Value,
 ) -> Result<NodeOutput, String> {
     match value {
@@ -366,6 +656,10 @@ fn node_output_from_value(
         Value::Bool(b) => Ok(NodeOutput::Bool(b)),
         Value::Str(s) => Ok(NodeOutput::Str(s.to_string())),
         Value::Unit => Ok(NodeOutput::Unit),
+        Value::Tree(handle) => {
+            runtime.remote_trees.borrow_mut().insert(node, handle);
+            Ok(NodeOutput::OutputTree)
+        }
         Value::OutputTree => Ok(NodeOutput::OutputTree),
         Value::Tuple(fields) => Ok(NodeOutput::LazyData {
             label: "(external)".to_string(),
@@ -415,6 +709,8 @@ fn node_output_from_value(
 fn node_output_from_value_in_driver(
     driver: &mut Driver,
     externals: ExternalThunks,
+    runtime: RuntimeBoundaries,
+    node: NodeId,
     value: Value,
 ) -> Result<NodeOutput, String> {
     match value {
@@ -422,6 +718,10 @@ fn node_output_from_value_in_driver(
         Value::Bool(b) => Ok(NodeOutput::Bool(b)),
         Value::Str(s) => Ok(NodeOutput::Str(s.to_string())),
         Value::Unit => Ok(NodeOutput::Unit),
+        Value::Tree(handle) => {
+            runtime.remote_trees.borrow_mut().insert(node, handle);
+            Ok(NodeOutput::OutputTree)
+        }
         Value::OutputTree => Ok(NodeOutput::OutputTree),
         Value::Tuple(fields) => Ok(NodeOutput::LazyData {
             label: "(external)".to_string(),
@@ -510,6 +810,7 @@ fn value_from_output(
     output: NodeOutput,
     driver: SharedDriver,
     externals: ExternalThunks,
+    runtime: RuntimeBoundaries,
 ) -> Result<Value, String> {
     match output {
         NodeOutput::U64(n) => Ok(Value::U64(n)),
@@ -520,7 +821,14 @@ fn value_from_output(
         NodeOutput::LazyData { label, fields } => {
             let fields = fields
                 .into_iter()
-                .map(|node| graph_field_thunk(Rc::clone(&driver), Rc::clone(&externals), node))
+                .map(|node| {
+                    graph_field_thunk(
+                        Rc::clone(&driver),
+                        Rc::clone(&externals),
+                        runtime.clone(),
+                        node,
+                    )
+                })
                 .collect();
             if label.starts_with('[') {
                 Ok(Value::Array(fields))
@@ -538,7 +846,12 @@ fn value_from_output(
                 .map(|(name, node)| {
                     (
                         name,
-                        graph_field_thunk(Rc::clone(&driver), Rc::clone(&externals), node),
+                        graph_field_thunk(
+                            Rc::clone(&driver),
+                            Rc::clone(&externals),
+                            runtime.clone(),
+                            node,
+                        ),
                     )
                 })
                 .collect();
@@ -555,7 +868,12 @@ fn value_from_output(
                 .map(|(name, node)| {
                     (
                         name,
-                        graph_field_thunk(Rc::clone(&driver), Rc::clone(&externals), node),
+                        graph_field_thunk(
+                            Rc::clone(&driver),
+                            Rc::clone(&externals),
+                            runtime.clone(),
+                            node,
+                        ),
                     )
                 })
                 .collect();
@@ -564,7 +882,12 @@ fn value_from_output(
         NodeOutput::Failure { err, context } => Ok(Value::Struct(vec![
             (
                 "err".to_string(),
-                ready_output_thunk(*err, Rc::clone(&driver), Rc::clone(&externals)),
+                ready_output_thunk(
+                    *err,
+                    Rc::clone(&driver),
+                    Rc::clone(&externals),
+                    runtime.clone(),
+                ),
             ),
             (
                 "context".to_string(),
@@ -572,6 +895,7 @@ fn value_from_output(
                     NodeOutput::FailureContext(context),
                     Rc::clone(&driver),
                     Rc::clone(&externals),
+                    runtime.clone(),
                 ),
             ),
         ])),
@@ -581,17 +905,28 @@ fn value_from_output(
     }
 }
 
-fn graph_field_thunk(driver: SharedDriver, externals: ExternalThunks, node: NodeId) -> Thunk {
+fn graph_field_thunk(
+    driver: SharedDriver,
+    externals: ExternalThunks,
+    runtime: RuntimeBoundaries,
+    node: NodeId,
+) -> Thunk {
     Thunk::native(move || {
         let result = drive_request(
             Rc::clone(&driver),
             Rc::clone(&externals),
+            runtime.clone(),
             DemandRequest::public_value_field(node),
         )
         .map_err(poison_from_string)?;
         let output = result.map_err(poison_from_driver_error)?;
-        value_from_output(output, Rc::clone(&driver), Rc::clone(&externals))
-            .map_err(poison_from_string)
+        value_from_output(
+            output,
+            Rc::clone(&driver),
+            Rc::clone(&externals),
+            runtime.clone(),
+        )
+        .map_err(poison_from_string)
     })
 }
 
@@ -599,10 +934,16 @@ fn ready_output_thunk(
     output: NodeOutput,
     driver: SharedDriver,
     externals: ExternalThunks,
+    runtime: RuntimeBoundaries,
 ) -> Thunk {
     Thunk::native(move || {
-        value_from_output(output.clone(), Rc::clone(&driver), Rc::clone(&externals))
-            .map_err(poison_from_string)
+        value_from_output(
+            output.clone(),
+            Rc::clone(&driver),
+            Rc::clone(&externals),
+            runtime.clone(),
+        )
+        .map_err(poison_from_string)
     })
 }
 

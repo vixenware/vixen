@@ -113,6 +113,27 @@ Execution:
 - driver dispatches to executor.
 - produced handles enter memo as graph outputs.
 
+Current progress:
+
+- Backtick command literals lower to graph `Boundary` nodes plus runtime-local
+  exec metadata keyed by graph `NodeId`. The metadata carries CLI argument
+  templates as text plus input node refs, and carries an explicit observer as a
+  static `vx_ir::Bundle`.
+- Bare invocations carry no observer bundle; the executor applies the default
+  `run.ok.out` observer.
+- Demand on the exec boundary materializes only request-shaping inputs: the
+  leading tool node, its `binary` field, and each demanded argv hole. Merely
+  constructing an exec boundary or a lazy product containing one does not run the
+  command.
+- Observe dispatch happens from graph boundary materialization through
+  `dispatch_observe`, then the resulting graph node is seeded and the same demand
+  loop resumes.
+- A top-level data observer result becomes graph output structure. A top-level
+  producing tree result becomes `NodeOutput::OutputTree` plus a runtime remote
+  handle entry keyed by the exec node.
+- `exec_on_strands` passes, including a cold-field tripwire where a failing exec
+  in tuple slot 0 stays undemanded while slot 1 is selected.
+
 ### Observer execution
 
 Observer payload should be graph/executable code, not source callback:
@@ -160,6 +181,17 @@ RemotePartNode {
 
 The boss/driver owns scheduling and parking. Core reports the need; it does not
 block.
+
+Current progress:
+
+- `tree.file(path)` lowers to a graph boundary with runtime-local metadata.
+- A remote `Tree` supplied as a public body argument or returned as a top-level
+  observe result seeds the destination graph node as `NodeOutput::OutputTree`
+  and records its `HandleId` in the runtime boundary context.
+- Demand on the `.file(path)` boundary demands the receiver node and path node,
+  then calls `force_remote(handle, PartKey::TreePath(path))`. Only that path's
+  bytes cross; absent parts poison through the graph boundary.
+- `remote_tree_via_eval` and `exec_output_tree` pass through graph execution.
 
 ## Strand integration
 
@@ -242,16 +274,22 @@ Verified green:
 
 - `cargo nextest run -p vx-runtime -E 'binary(host_probe)'`: 3/3 passed.
 - `cargo nextest run -p vx-runtime -E 'test(observe_runs_a_real_command_and_returns_the_observer_value) | test(observe_crosses_the_output_tree_as_a_handle_marker) | binary(observe_on_strands)' --no-fail-fast`: 4/4 passed.
-- In the full `vx-runtime` package run, observe tests and observe-on-strands now
-  pass through graph execution.
+- `cargo nextest run -p vx-runtime -E 'binary(exec_on_strands)' --no-fail-fast`:
+  3/3 passed.
+- `cargo nextest run -p vx-runtime -E 'binary(exec_output_tree)' --no-fail-fast`:
+  3/3 passed.
+- `cargo nextest run -p vx-runtime -E 'binary(remote_tree_via_eval)' --no-fail-fast`:
+  3/3 passed.
+- In the full `vx-runtime` package run, observe, observe-on-strands, exec,
+  output-tree, and remote-tree eval tests now pass through graph execution.
 
 Still red:
 
-- Backtick/CLI invocation boundary dispatch is not structured/wired yet.
 - `import`/grammar/toolchain graph payloads are still unresolved in body
   execution.
-- `Value::Tree(HandleId)` remote tree body arguments are not seedable into graph
-  execution yet.
+- A remaining graph boundary in the requested-toolchain hello-world path is not
+  wired yet; this is currently the `where`/capability/toolchain side of boundary
+  execution.
 
 No input-keyed L1/L2 cache has been implemented in this checkpoint.
 

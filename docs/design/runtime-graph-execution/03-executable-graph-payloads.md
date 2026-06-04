@@ -316,6 +316,16 @@ Current progress:
   boundaries, then resume the original demand.
 - Graph-visible executor-local output trees use `NodeOutput::OutputTree` and
   cross to `WireValue::Tree` at observer wire crossing.
+- Backtick command literals now emit graph `Boundary` nodes with runtime-local
+  metadata for CLI templates and observer bundles. The execution crates still see
+  only graph nodes and boundary requests; `vx-runtime` owns the VIR-derived
+  observer bundle sidecar.
+- Demand on a backtick boundary materializes only request-shaping input nodes
+  before dispatching observe. A cold exec in an undemanded lazy-data field stays
+  undemanded.
+- `tree.file(path)` now emits a graph boundary with runtime-local metadata.
+  Remote tree handles are stored in the runtime boundary context keyed by graph
+  node; demanding `.file(path)` pulls only that path through `force_remote`.
 
 ### Kernel nodes
 
