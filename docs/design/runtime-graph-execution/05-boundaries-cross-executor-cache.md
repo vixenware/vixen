@@ -1,0 +1,226 @@
+# Runtime graph execution - boundaries, cross-executor runtime, and cache
+
+This document is self-contained. It describes how to port boundary execution,
+cross-executor values, and caching onto the graph runtime.
+
+## Complete task context
+
+Vixen's runtime is a demand graph. Pure computation runs in eager kernel islands.
+Effects and external observations are boundary nodes. Boundary materialization is
+one of the only legal origins of demand. It is not an excuse for arbitrary
+internal `force`; the boundary node declares what must cross, and the driver
+materializes exactly that payload.
+
+The current runtime has exec, host operations, remote tree handles, observer
+shipping, and strand tests wired through the old `vx-runtime::eval` path. Those
+must move to graph driver semantics after pure graph execution is established.
+
+## Legal demand origins
+
+The driver should recognize only a small set of demand origins:
+
+- root result demanded by CLI/API/test harness
+- boundary payload materialization
+- boundary-produced output materialization
+- explicit test probe
+
+Core does not create demand origins. It can only report `Need(nodes)` or
+`Boundary(request)`.
+
+## Boundary node categories
+
+### Grammar import and tool values
+
+Graph payloads needed:
+
+- grammar package coordinate
+- grammar name coordinate
+- tool record layout: command coordinate + binary node
+
+Execution:
+
+- importing a grammar package returns a graph value representing available
+  grammar coordinates.
+- selecting `g.cc` is projection over that value.
+- command validation should operate over structured command payloads, not source
+  expressions.
+
+### Where/capability injection
+
+Graph payloads needed:
+
+- capability spec identity
+- structured predicate
+- provider candidates or provider registry handle
+
+Execution:
+
+- demand on `Type where(predicate)` asks driver/control plane for matching
+  provider.
+- predicate evaluation may demand provider attributes.
+- no provider match returns poison/unsupported according to current semantics.
+
+### Host methods
+
+Host methods are boundary or host-observation nodes:
+
+- `host.which(name)`
+- `host.exec(args)`
+
+Demand:
+
+- materialize method arguments required to cross host boundary.
+- run host operation.
+- memo output in node table.
+
+Do not hide host methods inside source-level method dispatch.
+
+### CLI invocation/backtick/exec
+
+Graph payloads needed:
+
+```text
+ExecBoundaryPayload {
+  tool: NodeId,
+  args: Vec<CliArgPayload>,
+  observer: ObserverPayload,
+  mounts: Vec<NodeId>,
+  env: Vec<NodeId>,
+}
+```
+
+Demand profile:
+
+- upfront inputs: tool identity, argv, env, mounts, observer code/captures
+- progressive inputs: mounted tree bytes demanded by executor
+- produced outputs: stdout/stderr streams, observer value, output tree
+
+Execution:
+
+- driver receives boundary request.
+- driver materializes upfront payload.
+- driver dispatches to executor.
+- produced handles enter memo as graph outputs.
+
+### Observer execution
+
+Observer payload should be graph/executable code, not source callback:
+
+- observer graph/function id
+- captured node refs
+- executor-local values such as `Run`, `Process`, `Tree`, `Host`
+
+Executor links the same graph evaluator semantics. It binds executor-local
+values as graph nodes and drives observer root demand.
+
+## Cross-executor remote values
+
+Remote tree/stream values are graph outputs that may be pending because another
+host has not produced a part.
+
+Driver behavior:
+
+- demanding a produced local part returns it immediately.
+- demanding an unproduced part parks the strand.
+- producer resolution wakes parked demand.
+- producer completion without part poisons.
+
+Graph shape:
+
+```text
+RemotePartNode {
+  handle: RemoteHandle,
+  key: PartKey
+}
+```
+
+The boss/driver owns scheduling and parking. Core reports the need; it does not
+block.
+
+## Strand integration
+
+The strand scheduler is the driver for asynchronous progress. The graph driver
+should produce step results that the strand scheduler can interpret:
+
+- `NeedLocal(nodes)`
+- `NeedBoundary(payload)`
+- `NeedRemotePart(handle, key)`
+- `Ready(output)`
+- `Poison`
+- `Unsupported`
+
+No code inside core should wait on remote I/O. Waiting/parking belongs to driver
+and strand scheduler.
+
+## Cache roadmap
+
+Caching must be added in this order.
+
+### 1. Per-run node memo
+
+Already conceptually present in driver. Every node has:
+
+- unready
+- running/in-progress
+- ready output
+- poison
+
+This is Tier 1 in-memory memo for one run.
+
+### 2. Function-call memo
+
+Key:
+
+```text
+function code identity + resolved argument values
+```
+
+Rules:
+
+- key computed before running body
+- only resolved values participate
+- no read-set in key
+
+### 3. Boundary L1 input-keyed cache
+
+Exec key:
+
+```text
+observer code identity
+observer captures
+argv
+env
+mount identities
+resolved toolchain/capability identities
+```
+
+Rules:
+
+- key computed before running
+- output not part of key
+- executor selector string not part of key
+- capability/toolchain identities are part of inputs
+
+### 4. L2 content-addressed storage
+
+Persist boundary/function outputs by content identity. This is the storage layer,
+not a reason to change cache key semantics.
+
+### 5. Read-set provenance
+
+Read-set is discovered after running. It supports reuse/rerun avoidance; it is
+never used as the primary key. If an implementation tries to key by read-set, it
+must already have run the command and is therefore wrong.
+
+## Acceptance criteria
+
+Boundary/cross-executor phase is complete when:
+
+- exec tests pass through graph driver.
+- observer evaluation runs graph payloads, not source callback evaluation.
+- remote tree tests pass through graph driver/strand semantics.
+- host `which`/`exec` are boundary nodes or structured host nodes.
+- boundary payload materialization is explicit in driver.
+- cache keys are computed before running.
+- read-set is recorded after running and not included in key.
+

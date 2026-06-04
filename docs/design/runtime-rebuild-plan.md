@@ -1,5 +1,13 @@
 # Runtime rebuild — implementation plan
 
+**Current execution-roadmap addendum:** the structural anti-fallback roadmap lives
+in [`runtime-graph-execution/README.md`](runtime-graph-execution/README.md). Read
+that roadmap before touching `vx-runtime` execution. It records the post-mortem
+for the graph-frame/tree-walker masquerade and the current requirement: execution
+crates must be source-blind, public runtime entry points must use graph driver,
+and unsupported graph shapes must fail explicitly instead of falling back to
+source interpretation.
+
 **Status: plan.** Sequenced. Each phase ends in a **committed, known state**
 (working, or *honestly red*). No demolition happens ahead of its replacement.
 
