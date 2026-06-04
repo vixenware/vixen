@@ -56,6 +56,7 @@ struct ExecInvocationCacheKey {
     command_package: String,
     command_name: String,
     program: String,
+    program_fingerprint: String,
     args: Vec<String>,
     observer: ObserverCacheIdentity,
 }
@@ -362,7 +363,8 @@ fn materialize_exec_invocation(
         )?);
     }
 
-    let cache_key = exec_invocation_cache_key(&tool, args.clone(), invocation);
+    let program_fingerprint = crate::host::fingerprint_executable(&tool.binary)?;
+    let cache_key = exec_invocation_cache_key(&tool, program_fingerprint, args.clone(), invocation);
     let cached = {
         runtime
             .exec_invocation_cache
@@ -533,6 +535,7 @@ fn command_coordinate(
 
 fn exec_invocation_cache_key(
     tool: &ToolRequest,
+    program_fingerprint: String,
     args: Vec<String>,
     invocation: &ExecInvocationMeta,
 ) -> ExecInvocationCacheKey {
@@ -544,6 +547,7 @@ fn exec_invocation_cache_key(
         command_package: tool.command_package.clone(),
         command_name: tool.command_name.clone(),
         program: tool.binary.clone(),
+        program_fingerprint,
         args,
         observer,
     }
@@ -850,7 +854,7 @@ fn host_exec_cache_key(args: &[String]) -> Result<HostExecCacheKey, String> {
         .ok_or_else(|| "host.exec needs a program".to_string())?;
     Ok(HostExecCacheKey {
         argv: args.to_vec(),
-        program_fingerprint: crate::host::fingerprint_program(program)?,
+        program_fingerprint: crate::host::fingerprint_executable(program)?,
     })
 }
 

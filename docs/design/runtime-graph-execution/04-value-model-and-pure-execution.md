@@ -286,7 +286,7 @@ Acceptance:
 Current progress:
 
 - Direct calls and known closure calls instantiate the body graph and wrap the
-  result in `NodeKind::Call { function, code_identity, arg_count }`.
+  result in `NodeKind::Call { function, code_identity, arg_count, capture_count }`.
 - `vx-runtime-core` executes a call node by demanding only its expanded body-root
   input. Additional argument inputs are retained as graph identity/memo-hook
   material, not as strict dependencies.

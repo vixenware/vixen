@@ -119,8 +119,9 @@ Expected latest structural checkpoint:
 - Backtick command invocations lower to graph boundary nodes plus runtime-local
   typed metadata for CLI argument templates and observer bundles. Demand on the
   exec boundary materializes only the request-shaping payload nodes, dispatches
-  observe on miss, seeds cached graph output on exact in-process L1 hit, and
-  memoizes the graph output.
+  observe on miss, seeds cached graph output on an exact in-process L1 hit keyed
+  by the materialized request plus the pre-run executable content fingerprint,
+  and memoizes the graph output.
 - Observer execution uses graph body execution and graph/native wire crossing.
 - Top-level producing trees returned by observe cross as remote handles attached
   to graph `OutputTree` nodes. Demanding `tree.file(path)` is a separate graph
@@ -149,13 +150,15 @@ Latest verified red/green shape:
 - `cargo nextest run -p vx-runtime -E 'binary(source_blind_guardrails)' --no-fail-fast`:
   2/2 passed.
 - `cargo nextest run -p vx-runtime -E 'binary(exec_on_strands)' --no-fail-fast`:
-  5/5 passed, including `undemanded_exec_in_tuple_does_not_dispatch`,
-  exact-L1 reuse for identical demanded backtick invocations, and observer
-  identity non-aliasing.
+  6/6 passed, including `undemanded_exec_in_tuple_does_not_dispatch`,
+  exact-L1 reuse for identical demanded backtick invocations, observer identity
+  non-aliasing, and executable-fingerprint non-aliasing when a stable binary
+  path changes content.
 - `cargo nextest run -p vx-runtime -E 'binary(exec_output_tree)' --no-fail-fast`:
   3/3 passed.
 - `cargo nextest run -p vx-runtime -E 'binary(host_probe)' --no-fail-fast`:
-  4/4 passed, including the input-keyed `host.exec` L1 cache test.
+  5/5 passed, including the input-keyed `host.exec` L1 cache test and bare
+  executable-name fingerprint resolution.
 - `cargo nextest run -p vx-runtime -E 'binary(bundle)' --no-fail-fast`:
   3/3 passed, including stable, content-sensitive observer bundle identity.
 - `cargo nextest run -p vx-runtime -E 'binary(remote_tree_via_eval)' --no-fail-fast`:
@@ -171,10 +174,10 @@ Latest verified red/green shape:
   call memo reuse, resolved-argument disambiguation, closure capture memo reuse,
   and proof that unresolved arguments or captures are not demanded to build a
   call memo key.
-- `cargo nextest run -p vx-runtime --no-fail-fast`: 142 run, 142 passed,
+- `cargo nextest run -p vx-runtime --no-fail-fast`: 144 run, 144 passed,
   0 failed, 0 skipped.
 - `cargo nextest run -p vx-runtime-graph -p vx-runtime-core -p vx-runtime-driver -p vx-runtime --no-fail-fast`:
-  158 run, 158 passed, 0 skipped.
+  160 run, 160 passed, 0 skipped.
 - The forbidden-symbol scan over `crates/vx-runtime-core` and
   `crates/vx-runtime-driver` returns no matches.
 - The deleted tree-walker affordance scan over `crates/vx-runtime/src` returns

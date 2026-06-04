@@ -238,6 +238,92 @@ fn identical_backtick_exec_boundaries_share_the_l1_entry() {
     );
 }
 
+#[cfg(unix)]
+#[test]
+fn backtick_exec_l1_keys_the_binary_fingerprint() {
+    use std::os::unix::fs::PermissionsExt;
+
+    let link = exec_cache_marker("binary-fingerprint");
+    let first_path = format!("{link}.first");
+    let second_path = format!("{link}.second");
+    let marker = format!("{link}.marker");
+    let _ = std::fs::remove_file(&link);
+    let _ = std::fs::remove_file(&first_path);
+    let _ = std::fs::remove_file(&second_path);
+    let _ = std::fs::remove_file(&marker);
+    std::fs::write(
+        &first_path,
+        format!("#!/bin/sh\nln -sf {second_path} {link}\nprintf a >> {marker}\nprintf same\n"),
+    )
+    .expect("write first executable");
+    std::fs::write(
+        &second_path,
+        format!("#!/bin/sh\nprintf b >> {marker}\nprintf same\n"),
+    )
+    .expect("write second executable");
+    for path in [&first_path, &second_path] {
+        let mut perms = std::fs::metadata(path)
+            .expect("executable metadata")
+            .permissions();
+        perms.set_mode(0o755);
+        std::fs::set_permissions(path, perms).expect("make executable runnable");
+    }
+    std::os::unix::fs::symlink(&first_path, &link).expect("link executable path to v1");
+
+    let fe = compile_source(
+        "fn t(cmd: Command) ( \
+           let first = `$cmd` with { observer: (run) => run.ok }; \
+           let second = `$cmd` with { observer: (run) => run.ok }; \
+           assert_eq(first.stdout, second.stdout) )",
+        "t",
+    )
+    .expect("exec binary fingerprint cache program compiles");
+    let entry = fe
+        .program
+        .arena
+        .items
+        .iter()
+        .find_map(|it| match &it.kind {
+            ItemKind::Function(f) if f.name == "t" => Some(f.body),
+            _ => None,
+        })
+        .expect("fn t");
+
+    let s = Scheduler::new(&[4]);
+    let client = s.block_on(local_observer());
+    let cid = s.register_observe_client(client);
+
+    let program = fe.program;
+    let env = fe.env;
+    let binary = link.clone();
+    let strand = s.spawn(ResourceId(0), move || {
+        let cmd = tool_value("@vixen/grammar-cc", "cc", &binary);
+        match eval_body_with_exec(&program, &env, entry, vec![cmd], KernelMode::Off, cid) {
+            EvalOutcome::Clean(Value::Unit) => Outcome::Clean,
+            EvalOutcome::Clean(other) => {
+                Outcome::Poisoned(format!("expected both executable versions, got {other:?}"))
+            }
+            EvalOutcome::Poisoned { reason, .. } => Outcome::Poisoned(reason),
+        }
+    });
+    s.demand(strand);
+    s.run();
+    assert_eq!(
+        s.outcome(strand),
+        Some(Outcome::Clean),
+        "changing the executable at the same path must miss the backtick exec L1"
+    );
+    let marker_contents = std::fs::read_to_string(&marker).expect("binary cache marker file");
+    assert_eq!(
+        marker_contents, "ab",
+        "the second executable version must run instead of reusing the path-keyed L1 entry"
+    );
+    let _ = std::fs::remove_file(&link);
+    let _ = std::fs::remove_file(&first_path);
+    let _ = std::fs::remove_file(&second_path);
+    let _ = std::fs::remove_file(&marker);
+}
+
 #[test]
 fn observer_identity_is_part_of_the_backtick_exec_l1_key() {
     let marker = exec_cache_marker("observer");

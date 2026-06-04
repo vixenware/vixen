@@ -140,12 +140,13 @@ Latest focused verification:
 - `cargo nextest run -p vx-runtime -E 'binary(source_blind_guardrails)' --no-fail-fast`:
   2/2 passed.
 - `cargo nextest run -p vx-runtime -E 'binary(exec_on_strands)' --no-fail-fast`:
-  5/5 passed, including cold exec non-demand, exact backtick exec L1 reuse, and
-  observer-identity non-aliasing.
+  6/6 passed, including cold exec non-demand, exact backtick exec L1 reuse,
+  observer-identity non-aliasing, and executable-fingerprint non-aliasing.
 - `cargo nextest run -p vx-runtime -E 'binary(exec_output_tree)' --no-fail-fast`:
   3/3 passed.
 - `cargo nextest run -p vx-runtime -E 'binary(host_probe)' --no-fail-fast`:
-  4/4 passed, including the input-keyed `host.exec` L1 cache test.
+  5/5 passed, including the input-keyed `host.exec` L1 cache test and bare
+  executable-name fingerprint resolution.
 - `cargo nextest run -p vx-runtime -E 'binary(bundle)' --no-fail-fast`:
   3/3 passed, including stable, content-sensitive observer bundle identity.
 - `cargo nextest run -p vx-runtime -E 'binary(remote_tree_via_eval)' --no-fail-fast`:
@@ -161,10 +162,10 @@ Latest focused verification:
   call memo reuse, resolved-argument disambiguation, closure capture memo reuse,
   and proof that unresolved arguments or captures are not demanded to build a
   call memo key.
-- `cargo nextest run -p vx-runtime --no-fail-fast`: 142 run, 142 passed,
+- `cargo nextest run -p vx-runtime --no-fail-fast`: 144 run, 144 passed,
   0 failed, 0 skipped.
 - `cargo nextest run -p vx-runtime-graph -p vx-runtime-core -p vx-runtime-driver -p vx-runtime --no-fail-fast`:
-  158 run, 158 passed, 0 skipped.
+  160 run, 160 passed, 0 skipped.
 - The forbidden-symbol scan over `vx-runtime-core` and `vx-runtime-driver`
   returns no matches.
 - The deleted tree-walker affordance scan over `vx-runtime/src` returns no

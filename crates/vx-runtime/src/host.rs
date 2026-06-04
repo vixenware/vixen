@@ -67,8 +67,19 @@ pub fn exec(args: &[String]) -> Result<HostExec, String> {
     let program = args
         .first()
         .ok_or_else(|| "host.exec needs a program".to_string())?;
-    let fingerprint = fingerprint_program(program)?;
+    let fingerprint = fingerprint_executable(program)?;
     exec_with_fingerprint(args, fingerprint)
+}
+
+/// Content identity for the executable that [`std::process::Command`] will run.
+pub fn fingerprint_executable(program: &str) -> Result<String, String> {
+    let path = Path::new(program);
+    let resolved = if path.components().count() == 1 {
+        which(program).ok_or_else(|| format!("tool `{program}` not found on PATH"))?
+    } else {
+        program.to_string()
+    };
+    fingerprint_program(&resolved)
 }
 
 /// Content identity for a program that is about to cross a host execution boundary.

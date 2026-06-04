@@ -123,6 +123,29 @@ fn host_exec_runs_a_tool_and_fingerprints_the_binary() {
 }
 
 #[test]
+fn host_exec_resolves_bare_program_names_for_fingerprinting() {
+    let fe = compile_source(
+        "fn probe(host: Host) -> String ( host.exec([\"sh\", \"-c\", \"printf hi\"]).stdout )",
+        "probe",
+    )
+    .expect("host bare exec program compiles");
+    let body = fn_body(&fe, "probe");
+
+    let outcome = eval_body(
+        &fe.program,
+        &fe.env,
+        body,
+        vec![local_host_value()],
+        KernelMode::Off,
+    );
+
+    match outcome {
+        Outcome::Clean(Value::Str(s)) => assert_eq!(&*s, "hi", "bare sh stdout crosses back"),
+        other => panic!("expected stdout `hi`, got {other:?}"),
+    }
+}
+
+#[test]
 fn host_exec_uses_input_keyed_l1_cache() {
     let marker = std::env::temp_dir().join(format!(
         "vixen-host-exec-cache-{}-{}",
