@@ -3,11 +3,25 @@ title = "Commands & grammars are values; the grammar-forcing resolver"
 
 [extra]
 type = "Task"
-status = "todo"
+status = "superseded"
 priority = "high"
 tags = ["exec", "grammar", "capability", "types", "type-checking", "lsp"]
 created = "2026-06-03"
 +++
+
+**[superseded]** This note's central premise — "commands & grammars are
+*values*, forced at runtime; the checker forces `${cmd}`'s grammar" — is wrong.
+A **command** is the grammar, a **constant**; a **tool** is a command + executor
+identity + binary + probed parameters (a mixed value, command static, the rest
+runtime); an **invocation** is a backtick literal `` `$tool args` ``; a **run**
+is it executing. Build code is written against a capability **spec** and the
+concrete tool is **injected** at dispatch (dependency injection). The checker
+**const-evaluates `tool.command`** (a constant) — it does not force a runtime
+value. The `@[ … ]` syntax and the `exec` builtin are gone (backticks).
+The settled model now lives in the **spec**: `docs/content/spec/language/core.md`
+(`r[expr.command]`), `docs/content/spec/stdlib/build.md`
+(`r[exec.*]`, `r[ability.*]`). Kept for the trail; do not build on the plan
+below.
 
 Distilled from a long working session (and ~seven wrong turns) so the next pass
 starts from the model instead of re-deriving it. Companion to
@@ -93,7 +107,7 @@ on the path would silently serve stale `.o` after a compiler upgrade).
 4. **The grammar-forcing resolver** — `infer_cli_literal` forces the leading
    hole's grammar value; best-effort / pending. This runs in the **engine**, not
    `vx-ir`: checking forces values, so the checker lives with the evaluator — see
-   [[Checking is forcing]] for the (settled) structural decision and migration.
+   [[The checker lives in the engine]] for the (settled) structural decision and migration.
 5. **Content-identified exec + input mounting** — `ExecCommand` carries the
    fingerprint; the executor materializes the read-set (the deferred `run_exec`
    piece in `observe.rs`); a real `cc` compiles a mounted `hello.c`.

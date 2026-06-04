@@ -7,10 +7,24 @@ tiers = ["2"]
 tags = ["types", "type-checking", "exec", "grammar", "lsp"]
 +++
 
-**[settled]** A decision we are done re-litigating, recorded so it doesn't get
-re-opened: **a type can be a first-class value, and type-checking is best-effort.**
+**[superseded]** The motivating example here — "the grammar is a runtime value
+the program *computes*, so types are values" — turned out wrong, and so did the
+generalization. A command (a grammar) is a **constant**, not a forced runtime
+value. Build code is written against a capability **spec**, and the concrete
+tool is **injected** at dispatch — dependency injection. The compiler reads a
+command by **const-evaluating `tool.command`**, which succeeds because the
+command is provider-independent; there is no "type that is a runtime value," and
+the "best-effort because we might lack a runner" framing is gone (the command is
+static and offline-available). The settled model is the build spec —
+`r[exec.command]`, `r[exec.validate.static]`/`r[exec.validate.runtime]`,
+`r[ability.*]` — and [[The checker lives in the engine]]. This note is kept only for the
+reasoning trail; **do not build on it.**
 
-This is the type-system stance behind [the exec primitive](/exec/) and
+---
+
+*(original below, for the record)*
+
+This was the type-system stance behind [the exec primitive](/exec/) and
 [Process as a first-class value](/process-as-first-class-value/). It started as
 "how does `@[ ${cmd} … ]` find its grammar," and generalized.
 

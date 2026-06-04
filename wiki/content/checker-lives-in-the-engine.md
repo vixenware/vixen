@@ -1,33 +1,43 @@
 +++
-title = "Checking is forcing; the checker lives in the engine"
+title = "The checker lives in the engine"
 
 [extra]
 type = "Doc"
 tiers = ["2"]
-tags = ["architecture", "type-checking", "runtime", "lsp", "incremental", "streams"]
+tags = ["architecture", "type-checking", "runtime", "lsp", "incremental"]
 created = "2026-06-04"
 +++
 
 **[settled]** Where the type checker lives, recorded so it isn't re-litigated.
-The structural companion to [[Types are values]] (the semantics) and
-[The demand-driven runtime](/runtime-semantics/) (the engine). Distilled from the
-session that derived it — including the wrong turns in [What this rejects](#what-this-rejects).
+Companion to [The demand-driven runtime](/runtime-semantics/) (the engine).
+
+> **Refined.** An earlier framing (and an earlier title) said "checking is
+> *forcing* runtime values." The precise statement is: checking
+> **const-evaluates constants**. A command (a grammar) is a compile-time
+> constant (`r[exec.command]`); the checker obtains it by const-evaluating
+> `tool.command` at check time and validates the invocation against it
+> (`r[exec.validate.static]`). That is still *evaluation* — the real evaluator,
+> run at compile time — which is why the conclusion below holds. It is not "a
+> type that is a runtime value"; see [[Types are values]] (superseded) for that
+> dead end.
 
 ## The thesis
 
-**Checking and evaluation are one process, so the checker lives in the engine —
-the same crate as the evaluator, not a lower layer that calls it or that it calls.**
+**Checking const-evaluates constants, and const-evaluation *is* the evaluator —
+so the checker lives in the engine, the same crate as the evaluator, not a lower
+layer that calls it or that it calls.**
 
-[[Types are values]] settles the *semantics*: a check is forcing the assertion a
-program makes and emitting a diagnostic if it doesn't hold; type-checking is the
-subset of forcing that validates; resolve statically what is statically
-resolvable, force what isn't, record *pending* otherwise. This note settles the
-*structure* that follows: if checking is forcing, the checker must sit where
-forcing lives.
+Validating `` `$gcc -flag` `` means obtaining `gcc.command` (a constant) and
+checking `-flag` against it. The command is reached by **const-evaluating**
+`gcc.command` — following the `let`, the `where`, the field access, all constant
+operations — with the *real* evaluator at compile time. A hand-rolled static
+trace of that chain is the cheat in [What this rejects](#what-this-rejects); the
+fix is to use the evaluator, which means co-locating the checker with it.
 
 Concretely: `vx-parser` and the IR data types are the pure front-end below
-(lex → parse → lower to IR). Everything that **forces** — checking, evaluation,
-and eventually dynamic import / name resolution — is the **engine**
+(lex → parse → lower to IR). Everything that **evaluates** — checking (via
+const-eval), evaluation proper, and eventually dynamic import / name resolution —
+is the **engine**
 (`vx-runtime`). The type checker (`type_check/`, `cli.rs`) belongs in the engine,
 beside the evaluator.
 
