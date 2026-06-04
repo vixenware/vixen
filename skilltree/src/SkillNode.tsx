@@ -25,6 +25,7 @@ export function SkillNode({ data, selected }: NodeProps<SkillFlowNode>) {
       </header>
       {spec.summary && <p className="summary">{spec.summary}</p>}
       <footer>
+        {spec.hands && <span className="hands" title="Good for extra hands (Hexcat)">✋ hands</span>}
         {category?.label && <span className="cat">{category.label}</span>}
         <span className="status">{STATUS_LABEL[spec.status] ?? spec.status}</span>
       </footer>

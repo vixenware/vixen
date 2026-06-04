@@ -91,11 +91,12 @@ export default function App() {
                 {tree.categories[selected.category].label ?? selected.category}
               </span>
             )}
+            {selected.hands && <p className="hands-note">✋ Good candidate for extra hands (Hexcat)</p>}
             {selected.summary && <p className="lead">{selected.summary}</p>}
             {selected.detail && <p>{selected.detail}</p>}
             {selected.payoff && (
               <div className="payoff">
-                <h3>Why funders care</h3>
+                <h3>Why it matters</h3>
                 <p>{selected.payoff}</p>
               </div>
             )}

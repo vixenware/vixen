@@ -139,6 +139,26 @@ body,
   border-radius: 999px;
   border: 1px solid var(--border);
 }
+.skill-node .hands {
+  padding: 2px 7px;
+  border-radius: 999px;
+  font-size: 10px;
+  color: #ffd7c2;
+  background: rgba(255, 122, 69, 0.14);
+  border: 1px solid rgba(255, 122, 69, 0.4);
+  margin-right: auto;
+}
+.skill-node footer .cat {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.hands-note {
+  margin: 12px 0 0;
+  font-size: 12.5px;
+  font-weight: 600;
+  color: #ffb499;
+}
 
 /* status flavors */
 .status-done .status {

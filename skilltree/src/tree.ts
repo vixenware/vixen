@@ -18,8 +18,10 @@ export interface SkillSpec {
   summary?: string;
   /** longer prose shown in the side panel */
   detail?: string;
-  /** why this milestone helps convince funders */
+  /** why this milestone matters / what value it unlocks */
   payoff?: string;
+  /** good candidate for extra hands (Hexcat) — parallelizable / handoff-friendly */
+  hands?: boolean;
   /** ids of skills that must come first */
   requires?: string[];
 }
