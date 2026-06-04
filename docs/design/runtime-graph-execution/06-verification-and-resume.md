@@ -116,10 +116,9 @@ Current partial state:
   around expanded body roots. Core demands only the body-root input; argument
   inputs are retained for graph identity and future call-memo keys without being
   strict call-boundary dependencies.
-- Direct call nodes carry a direct function code identity and share a per-run
-  driver call memo when all argument outputs are already resolved before the body
-  runs. Unresolved arguments are not demanded to build the key. Closure calls do
-  not use this memo yet.
+- Direct and closure call nodes carry a code identity and share a per-run driver
+  call memo when all argument and capture outputs are already resolved before the
+  body runs. Unresolved arguments or captures are not demanded to build the key.
 - Observer execution calls graph body execution and graph/native wire crossing.
 - Mirror, host, intrinsic, observer, observe-on-strands, backtick exec,
   exec-output-tree, remote-tree body, import/toolchain, and requested-toolchain
@@ -156,15 +155,16 @@ Latest focused verification:
   backtick exec in a lazy tuple slot stays cold with no observe client.
 - `cargo nextest run -p vx-runtime -E 'binary(cc_probe) | binary(hello_world)' --no-fail-fast`:
   2/2 passed.
-- `cargo nextest run -p vx-runtime-driver --no-fail-fast`: 9/9 passed,
+- `cargo nextest run -p vx-runtime-driver --no-fail-fast`: 11/11 passed,
   including poison memoization, boundary in-progress cleanup, call-node
   non-strict argument edges, zero-arg direct call memo reuse, resolved-argument
-  call memo reuse, resolved-argument disambiguation, and proof that unresolved
-  arguments are not demanded to build a call memo key.
+  call memo reuse, resolved-argument disambiguation, closure capture memo reuse,
+  and proof that unresolved arguments or captures are not demanded to build a
+  call memo key.
 - `cargo nextest run -p vx-runtime --no-fail-fast`: 142 run, 142 passed,
   0 failed, 0 skipped.
 - `cargo nextest run -p vx-runtime-graph -p vx-runtime-core -p vx-runtime-driver -p vx-runtime --no-fail-fast`:
-  156 run, 156 passed, 0 skipped.
+  158 run, 158 passed, 0 skipped.
 - The forbidden-symbol scan over `vx-runtime-core` and `vx-runtime-driver`
   returns no matches.
 - The deleted tree-walker affordance scan over `vx-runtime/src` returns no

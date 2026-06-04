@@ -96,6 +96,7 @@ pub enum NodeKind {
         function: String,
         code_identity: Option<String>,
         arg_count: u32,
+        capture_count: u32,
     },
     Match {
         arms: Vec<MatchArm>,

@@ -286,15 +286,17 @@ impl Driver {
             NodeKind::Call {
                 code_identity: Some(code_identity),
                 arg_count,
+                capture_count,
                 ..
             } => {
-                let arg_nodes = graph_node.inputs.get(1..)?;
-                if arg_nodes.len() != *arg_count as usize {
+                let key_nodes = graph_node.inputs.get(1..)?;
+                let key_input_count = *arg_count as usize + *capture_count as usize;
+                if key_nodes.len() != key_input_count {
                     return None;
                 }
-                let mut args = Vec::with_capacity(arg_nodes.len());
-                for &arg in arg_nodes {
-                    args.push(self.output(arg)?.clone());
+                let mut args = Vec::with_capacity(key_nodes.len());
+                for &input in key_nodes {
+                    args.push(self.output(input)?.clone());
                 }
                 Some(CallMemoKey {
                     code_identity: code_identity.clone(),
@@ -417,6 +419,7 @@ mod tests {
                         function: "pick_first".to_string(),
                         code_identity: Some("fn:pick_first".to_string()),
                         arg_count: 1,
+                        capture_count: 0,
                     },
                     span: None,
                     label: "pick_first(...)".to_string(),
@@ -454,6 +457,7 @@ mod tests {
                         function: "answer".to_string(),
                         code_identity: Some("fn:answer".to_string()),
                         arg_count: 0,
+                        capture_count: 0,
                     },
                     span: None,
                     label: "answer()".to_string(),
@@ -474,6 +478,7 @@ mod tests {
                         function: "answer".to_string(),
                         code_identity: Some("fn:answer".to_string()),
                         arg_count: 0,
+                        capture_count: 0,
                     },
                     span: None,
                     label: "answer() duplicate".to_string(),
@@ -522,6 +527,7 @@ mod tests {
                         function: "id".to_string(),
                         code_identity: Some("fn:id".to_string()),
                         arg_count: 1,
+                        capture_count: 0,
                     },
                     span: None,
                     label: "id(arg)".to_string(),
@@ -542,6 +548,7 @@ mod tests {
                         function: "id".to_string(),
                         code_identity: Some("fn:id".to_string()),
                         arg_count: 1,
+                        capture_count: 0,
                     },
                     span: None,
                     label: "id(arg) duplicate".to_string(),
@@ -594,6 +601,7 @@ mod tests {
                         function: "id".to_string(),
                         code_identity: Some("fn:id".to_string()),
                         arg_count: 1,
+                        capture_count: 0,
                     },
                     span: None,
                     label: "id(9)".to_string(),
@@ -622,6 +630,7 @@ mod tests {
                         function: "id".to_string(),
                         code_identity: Some("fn:id".to_string()),
                         arg_count: 1,
+                        capture_count: 0,
                     },
                     span: None,
                     label: "id(10)".to_string(),
@@ -653,6 +662,174 @@ mod tests {
     }
 
     #[test]
+    fn closure_calls_with_ready_captures_share_per_run_memo() {
+        let graph = DemandGraph {
+            nodes: vec![
+                Node {
+                    id: NodeId(0),
+                    kind: NodeKind::Const(vx_runtime_graph::ConstValue::U64(5)),
+                    span: None,
+                    label: "capture".to_string(),
+                    ty: "U64".to_string(),
+                    inputs: Vec::new(),
+                },
+                Node {
+                    id: NodeId(1),
+                    kind: NodeKind::Const(vx_runtime_graph::ConstValue::U64(9)),
+                    span: None,
+                    label: "arg".to_string(),
+                    ty: "U64".to_string(),
+                    inputs: Vec::new(),
+                },
+                Node {
+                    id: NodeId(2),
+                    kind: NodeKind::Const(vx_runtime_graph::ConstValue::U64(42)),
+                    span: None,
+                    label: "first body".to_string(),
+                    ty: "U64".to_string(),
+                    inputs: Vec::new(),
+                },
+                Node {
+                    id: NodeId(3),
+                    kind: NodeKind::Call {
+                        function: "f".to_string(),
+                        code_identity: Some("closure:test".to_string()),
+                        arg_count: 1,
+                        capture_count: 1,
+                    },
+                    span: None,
+                    label: "f(arg)".to_string(),
+                    ty: "U64".to_string(),
+                    inputs: vec![NodeId(2), NodeId(1), NodeId(0)],
+                },
+                Node {
+                    id: NodeId(4),
+                    kind: NodeKind::Bomb,
+                    span: None,
+                    label: "duplicate expansion tripwire".to_string(),
+                    ty: "bottom".to_string(),
+                    inputs: Vec::new(),
+                },
+                Node {
+                    id: NodeId(5),
+                    kind: NodeKind::Call {
+                        function: "f".to_string(),
+                        code_identity: Some("closure:test".to_string()),
+                        arg_count: 1,
+                        capture_count: 1,
+                    },
+                    span: None,
+                    label: "f(arg) duplicate".to_string(),
+                    ty: "U64".to_string(),
+                    inputs: vec![NodeId(4), NodeId(1), NodeId(0)],
+                },
+            ],
+            root: NodeId(3),
+        };
+        let mut driver = Driver::new(graph);
+        assert_eq!(
+            driver.drive(DemandRequest::test_probe(NodeId(0))),
+            Ok(NodeOutput::U64(5))
+        );
+        assert_eq!(
+            driver.drive(DemandRequest::test_probe(NodeId(1))),
+            Ok(NodeOutput::U64(9))
+        );
+        assert_eq!(
+            driver.drive(DemandRequest::root(NodeId(3))),
+            Ok(NodeOutput::U64(42))
+        );
+        assert_eq!(
+            driver.drive(DemandRequest::root(NodeId(5))),
+            Ok(NodeOutput::U64(42))
+        );
+        assert_eq!(driver.memo_state(NodeId(4)), None);
+        assert_eq!(driver.memo_state(NodeId(5)), Some(MemoState::Ready));
+    }
+
+    #[test]
+    fn closure_calls_with_unresolved_captures_do_not_build_call_memo() {
+        let graph = DemandGraph {
+            nodes: vec![
+                Node {
+                    id: NodeId(0),
+                    kind: NodeKind::Bomb,
+                    span: None,
+                    label: "cold capture".to_string(),
+                    ty: "bottom".to_string(),
+                    inputs: Vec::new(),
+                },
+                Node {
+                    id: NodeId(1),
+                    kind: NodeKind::Const(vx_runtime_graph::ConstValue::U64(9)),
+                    span: None,
+                    label: "arg".to_string(),
+                    ty: "U64".to_string(),
+                    inputs: Vec::new(),
+                },
+                Node {
+                    id: NodeId(2),
+                    kind: NodeKind::Const(vx_runtime_graph::ConstValue::U64(42)),
+                    span: None,
+                    label: "first body".to_string(),
+                    ty: "U64".to_string(),
+                    inputs: Vec::new(),
+                },
+                Node {
+                    id: NodeId(3),
+                    kind: NodeKind::Call {
+                        function: "f".to_string(),
+                        code_identity: Some("closure:test".to_string()),
+                        arg_count: 1,
+                        capture_count: 1,
+                    },
+                    span: None,
+                    label: "f(arg)".to_string(),
+                    ty: "U64".to_string(),
+                    inputs: vec![NodeId(2), NodeId(1), NodeId(0)],
+                },
+                Node {
+                    id: NodeId(4),
+                    kind: NodeKind::Const(vx_runtime_graph::ConstValue::U64(7)),
+                    span: None,
+                    label: "second body".to_string(),
+                    ty: "U64".to_string(),
+                    inputs: Vec::new(),
+                },
+                Node {
+                    id: NodeId(5),
+                    kind: NodeKind::Call {
+                        function: "f".to_string(),
+                        code_identity: Some("closure:test".to_string()),
+                        arg_count: 1,
+                        capture_count: 1,
+                    },
+                    span: None,
+                    label: "f(arg) duplicate".to_string(),
+                    ty: "U64".to_string(),
+                    inputs: vec![NodeId(4), NodeId(1), NodeId(0)],
+                },
+            ],
+            root: NodeId(3),
+        };
+        let mut driver = Driver::new(graph);
+        assert_eq!(
+            driver.drive(DemandRequest::test_probe(NodeId(1))),
+            Ok(NodeOutput::U64(9))
+        );
+        assert_eq!(
+            driver.drive(DemandRequest::root(NodeId(3))),
+            Ok(NodeOutput::U64(42))
+        );
+        assert_eq!(
+            driver.drive(DemandRequest::root(NodeId(5))),
+            Ok(NodeOutput::U64(7))
+        );
+        assert_eq!(driver.memo_state(NodeId(0)), None);
+        assert_eq!(driver.memo_state(NodeId(5)), Some(MemoState::Ready));
+    }
+
+    #[test]
     fn calls_with_unresolved_arguments_do_not_build_call_memo() {
         let graph = DemandGraph {
             nodes: vec![
@@ -678,6 +855,7 @@ mod tests {
                         function: "id".to_string(),
                         code_identity: Some("fn:id".to_string()),
                         arg_count: 1,
+                        capture_count: 0,
                     },
                     span: None,
                     label: "id(42)".to_string(),
@@ -706,6 +884,7 @@ mod tests {
                         function: "id".to_string(),
                         code_identity: Some("fn:id".to_string()),
                         arg_count: 1,
+                        capture_count: 0,
                     },
                     span: None,
                     label: "id(7)".to_string(),

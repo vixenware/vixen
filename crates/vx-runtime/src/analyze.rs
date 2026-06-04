@@ -334,7 +334,7 @@ impl Builder<'_> {
         captures: HashMap<BindingId, NodeId>,
         code_identity: Option<String>,
     ) -> NodeId {
-        let inputs = captures.values().copied().collect();
+        let inputs = sorted_capture_nodes(&captures);
         let node = self.emit(NodeKind::Closure, label, span, inputs);
         self.callables.insert(
             node,
@@ -563,6 +563,8 @@ impl Builder<'_> {
         let saved_memo = self.memo.clone();
 
         let code_identity = template.code_identity.clone();
+        let capture_inputs = sorted_capture_nodes(&template.captures);
+        let capture_count = capture_inputs.len() as u32;
 
         self.active_bodies.push(body);
         for (binding, node) in template.captures {
@@ -578,14 +580,16 @@ impl Builder<'_> {
         self.param_bindings = saved_param_bindings;
         self.memo = saved_memo;
 
-        let mut inputs = Vec::with_capacity(args.len() + 1);
+        let mut inputs = Vec::with_capacity(args.len() + capture_inputs.len() + 1);
         inputs.push(root);
         inputs.extend_from_slice(args);
+        inputs.extend_from_slice(&capture_inputs);
         self.emit(
             NodeKind::Call {
                 function: callee_name.to_string(),
                 code_identity,
                 arg_count: args.len() as u32,
+                capture_count,
             },
             format!("{callee_name}(…)"),
             span,
@@ -962,7 +966,13 @@ impl Builder<'_> {
             ExprKind::Closure(cl) => {
                 let body = cl.body;
                 let captures = self.captures_for_body(body);
-                self.emit_callable_value(body, "(…)=>".into(), span, captures, None)
+                self.emit_callable_value(
+                    body,
+                    "(…)=>".into(),
+                    span,
+                    captures,
+                    Some(format!("closure:{}:{}", span.start, span.end)),
+                )
             }
 
             // An interpolated string is a kernel over its embedded expressions.
@@ -1359,6 +1369,15 @@ impl Builder<'_> {
     }
 }
 
+fn sorted_capture_nodes(captures: &HashMap<BindingId, NodeId>) -> Vec<NodeId> {
+    let mut captures: Vec<(BindingId, NodeId)> = captures
+        .iter()
+        .map(|(&binding, &node)| (binding, node))
+        .collect();
+    captures.sort_by_key(|(binding, _)| *binding);
+    captures.into_iter().map(|(_, node)| node).collect()
+}
+
 /// Map a front-end [`BinOp`] to the graph's [`KernelOp`]. Scalar operators get a
 /// [`BinKind`]; `++` (concat) and `|>` (pipe) aren't scalar, so they're
 /// [`KernelOp::Opaque`] — the lowering will decline them, the evaluator handles
@@ -1494,7 +1513,8 @@ mod tests {
                     NodeKind::Call {
                         function,
                         code_identity: Some(code_identity),
-                        arg_count: 1
+                        arg_count: 1,
+                        capture_count: 0
                     } if function == "id" && code_identity == "fn:id"
                 )
             }),
@@ -1520,9 +1540,10 @@ mod tests {
                     &node.kind,
                     NodeKind::Call {
                         function,
-                        code_identity: None,
-                        arg_count: 1
-                    } if function == "f"
+                        code_identity: Some(code_identity),
+                        arg_count: 1,
+                        capture_count: 0
+                    } if function == "f" && code_identity.starts_with("closure:")
                 )
             }),
             "closure calls must leave a source-blind Call node for runtime memo hooks: {:?}",
