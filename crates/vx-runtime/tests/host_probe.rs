@@ -5,10 +5,14 @@
 //! `Value::Host` variant, no opaque holder), and a `host.os` field read returns
 //! the compiled-in target OS — proving `Host` is just a struct.
 
+use std::sync::atomic::{AtomicUsize, Ordering};
+
 use vx_ir::item::ItemKind;
 use vx_runtime::compile::compile_source;
 use vx_runtime::eval::{KernelMode, Outcome, Value, eval_body};
 use vx_runtime::host::local_host_value;
+
+static NEXT_MARKER: AtomicUsize = AtomicUsize::new(0);
 
 /// Find the body of the single fn named `name` in a compiled program.
 fn fn_body(fe: &vx_runtime::compile::FrontEnd, name: &str) -> vx_ir::ids::BodyId {
@@ -116,4 +120,49 @@ fn host_exec_runs_a_tool_and_fingerprints_the_binary() {
         ),
         other => panic!("expected a blake3 fingerprint, got {other:?}"),
     }
+}
+
+#[test]
+fn host_exec_uses_input_keyed_l1_cache() {
+    let marker = std::env::temp_dir().join(format!(
+        "vixen-host-exec-cache-{}-{}",
+        std::process::id(),
+        NEXT_MARKER.fetch_add(1, Ordering::Relaxed)
+    ));
+    let marker = marker.to_string_lossy().into_owned();
+    let _ = std::fs::remove_file(&marker);
+    let script = format!("printf x >> {marker}; cat {marker}");
+
+    let fe = compile_source(
+        &format!(
+            "fn probe(host: Host) -> Bool ( \
+             let script = \"{script}\"; \
+             let first = host.exec([host.which(\"sh\"), \"-c\", script]).stdout; \
+             let second = host.exec([host.which(\"sh\"), \"-c\", script]).stdout; \
+             (first == \"x\") && (second == \"x\") )"
+        ),
+        "probe",
+    )
+    .expect("host exec cache program compiles");
+    let body = fn_body(&fe, "probe");
+
+    let outcome = eval_body(
+        &fe.program,
+        &fe.env,
+        body,
+        vec![local_host_value()],
+        KernelMode::Off,
+    );
+
+    match outcome {
+        Outcome::Clean(Value::Bool(true)) => {}
+        other => panic!("identical host.exec boundaries should share the cached output: {other:?}"),
+    }
+
+    let count = std::fs::read_to_string(&marker).expect("host.exec marker file");
+    let _ = std::fs::remove_file(&marker);
+    assert_eq!(
+        count, "x",
+        "the second identical host.exec boundary must not spawn again"
+    );
 }

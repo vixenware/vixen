@@ -203,9 +203,10 @@ Observed result:
 
 - `cargo check` passes with no old-evaluator dead-code warnings. The old
   evaluator and `dispatch.rs` scalar planner are deleted.
-- `host_probe` passes 3/3 through graph body execution. `host.which` and
+- `host_probe` passes 4/4 through graph body execution. `host.which` and
   `host.exec` lower to typed `HostMethod` graph boundary nodes and materialize
-  through the driver.
+  through the driver. The added host cache test proves identical `host.exec`
+  boundary inputs use the input-keyed L1 instead of spawning twice.
 - Observer crossing passes 4/4 for direct observe and observe-on-strands. The
   executor binds `Run` as graph external input, demands `run.ok` or
   `run.stream.out` through graph/native boundary thunks, and crosses the result
@@ -237,7 +238,7 @@ Current broad runtime result:
 cargo nextest run -p vx-runtime --no-fail-fast
 ```
 
-Observed result: 135 tests run, 135 passed, 0 failed, 0 skipped. The former red
+Observed result: 136 tests run, 136 passed, 0 failed, 0 skipped. The former red
 `cc_probe_builds_a_content_identified_ctoolchain` and
 `hello_world_compiles_through_a_requested_toolchain` cases are now green through
 graph execution. The private tree-walker demand-path oracle test was removed

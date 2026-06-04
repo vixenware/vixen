@@ -132,6 +132,8 @@ Latest focused verification:
   3/3 passed.
 - `cargo nextest run -p vx-runtime -E 'binary(exec_output_tree)' --no-fail-fast`:
   3/3 passed.
+- `cargo nextest run -p vx-runtime -E 'binary(host_probe)' --no-fail-fast`:
+  4/4 passed, including the input-keyed `host.exec` L1 cache test.
 - `cargo nextest run -p vx-runtime -E 'binary(remote_tree_via_eval)' --no-fail-fast`:
   3/3 passed.
 - `cargo nextest run -p vx-runtime -E 'binary(lang_suite)' --no-fail-fast`:
@@ -140,10 +142,10 @@ Latest focused verification:
   2/2 passed.
 - `cargo nextest run -p vx-runtime-driver --no-fail-fast`: 4/4 passed,
   including poison memoization and boundary in-progress cleanup.
-- `cargo nextest run -p vx-runtime --no-fail-fast`: 135 run, 135 passed,
+- `cargo nextest run -p vx-runtime --no-fail-fast`: 136 run, 136 passed,
   0 failed, 0 skipped.
 - `cargo nextest run -p vx-runtime-graph -p vx-runtime-core -p vx-runtime-driver -p vx-runtime --no-fail-fast`:
-  144 run, 144 passed, 0 skipped.
+  145 run, 145 passed, 0 skipped.
 - The forbidden-symbol scan over `vx-runtime-core` and `vx-runtime-driver`
   returns no matches.
 - The deleted tree-walker affordance scan over `vx-runtime/src` returns no

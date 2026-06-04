@@ -85,6 +85,9 @@ Current progress:
   operation, and memoizing the graph output.
 - `host.exec` returns a graph struct with `exit_code`, `stdout`, `stderr`, and
   `fingerprint` fields.
+- `host.exec` has an in-process input-keyed L1. The key is computed before
+  spawning from the materialized argv plus the executable's content fingerprint;
+  the cached output is not part of the key.
 
 ### CLI invocation/backtick/exec
 
@@ -265,6 +268,14 @@ Rules:
 - executor selector string not part of key
 - capability/toolchain identities are part of inputs
 
+Current progress:
+
+- `host.exec` has a local in-process L1 keyed by argv plus the executable
+  fingerprint. `host_exec_uses_input_keyed_l1_cache` proves two identical graph
+  host boundaries demand both outputs but spawn only once.
+- Backtick exec, function calls, persistent L2 storage, and read-set provenance
+  do not have this cache yet.
+
 ### 4. L2 content-addressed storage
 
 Persist boundary/function outputs by content identity. This is the storage layer,
@@ -280,7 +291,8 @@ must already have run the command and is therefore wrong.
 
 Verified green:
 
-- `cargo nextest run -p vx-runtime -E 'binary(host_probe)'`: 3/3 passed.
+- `cargo nextest run -p vx-runtime -E 'binary(host_probe)'`: 4/4 passed,
+  including the input-keyed `host.exec` L1 cache test.
 - `cargo nextest run -p vx-runtime -E 'test(observe_runs_a_real_command_and_returns_the_observer_value) | test(observe_crosses_the_output_tree_as_a_handle_marker) | binary(observe_on_strands)' --no-fail-fast`: 4/4 passed.
 - `cargo nextest run -p vx-runtime -E 'binary(exec_on_strands)' --no-fail-fast`:
   3/3 passed.
@@ -302,9 +314,10 @@ Newly green boundary payloads:
   capability metadata and materialize by selecting an advertised provider.
 - Per-run node memo is explicit driver state for in-progress, ready, and poisoned
   nodes.
+- `host.exec` has a local input-keyed L1 cache.
 
-No function-call memo or input-keyed L1/L2 cache has been implemented in this
-checkpoint.
+No function-call memo, backtick exec L1, persistent L2 cache, or read-set
+provenance has been implemented in this checkpoint.
 
 ## Acceptance criteria
 

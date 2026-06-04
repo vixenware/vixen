@@ -28,6 +28,7 @@ struct RuntimeBoundaries {
     providers: ProviderRegistry,
     meta: Rc<GraphRuntimeMeta>,
     remote_trees: Rc<RefCell<HashMap<NodeId, HandleId>>>,
+    host_exec_cache: Rc<RefCell<HashMap<HostExecCacheKey, crate::host::HostExec>>>,
 }
 
 impl Default for RuntimeBoundaries {
@@ -37,8 +38,15 @@ impl Default for RuntimeBoundaries {
             providers: ProviderRegistry::default(),
             meta: Rc::new(GraphRuntimeMeta::default()),
             remote_trees: Rc::new(RefCell::new(HashMap::new())),
+            host_exec_cache: Rc::new(RefCell::new(HashMap::new())),
         }
     }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
+struct HostExecCacheKey {
+    argv: Vec<String>,
+    program_fingerprint: String,
 }
 
 pub(crate) fn run_source(source: &str, entry: &str) -> Result<(Outcome, u64), String> {
@@ -631,13 +639,38 @@ fn materialize_host_exec(
         args.push(expect_string(value, "host.exec argv element")?);
     }
 
-    let observed = crate::host::exec(&args).map_err(|e| format!("host.exec: {e}"))?;
+    let cache_key = host_exec_cache_key(&args)?;
+    if let Some(cached) = runtime.host_exec_cache.borrow().get(&cache_key).cloned() {
+        let output = {
+            let mut driver = driver.borrow_mut();
+            host_exec_output(&mut driver, cached)
+        };
+        driver.borrow_mut().seed(node, output);
+        return Ok(());
+    }
+
+    let observed = crate::host::exec_with_fingerprint(&args, cache_key.program_fingerprint.clone())
+        .map_err(|e| format!("host.exec: {e}"))?;
+    runtime
+        .host_exec_cache
+        .borrow_mut()
+        .insert(cache_key, observed.clone());
     let output = {
         let mut driver = driver.borrow_mut();
         host_exec_output(&mut driver, observed)
     };
     driver.borrow_mut().seed(node, output);
     Ok(())
+}
+
+fn host_exec_cache_key(args: &[String]) -> Result<HostExecCacheKey, String> {
+    let program = args
+        .first()
+        .ok_or_else(|| "host.exec needs a program".to_string())?;
+    Ok(HostExecCacheKey {
+        argv: args.to_vec(),
+        program_fingerprint: crate::host::fingerprint_program(program)?,
+    })
 }
 
 fn demand_payload(

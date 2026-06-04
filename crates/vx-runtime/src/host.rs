@@ -49,6 +49,7 @@ pub fn which(name: &str) -> Option<String> {
 /// **fingerprint** of the binary that ran. `host.exec` *implies `host.hash`* —
 /// running `args[0]` depends on its exact bytes, so we hash it as part of the same
 /// observation (one call yields the tool's version *and* its content identity).
+#[derive(Clone, Debug, PartialEq, Eq)]
 pub struct HostExec {
     pub exit_code: i64,
     pub stdout: String,
@@ -66,9 +67,21 @@ pub fn exec(args: &[String]) -> Result<HostExec, String> {
     let program = args
         .first()
         .ok_or_else(|| "host.exec needs a program".to_string())?;
-    // exec implies hash: fingerprint the binary we are about to run.
+    let fingerprint = fingerprint_program(program)?;
+    exec_with_fingerprint(args, fingerprint)
+}
+
+/// Content identity for a program that is about to cross a host execution boundary.
+pub fn fingerprint_program(program: &str) -> Result<String, String> {
     let bytes = std::fs::read(program).map_err(|e| format!("read `{program}`: {e}"))?;
-    let fingerprint = format!("blake3:{}", blake3::hash(&bytes).to_hex());
+    Ok(format!("blake3:{}", blake3::hash(&bytes).to_hex()))
+}
+
+/// Run `args` with a fingerprint that was computed before the process was spawned.
+pub fn exec_with_fingerprint(args: &[String], fingerprint: String) -> Result<HostExec, String> {
+    let program = args
+        .first()
+        .ok_or_else(|| "host.exec needs a program".to_string())?;
     let out = std::process::Command::new(program)
         .args(&args[1..])
         .output()
