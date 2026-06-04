@@ -2115,6 +2115,7 @@ fn starts_expr(kind: SyntaxKind) -> bool {
             | SyntaxKind::L_CURLY
             | SyntaxKind::PERCENT_L_CURLY
             | SyntaxKind::AT
+            | SyntaxKind::DQUOTE
             | SyntaxKind::BACKTICK
             | SyntaxKind::INT
             | SyntaxKind::FLOAT
@@ -2127,11 +2128,12 @@ fn starts_expr(kind: SyntaxKind) -> bool {
 
 fn starts_application_arg(p: &Parser<'_>) -> bool {
     let kind = p.current();
-    // String and backtick literals are juxtaposable args — paths are strings now,
-    // so `f "x"` / `` f `x/{y}` `` is application, exactly as `f @path` once was.
+    // String literals (raw `'x'`, plain `"x"`=STRING, interpolated `"x${y}"`=DQUOTE)
+    // and backtick command invocations are juxtaposable args — paths are strings
+    // now, so `f "x"` is application, exactly as `f @path` once was.
     matches!(
         kind,
-        SyntaxKind::L_BRACKET | SyntaxKind::AT | SyntaxKind::STRING | SyntaxKind::BACKTICK
+        SyntaxKind::L_BRACKET | SyntaxKind::STRING | SyntaxKind::DQUOTE | SyntaxKind::BACKTICK
     ) && p.has_significant_gap_before_current()
         || (kind == SyntaxKind::L_PAREN && !p.has_significant_gap_before_current())
         || (kind == SyntaxKind::L_CURLY
