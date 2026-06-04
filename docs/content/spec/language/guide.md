@@ -131,16 +131,12 @@ The main things to notice:
 - the last expression is the block's value
 - `if` always has an `else`
 
-This is why real observers often look like this:
+Observers run on the executor and pull a value out of the `Run`. `run.ok`
+gates on success — it poisons if the process failed — so they are often a
+one-liner:
 
 ```vixen
-observer: (proc, vfs) => (
-  if proc.exit_code != 0 (
-    fail `process failed`
-  ) else (
-    vfs.subtree("out")
-  )
-)
+observer: (run) => run.ok.out.subtree("out")
 ```
 
 ## Closures, pipelines, and partial application
