@@ -238,6 +238,17 @@ The core/driver may call the kernel interpreter when strict inputs are ready.
 The kernel contains eager pure control flow. It does not contain lazy data
 construction or boundaries.
 
+Current implemented executable kernel payloads:
+
+- `KernelOp::Assert`: demands one boolean input, returns unit on `true`, poisons
+  on `false`.
+- `KernelOp::AssertEq`: demands two inputs, compares their resolved graph outputs,
+  returns unit on equality, poisons on inequality.
+
+These are explicit graph payloads emitted by the analyzer for prelude
+`assert(...)` and `assert_eq(...)` calls. Core executes them without consulting
+VIR or source expressions.
+
 ## Analyzer responsibilities
 
 The analyzer must translate VIR into executable graph payloads. If it cannot
@@ -266,4 +277,3 @@ Those maps must not cross into core/driver execution.
 - Analyzer emits explicit unsupported graph payloads for unknown constructs.
 - No execution crate stores `ExprId` or `BodyId`.
 - Playground/display labels remain available but cannot affect runtime results.
-

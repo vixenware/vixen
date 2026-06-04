@@ -321,12 +321,15 @@ impl Builder<'_> {
                     _ => "call".to_string(),
                 };
                 let inputs = args.into_iter().map(|x| self.walk(x)).collect();
-                let kind = if BOUNDARY_CALLS.contains(&callee_name.as_str()) {
-                    NodeKind::Boundary
-                } else {
-                    // A pure call: a kernel, but not lowerable to scalar IR until
-                    // we inline callee bodies. Opaque for now.
-                    NodeKind::Kernel(KernelOp::Opaque)
+                let kind = match callee_name.as_str() {
+                    "assert" => NodeKind::Kernel(KernelOp::Assert),
+                    "assert_eq" => NodeKind::Kernel(KernelOp::AssertEq),
+                    name if BOUNDARY_CALLS.contains(&name) => NodeKind::Boundary,
+                    _ => {
+                        // A pure call: a kernel, but not lowerable to scalar IR
+                        // until we inline callee bodies. Opaque for now.
+                        NodeKind::Kernel(KernelOp::Opaque)
+                    }
                 };
                 self.emit(kind, format!("{callee_name}()"), span, inputs)
             }

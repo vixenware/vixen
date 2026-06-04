@@ -175,6 +175,39 @@ fn kernel(
                 None => Step::Need(NeedSet::Nodes(vec![selected])),
             }
         }
+        KernelOp::Assert => {
+            let Some(&condition) = raw_inputs.first() else {
+                return unsupported(node, "assert kernel needs one input");
+            };
+            let Some(output) = inputs.get(condition) else {
+                return Step::Need(NeedSet::Nodes(vec![condition]));
+            };
+            match output {
+                NodeOutput::Bool(true) => Step::Ready(NodeOutput::Unit),
+                NodeOutput::Bool(false) => Step::Poison(CorePoison {
+                    node,
+                    reason: "assertion failed".to_string(),
+                }),
+                _ => unsupported(node, "assert kernel needs bool input"),
+            }
+        }
+        KernelOp::AssertEq => {
+            let Some((a, b)) = two_inputs(node, raw_inputs) else {
+                return unsupported(node, "assert_eq kernel needs two inputs");
+            };
+            let missing = missing(inputs.values, [a, b]);
+            if !missing.is_empty() {
+                return Step::Need(NeedSet::Nodes(missing));
+            }
+            if inputs.get(a).unwrap() == inputs.get(b).unwrap() {
+                Step::Ready(NodeOutput::Unit)
+            } else {
+                Step::Poison(CorePoison {
+                    node,
+                    reason: "assert_eq failed".to_string(),
+                })
+            }
+        }
         KernelOp::Opaque => unsupported(node, "opaque kernel is not executable in core"),
     }
 }
@@ -369,5 +402,48 @@ mod tests {
         values.insert(NodeId(0), NodeOutput::Bool(true));
         let second = step(&graph, NodeId(3), ReadyInputs::new(&values));
         assert_eq!(second, Step::Need(NeedSet::Nodes(vec![NodeId(1)])));
+    }
+
+    #[test]
+    fn assert_eq_requests_both_inputs_then_returns_unit() {
+        let graph = DemandGraph {
+            nodes: vec![
+                Node {
+                    id: NodeId(0),
+                    kind: NodeKind::Const,
+                    span: None,
+                    label: "42".to_string(),
+                    ty: "U64".to_string(),
+                    inputs: vec![],
+                },
+                Node {
+                    id: NodeId(1),
+                    kind: NodeKind::Const,
+                    span: None,
+                    label: "42".to_string(),
+                    ty: "U64".to_string(),
+                    inputs: vec![],
+                },
+                Node {
+                    id: NodeId(2),
+                    kind: NodeKind::Kernel(KernelOp::AssertEq),
+                    span: None,
+                    label: "assert_eq".to_string(),
+                    ty: "Unit".to_string(),
+                    inputs: vec![NodeId(0), NodeId(1)],
+                },
+            ],
+            root: NodeId(2),
+        };
+        let mut values = HashMap::new();
+        let first = step(&graph, NodeId(2), ReadyInputs::new(&values));
+        assert_eq!(
+            first,
+            Step::Need(NeedSet::Nodes(vec![NodeId(0), NodeId(1)]))
+        );
+        values.insert(NodeId(0), NodeOutput::U64(42));
+        values.insert(NodeId(1), NodeOutput::U64(42));
+        let second = step(&graph, NodeId(2), ReadyInputs::new(&values));
+        assert_eq!(second, Step::Ready(NodeOutput::Unit));
     }
 }

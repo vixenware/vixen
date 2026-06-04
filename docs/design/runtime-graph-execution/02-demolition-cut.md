@@ -187,8 +187,9 @@ rg -n 'vx[_-]ir|ExprKind|ExprId|StmtKind|PatternKind|PatternId|VirProgram|BodyId
 Observed result:
 
 - `cargo check` passes.
-- `source_entry` passes 3/3: graph root constant, projection skipping a dead
-  bomb slot, and explicit unsupported graph call.
+- `source_entry` passes 5/5: graph root constant, projection skipping a dead
+  bomb slot, graph `assert_eq` success, graph `assert_eq` poison, and explicit
+  unsupported graph call.
 - `execution_crates_stay_source_blind` passes.
 - The raw forbidden-symbol scan returns no matches in core/driver.
 
@@ -198,7 +199,8 @@ Current broad-suite result:
 cargo nextest run -p vx-runtime-graph -p vx-runtime-core -p vx-runtime-driver -p vx-runtime --no-fail-fast
 ```
 
-Observed result: 138 tests run, 125 passed, 13 failed, 0 skipped.
+Observed result after assertion kernel payloads: 141 tests run, 128 passed, 13
+failed, 0 skipped.
 
 The red surface is honest graph-driver fallout from the source-entry cut:
 
@@ -216,7 +218,7 @@ The red surface is honest graph-driver fallout from the source-entry cut:
 - `vx-runtime::eval_on_strands clean_program_evaluates_to_clean_on_a_strand`
 - `vx-runtime::lang_suite lang_suite`
 
-Most failures stop with explicit messages like:
+Several failures still stop with explicit messages like:
 
 ```text
 graph unsupported at node NodeId(...): opaque kernel is not executable in core
@@ -226,10 +228,12 @@ graph unsupported at node NodeId(...): opaque kernel is not executable in core
 by zero now poisons through core, but the source span has not yet been threaded
 from graph node spans into `Outcome`.
 
-The `.vx` language harness now runs through graph driver for source entries. It
-fails 65 of 68 Vixen-language cases because calls such as `assert`/`assert_eq`,
-function calls, match, variants, strings, and failure context are still opaque or
-unsupported graph payloads. That is expected for this cut and is not a fallback.
+The `.vx` language harness now runs through graph driver for source entries.
+After `KernelOp::Assert` and `KernelOp::AssertEq`, it fails 43 of 68
+Vixen-language cases. Assertion calls are no longer opaque; remaining failures
+are mostly function calls, closures, match, variants, strings/methods, failure
+context, and kernel-dispatch counters that no longer mean "source tree-walk vs
+kernel." That is expected for this cut and is not a fallback.
 
 ## Verification commands
 
