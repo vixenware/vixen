@@ -72,12 +72,73 @@ Free tier with anonymous reads is deferred until grant or VC funding underwrites
 A trusted-builder backfill never just shells out and `cargo build` unsandboxed. It runs under the sandbox — landlock on Linux today, seatbelt on macOS once restored, AppContainer on Windows once designed — so the build cannot read bytes outside the declared set. But **how the key is derived** differs by product, and the two paths are deliberately separate:
 
 - **CCC (Tier 1) backfill** keys by **declared identity** — the crates.io descriptor `(crate, version, registry-hash, compile-args, toolchain-identity)`. The worker runs `rustc` under `landlock-exec` directly; no Vixen runtime, no demand evaluator, no sandbox-observed read-set. The descriptor *is* the key; landlock enforces nothing outside it leaked, so the descriptor stays an honest read-set. See [CCC → backfill](/ccc/#backfill-is-direct-landlock-exec-not-the-vixen-runtime).
-- **Vixen Build (Tier 2) backfill** keys by the **sandbox-observed read-set**, derived through the Vixen runtime's `exec` evaluation — the same path Tier-2 customer work takes. Here the sandbox is the *source* of the key, not just an enforcement boundary.
+- **Vixen Build (Tier 2) backfill** looks up by the runtime's pre-run `exec`
+  request identity and records the **sandbox-observed read-set** as the reuse
+  witness — the same path Tier-2 customer work takes. Here the sandbox is the
+  source of the post-run validity proof, not just an enforcement boundary.
 
 The sandbox is non-negotiable in both:
 
-1. **Cache validity by construction.** The sandbox enforces that the build cannot read bytes outside the declared set. At Tier 1 that set is the descriptor; at Tier 2 it is the observed read-set the key hashes. Either way the key faithfully captures what the build depended on — by construction, not by audit. Without it, a build could quietly read `/etc/something` we didn't account for, and the entry would be subtly wrong.
+1. **Cache validity by construction.** The sandbox enforces that the build cannot read bytes outside the declared set. At Tier 1 that set is the descriptor; at Tier 2 the pre-run request identity names the declared handles and the observed read-set records the exact bytes actually consulted under those handles. Either way reuse faithfully captures what the build depended on — by construction, not by audit. Without it, a build could quietly read `/etc/something` we didn't account for, and the entry would be subtly wrong.
 2. **Dogfooding the substrate.** Tier-2 backfill is a production exercise of the full runtime + sandbox + VFS — bugs in the per-OS sandbox, the VFS mount lifecycle, the FUSE / FSKit / ProjFS layers get hit on real workloads before any customer depends on them. CCC backfill exercises only `landlock-exec`, by design: it is the lighter path that keeps the runtime off CCC's critical path.
+
+## Coarse lookup, precise validation
+
+Tier 2 has two identities, and they do different jobs:
+
+- **Request identity** is computable before dispatch: observer identity, resolved
+  command shape, env, declared mount handles, and capability/toolchain identities.
+  It is the L1 lookup address and the demand signal. It may be deliberately coarse
+  because a command often needs a whole tree mounted before the runtime knows which
+  paths it will actually open.
+- **Read-set witness** is learned after a run: the exact mounted paths, byte ranges,
+  or subtrees the process read, with the content identities observed at those
+  positions. It is attached to the cached execution record and proves reuse under a
+  later input tree. It is not known before the first run, so it is not the primary
+  lookup key.
+
+That gives the useful "coarse miss, precise hit" case. Suppose the request identity
+misses because a mounted source tree has a different root hash. The cache may still
+ask for prior records with the same stable request shape, then validate a candidate's
+read-set witness against the current tree. If every recorded read still has the same
+content identity, the old observer result is valid and the process does not rerun,
+even though the coarse tree identity changed.
+
+The cache must **not** validate by unioning every file ever read by every prior
+miss. That degenerates into hashing the world. Candidate validation is scoped,
+ranked, and bounded:
+
+- Candidate lookup is first narrowed by the stable request shape: command,
+  observer, env, logical mount roles, capability/toolchain identities, and impurity
+  marks. Changed coarse tree identities only move the lookup from "exact hit" to
+  "candidate validation"; they do not open the whole cache.
+- Each candidate carries its own read-set witness. Validation asks the current tree
+  service for exactly that witness, preferably as a batched Merkle query. Candidates
+  sharing the same read-set shape are grouped so the same witness is validated at
+  most once per lookup.
+- Large witnesses are represented structurally. A process that reads a directory
+  recursively can record a subtree digest; a process that opens sparse files records
+  paths or ranges. The witness is a trie/Merkle proof, not necessarily a flat list
+  of filenames.
+- If the store can compute a changed-path or changed-subtree summary between the
+  old and current tree roots, disjointness from a candidate's witness can validate
+  the candidate without rehashing each file. If no such diff is available, the
+  batched witness check is the fallback.
+- Candidate validation has a budget. Prefer recent, previously-valid, or cheapest
+  witnesses; if hundreds of thousands of records remain plausible and none validates
+  within budget, the correct answer is "miss" and the executor runs. A cache miss is
+  always sound.
+- If multiple validated candidates claim different output identities for the same
+  request shape and same validated read bytes, that is impurity, corruption, or an
+  incomplete witness. The cache must not choose randomly; it reruns locally and marks
+  the ambiguous records suspect or non-shareable under the trust policy.
+
+This preserves the invariant from [runtime semantics](/runtime-semantics/): the
+root demand reaches an `exec` boundary, the runtime computes the pre-run request
+identity, and cache lookup decides whether boundary materialization is "reuse a
+validated record" or "dispatch to an executor." The read-set witness improves reuse;
+it never becomes an excuse to inspect unrelated inputs or to invent a key that could
+only be known after the command already ran.
 
 ## Asymmetric infrastructure: customer-facing vs fleet-facing
 

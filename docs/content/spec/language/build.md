@@ -157,4 +157,7 @@ Build entry points and runtime-backed surfaces such as `main`, `exec`,
 > only when the command is a deterministic function of the bytes it reads;
 > non-determinism is flagged separately (impurity) and forfeits the reuse. The
 > storage and lookup that map a command and its declared inputs to candidate
-> prior results and their read-sets are not yet specified.
+> prior results narrows by the pre-run request shape, then validates each
+> candidate's recorded read-set witness against the current inputs. Candidate
+> validation is bounded; if no candidate proves valid within budget, the command
+> reruns.

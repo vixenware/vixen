@@ -295,6 +295,33 @@ Read-set is discovered after running. It supports reuse/rerun avoidance; it is
 never used as the primary key. If an implementation tries to key by read-set, it
 must already have run the command and is therefore wrong.
 
+Coarse misses can still become precise hits. The pre-run request key may include a
+broad mounted tree identity because the runtime cannot know the exact include set,
+response-file reads, or generated input paths before dispatch. When that coarse
+identity changes, lookup moves to a candidate-validation path:
+
+1. Narrow candidates by stable request shape: observer identity, resolved command
+   shape, env, mount roles, capability/toolchain identities, and impurity marks.
+2. Validate one candidate's recorded read-set witness against the current input
+   handles. The witness names exactly the paths, byte ranges, or subtrees that
+   candidate read and the content identities observed there.
+3. Reuse the candidate only if its witness still matches. Otherwise try the next
+   candidate within budget, or run the command.
+
+Do not form the union of every file read by every prior candidate. That turns a
+precision mechanism into a broad rehash. Candidate validation must be grouped and
+bounded:
+
+- group records with the same read-set shape so a witness is checked at most once
+  per lookup.
+- use batched tree/Merkle queries, changed-path summaries, and subtree witnesses
+  instead of per-file filesystem reads whenever possible.
+- if the candidate set remains huge, prefer recent/cheap candidates and then miss.
+  Rerunning is sound; unbounded validation is not.
+- if two validated candidates with the same request shape and same current read
+  bytes disagree on output identity, treat that as impurity/corruption or an
+  incomplete witness. Do not choose arbitrarily.
+
 ## Current boundary/cross-executor checkpoint
 
 Verified green:
