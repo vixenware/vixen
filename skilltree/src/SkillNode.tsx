@@ -1,34 +1,13 @@
 import { Handle, Position, type NodeProps } from "@xyflow/react";
-import type { SkillFlowNode } from "./tree";
+import type { WorkFlowNode } from "./tree";
 
-const STATUS_LABEL: Record<string, string> = {
-  done: "Done",
-  in_progress: "In progress",
-  planned: "Planned",
-  idea: "Idea",
-};
-
-export function SkillNode({ data, selected }: NodeProps<SkillFlowNode>) {
-  const { spec, category } = data;
-  const color = category?.color ?? "#7a8190";
-
+export function SkillNode({ data }: NodeProps<WorkFlowNode>) {
+  const { spec } = data;
   return (
-    <div
-      className={`skill-node status-${spec.status}`}
-      data-selected={selected || undefined}
-      style={{ "--cat": color } as React.CSSProperties}
-    >
+    <div className="work-node">
       <Handle type="target" position={Position.Left} />
-      <header>
-        <span className="dot" />
-        <span className="title">{spec.title}</span>
-      </header>
-      {spec.summary && <p className="summary">{spec.summary}</p>}
-      <footer>
-        {spec.hands && <span className="hands" title="Good for extra hands (Hexcat)">✋ hands</span>}
-        {category?.label && <span className="cat">{category.label}</span>}
-        <span className="status">{STATUS_LABEL[spec.status] ?? spec.status}</span>
-      </footer>
+      <h2>{spec.title}</h2>
+      {spec.description && <p>{spec.description}</p>}
       <Handle type="source" position={Position.Right} />
     </div>
   );

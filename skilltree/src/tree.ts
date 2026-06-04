@@ -3,55 +3,35 @@ import Dagre from "@dagrejs/dagre";
 import { Position, type Edge, type Node } from "@xyflow/react";
 
 // ---------------------------------------------------------------------------
-// Data model — mirrors the YAML in `src/tree.yaml`.
+// Data model — a roadmap. Each node is a unit of work: a title and a short
+// description. `after` lists the work that must come before it (the sequencing).
 // ---------------------------------------------------------------------------
 
-export type Status = "done" | "in_progress" | "planned" | "idea";
-
-export interface SkillSpec {
+export interface WorkSpec {
   id: string;
   title: string;
-  status: Status;
-  /** key into `categories` */
-  category?: string;
-  /** one-line teaser shown on the node */
-  summary?: string;
-  /** longer prose shown in the side panel */
-  detail?: string;
-  /** why this milestone matters / what value it unlocks */
-  payoff?: string;
-  /** good candidate for extra hands (Hexcat) — parallelizable / handoff-friendly */
-  hands?: boolean;
-  /** ids of skills that must come first */
-  requires?: string[];
+  description?: string;
+  /** ids of work that must come first (drives the arrows / sequencing) */
+  after?: string[];
 }
 
-export interface CategorySpec {
-  label?: string;
-  color: string;
+export interface Roadmap {
+  title?: string;
+  nodes: WorkSpec[];
 }
 
-export interface SkillTree {
-  meta?: { title?: string; subtitle?: string };
-  categories: Record<string, CategorySpec>;
-  nodes: SkillSpec[];
+export interface WorkNodeData extends Record<string, unknown> {
+  spec: WorkSpec;
 }
 
-export interface SkillNodeData extends Record<string, unknown> {
-  spec: SkillSpec;
-  category?: CategorySpec;
-}
-
-export type SkillFlowNode = Node<SkillNodeData, "skill">;
+export type WorkFlowNode = Node<WorkNodeData, "work">;
 
 // ---------------------------------------------------------------------------
 // Parsing
 // ---------------------------------------------------------------------------
 
-const DEFAULT_CATEGORY: CategorySpec = { label: "Uncategorized", color: "#7a8190" };
-
-export function parseTree(source: string): SkillTree {
-  const raw = yaml.load(source) as Partial<SkillTree> | undefined;
+export function parseRoadmap(source: string): Roadmap {
+  const raw = yaml.load(source) as Partial<Roadmap> | undefined;
   if (!raw || typeof raw !== "object") {
     throw new Error("tree.yaml did not parse to an object");
   }
@@ -66,67 +46,64 @@ export function parseTree(source: string): SkillTree {
     ids.add(n.id);
   }
   for (const n of raw.nodes) {
-    for (const dep of n.requires ?? []) {
-      if (!ids.has(dep)) {
-        throw new Error(`node "${n.id}" requires unknown node "${dep}"`);
-      }
+    for (const dep of n.after ?? []) {
+      if (!ids.has(dep)) throw new Error(`node "${n.id}" comes after unknown node "${dep}"`);
     }
   }
 
-  return {
-    meta: raw.meta,
-    categories: raw.categories ?? {},
-    nodes: raw.nodes,
-  };
+  return { title: raw.title, nodes: raw.nodes };
 }
 
 // ---------------------------------------------------------------------------
 // React Flow conversion + dagre layout
 // ---------------------------------------------------------------------------
 
-const NODE_W = 240;
-const NODE_H = 108;
+const NODE_W = 300;
 
-export function toFlow(tree: SkillTree): { nodes: SkillFlowNode[]; edges: Edge[] } {
-  const nodes: SkillFlowNode[] = tree.nodes.map((spec) => ({
+export function toFlow(roadmap: Roadmap): { nodes: WorkFlowNode[]; edges: Edge[] } {
+  const nodes: WorkFlowNode[] = roadmap.nodes.map((spec) => ({
     id: spec.id,
-    type: "skill",
+    type: "work",
     position: { x: 0, y: 0 },
-    data: {
-      spec,
-      category: spec.category ? tree.categories[spec.category] ?? DEFAULT_CATEGORY : undefined,
-    },
+    data: { spec },
   }));
 
   const edges: Edge[] = [];
-  for (const spec of tree.nodes) {
-    for (const dep of spec.requires ?? []) {
-      edges.push({
-        id: `${dep}->${spec.id}`,
-        source: dep,
-        target: spec.id,
-        animated: spec.status === "in_progress",
-      });
+  for (const spec of roadmap.nodes) {
+    for (const dep of spec.after ?? []) {
+      edges.push({ id: `${dep}->${spec.id}`, source: dep, target: spec.id });
     }
   }
 
-  return layout(nodes, edges);
+  return layout(nodes, edges, roadmap.nodes);
 }
 
-function layout(nodes: SkillFlowNode[], edges: Edge[]): { nodes: SkillFlowNode[]; edges: Edge[] } {
-  const g = new Dagre.graphlib.Graph().setDefaultEdgeLabel(() => ({}));
-  g.setGraph({ rankdir: "LR", nodesep: 36, ranksep: 96, marginx: 40, marginy: 40 });
+function nodeHeight(spec: WorkSpec): number {
+  // rough: title + ~ chars-per-line of description, big readable type
+  const descLines = spec.description ? Math.ceil(spec.description.length / 34) : 0;
+  return 56 + descLines * 26;
+}
 
-  for (const n of nodes) g.setNode(n.id, { width: NODE_W, height: NODE_H });
+function layout(
+  nodes: WorkFlowNode[],
+  edges: Edge[],
+  specs: WorkSpec[],
+): { nodes: WorkFlowNode[]; edges: Edge[] } {
+  const heights = new Map(specs.map((s) => [s.id, nodeHeight(s)]));
+  const g = new Dagre.graphlib.Graph().setDefaultEdgeLabel(() => ({}));
+  g.setGraph({ rankdir: "LR", nodesep: 48, ranksep: 130, marginx: 60, marginy: 60 });
+
+  for (const n of nodes) g.setNode(n.id, { width: NODE_W, height: heights.get(n.id) ?? 80 });
   for (const e of edges) g.setEdge(e.source, e.target);
 
   Dagre.layout(g);
 
   const laidOut = nodes.map((n) => {
     const { x, y } = g.node(n.id);
+    const h = heights.get(n.id) ?? 80;
     return {
       ...n,
-      position: { x: x - NODE_W / 2, y: y - NODE_H / 2 },
+      position: { x: x - NODE_W / 2, y: y - h / 2 },
       sourcePosition: Position.Right,
       targetPosition: Position.Left,
     };
