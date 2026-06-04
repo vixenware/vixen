@@ -115,6 +115,7 @@ pub(crate) fn build_graph_indexed(
     DemandGraph,
     HashMap<ExprId, NodeId>,
     HashMap<NodeId, BindingId>,
+    HashMap<BindingId, NodeId>,
 ) {
     let params: Vec<PatternId> = program.arena[body_id]
         .params
@@ -128,25 +129,18 @@ pub(crate) fn build_graph_indexed(
         nodes: Vec::new(),
         memo: HashMap::new(),
         bindings: HashMap::new(),
+        param_bindings: HashMap::new(),
         field_names: HashMap::new(),
     };
     for pat in params {
-        b.bind_param(pat);
+        b.bind_pattern(pat);
     }
     let root = b.walk(root_expr);
-    // Invert the binding map for `Param` nodes only (a kernel's parameters are
-    // always `Param` nodes; let-bindings link to their value node instead).
-    let mut param_bindings = HashMap::new();
-    for (&binding, &node) in &b.bindings {
-        if matches!(b.nodes[node.0 as usize].kind, NodeKind::Param) {
-            param_bindings.insert(node, binding);
-        }
-    }
     let graph = DemandGraph {
         nodes: b.nodes,
         root,
     };
-    (graph, b.memo, param_bindings)
+    (graph, b.memo, b.param_bindings, b.bindings)
 }
 
 struct Builder<'a> {
@@ -157,6 +151,10 @@ struct Builder<'a> {
     /// Local binding → the node of its value (the link that makes `pair[0]` reach
     /// the construction). Flat (shadowing not modelled yet).
     bindings: HashMap<BindingId, NodeId>,
+    /// Nodes introduced by patterns/function parameters and backed by runtime env
+    /// entries. This deliberately excludes let bindings whose value node happens to
+    /// be `NodeKind::Param` (for example a bare unit variant name).
+    param_bindings: HashMap<NodeId, BindingId>,
     /// For a lazy-data node built from a named struct/record: its field names in
     /// slot order, so a named projection (`.a`) can resolve to the right slot.
     field_names: HashMap<NodeId, Vec<String>>,
@@ -176,15 +174,66 @@ impl Builder<'_> {
         id
     }
 
-    /// Bind a parameter pattern to a fresh `Param` node, so name refs to it link.
-    fn bind_param(&mut self, pat: PatternId) {
+    /// Bind every name introduced by a pattern to a fresh `Param` node, so name refs
+    /// in the matched body link to the value supplied by runtime pattern matching.
+    fn bind_pattern(&mut self, pat: PatternId) {
         let prog = self.program;
         let p = &prog.arena[pat];
-        if let PatternKind::Binding(pb) = &p.kind {
-            let (name, binding) = (pb.name.clone(), pb.binding);
-            let span = to_span(p.span);
-            let node = self.emit(NodeKind::Param, name, span, vec![]);
-            self.bindings.insert(binding, node);
+        match &p.kind {
+            PatternKind::Binding(pb) => {
+                let (name, binding) = (pb.name.clone(), pb.binding);
+                let span = to_span(p.span);
+                let node = self.emit(NodeKind::Param, name, span, vec![]);
+                self.bindings.insert(binding, node);
+                self.param_bindings.insert(node, binding);
+            }
+            PatternKind::Tuple(tp) => {
+                for &child in &tp.elements {
+                    self.bind_pattern(child);
+                }
+            }
+            PatternKind::Struct(sp) => {
+                for field in &sp.fields {
+                    self.bind_pattern(field.pattern);
+                }
+            }
+            PatternKind::Array(ap) => {
+                for &child in &ap.elements {
+                    self.bind_pattern(child);
+                }
+            }
+            PatternKind::ArrayRest(rest) => {
+                if let Some(binding) = rest.binding {
+                    let name = rest.name.clone().unwrap_or_else(|| "..".to_string());
+                    let span = to_span(p.span);
+                    let node = self.emit(NodeKind::Param, name, span, vec![]);
+                    self.bindings.insert(binding, node);
+                    self.param_bindings.insert(node, binding);
+                }
+            }
+            PatternKind::Variant(vp) => {
+                if let Some(fields) = &vp.fields {
+                    for field in fields {
+                        self.bind_pattern(field.pattern);
+                    }
+                }
+            }
+            PatternKind::At(at) => {
+                let span = to_span(p.span);
+                let node = self.emit(NodeKind::Param, at.name.clone(), span, vec![]);
+                self.bindings.insert(at.binding, node);
+                self.param_bindings.insert(node, at.binding);
+                self.bind_pattern(at.inner);
+            }
+            PatternKind::Or(or) => {
+                for &child in &or.alternatives {
+                    self.bind_pattern(child);
+                }
+            }
+            PatternKind::Wildcard
+            | PatternKind::Literal(_)
+            | PatternKind::Unit
+            | PatternKind::Error => {}
         }
     }
 
@@ -353,7 +402,7 @@ impl Builder<'_> {
                 let cparams: Vec<PatternId> =
                     prog.arena[body].params.iter().map(|p| p.pattern).collect();
                 for p in cparams {
-                    self.bind_param(p);
+                    self.bind_pattern(p);
                 }
                 let croot = prog.arena[body].root_expr;
                 let child = self.walk(croot);
@@ -436,7 +485,10 @@ impl Builder<'_> {
                     }
                 }
                 match tail.map(|t| self.walk(t)).or(last_expr) {
-                    Some(v) => return v,
+                    Some(v) => {
+                        self.memo.insert(e, v);
+                        return v;
+                    }
                     None => self.emit(NodeKind::Const, "()".into(), span, vec![]),
                 }
             }
@@ -475,7 +527,7 @@ impl Builder<'_> {
                     mx.arms.iter().map(|a| (a.pattern, a.body)).collect();
                 let mut inputs = vec![self.walk(scrutinee)];
                 for (pat, body) in arms {
-                    self.bind_param(pat);
+                    self.bind_pattern(pat);
                     inputs.push(self.walk(body));
                 }
                 self.emit(
@@ -513,16 +565,36 @@ impl Builder<'_> {
             // A coercion is a transparent single-child wrapper: forward to its
             // child's node so demand flows through it unchanged (identity at
             // runtime for `String -> Path`).
-            ExprKind::Coerce(c) => return self.walk(c.expr),
+            ExprKind::Coerce(c) => {
+                let node = self.walk(c.expr);
+                self.memo.insert(e, node);
+                return node;
+            }
 
-            // A name: link to its bound value's node, else a leaf.
+            // A name: link to its bound value's node. A body/frame parameter is
+            // introduced by `bind_pattern`; resolved non-local names are values,
+            // not kernel parameters.
             ExprKind::NameRef(n) => {
                 if let Some(DefTarget::Binding(bid)) = n.resolved
                     && let Some(&node) = self.bindings.get(&bid)
                 {
+                    self.memo.insert(e, node);
                     return node;
                 }
-                self.emit(NodeKind::Param, n.name.clone(), span, vec![])
+                match n.resolved {
+                    Some(DefTarget::Variant { .. }) => {
+                        self.emit(NodeKind::LazyData, n.name.clone(), span, vec![])
+                    }
+                    Some(DefTarget::Item(_)) => self.emit(
+                        NodeKind::Kernel(KernelOp::Opaque),
+                        n.name.clone(),
+                        span,
+                        vec![],
+                    ),
+                    Some(DefTarget::Binding(_)) | None => {
+                        self.emit(NodeKind::Unresolved, n.name.clone(), span, vec![])
+                    }
+                }
             }
 
             // Honest frontier: everything this snapshot doesn't model yet.

@@ -30,8 +30,9 @@ use vx_ir::stmt::StmtKind;
 use vx_types::TypeEnv;
 
 use crate::ability::{self, AttrLit, Constraint, ProviderRegistry};
+use crate::analyze::build_graph_indexed;
 use crate::dispatch::{self, Dispatcher};
-use crate::graph::Span;
+use crate::graph::{DemandGraph, NodeId, NodeKind, Span};
 use crate::observe::{ExecCommand, ObserveRequest, WireValue};
 use crate::remote::{Part, PartKey};
 use crate::strand::{HandleId, ObserveClientId, ObserveOutcome, dispatch_observe, force_remote};
@@ -274,6 +275,45 @@ pub enum KernelMode {
 
 type Env = HashMap<BindingId, Thunk>;
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+struct FrameId(usize);
+
+/// A reference to a node in one invocation of one body graph. The captured `env`
+/// is the lexical environment in which this node is forced; the frame owns the
+/// graph and memo table, while the env connects parameter nodes to caller nodes.
+#[derive(Debug, Clone)]
+struct NodeRef {
+    frame: FrameId,
+    node: NodeId,
+    env: Env,
+}
+
+#[derive(Debug)]
+enum NodeMemo {
+    Unforced,
+    Forcing,
+    Done(Result<Value, Poison>),
+}
+
+struct Frame {
+    body: BodyId,
+    graph: DemandGraph,
+    exprmap: HashMap<ExprId, NodeId>,
+    node_exprs: HashMap<NodeId, ExprId>,
+    param_bindings: HashMap<NodeId, BindingId>,
+    binding_nodes: HashMap<BindingId, NodeId>,
+    memo: Vec<NodeMemo>,
+}
+
+impl std::fmt::Debug for Frame {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("Frame")
+            .field("body", &self.body)
+            .field("nodes", &self.graph.nodes.len())
+            .finish()
+    }
+}
+
 /// A lazily-evaluated, memoised value. Forcing runs its expression in its
 /// captured environment once; re-forcing returns the cached result.
 #[derive(Debug, Clone)]
@@ -310,6 +350,7 @@ impl std::fmt::Debug for Intrinsic {
 
 #[derive(Debug)]
 enum ThunkState {
+    Node(NodeRef),
     /// The captured `body` travels with the thunk so that forcing it re-enters the
     /// right body's demand graph for sub-expression dispatch.
     Unforced {
@@ -334,6 +375,12 @@ struct Evaluator<'a> {
     dispatch: Dispatcher,
     /// How many (sub-)expressions ran as kernels — observability; tests assert it.
     dispatches: Cell<u64>,
+    /// The currently-executing body invocation. A thunk created while this is set
+    /// names a graph node in this frame rather than carrying a bare expression.
+    current_frame: Cell<Option<FrameId>>,
+    /// Body invocations: each one owns a demand graph snapshot plus per-node memo
+    /// state. This is the Tier-1 memo table for the current run.
+    frames: RefCell<Vec<Frame>>,
     /// Which kernel path dispatch takes (`Off` ⇒ pure tree-walk, no dispatch).
     mode: KernelMode,
     /// The executor an `exec(…)` dispatches its observe RPC to (the orchestrator
@@ -350,11 +397,114 @@ struct Evaluator<'a> {
 
 impl Evaluator<'_> {
     fn thunk(&self, expr: ExprId, env: &Env) -> Thunk {
+        if let Some(frame) = self.current_frame.get()
+            && let Some(node) = self.node_for_expr(frame, expr)
+        {
+            return Thunk(Rc::new(RefCell::new(ThunkState::Node(NodeRef {
+                frame,
+                node,
+                env: env.clone(),
+            }))));
+        }
         Thunk(Rc::new(RefCell::new(ThunkState::Unforced {
             expr,
             env: env.clone(),
             body: self.current_body.get(),
         })))
+    }
+
+    fn node_for_expr(&self, frame: FrameId, expr: ExprId) -> Option<NodeId> {
+        self.frames
+            .borrow()
+            .get(frame.0)
+            .and_then(|f| f.exprmap.get(&expr).copied())
+    }
+
+    fn push_frame(&self, body: BodyId) -> FrameId {
+        let (graph, exprmap, param_bindings, binding_nodes) =
+            build_graph_indexed(self.program, self.env, body);
+        let mut node_exprs = HashMap::new();
+        for (&expr, &node) in &exprmap {
+            let replace = node_exprs
+                .get(&node)
+                .is_none_or(|&old| is_forwarding_expr(self.program, old));
+            if replace || !is_forwarding_expr(self.program, expr) {
+                node_exprs.insert(node, expr);
+            }
+        }
+        let memo = graph.nodes.iter().map(|_| NodeMemo::Unforced).collect();
+        let mut frames = self.frames.borrow_mut();
+        let id = FrameId(frames.len());
+        frames.push(Frame {
+            body,
+            graph,
+            exprmap,
+            node_exprs,
+            param_bindings,
+            binding_nodes,
+            memo,
+        });
+        id
+    }
+
+    fn force_root(&self, body: BodyId, env: Env) -> Result<Value, Poison> {
+        let frame = self.push_frame(body);
+        let root = self.frames.borrow()[frame.0].graph.root;
+        self.force_node(&NodeRef {
+            frame,
+            node: root,
+            env,
+        })
+    }
+
+    fn demand(&self, expr: ExprId, env: &Env) -> Result<Value, Poison> {
+        let th = self.thunk(expr, env);
+        self.force(&th)
+    }
+
+    fn force_frame_binding(&self, binding: BindingId, env: &Env) -> Result<Option<Value>, Poison> {
+        let Some(frame) = self.current_frame.get() else {
+            return Ok(None);
+        };
+        let node = {
+            let frames = self.frames.borrow();
+            frames[frame.0].binding_nodes.get(&binding).copied()
+        };
+        match node {
+            Some(node) => self
+                .force_node(&NodeRef {
+                    frame,
+                    node,
+                    env: env.clone(),
+                })
+                .map(Some),
+            None => Ok(None),
+        }
+    }
+
+    fn capture_env(&self, env: &Env) -> Env {
+        let mut captured = env.clone();
+        let Some(frame) = self.current_frame.get() else {
+            return captured;
+        };
+        let bindings: Vec<(BindingId, NodeId)> = {
+            let frames = self.frames.borrow();
+            frames[frame.0]
+                .binding_nodes
+                .iter()
+                .map(|(&binding, &node)| (binding, node))
+                .collect()
+        };
+        for (binding, node) in bindings {
+            captured.entry(binding).or_insert_with(|| {
+                Thunk(Rc::new(RefCell::new(ThunkState::Node(NodeRef {
+                    frame,
+                    node,
+                    env: env.clone(),
+                }))))
+            });
+        }
+        captured
     }
 
     /// Force a thunk to a value (memoised; detects cycles). The thunk's captured
@@ -363,6 +513,7 @@ impl Evaluator<'_> {
     fn force(&self, t: &Thunk) -> Result<Value, Poison> {
         // Extract the work without holding the borrow across the recursive eval.
         enum Work {
+            Node(NodeRef),
             Expr(ExprId, Env, BodyId),
             Native(Intrinsic),
         }
@@ -370,6 +521,7 @@ impl Evaluator<'_> {
             let mut st = t.0.borrow_mut();
             match &*st {
                 ThunkState::Done(r) => return r.clone(),
+                ThunkState::Node(node) => Work::Node(node.clone()),
                 ThunkState::Forcing => {
                     return Err(poison(
                         "circular dependency (a value demands itself)".into(),
@@ -388,6 +540,7 @@ impl Evaluator<'_> {
             }
         };
         let result = match work {
+            Work::Node(node) => return self.force_node(&node),
             Work::Expr(expr, env, body) => {
                 let prev = self.current_body.replace(body);
                 let r = self.eval(expr, &env);
@@ -398,6 +551,76 @@ impl Evaluator<'_> {
             Work::Native(intrinsic) => (intrinsic.0)(),
         };
         *t.0.borrow_mut() = ThunkState::Done(result.clone());
+        result
+    }
+
+    fn force_node(&self, node_ref: &NodeRef) -> Result<Value, Poison> {
+        enum Work {
+            Param(BindingId),
+            Expr(ExprId, BodyId),
+        }
+
+        let work = {
+            let mut frames = self.frames.borrow_mut();
+            let frame = &mut frames[node_ref.frame.0];
+            let idx = node_ref.node.0 as usize;
+            match &frame.memo[idx] {
+                NodeMemo::Done(r) => return r.clone(),
+                NodeMemo::Forcing => {
+                    return Err(poison("circular dependency (a node demands itself)".into()));
+                }
+                NodeMemo::Unforced => {}
+            }
+            frame.memo[idx] = NodeMemo::Forcing;
+            match frame.graph.nodes[idx].kind {
+                NodeKind::Param => match frame.param_bindings.get(&node_ref.node).copied() {
+                    Some(binding) => Work::Param(binding),
+                    None => match frame.node_exprs.get(&node_ref.node).copied() {
+                        Some(expr) => Work::Expr(expr, frame.body),
+                        None => {
+                            let result = Err(poison(format!(
+                                "parameter node {:?} has no binding",
+                                node_ref.node
+                            )));
+                            frame.memo[idx] = NodeMemo::Done(result.clone());
+                            return result;
+                        }
+                    },
+                },
+                _ => match frame.node_exprs.get(&node_ref.node).copied() {
+                    Some(expr) => Work::Expr(expr, frame.body),
+                    None => {
+                        let result = Err(poison(format!(
+                            "graph node {:?} has no source expression",
+                            node_ref.node
+                        )));
+                        frame.memo[idx] = NodeMemo::Done(result.clone());
+                        return result;
+                    }
+                },
+            }
+        };
+
+        let result = match work {
+            Work::Param(binding) => match node_ref.env.get(&binding) {
+                Some(th) => self.force(th),
+                None => Err(poison(format!(
+                    "unbound parameter for graph node {:?}",
+                    node_ref.node
+                ))),
+            },
+            Work::Expr(expr, body) => {
+                let prev_body = self.current_body.replace(body);
+                let prev_frame = self.current_frame.replace(Some(node_ref.frame));
+                let r = self.eval(expr, &node_ref.env);
+                self.current_frame.set(prev_frame);
+                self.current_body.set(prev_body);
+                r
+            }
+        };
+
+        self.frames.borrow_mut()[node_ref.frame.0].memo[node_ref.node.0 as usize] =
+            NodeMemo::Done(result.clone());
         result
     }
 
@@ -453,7 +676,7 @@ impl Evaluator<'_> {
             // in as it bubbles).
             ExprKind::Fail(fx) => {
                 let raised = match fx.message {
-                    Some(m) => self.eval(m, env)?,
+                    Some(m) => self.demand(m, env)?,
                     None => Value::Str(Rc::from("fail")),
                 };
                 match self.as_caught_failure(&raised)? {
@@ -474,7 +697,7 @@ impl Evaluator<'_> {
             // (the failure model's "one value, two modes"). The inner may dispatch to
             // the kernel — a `fail`'s `err` survives via the kernel's value-pool side
             // table, so both modes catch the same value.
-            ExprKind::Fallible(fb) => match self.eval(fb.expr, env) {
+            ExprKind::Fallible(fb) => match self.demand(fb.expr, env) {
                 Ok(v) => Ok(Value::Variant {
                     tag: "Ok".to_string(),
                     fields: vec![("0".to_string(), done(v))],
@@ -500,7 +723,7 @@ impl Evaluator<'_> {
             // identity: the value passes through unchanged. A coercion fn with a
             // real body is invoked with the value as its single argument.
             ExprKind::Coerce(c) => {
-                let inner = self.eval(c.expr, env)?;
+                let inner = self.demand(c.expr, env)?;
                 match &prog.arena[c.coerce_fn].kind {
                     ItemKind::Function(f) => {
                         let body = f.body;
@@ -557,15 +780,15 @@ impl Evaluator<'_> {
 
             // Projection: force the container, then force only the selected slot.
             ExprKind::Index(ix) => {
-                let container = self.eval(ix.receiver, env)?;
-                let idx = match self.eval(ix.index, env)? {
+                let container = self.demand(ix.receiver, env)?;
+                let idx = match self.demand(ix.index, env)? {
                     Value::U64(n) => n as usize,
                     other => return Err(poison(format!("non-integer index: {other:?}"))),
                 };
                 self.project_index(&container, idx)
             }
             ExprKind::Field(fx) => {
-                let container = self.eval(fx.receiver, env)?;
+                let container = self.demand(fx.receiver, env)?;
                 match &fx.field {
                     FieldKey::Index(i) => self.project_index(&container, *i as usize),
                     FieldKey::Name(name) => self.project_name(&container, name),
@@ -574,12 +797,12 @@ impl Evaluator<'_> {
 
             // Eager compute (operands forced).
             ExprKind::Binary(bx) => {
-                let l = self.eval(bx.lhs, env)?;
-                let r = self.eval(bx.rhs, env)?;
+                let l = self.demand(bx.lhs, env)?;
+                let r = self.demand(bx.rhs, env)?;
                 self.binary(bx.op, l, r)
             }
             ExprKind::Prefix(px) => {
-                let v = self.eval(px.operand, env)?;
+                let v = self.demand(px.operand, env)?;
                 match v {
                     Value::Bool(b) => Ok(Value::Bool(!b)),
                     other => Err(poison(format!("unsupported prefix on {other:?}"))),
@@ -587,10 +810,10 @@ impl Evaluator<'_> {
             }
 
             // Control flow: only the taken branch is evaluated (short-circuit).
-            ExprKind::If(ifx) => match self.eval(ifx.condition, env)? {
-                Value::Bool(true) => self.eval(ifx.then_branch, env),
+            ExprKind::If(ifx) => match self.demand(ifx.condition, env)? {
+                Value::Bool(true) => self.demand(ifx.then_branch, env),
                 Value::Bool(false) => match ifx.else_branch {
-                    Some(eb) => self.eval(eb, env),
+                    Some(eb) => self.demand(eb, env),
                     None => Ok(Value::Unit),
                 },
                 other => Err(poison(format!("non-bool condition: {other:?}"))),
@@ -603,7 +826,7 @@ impl Evaluator<'_> {
                 let scrutinee = self.thunk(m.scrutinee, env);
                 for arm in &m.arms {
                     if let Some(arm_env) = self.match_pattern(arm.pattern, &scrutinee, env)? {
-                        return self.eval(arm.body, &arm_env);
+                        return self.demand(arm.body, &arm_env);
                     }
                 }
                 Err(poison("non-exhaustive match".into()))
@@ -615,7 +838,7 @@ impl Evaluator<'_> {
                 for part in &s.parts {
                     match part {
                         StringPart::Text(t) => out.push_str(t),
-                        StringPart::Expr(x) => match self.eval(*x, env)? {
+                        StringPart::Expr(x) => match self.demand(*x, env)? {
                             Value::Str(s) => out.push_str(&s),
                             Value::U64(n) => out.push_str(&n.to_string()),
                             Value::Bool(b) => out.push_str(&b.to_string()),
@@ -639,12 +862,12 @@ impl Evaluator<'_> {
                                 local.insert(pb.binding, th);
                             }
                         }
-                        StmtKind::Expr(x) => last = Some(self.eval(*x, &local)?),
+                        StmtKind::Expr(x) => last = Some(self.demand(*x, &local)?),
                         _ => {}
                     }
                 }
                 match bl.tail {
-                    Some(t) => self.eval(t, &local),
+                    Some(t) => self.demand(t, &local),
                     None => Ok(last.unwrap_or(Value::Unit)),
                 }
             }
@@ -655,7 +878,10 @@ impl Evaluator<'_> {
             ExprKind::NameRef(n) => match n.resolved {
                 Some(DefTarget::Binding(bid)) => match env.get(&bid) {
                     Some(th) => self.force(th),
-                    None => Err(poison(format!("unbound `{}`", n.name))),
+                    None => match self.force_frame_binding(bid, env)? {
+                        Some(value) => Ok(value),
+                        None => Err(poison(format!("unbound `{}`", n.name))),
+                    },
                 },
                 Some(DefTarget::Item(item)) => match &self.program.arena[item].kind {
                     ItemKind::Function(f) => Ok(Value::Closure {
@@ -691,7 +917,7 @@ impl Evaluator<'_> {
             // minimal). `call` binds the parameters when it is invoked.
             ExprKind::Closure(c) => Ok(Value::Closure {
                 body: c.body,
-                env: env.clone(),
+                env: self.capture_env(env),
             }),
 
             // A call: resolve the callee to a function body and evaluate it with
@@ -858,7 +1084,7 @@ impl Evaluator<'_> {
         // Read the leading tool — its program to run. (Its command coordinate is
         // carried for static validation + argument classification; the run itself
         // needs only the binary until input mounting lands.)
-        let (_command, binary) = self.read_tool(&self.eval(tool_expr, env)?)?;
+        let (_command, binary) = self.read_tool(&self.demand(tool_expr, env)?)?;
         // Render the remaining argument tokens to argv strings (static text verbatim,
         // holes forced to a scalar).
         let mut args = Vec::with_capacity(rest.len());
@@ -934,7 +1160,7 @@ impl Evaluator<'_> {
         for piece in &arg.pieces {
             match piece {
                 StringPart::Text(t) => s.push_str(t),
-                StringPart::Expr(id) => match self.eval(*id, env)? {
+                StringPart::Expr(id) => match self.demand(*id, env)? {
                     Value::Str(v) => s.push_str(&v),
                     Value::U64(n) => s.push_str(&n.to_string()),
                     other => {
@@ -1053,7 +1279,7 @@ impl Evaluator<'_> {
         }
         // Otherwise the callee must evaluate to a closure value — a closure-bound
         // name, a lambda literal, a call result. Invoke it over its captured env.
-        match self.eval(callee, env)? {
+        match self.demand(callee, env)? {
             Value::Closure {
                 body,
                 env: captured,
@@ -1080,10 +1306,7 @@ impl Evaluator<'_> {
                 );
             }
         }
-        let prev = self.current_body.replace(body);
-        let result = self.eval(prog.arena[body].root_expr, &callee_env);
-        self.current_body.set(prev);
-        result
+        self.force_root(body, callee_env)
     }
 
     /// A `where`/`with` decorated expression. `Type where (constraint)` is an ability
@@ -1254,10 +1477,7 @@ impl Evaluator<'_> {
                 callee_env.insert(pb.binding, th);
             }
         }
-        let prev = self.current_body.replace(body);
-        let result = self.eval(prog.arena[body].root_expr, &callee_env);
-        self.current_body.set(prev);
-        result
+        self.force_root(body, callee_env)
     }
 
     /// Dispatch a native builtin method `receiver.method(args)`. The receiver and
@@ -1275,9 +1495,9 @@ impl Evaluator<'_> {
             FieldKey::Name(n) => n.clone(),
             FieldKey::Index(i) => return Err(poison(format!("cannot call tuple index `{i}`"))),
         };
-        let recv = self.eval(fx.receiver, env)?;
+        let recv = self.demand(fx.receiver, env)?;
         let argv = args
-            .map(|a| self.eval(a, env))
+            .map(|a| self.demand(a, env))
             .collect::<Result<Vec<_>, _>>()?;
         match (method.as_str(), &recv) {
             // Byte length of the string (per core.vx's `String::len`).
@@ -1505,6 +1725,14 @@ fn kind_name(_k: &ExprKind) -> &'static str {
     "<unhandled>"
 }
 
+fn is_forwarding_expr(program: &VirProgram, expr: ExprId) -> bool {
+    match &program.arena[expr].kind {
+        ExprKind::Block(_) | ExprKind::Coerce(_) => true,
+        ExprKind::NameRef(n) => matches!(n.resolved, Some(DefTarget::Binding(_))),
+        _ => false,
+    }
+}
+
 /// A scalar value as an ABI word: `U64` is itself, `Bool` is `0`/`1`. Anything
 /// else (string, compound) is not a kernel value.
 fn scalar_word(v: &Value) -> Option<u64> {
@@ -1546,18 +1774,19 @@ pub fn run_in_mode(source: &str, entry: &str, mode: KernelMode) -> Result<(Outco
             _ => None,
         })
         .ok_or_else(|| format!("function `{entry}` not found"))?;
-    let root = program.arena[body].root_expr;
     let ev = Evaluator {
         program: &program,
         env: &env,
         current_body: Cell::new(body),
         dispatch: Dispatcher::default(),
         dispatches: Cell::new(0),
+        current_frame: Cell::new(None),
+        frames: RefCell::new(Vec::new()),
         mode,
         exec_client: None,
         providers: ProviderRegistry::default(),
     };
-    let outcome = match ev.eval(root, &Env::new()) {
+    let outcome = match ev.force_root(body, Env::new()) {
         Ok(v) => Outcome::Clean(v),
         Err(p) => Outcome::Poisoned {
             reason: p.message(),
@@ -1646,6 +1875,8 @@ fn eval_body_inner(
         current_body: Cell::new(body),
         dispatch: Dispatcher::default(),
         dispatches: Cell::new(0),
+        current_frame: Cell::new(None),
+        frames: RefCell::new(Vec::new()),
         mode,
         exec_client,
         providers,
@@ -1678,6 +1909,8 @@ pub fn eval_body_wire(
         current_body: Cell::new(body),
         dispatch: Dispatcher::default(),
         dispatches: Cell::new(0),
+        current_frame: Cell::new(None),
+        frames: RefCell::new(Vec::new()),
         mode,
         exec_client: None,
         providers: ProviderRegistry::default(),
@@ -1900,18 +2133,19 @@ mod tests {
                 _ => None,
             })
             .unwrap_or_else(|| panic!("function `{entry}` not found"));
-        let root = program.arena[body].root_expr;
         let ev = Evaluator {
             program: &program,
             env: &env,
             current_body: Cell::new(body),
             dispatch: Dispatcher::default(),
             dispatches: Cell::new(0),
+            current_frame: Cell::new(None),
+            frames: RefCell::new(Vec::new()),
             mode: KernelMode::Off,
             exec_client: None,
             providers: ProviderRegistry::default(),
         };
-        match ev.eval(root, &Env::new()) {
+        match ev.force_root(body, Env::new()) {
             Ok(v) => panic!("expected a poison, evaluated clean: {v:?}"),
             Err(p) => p,
         }
@@ -1978,6 +2212,8 @@ mod tests {
             current_body: Cell::new(body),
             dispatch: Dispatcher::default(),
             dispatches: Cell::new(0),
+            current_frame: Cell::new(None),
+            frames: RefCell::new(Vec::new()),
             mode: KernelMode::Off,
             exec_client: None,
             providers: ProviderRegistry::default(),
@@ -2048,20 +2284,20 @@ mod tests {
                 _ => None,
             })
             .expect("fn t");
-        let root_expr = fe.program.arena[body].root_expr;
-
         let ev = Evaluator {
             program: &fe.program,
             env: &fe.env,
             current_body: Cell::new(body),
             dispatch: Dispatcher::default(),
             dispatches: Cell::new(0),
+            current_frame: Cell::new(None),
+            frames: RefCell::new(Vec::new()),
             mode: KernelMode::Off,
             exec_client: None,
             providers: ProviderRegistry::default(),
         };
         let coord = ev
-            .eval(root_expr, &Env::new())
+            .force_root(body, Env::new())
             .expect("eval grammar import");
         let (name, pkg) = read_grammar_coord(&ev, &coord);
         assert_eq!(name, "cc");
@@ -2109,11 +2345,9 @@ mod tests {
                 _ => None,
             })
             .expect("fn t");
-        let root_expr = fe.program.arena[body].root_expr;
-
         let ev = shape_evaluator(&fe.program, &fe.env);
         ev.current_body.set(body);
-        let tool = ev.eval(root_expr, &Env::new()).expect("eval tool");
+        let tool = ev.force_root(body, Env::new()).expect("eval tool");
         let (command, binary) = ev.read_tool(&tool).expect("read tool");
         assert_eq!(binary, "cc");
         let (name, pkg) = read_grammar_coord(&ev, &command);
@@ -2182,19 +2416,19 @@ mod tests {
                 _ => None,
             })
             .expect("fn t");
-        let root = program.arena[body].root_expr;
-
         let ev = Evaluator {
             program: &program,
             env: &tenv,
             current_body: Cell::new(body),
             dispatch: Dispatcher::default(),
             dispatches: Cell::new(0),
+            current_frame: Cell::new(None),
+            frames: RefCell::new(Vec::new()),
             mode: KernelMode::Off,
             exec_client: None,
             providers,
         };
-        match ev.eval(root, &Env::new()) {
+        match ev.force_root(body, Env::new()) {
             Ok(v) => match ev.project_name(&v, "binary") {
                 Ok(Value::Str(s)) => Ok(s.to_string()),
                 Ok(other) => Err(format!("`binary` is not a string: {other:?}")),

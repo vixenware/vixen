@@ -70,7 +70,7 @@ impl Dispatcher {
     /// Build this body's demand graph (with indices) on first use, caching it.
     fn ensure_body_graph(&self, program: &VirProgram, env: &TypeEnv, body: BodyId) {
         if !self.body_graphs.borrow().contains_key(&body) {
-            let (graph, exprmap, bindmap) = build_graph_indexed(program, env, body);
+            let (graph, exprmap, bindmap, _) = build_graph_indexed(program, env, body);
             self.body_graphs.borrow_mut().insert(
                 body,
                 BodyGraph {
