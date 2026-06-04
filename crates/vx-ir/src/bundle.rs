@@ -79,6 +79,16 @@ pub fn reachable(arena: &VirArena, env: &TypeEnv, entry: BodyId) -> Bundle {
 }
 
 impl Bundle {
+    /// Content identity for this observer bundle.
+    ///
+    /// `reachable` packs every table sorted by id, so the Facet JSON encoding is
+    /// stable for the same bundle content. This identity is suitable as the
+    /// observer-code component of a boundary cache key.
+    pub fn content_identity(&self) -> String {
+        let json = facet_json::to_string(self).expect("Bundle is facet-serializable");
+        format!("blake3:{}", blake3::hash(json.as_bytes()).to_hex())
+    }
+
     /// Install this bundle into a fresh `VirProgram` + `TypeEnv` in the **original id
     /// space** — the mirror side. Each node lands at its verbatim id; the holes (ids
     /// the observer can't reach) hold placeholders that eval never indexes, because

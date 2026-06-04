@@ -3979,9 +3979,11 @@ dependencies = [
 name = "vx-ir"
 version = "0.1.0"
 dependencies = [
+ "blake3",
  "command-grammar-vx",
  "command-model",
  "facet",
+ "facet-json",
  "margin",
  "rowan",
  "vx-package",

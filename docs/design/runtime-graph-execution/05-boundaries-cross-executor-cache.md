@@ -124,6 +124,9 @@ Current progress:
   static `vx_ir::Bundle`.
 - Bare invocations carry no observer bundle; the executor applies the default
   `run.ok.out` observer.
+- Observer bundles have a stable `blake3:` content identity computed from the
+  deterministic Facet JSON encoding of the packed `vx_ir::Bundle`. This is the
+  observer-code component needed for an exec boundary cache key.
 - Demand on the exec boundary materializes only request-shaping inputs: the
   leading tool node, its `binary` field, and each demanded argv hole. Merely
   constructing an exec boundary or a lazy product containing one does not run the
@@ -276,6 +279,8 @@ Current progress:
 - `host.exec` has a local in-process L1 keyed by argv plus the executable
   fingerprint. `host_exec_uses_input_keyed_l1_cache` proves two identical graph
   host boundaries demand both outputs but spawn only once.
+- Observer bundles now have a content identity suitable for the observer-code
+  part of a backtick exec key.
 - Backtick exec, function calls, persistent L2 storage, and read-set provenance
   do not have this cache yet.
 
@@ -296,6 +301,8 @@ Verified green:
 
 - `cargo nextest run -p vx-runtime -E 'binary(host_probe)'`: 4/4 passed,
   including the input-keyed `host.exec` L1 cache test.
+- `cargo nextest run -p vx-runtime -E 'binary(bundle)' --no-fail-fast`: 3/3
+  passed, including stable, content-sensitive observer bundle identity.
 - `cargo nextest run -p vx-runtime -E 'test(observe_runs_a_real_command_and_returns_the_observer_value) | test(observe_crosses_the_output_tree_as_a_handle_marker) | binary(observe_on_strands)' --no-fail-fast`: 4/4 passed.
 - `cargo nextest run -p vx-runtime -E 'binary(exec_on_strands)' --no-fail-fast`:
   3/3 passed.

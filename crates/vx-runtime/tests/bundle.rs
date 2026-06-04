@@ -115,3 +115,32 @@ fn install_reconstructs_every_collected_node_in_place() {
         );
     }
 }
+
+#[test]
+fn bundle_content_identity_is_stable_and_content_sensitive() {
+    let fe = compile_source(SRC, "observe").expect("front-end compiles");
+    let entry = fn_body(&fe.program.arena, "observe");
+    let first = reachable(&fe.program.arena, &fe.env, entry).content_identity();
+
+    let fe = compile_source(SRC, "observe").expect("front-end compiles again");
+    let entry = fn_body(&fe.program.arena, "observe");
+    let second = reachable(&fe.program.arena, &fe.env, entry).content_identity();
+
+    let changed = r#"
+struct Stat { n: U64 }
+
+fn helper(n: U64) -> U64 ( n + 2 )
+
+fn observe(s: Stat) -> U64 ( helper(s.n) )
+"#;
+    let fe = compile_source(changed, "observe").expect("changed front-end compiles");
+    let entry = fn_body(&fe.program.arena, "observe");
+    let changed = reachable(&fe.program.arena, &fe.env, entry).content_identity();
+
+    assert!(
+        first.starts_with("blake3:"),
+        "bundle identity is content-addressed: {first}"
+    );
+    assert_eq!(first, second, "same bundle content has stable identity");
+    assert_ne!(first, changed, "changed observer code changes identity");
+}

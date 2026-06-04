@@ -17,6 +17,8 @@ vx-package = { workspace = true }
 vx-stdlib = { workspace = true }
 margin = { workspace = true }
 facet = { workspace = true }
+facet-json = { workspace = true }
+blake3 = { workspace = true }
 # CLI-literal grammar checking: the engine (command-model) + the authoring-vocab
 # loader (command-grammar-vx) that turns a grammar package's source into a
 # GrammarSet without evaluation. Checking `@cc[ … ]` against its grammar is a
