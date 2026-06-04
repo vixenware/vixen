@@ -217,6 +217,7 @@ impl<'a> Lexer<'a> {
             Some('/') if self.starts_with("//") => self.line_comment(), // r[lex.comments]
             Some('/') if self.starts_with("/*") => self.block_comment(), // r[lex.comments]
             Some('"') => self.string(),                                 // r[lex.string]
+            Some('\'') => self.raw_string(),                            // r[lex.string] (raw)
             // r[lex.string.interpolation]
             Some('`') => {
                 self.bump_char();
@@ -405,6 +406,28 @@ impl<'a> Lexer<'a> {
         while let Some(ch) = self.current_char() {
             match ch {
                 '"' => {
+                    self.bump_char();
+                    return SyntaxKind::STRING;
+                }
+                '\\' => {
+                    self.bump_char();
+                    if !self.is_eof() {
+                        self.bump_char();
+                    }
+                }
+                _ => self.bump_char(),
+            }
+        }
+        SyntaxKind::ERROR_TOKEN
+    }
+
+    // r[lex.string] — a raw (single-quoted) string: no interpolation, only `\'`
+    // and `\\` escape; every other character, including `$` and `` ` ``, is literal.
+    fn raw_string(&mut self) -> SyntaxKind {
+        self.bump_char();
+        while let Some(ch) = self.current_char() {
+            match ch {
+                '\'' => {
                     self.bump_char();
                     return SyntaxKind::STRING;
                 }
