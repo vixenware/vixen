@@ -20,6 +20,10 @@ path = "src/main.rs"
 [dependencies]
 vx-parser = { workspace = true }
 vx-ir = { workspace = true }
+# The checker (type-check + error-union) lives in the engine now — checking forces
+# values (see the wiki: "Checking is forcing; the checker lives in the engine"), so
+# the LSP is a client of the engine, as the design always intended.
+vx-runtime = { path = "../vx-runtime" }
 vx-stdlib = { workspace = true }
 vx-types = { workspace = true }
 eyre = { workspace = true }

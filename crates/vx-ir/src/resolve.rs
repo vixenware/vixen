@@ -545,9 +545,9 @@ fn redirect_import(arena: &VirArena, target: DefTarget) -> DefTarget {
 /// top-level items (struct/enum/fn/namespace/…) or a top-level `let` binding.
 /// The injected prelude is *not* an export — only the unit's own definitions.
 ///
-/// Shared with type checking, which uses it to type module-record field access
-/// (`let m = import "…"; m.field`).
-pub(crate) fn unit_export(arena: &VirArena, unit: SourceUnitId, name: &str) -> Option<DefTarget> {
+/// Shared with type checking (now in the engine, `vx-runtime`), which uses it to
+/// type module-record field access (`let m = import "…"; m.field`).
+pub fn unit_export(arena: &VirArena, unit: SourceUnitId, name: &str) -> Option<DefTarget> {
     // The unit's own items: types, functions, namespaces.
     for &item_id in &arena[unit].items {
         if arena.item_name(item_id) == name {

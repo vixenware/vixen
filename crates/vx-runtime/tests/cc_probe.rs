@@ -10,9 +10,9 @@
 //! deferred (a local probe stands in), and cross-package import is still unbuilt,
 //! so `CToolchain` + `probe` ride as inline `.vx`.
 
-use vx_ir::compile::{NoopObserver, semantic_front_end};
 use vx_ir::item::ItemKind;
 use vx_package::CompositeResolver;
+use vx_runtime::compile::{NoopObserver, semantic_front_end};
 use vx_runtime::eval::{KernelMode, Outcome, Value, eval_body};
 use vx_runtime::host::local_host_value;
 

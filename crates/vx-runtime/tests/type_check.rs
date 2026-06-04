@@ -5,11 +5,11 @@
 
 use vx_ir::build::VirBuilder;
 use vx_ir::resolve::resolve_names;
-use vx_ir::type_check::{TypeCheckVirResult, type_check_vir};
 use vx_ir::type_collect::collect_types_vir;
 use vx_ir::type_collection::TypeCollection;
 use vx_ir::{ExprId, VirArena};
 use vx_parser::{SourceId, parse_source_file};
+use vx_runtime::type_check::{TypeCheckVirResult, type_check_vir};
 use vx_types::{Scalar, Ty};
 
 /// Helper: build VIR, resolve names, collect types, run type checker, then run
@@ -21,7 +21,8 @@ fn check_source(source: &str) -> (VirArena, TypeCollection, TypeCheckVirResult) 
     let mut tc = collect_types_vir(&mut program.arena);
     let _resolve_errors = resolve_names(&mut program.arena);
     let result = type_check_vir(&mut program.arena, &mut tc);
-    let _eu_errors = vx_ir::error_union::infer_error_unions(&mut program.arena, &mut tc, &result);
+    let _eu_errors =
+        vx_runtime::error_union::infer_error_unions(&mut program.arena, &mut tc, &result);
     (program.arena, tc, result)
 }
 
@@ -250,7 +251,7 @@ fn fallible_over_infallible_wraps_in_result_failure_never() {
     // the zero-variant `Never` enum: `42? : Result[U64, Failure[Never]]`. `Result`
     // and `Failure` are stdlib types, so go through the bundled front-end that loads
     // them (and runs the error-union pass).
-    let fe = vx_ir::compile::semantic_front_end_bundled("fn f() ( 42? )").expect("front-end");
+    let fe = vx_runtime::compile::semantic_front_end_bundled("fn f() ( 42? )").expect("front-end");
     let id = find_expr(&fe.program.arena, |k| {
         matches!(k, vx_ir::expr::ExprKind::Fallible(_))
     })
@@ -302,7 +303,7 @@ fn fallible_infers_string_from_single_fail() {
     // not hardcoded): `f()? : Result[U64, Failure[String]]`.
     let src =
         "fn f(x: U64) -> U64 ( if x > 0 ( x ) else ( fail \"neg\" ) )\nfn g(x: U64) ( f(x)? )";
-    let fe = vx_ir::compile::semantic_front_end_bundled(src).expect("front-end");
+    let fe = vx_runtime::compile::semantic_front_end_bundled(src).expect("front-end");
     let id = find_expr(&fe.program.arena, |k| {
         matches!(k, vx_ir::expr::ExprKind::Fallible(_))
     })
@@ -327,7 +328,7 @@ fn fallible_infers_non_string_error_type() {
     let src = "enum MyErr { Bad, Worse }\n\
                fn f(x: U64) -> U64 ( if x > 0 ( x ) else ( fail Bad ) )\n\
                fn g(x: U64) ( f(x)? )";
-    let fe = vx_ir::compile::semantic_front_end_bundled(src).expect("front-end");
+    let fe = vx_runtime::compile::semantic_front_end_bundled(src).expect("front-end");
     let id = find_expr(&fe.program.arena, |k| {
         matches!(k, vx_ir::expr::ExprKind::Fallible(_))
     })
@@ -357,9 +358,9 @@ fn fallible_infers_non_string_error_type() {
 /// `NonExhaustiveMatch` diagnostics (as `(missing-variant-list)`), or an empty
 /// vec if it compiled clean / failed elsewhere.
 fn non_exhaustive_diags(src: &str) -> Vec<Vec<String>> {
-    match vx_ir::compile::semantic_front_end_bundled(src) {
+    match vx_runtime::compile::semantic_front_end_bundled(src) {
         Ok(_) => Vec::new(),
-        Err(vx_ir::compile::CompileError::ErrorUnion { errors, .. }) => errors
+        Err(vx_runtime::compile::CompileError::ErrorUnion { errors, .. }) => errors
             .into_iter()
             .filter_map(|d| match d {
                 vx_ir::IrDiagnostic::NonExhaustiveMatch { missing, .. } => Some(missing),
@@ -378,7 +379,7 @@ fn fallible_infers_heterogeneous_two_element_union() {
                fn fs(x: U64) -> U64 ( if x > 0 ( x ) else ( fail \"s\" ) )\n\
                fn fe(x: U64) -> U64 ( if x > 0 ( x ) else ( fail Bad ) )\n\
                fn g(a: U64, b: U64) ( (fs(a) + fe(b))? )";
-    let fe = vx_ir::compile::semantic_front_end_bundled(src).expect("front-end");
+    let fe = vx_runtime::compile::semantic_front_end_bundled(src).expect("front-end");
     let id = find_expr(&fe.program.arena, |k| {
         matches!(k, vx_ir::expr::ExprKind::Fallible(_))
     })
@@ -413,7 +414,7 @@ fn fallible_union_propagates_through_call_chain() {
                fn g(x: U64) -> U64 ( f(x) )\n\
                fn h(x: U64) -> U64 ( g(x) )\n\
                fn top(x: U64) ( h(x)? )";
-    let fe = vx_ir::compile::semantic_front_end_bundled(src).expect("front-end");
+    let fe = vx_runtime::compile::semantic_front_end_bundled(src).expect("front-end");
     let id = find_expr(&fe.program.arena, |k| {
         matches!(k, vx_ir::expr::ExprKind::Fallible(_))
     })
@@ -437,7 +438,7 @@ fn fallible_union_terminates_on_mutual_recursion() {
     let src = "fn a(x: U64) -> U64 ( if x > 0 ( b(x) ) else ( fail \"ae\" ) )\n\
                fn b(x: U64) -> U64 ( if x > 1 ( a(x) ) else ( fail \"be\" ) )\n\
                fn top(x: U64) ( a(x)? )";
-    let fe = vx_ir::compile::semantic_front_end_bundled(src).expect("front-end");
+    let fe = vx_runtime::compile::semantic_front_end_bundled(src).expect("front-end");
     let id = find_expr(&fe.program.arena, |k| {
         matches!(k, vx_ir::expr::ExprKind::Fallible(_))
     })

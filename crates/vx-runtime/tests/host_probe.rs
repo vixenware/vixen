@@ -5,13 +5,13 @@
 //! `Value::Host` variant, no opaque holder), and a `host.os` field read returns
 //! the compiled-in target OS — proving `Host` is just a struct.
 
-use vx_ir::compile::compile_source;
 use vx_ir::item::ItemKind;
+use vx_runtime::compile::compile_source;
 use vx_runtime::eval::{KernelMode, Outcome, Value, eval_body};
 use vx_runtime::host::local_host_value;
 
 /// Find the body of the single fn named `name` in a compiled program.
-fn fn_body(fe: &vx_ir::compile::FrontEnd, name: &str) -> vx_ir::ids::BodyId {
+fn fn_body(fe: &vx_runtime::compile::FrontEnd, name: &str) -> vx_ir::ids::BodyId {
     fe.program
         .arena
         .items

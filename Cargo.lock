@@ -3916,6 +3916,7 @@ dependencies = [
  "tree-sitter-vixen",
  "vx-ir",
  "vx-parser",
+ "vx-runtime",
  "vx-stdlib",
  "vx-types",
 ]
@@ -4000,6 +4001,7 @@ dependencies = [
  "tracing",
  "vx-ir",
  "vx-parser",
+ "vx-runtime",
  "vx-stdlib",
  "vx-types",
 ]
@@ -4048,6 +4050,7 @@ name = "vx-runtime"
 version = "0.1.0"
 dependencies = [
  "blake3",
+ "command-grammar-vx",
  "command-model",
  "copypatch",
  "corosensei",

@@ -2,8 +2,8 @@
 
 use vx_types::{Scalar, Ty, TypeId};
 
-use crate::diagnostic::IrDiagnostic;
-use crate::expr::{BinOp, BinaryExpr, PrefixExpr, PrefixOp};
+use vx_ir::diagnostic::IrDiagnostic;
+use vx_ir::expr::{BinOp, BinaryExpr, PrefixExpr, PrefixOp};
 
 use super::TypeChecker;
 

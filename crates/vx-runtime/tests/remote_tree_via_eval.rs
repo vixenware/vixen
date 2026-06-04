@@ -11,8 +11,8 @@
 
 use std::thread;
 
-use vx_ir::compile::compile_source;
 use vx_ir::item::ItemKind;
+use vx_runtime::compile::compile_source;
 use vx_runtime::eval::{KernelMode, Outcome as EvalOutcome, Value, eval_body};
 use vx_runtime::remote;
 use vx_runtime::strand::{HandleId, Outcome, ResourceId, Scheduler, StrandId};

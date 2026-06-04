@@ -2,10 +2,10 @@
 
 use vx_types::{Ty, TypeId};
 
-use crate::PatternId;
-use crate::arena::VirArena;
-use crate::pattern::PatternKind;
-use crate::type_collection::TypeCollection;
+use vx_ir::PatternId;
+use vx_ir::arena::VirArena;
+use vx_ir::pattern::PatternKind;
+use vx_ir::type_collection::TypeCollection;
 
 use super::TypeChecker;
 use super::subst::substitute_type_params;

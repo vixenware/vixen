@@ -2,11 +2,11 @@
 
 use vx_types::{FnSig, ParamDef, Ty, TypeEnv, TypeId};
 
-use crate::ExprId;
-use crate::def::{DefKind, Definition};
-use crate::expr::{ExprKind, FieldExpr, FieldKey};
-use crate::item::ItemKind;
-use crate::scope::DefTarget;
+use vx_ir::ExprId;
+use vx_ir::def::{DefKind, Definition};
+use vx_ir::expr::{ExprKind, FieldExpr, FieldKey};
+use vx_ir::item::ItemKind;
+use vx_ir::scope::DefTarget;
 
 use super::subst::{bind_type_params, infer_type_params, substitute_bound_type_params};
 use super::{BoundMethodSig, TypeChecker};
@@ -74,7 +74,7 @@ fn infer_static_namespace_field(tc: &mut TypeChecker, f: &FieldExpr) -> Option<T
     };
 
     // Find a child function matching field_name.
-    let ns_items: Vec<crate::ItemId> = ns.items.clone();
+    let ns_items: Vec<vx_ir::ItemId> = ns.items.clone();
     for child_id in ns_items {
         if let ItemKind::Function(ref child_f) = tc.arena[child_id].kind
             && child_f.name == *field_name
@@ -111,7 +111,7 @@ fn infer_module_record_field(tc: &mut TypeChecker, f: &FieldExpr) -> Option<Type
     };
 
     // The field names an export of the imported unit.
-    match crate::resolve::unit_export(tc.arena, unit, field_name)? {
+    match vx_ir::resolve::unit_export(tc.arena, unit, field_name)? {
         DefTarget::Item(item_id) => Some(super::names::type_of_item(tc, item_id)),
         DefTarget::Binding(export_bid) => Some(super::names::type_of_binding(tc, export_bid)),
         DefTarget::Variant {
@@ -133,9 +133,9 @@ fn resolve_method_on_receiver(
     // Look up the namespace item in the arena by scanning all items.
     let ns_item_id = tc.arena.items.iter().enumerate().find_map(|(i, item)| {
         if let ItemKind::Namespace(_) = item.kind
-            && tc.arena.item_name(crate::ItemId::from_index(i)) == namespace_name
+            && tc.arena.item_name(vx_ir::ItemId::from_index(i)) == namespace_name
         {
-            return Some(crate::ItemId::from_index(i));
+            return Some(vx_ir::ItemId::from_index(i));
         }
         None
     })?;
@@ -145,7 +145,7 @@ fn resolve_method_on_receiver(
     };
 
     // Find the method in the namespace.
-    let ns_items: Vec<crate::ItemId> = ns.items.clone();
+    let ns_items: Vec<vx_ir::ItemId> = ns.items.clone();
     for child_id in ns_items {
         if let ItemKind::Function(ref f) = tc.arena[child_id].kind
             && f.name == method_name
@@ -177,7 +177,7 @@ pub(crate) fn candidates_for_method(
     tc: &TypeChecker,
     receiver_ty: TypeId,
     method_name: &str,
-) -> Vec<crate::diagnostic::MethodCandidate> {
+) -> Vec<vx_ir::diagnostic::MethodCandidate> {
     let Some(namespace_name) =
         namespace_name_for_receiver(tc.types.env.get_ty(receiver_ty), &tc.types.env)
     else {
@@ -186,9 +186,9 @@ pub(crate) fn candidates_for_method(
 
     let Some(ns_item_id) = tc.arena.items.iter().enumerate().find_map(|(i, item)| {
         if matches!(item.kind, ItemKind::Namespace(_))
-            && tc.arena.item_name(crate::ItemId::from_index(i)) == namespace_name
+            && tc.arena.item_name(vx_ir::ItemId::from_index(i)) == namespace_name
         {
-            Some(crate::ItemId::from_index(i))
+            Some(vx_ir::ItemId::from_index(i))
         } else {
             None
         }
@@ -200,7 +200,7 @@ pub(crate) fn candidates_for_method(
         return Vec::new();
     };
 
-    let mut ranked: Vec<(u32, crate::diagnostic::MethodCandidate)> = ns
+    let mut ranked: Vec<(u32, vx_ir::diagnostic::MethodCandidate)> = ns
         .items
         .iter()
         .filter_map(|&child_id| {
@@ -209,7 +209,7 @@ pub(crate) fn candidates_for_method(
                 if d <= 3 {
                     return Some((
                         d,
-                        crate::diagnostic::MethodCandidate {
+                        vx_ir::diagnostic::MethodCandidate {
                             item: child_id,
                             name_span: f.name_span,
                         },
@@ -390,9 +390,9 @@ pub(crate) fn resolve_method_for_call(
 
     let ns_item_id = tc.arena.items.iter().enumerate().find_map(|(i, item)| {
         if let ItemKind::Namespace(ref _ns) = item.kind
-            && tc.arena.item_name(crate::ItemId::from_index(i)) == namespace_name
+            && tc.arena.item_name(vx_ir::ItemId::from_index(i)) == namespace_name
         {
-            return Some(crate::ItemId::from_index(i));
+            return Some(vx_ir::ItemId::from_index(i));
         }
         None
     })?;
@@ -405,7 +405,7 @@ pub(crate) fn resolve_method_for_call(
     // Find matching method and clone the sig.
     let mut found_sig = None;
     let mut found_name = String::new();
-    let mut found_item_id: Option<crate::ItemId> = None;
+    let mut found_item_id: Option<vx_ir::ItemId> = None;
     for &child_id in &ns.items {
         let child_kind = tc.arena[child_id].kind.clone();
         if let ItemKind::Function(ref f) = child_kind
@@ -434,9 +434,9 @@ pub(crate) fn resolve_method_for_call(
             full_span: tc.arena[child_id].span,
         };
         let call_kind = tc.arena[call_expr_id].kind.clone();
-        if let crate::expr::ExprKind::Call(ref call) = call_kind {
+        if let vx_ir::expr::ExprKind::Call(ref call) = call_kind {
             let callee_kind = tc.arena[call.callee].kind.clone();
-            if let crate::expr::ExprKind::Field(ref field) = callee_kind {
+            if let vx_ir::expr::ExprKind::Field(ref field) = callee_kind {
                 tc.member_defs.insert(field.field_span, def);
             }
         }
@@ -447,7 +447,7 @@ pub(crate) fn resolve_method_for_call(
 
     // Infer arg types.
     let call_kind = tc.arena[call_expr_id].kind.clone();
-    let crate::expr::ExprKind::Call(ref call) = call_kind else {
+    let vx_ir::expr::ExprKind::Call(ref call) = call_kind else {
         return Some(initial);
     };
     let initial_param_count = initial.params.len();

@@ -2,8 +2,8 @@
 
 use vx_types::TypeId;
 
-use crate::expr::ClosureExpr;
-use crate::pattern::PatternKind;
+use vx_ir::expr::ClosureExpr;
+use vx_ir::pattern::PatternKind;
 
 use super::TypeChecker;
 
@@ -34,7 +34,7 @@ pub(crate) fn infer_closure(tc: &mut TypeChecker, closure: &ClosureExpr) -> Type
 /// Writes directly to `Binding.ty` on the arena.
 pub(crate) fn bind_closure_params(
     tc: &mut TypeChecker,
-    closure_body_id: crate::BodyId,
+    closure_body_id: vx_ir::BodyId,
     param_types: &[TypeId],
     slot_doc: Option<&str>,
     slot_name: &str,

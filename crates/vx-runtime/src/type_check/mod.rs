@@ -28,14 +28,14 @@ use std::collections::HashMap;
 use vx_parser::SourceSpan;
 use vx_types::{ArrayTy, FnSig, MapTy, ParamDef, Ty, TypeId};
 
-use crate::arena::VirArena;
-use crate::def::Definition;
-use crate::diagnostic::IrDiagnostic;
-use crate::expr::{ArrayElement, CoerceExpr, ExprKind, MapElement, MapKey};
-use crate::item::ItemKind;
-use crate::type_collect::resolve_type_ref;
-use crate::type_collection::TypeCollection;
-use crate::{BindingId, BodyId, ExprId, ItemId, SourceUnitId, TypeRefId};
+use vx_ir::arena::VirArena;
+use vx_ir::def::Definition;
+use vx_ir::diagnostic::IrDiagnostic;
+use vx_ir::expr::{ArrayElement, CoerceExpr, ExprKind, MapElement, MapKey};
+use vx_ir::item::ItemKind;
+use vx_ir::type_collect::resolve_type_ref;
+use vx_ir::type_collection::TypeCollection;
+use vx_ir::{BindingId, BodyId, ExprId, ItemId, SourceUnitId, TypeRefId};
 
 /// Result of the VIR type checking pass.
 ///

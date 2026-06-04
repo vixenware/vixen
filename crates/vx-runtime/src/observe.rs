@@ -231,7 +231,7 @@ pub async fn local_observer() -> ObserveClient {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use vx_ir::compile::compile_source;
+    use crate::compile::compile_source;
     use vx_ir::item::ItemKind;
     use vx_ir::reachable;
 

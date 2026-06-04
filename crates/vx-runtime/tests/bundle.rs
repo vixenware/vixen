@@ -3,9 +3,9 @@
 //! just the syntax tree — plus the transitive type closure. A missed node would
 //! silently break the mirror, so this is the load-bearing test.
 
-use vx_ir::compile::compile_source;
 use vx_ir::item::ItemKind;
 use vx_ir::{BodyId, VirArena, reachable};
+use vx_runtime::compile::compile_source;
 use vx_types::{Ty, TypeDef};
 
 const SRC: &str = r#"

@@ -7,9 +7,9 @@
 use std::cell::Cell;
 use std::rc::Rc;
 
-use vx_ir::compile::compile_source;
 use vx_ir::item::ItemKind;
 use vx_ir::{BodyId, VirArena};
+use vx_runtime::compile::compile_source;
 use vx_runtime::eval::{KernelMode, Outcome, Thunk, Value, eval_body};
 
 fn fn_body(arena: &VirArena, name: &str) -> BodyId {

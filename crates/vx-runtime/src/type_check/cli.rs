@@ -18,11 +18,11 @@ use command_model::{ArgRole, Arity, Grammar, GrammarSet, Kind, Lint, Policy, Val
 use vx_parser::SourceSpan;
 use vx_types::{Scalar, TypeId};
 
-use crate::arena::VirArena;
-use crate::diagnostic::{CliDiagnosticKind, CliHoleExpect, IrDiagnostic};
-use crate::expr::{CliLiteralExpr, StringPart};
-use crate::scope::{self, DefTarget};
-use crate::{ExprId, ScopeId};
+use vx_ir::arena::VirArena;
+use vx_ir::diagnostic::{CliDiagnosticKind, CliHoleExpect, IrDiagnostic};
+use vx_ir::expr::{CliLiteralExpr, StringPart};
+use vx_ir::scope::{self, DefTarget};
+use vx_ir::{ExprId, ScopeId};
 
 use super::TypeChecker;
 
@@ -323,7 +323,7 @@ fn check_hole_type(tc: &mut TypeChecker, hty: TypeId, req: &HoleReq) -> Option<C
 /// match preferred over a substring), falling back to the grammar name when no
 /// argument matches.
 fn arg_span_for(cli: &CliLiteralExpr, token: &str) -> SourceSpan {
-    let static_text = |arg: &crate::expr::CliArgIr| -> String {
+    let static_text = |arg: &vx_ir::expr::CliArgIr| -> String {
         arg.pieces
             .iter()
             .filter_map(|p| match p {

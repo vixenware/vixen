@@ -12,8 +12,8 @@
 //! `Exit` struct that crossed back, not a placeholder. (`observe_on_strands` drives
 //! `dispatch_observe` directly; `observe`'s own test asserts the crossed `WireValue`.)
 
-use vx_ir::compile::compile_source;
 use vx_ir::item::ItemKind;
+use vx_runtime::compile::compile_source;
 use vx_runtime::eval::{
     KernelMode, Outcome as EvalOutcome, Value, command_value, eval_body_with_exec,
 };

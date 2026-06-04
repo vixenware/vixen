@@ -2,17 +2,17 @@
 
 use vx_types::{FnSig, KeywordParamDef, ParamDef, Ty, TypeId};
 
-use crate::ExprId;
-use crate::expr::{CallExpr, ExprKind, InvokeExpr, PartialAppExpr, RecordField, WhereExpr};
-use crate::item::ItemKind;
-use crate::scope::DefTarget;
+use vx_ir::ExprId;
+use vx_ir::expr::{CallExpr, ExprKind, InvokeExpr, PartialAppExpr, RecordField, WhereExpr};
+use vx_ir::item::ItemKind;
+use vx_ir::scope::DefTarget;
 
 use super::TypeChecker;
 use super::closures::bind_closure_params;
 use super::fields::{instantiate_method_sig, resolve_method_for_call};
 use super::names::{sig_for_name_ref_target, variant_sig};
 use super::subst::{infer_type_params, substitute_bound_type_params};
-use crate::diagnostic::IrDiagnostic;
+use vx_ir::diagnostic::IrDiagnostic;
 
 pub(crate) fn infer_call(tc: &mut TypeChecker, expr_id: ExprId, call: &CallExpr) -> TypeId {
     let callee_kind = tc.arena[call.callee].kind.clone();
@@ -54,7 +54,7 @@ pub(crate) fn infer_call(tc: &mut TypeChecker, expr_id: ExprId, call: &CallExpr)
             // Method call: receiver.method(args)
             let receiver_ty = tc.infer_expr(field.receiver);
             let method_name = match &field.field {
-                crate::expr::FieldKey::Name(n) => n.clone(),
+                vx_ir::expr::FieldKey::Name(n) => n.clone(),
                 _ => String::new(),
             };
 
@@ -145,7 +145,7 @@ fn instantiate_call_sig(tc: &mut TypeChecker, call: &CallExpr, mut sig: FnSig) -
     let mut substitutions: Vec<Option<TypeId>> = vec![None; sig.type_params.len()];
 
     // Explicit type args.
-    let type_arg_refs: Vec<crate::TypeRefId> = call.type_args.clone();
+    let type_arg_refs: Vec<vx_ir::TypeRefId> = call.type_args.clone();
     for (slot, tr_id) in substitutions.iter_mut().zip(type_arg_refs) {
         let resolved = tc.resolve_type_ref_id(tr_id);
         *slot = Some(resolved);
@@ -257,9 +257,9 @@ fn infer_call_arg_exprs(tc: &mut TypeChecker, call: &CallExpr) {
 fn infer_static_namespace_call_sig(
     tc: &mut TypeChecker,
     call: &CallExpr,
-    field: &crate::expr::FieldExpr,
+    field: &vx_ir::expr::FieldExpr,
 ) -> Option<FnSig> {
-    let crate::expr::FieldKey::Name(ref field_name) = field.field else {
+    let vx_ir::expr::FieldKey::Name(ref field_name) = field.field else {
         return None;
     };
 
@@ -274,7 +274,7 @@ fn infer_static_namespace_call_sig(
         return None;
     };
 
-    let child_ids: Vec<crate::ItemId> = ns.items.clone();
+    let child_ids: Vec<vx_ir::ItemId> = ns.items.clone();
     for child_id in child_ids {
         if let ItemKind::Function(ref f) = tc.arena[child_id].kind
             && f.name == *field_name
@@ -337,7 +337,7 @@ pub(crate) fn infer_where(tc: &mut TypeChecker, w: &WhereExpr) -> TypeId {
     // Seed substitutions from positional args, where present.
     if let WhereCalleeKind::Call(ref call) = kind {
         // Explicit type args.
-        let type_arg_refs: Vec<crate::TypeRefId> = call.type_args.clone();
+        let type_arg_refs: Vec<vx_ir::TypeRefId> = call.type_args.clone();
         for (slot, tr_id) in substitutions.iter_mut().zip(type_arg_refs) {
             let resolved = tc.resolve_type_ref_id(tr_id);
             *slot = Some(resolved);
@@ -519,7 +519,7 @@ fn find_record_fields_for_keywords(
     // Walk all let-statements to find the one binding this id, then return
     // its initializer record fields if it's a record literal.
     for stmt in &tc.arena.stmts {
-        let crate::stmt::StmtKind::Let(ref let_) = stmt.kind else {
+        let vx_ir::stmt::StmtKind::Let(ref let_) = stmt.kind else {
             continue;
         };
         if !let_binds(tc, let_.pattern, binding_id) {
@@ -534,8 +534,8 @@ fn find_record_fields_for_keywords(
     None
 }
 
-fn let_binds(tc: &TypeChecker, pattern_id: crate::PatternId, binding_id: crate::BindingId) -> bool {
-    use crate::pattern::PatternKind;
+fn let_binds(tc: &TypeChecker, pattern_id: vx_ir::PatternId, binding_id: vx_ir::BindingId) -> bool {
+    use vx_ir::pattern::PatternKind;
     let kind = &tc.arena[pattern_id].kind;
     match kind {
         PatternKind::Binding(bp) => bp.binding == binding_id,
@@ -550,7 +550,7 @@ pub(crate) fn infer_invoke(tc: &mut TypeChecker, inv: &InvokeExpr) -> TypeId {
         ExprKind::Field(ref field) => {
             let receiver_ty = tc.infer_expr(field.receiver);
             let method_name = match &field.field {
-                crate::expr::FieldKey::Name(n) => n.clone(),
+                vx_ir::expr::FieldKey::Name(n) => n.clone(),
                 _ => return tc.poison(),
             };
 
@@ -596,7 +596,7 @@ pub(crate) fn infer_partial_app(tc: &mut TypeChecker, pa: &PartialAppExpr) -> Ty
 fn find_namespace_method_sig(tc: &TypeChecker, ns_name: &str, method_name: &str) -> Option<FnSig> {
     for (i, item) in tc.arena.items.iter().enumerate() {
         if let ItemKind::Namespace(ref ns) = item.kind
-            && tc.arena.item_name(crate::ItemId::from_index(i)) == ns_name
+            && tc.arena.item_name(vx_ir::ItemId::from_index(i)) == ns_name
         {
             for &child_id in &ns.items {
                 if let ItemKind::Function(ref f) = tc.arena[child_id].kind

@@ -2,8 +2,8 @@
 
 use vx_types::{Ty, TypeId};
 
-use crate::ExprId;
-use crate::expr::{
+use vx_ir::ExprId;
+use vx_ir::expr::{
     ExprKind, FailExpr, FallibleExpr, TypeOpExpr, TypeOpKind, UpdateField, WithExpr,
 };
 

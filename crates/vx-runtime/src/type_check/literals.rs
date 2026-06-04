@@ -2,7 +2,7 @@
 
 use vx_types::{Scalar, TypeId};
 
-use crate::expr::{InterpolatedStringExpr, LitKind, LiteralExpr, StringPart};
+use vx_ir::expr::{InterpolatedStringExpr, LitKind, LiteralExpr, StringPart};
 
 use super::TypeChecker;
 

@@ -2,7 +2,7 @@
 
 use vx_types::{Scalar, TypeId};
 
-use crate::expr::{
+use vx_ir::expr::{
     ArrayElement, ArrayExpr, MapElement, MapExpr, RecordExpr, StructLiteralExpr, TupleExpr,
 };
 
@@ -32,7 +32,7 @@ pub(crate) fn infer_record(tc: &mut TypeChecker, r: &RecordExpr) -> TypeId {
     for field in &r.fields {
         // Skip closures in record fields (they get typed via callback param binding).
         let kind = &tc.arena[field.value].kind.clone();
-        if matches!(kind, crate::expr::ExprKind::Closure(_)) {
+        if matches!(kind, vx_ir::expr::ExprKind::Closure(_)) {
             continue;
         }
         tc.infer_expr(field.value);
@@ -47,13 +47,13 @@ pub(crate) fn infer_map(tc: &mut TypeChecker, m: &MapExpr) -> TypeId {
         match elem {
             MapElement::Entry(entry) => {
                 match &entry.key {
-                    crate::expr::MapKey::Expr(k) => {
+                    vx_ir::expr::MapKey::Expr(k) => {
                         let ty = tc.infer_expr(*k);
                         if !tc.types.env.get_ty(ty).is_poison() && key_ty.is_none() {
                             key_ty = Some(ty);
                         }
                     }
-                    crate::expr::MapKey::Name { .. } => {
+                    vx_ir::expr::MapKey::Name { .. } => {
                         if key_ty.is_none() {
                             key_ty = Some(tc.types.env.intern_scalar(Scalar::String));
                         }
@@ -100,7 +100,7 @@ pub(crate) fn infer_struct_literal(tc: &mut TypeChecker, sl: &StructLiteralExpr)
     // type. `resolved` is the enum item, `resolved_variant` the chosen variant.
     if let Some(item_id) = sl.resolved
         && sl.resolved_variant.is_some()
-        && let crate::item::ItemKind::Enum(ref e) = tc.arena[item_id].kind
+        && let vx_ir::item::ItemKind::Enum(ref e) = tc.arena[item_id].kind
     {
         let enum_name_span = e.name_span;
         if let Some(&def_id) = tc.types.def_to_type.get(&enum_name_span)
@@ -112,7 +112,7 @@ pub(crate) fn infer_struct_literal(tc: &mut TypeChecker, sl: &StructLiteralExpr)
 
     // Use the resolved struct item to find the TypeDefId.
     if let Some(item_id) = sl.resolved
-        && let crate::item::ItemKind::Struct(ref s) = tc.arena[item_id].kind
+        && let vx_ir::item::ItemKind::Struct(ref s) = tc.arena[item_id].kind
     {
         let name_span = s.name_span;
         if let Some(&def_id) = tc.types.def_to_type.get(&name_span)
@@ -158,7 +158,7 @@ fn struct_literal_field_types(
     // Enum-variant construction: the chosen variant's payload struct.
     if let Some(item_id) = sl.resolved
         && sl.resolved_variant.is_some()
-        && let crate::item::ItemKind::Enum(ref e) = tc.arena[item_id].kind
+        && let vx_ir::item::ItemKind::Enum(ref e) = tc.arena[item_id].kind
     {
         let enum_name_span = e.name_span;
         if let Some(&enum_def_id) = tc.types.def_to_type.get(&enum_name_span)
@@ -174,7 +174,7 @@ fn struct_literal_field_types(
 
     // Plain struct construction.
     if let Some(item_id) = sl.resolved
-        && let crate::item::ItemKind::Struct(ref s) = tc.arena[item_id].kind
+        && let vx_ir::item::ItemKind::Struct(ref s) = tc.arena[item_id].kind
     {
         let name_span = s.name_span;
         if let Some(&def_id) = tc.types.def_to_type.get(&name_span) {

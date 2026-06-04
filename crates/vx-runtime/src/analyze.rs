@@ -72,14 +72,14 @@ pub fn analyze_all(source: &str) -> Result<Vec<(String, DemandGraph)>, String> {
 
 /// Run the engine's front-end on `source` and return the checked program + its
 /// type environment. This drives the **one** shared semantic pipeline
-/// ([`vx_ir::compile::semantic_front_end`]): parse → VIR → prelude → resolve →
+/// ([`crate::compile::semantic_front_end`]): parse → VIR → prelude → resolve →
 /// type-check → capability-check, with packages + grammars loaded. vx-runtime is
 /// the engine that owns this entry; vx-lsp and vx-diagnostics ride the same passes.
 ///
 /// Strict: a `CompileError` (parse / resolve / type / capability) comes back as a
 /// setup-error string — the demand evaluator only runs a well-formed program.
 pub(crate) fn front_end(source: &str) -> Result<(VirProgram, TypeEnv), String> {
-    let fe = vx_ir::compile::semantic_front_end_bundled(source).map_err(|e| e.to_string())?;
+    let fe = crate::compile::semantic_front_end_bundled(source).map_err(|e| e.to_string())?;
     Ok((fe.program, fe.env))
 }
 

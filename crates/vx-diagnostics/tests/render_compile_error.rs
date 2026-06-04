@@ -7,8 +7,8 @@
 //! that belongs in margin-term coverage.
 
 use vx_diagnostics::render_compile_error;
-use vx_ir::compile::compile_source;
 use vx_parser::SourceId;
+use vx_runtime::compile::compile_source;
 use vx_types::TypeEnv;
 
 #[test]

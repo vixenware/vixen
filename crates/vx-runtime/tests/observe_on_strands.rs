@@ -4,9 +4,9 @@
 //! generalized to "force an observe" — the eval↔async-observe bridge for
 //! `exec(cmd) with { observer }`, over a real vox connection (`local_observer`).
 
-use vx_ir::compile::compile_source;
 use vx_ir::item::ItemKind;
 use vx_ir::reachable;
+use vx_runtime::compile::compile_source;
 use vx_runtime::observe::{ExecCommand, ObserveRequest, local_observer};
 use vx_runtime::strand::{ObserveOutcome, Outcome, ResourceId, Scheduler, dispatch_observe};
 

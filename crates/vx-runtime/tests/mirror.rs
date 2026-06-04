@@ -6,9 +6,9 @@
 //! This is the spine in miniature: closure-walk → install → eval. Argument binding
 //! (the observer's `Run`) and shipping over vox land on top of it.
 
-use vx_ir::compile::compile_source;
 use vx_ir::item::ItemKind;
 use vx_ir::reachable;
+use vx_runtime::compile::compile_source;
 use vx_runtime::eval::{KernelMode, Outcome, Value, eval_body};
 
 #[test]

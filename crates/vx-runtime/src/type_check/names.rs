@@ -2,11 +2,11 @@
 
 use vx_types::{FnSig, ParamDef, TypeId};
 
-use crate::binding::BindingKind;
-use crate::expr::NameRefExpr;
-use crate::item::ItemKind;
-use crate::scope::DefTarget;
-use crate::{BindingId, ExprId, ItemId};
+use vx_ir::binding::BindingKind;
+use vx_ir::expr::NameRefExpr;
+use vx_ir::item::ItemKind;
+use vx_ir::scope::DefTarget;
+use vx_ir::{BindingId, ExprId, ItemId};
 
 use super::TypeChecker;
 
@@ -61,7 +61,7 @@ fn param_type_from_fn_sig(tc: &TypeChecker, binding_id: BindingId) -> Option<Typ
 
     // Find the FnSig for this body's owning function.
     let item_id = match body.owner {
-        crate::body::BodyOwner::Function { item } => item,
+        vx_ir::body::BodyOwner::Function { item } => item,
         _ => return None,
     };
 

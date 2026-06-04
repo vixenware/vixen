@@ -31,7 +31,9 @@
 
 pub mod analyze;
 pub mod command;
+pub mod compile;
 pub mod dispatch;
+pub mod error_union;
 pub mod eval;
 pub mod graph;
 pub mod host;
@@ -41,6 +43,7 @@ pub mod observe;
 pub mod remote;
 pub mod run_value;
 pub mod strand;
+pub mod type_check;
 
 /// Stencil machine code extracted from rustc's object output at build time
 /// (`build.rs`). Only on the native target; the interpreter is the path elsewhere.

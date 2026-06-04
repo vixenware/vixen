@@ -10,9 +10,9 @@ use vx_ir::expr::ExprKind;
 use vx_ir::item::ItemKind;
 use vx_ir::scope::{DefTarget, ScopeEntryTarget, ScopeOwner};
 use vx_ir::span_index::SpanIndex;
-use vx_ir::type_check::TypeCheckVirResult;
 use vx_ir::{BindingId, ItemId, ScopeId, TypeCollection};
 use vx_parser::{self as vx, AstNode, FnDecl, Parsed, SourceFile, SyntaxKind, trimmed_range};
+use vx_runtime::type_check::TypeCheckVirResult;
 
 use vx_ir::{DefId, DefKind, Definition};
 use vx_parser::{SourceId, SourceSpan};
@@ -117,11 +117,14 @@ impl DocumentState {
 
         let mut types = vx_ir::type_collect::collect_types_vir(&mut program.arena);
         let resolve_errors = vx_ir::resolve::resolve_names(&mut program.arena);
-        let type_check = vx_ir::type_check::type_check_vir(&mut program.arena, &mut types);
+        let type_check = vx_runtime::type_check::type_check_vir(&mut program.arena, &mut types);
         // Infer `?` error unions (re-types Fallible nodes + match arms in place)
         // mirroring the front-end pipeline order.
-        let error_union_errors =
-            vx_ir::error_union::infer_error_unions(&mut program.arena, &mut types, &type_check);
+        let error_union_errors = vx_runtime::error_union::infer_error_unions(
+            &mut program.arena,
+            &mut types,
+            &type_check,
+        );
 
         let span_index = SpanIndex::build(&program.arena);
         let arena = program.arena;

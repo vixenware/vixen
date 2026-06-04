@@ -41,18 +41,18 @@ use std::collections::{BTreeSet, HashMap};
 
 use vx_types::{Ty, TypeDef, TypeId};
 
-use crate::arena::VirArena;
-use crate::diagnostic::IrDiagnostic;
-use crate::expr::{
+use crate::type_check::TypeCheckVirResult;
+use vx_ir::arena::VirArena;
+use vx_ir::diagnostic::IrDiagnostic;
+use vx_ir::expr::{
     ArrayElement, ExprKind, MapElement, MapKey, PartialArg, StringPart, UpdateField,
 };
-use crate::item::ItemKind;
-use crate::pattern::PatternKind;
-use crate::scope::DefTarget;
-use crate::stmt::StmtKind;
-use crate::type_check::TypeCheckVirResult;
-use crate::type_collection::TypeCollection;
-use crate::{ExprId, ItemId, PatternId, SourceUnitId, StmtId};
+use vx_ir::item::ItemKind;
+use vx_ir::pattern::PatternKind;
+use vx_ir::scope::DefTarget;
+use vx_ir::stmt::StmtKind;
+use vx_ir::type_collection::TypeCollection;
+use vx_ir::{ExprId, ItemId, PatternId, SourceUnitId, StmtId};
 
 /// What a function can raise, before the fixpoint: the error types it `fail`s
 /// directly and the functions it calls (both ignoring anything under a nested
@@ -149,7 +149,7 @@ pub(crate) fn intern_failure_in(env: &mut vx_types::TypeEnv, err: TypeId) -> Opt
 struct ErrorUnionPass<'a> {
     arena: &'a mut VirArena,
     types: &'a mut TypeCollection,
-    member_defs: &'a HashMap<vx_parser::SourceSpan, crate::def::Definition>,
+    member_defs: &'a HashMap<vx_parser::SourceSpan, vx_ir::def::Definition>,
     errors: Vec<IrDiagnostic>,
 }
 
@@ -680,7 +680,7 @@ impl ErrorUnionPass<'_> {
     /// Handle one `match`: if its scrutinee observes a `?` (directly, or via a
     /// `let x = <?>` binding), re-type the arms' patterns against the new
     /// `Result` type so `Err(e)` binds the real `E`, then check exhaustiveness.
-    fn handle_match(&mut self, scrutinee: ExprId, arms: &[crate::expr::MatchArm]) {
+    fn handle_match(&mut self, scrutinee: ExprId, arms: &[vx_ir::expr::MatchArm]) {
         let Some(scrut_ty) = self.fallible_scrutinee_ty(scrutinee) else {
             return;
         };
@@ -728,7 +728,7 @@ impl ErrorUnionPass<'_> {
         &mut self,
         scrutinee: ExprId,
         scrut_ty: TypeId,
-        arms: &[crate::expr::MatchArm],
+        arms: &[vx_ir::expr::MatchArm],
     ) {
         // Any irrefutable arm → exhaustive.
         for arm in arms {
@@ -842,7 +842,7 @@ impl ErrorUnionPass<'_> {
 
     /// Find the function `ItemId` whose name span equals a member definition's
     /// site (used to attribute method-call failures, best-effort).
-    fn item_for_def_site(&self, def: &crate::def::Definition) -> Option<ItemId> {
+    fn item_for_def_site(&self, def: &vx_ir::def::Definition) -> Option<ItemId> {
         let site = def.site();
         for (i, item) in self.arena.items.iter().enumerate() {
             if let ItemKind::Function(f) = &item.kind

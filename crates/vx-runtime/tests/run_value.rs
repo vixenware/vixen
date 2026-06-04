@@ -2,8 +2,8 @@
 //! (clean), nonzero → poison. The §7 success-gate, exercised in isolation before a
 //! real subprocess (#2) feeds the model.
 
-use vx_ir::compile::compile_source;
 use vx_ir::item::ItemKind;
+use vx_runtime::compile::compile_source;
 use vx_runtime::eval::{KernelMode, Outcome, Value, eval_body};
 use vx_runtime::run_value::{ProcOutcome, build};
 

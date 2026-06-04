@@ -9,8 +9,8 @@
 //! `force_remote`s that path (parks again), the boss pulls it over the vconn, and eval
 //! resumes with the file's bytes. Demand-pull across executors, in the language.
 
-use vx_ir::compile::compile_source;
 use vx_ir::item::ItemKind;
+use vx_runtime::compile::compile_source;
 use vx_runtime::eval::{
     KernelMode, Outcome as EvalOutcome, Value, command_value, eval_body_with_exec,
 };

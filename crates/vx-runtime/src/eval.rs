@@ -1997,9 +1997,9 @@ mod tests {
     /// via a CompositeResolver over packages/).
     #[test]
     fn import_grammar_package_selects_a_grammar_value() {
+        use crate::compile::{NoopObserver, semantic_front_end};
         use crate::dispatch::Dispatcher;
         use std::cell::Cell;
-        use vx_ir::compile::{NoopObserver, semantic_front_end};
         use vx_ir::item::ItemKind;
         use vx_package::CompositeResolver;
 
@@ -2057,9 +2057,9 @@ mod tests {
     /// syntax. The set the import loaded onto the arena then classifies the argv.
     #[test]
     fn cli_literal_from_imported_grammar_projects() {
+        use crate::compile::{NoopObserver, semantic_front_end};
         use crate::dispatch::Dispatcher;
         use std::cell::Cell;
-        use vx_ir::compile::{NoopObserver, semantic_front_end};
         use vx_ir::item::ItemKind;
         use vx_package::CompositeResolver;
 

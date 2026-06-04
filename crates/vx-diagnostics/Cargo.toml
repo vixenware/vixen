@@ -28,6 +28,9 @@ vx-types = { workspace = true }
 [dev-dependencies]
 margin = { path = "../../crates-plus/margin" }
 vx-ir = { path = "../vx-ir" }
+# `compile_source` (the checked front-end) lives in the engine now — checking
+# forces values, so it moved in with the evaluator.
+vx-runtime = { path = "../vx-runtime" }
 vx-parser = { path = "../vx-parser" }
 vx-types = { path = "../vx-types" }
 

@@ -10,9 +10,9 @@
 //! type-checking inserted the coercion: without it, `f("out.txt")` would raise
 //! `ArgTypeMismatch` (String vs Path) and the front-end would error out.
 
-use vx_ir::compile::compile_source;
 use vx_ir::expr::ExprKind;
 use vx_ir::item::ItemKind;
+use vx_runtime::compile::compile_source;
 use vx_runtime::eval::{Outcome, Value, run};
 
 /// A plain string literal in a `Path` argument position type-checks (the coercion

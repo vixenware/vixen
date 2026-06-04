@@ -22,6 +22,10 @@ vx-ir = { workspace = true }
 vx-parser = { workspace = true }
 vx-stdlib = { workspace = true }
 vx-types = { workspace = true }
+# The engine owns the checked semantic front-end (`compile`): checking forces
+# values, so it lives with the evaluator (see the wiki: "Checking is forcing").
+# Resolving `@scope/name` packages for that front-end needs the package resolver.
+vx-package = { path = "../vx-package" }
 # command-model is pure projection (grammar + argv -> classified I/O + canonical
 # form, no I/O). The runtime Command value (what a CLI literal evaluates to and exec
 # consumes) wraps its EffectiveCommand with the execution argv + the outputs.
@@ -52,6 +56,6 @@ vox = { workspace = true }
 copypatch = { workspace = true, features = ["build"] }
 
 [dev-dependencies]
-# The grammar-as-value tests resolve on-disk @vixen/* packages (a CompositeResolver
-# over the repo's packages/ root) through the shared semantic front-end.
-vx-package = { path = "../vx-package" }
+# The CLI-literal checker tests reconstruct the front-end pipeline and load grammar
+# packages directly (the same loader vx-ir's `front_end_resolved` uses).
+command-grammar-vx = { path = "../../crates-plus/command-grammar-vx" }

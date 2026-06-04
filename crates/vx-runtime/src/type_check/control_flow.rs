@@ -2,13 +2,13 @@
 
 use vx_types::TypeId;
 
-use crate::StmtId;
-use crate::expr::{BlockExpr, IfExpr, MatchExpr};
-use crate::stmt::StmtKind;
+use vx_ir::StmtId;
+use vx_ir::expr::{BlockExpr, IfExpr, MatchExpr};
+use vx_ir::stmt::StmtKind;
 
 use super::TypeChecker;
 use super::patterns::type_pattern;
-use crate::diagnostic::IrDiagnostic;
+use vx_ir::diagnostic::IrDiagnostic;
 
 pub(crate) fn infer_block(tc: &mut TypeChecker, block: &BlockExpr) -> TypeId {
     let stmts = block.stmts.clone();
@@ -88,13 +88,13 @@ fn check_stmt(tc: &mut TypeChecker, stmt_id: StmtId, is_tail: bool) {
     }
 }
 
-fn infer_update_fields(tc: &mut TypeChecker, updates: &[crate::expr::UpdateField]) {
+fn infer_update_fields(tc: &mut TypeChecker, updates: &[vx_ir::expr::UpdateField]) {
     for field in updates {
         match field {
-            crate::expr::UpdateField::Set { value, .. } => {
+            vx_ir::expr::UpdateField::Set { value, .. } => {
                 tc.infer_expr(*value);
             }
-            crate::expr::UpdateField::Nested { updates, .. } => {
+            vx_ir::expr::UpdateField::Nested { updates, .. } => {
                 infer_update_fields(tc, updates);
             }
         }
