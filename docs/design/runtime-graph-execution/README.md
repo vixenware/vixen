@@ -139,10 +139,12 @@ Expected latest structural checkpoint:
   content fingerprint, and memoizes the graph output.
 - Observer execution uses graph body execution and graph/native wire crossing.
 - `vx-runner` now implements the runtime `Observe` service and routes `"Observe"`
-  through `RunnerAcceptor`; the implementation calls `run_exec`, converts the
-  process result to `CompletedRun`, and invokes the shared observer-evaluation
-  helper. Runtime tests still use `local_observer()` and therefore do not yet
-  prove the runner-backed observe path.
+  through `RunnerAcceptor`; `vx-daemon` also advertises and routes `"Observe"` to
+  its hosted `RunnerService` when a runner is configured. The implementation
+  calls `run_exec`, converts the process result to `CompletedRun`, and invokes
+  the shared observer-evaluation helper. Runtime tests still use
+  `local_observer()` and therefore do not yet prove the runner-backed observe
+  path.
 - Top-level producing trees returned by observe cross as remote handles attached
   to graph `OutputTree` nodes. Demanding `tree.file(path)` is a separate graph
   boundary that materializes only that path through strand remote-part demand.

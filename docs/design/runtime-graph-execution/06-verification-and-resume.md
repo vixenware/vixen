@@ -188,9 +188,10 @@ Latest focused verification:
 - `cargo nextest run -p vx-runtime-graph -p vx-runtime-core -p vx-runtime-driver -p vx-runtime -p vx-runner --no-fail-fast`:
   173 run, 173 passed, 0 skipped.
 - `vx-runner` implements the runtime `Observe` service and routes it through
-  `RunnerAcceptor`, but runtime exec tests still use `local_observer()`. Treat
-  those green exec tests as compatibility evidence, not as proof that
-  runner-backed observe is the production runtime path.
+  `RunnerAcceptor`; `vx-daemon` advertises and routes `"Observe"` to its hosted
+  `RunnerService` when a runner is configured. Runtime exec tests still use
+  `local_observer()`. Treat those green exec tests as compatibility evidence, not
+  as proof that runner-backed observe is the production runtime path.
 - The forbidden-symbol scan over `vx-runtime-core` and `vx-runtime-driver`
   returns no matches.
 - The deleted tree-walker affordance scan over `vx-runtime/src` returns no

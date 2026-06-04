@@ -9,6 +9,7 @@ use facet::Facet;
 use tokio::sync::watch;
 use vox::{ConnectionAcceptor, Metadata, TransportMode};
 use vx_runner::RunnerService;
+use vx_runtime::observe::ObserveDispatcher;
 use vx_services::{
     DAEMON_SOCK, DaemonDispatcher, RunnerDispatcher, StoreDispatcher, TestRunnerDispatcher,
 };
@@ -273,6 +274,7 @@ pub async fn serve(config: DaemonConfig) -> Result<()> {
     }
     if runner_service.is_some() {
         hosted_services.push("Runner".to_owned());
+        hosted_services.push("Observe".to_owned());
     }
     if vfsd_service.is_some() {
         hosted_services.push("Vfsd".to_owned());
@@ -420,6 +422,13 @@ impl ConnectionAcceptor for DaemonAcceptor {
                     return Err(vec![]);
                 };
                 connection.handle_with(RunnerDispatcher::new(service.clone()));
+            }
+            "Observe" => {
+                let Some(service) = &self.runner_service else {
+                    tracing::warn!("observe service requested but runner is not hosted");
+                    return Err(vec![]);
+                };
+                connection.handle_with(ObserveDispatcher::new(service.clone()));
             }
             "Vfsd" => {
                 let Some(service) = &self.vfsd_service else {

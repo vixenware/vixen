@@ -146,7 +146,6 @@ fn map_value(value: Value) -> RuntimeValue {
         Value::Tuple(_) => RuntimeValue::String("(…)".to_string()),
         Value::Array(_) => RuntimeValue::String("[…]".to_string()),
         Value::Struct(_) => RuntimeValue::String("{…}".to_string()),
-        Value::Closure { .. } => RuntimeValue::String("<closure>".to_string()),
         Value::Tree(_) => RuntimeValue::String("<tree>".to_string()),
         Value::OutputTree => RuntimeValue::String("<output-tree>".to_string()),
         Value::FailureContext(_) => RuntimeValue::String("<failure-context>".to_string()),

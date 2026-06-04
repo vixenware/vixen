@@ -124,6 +124,9 @@ Current checkpoint:
 - `vx-runner` depends on `vx-runtime`, not the other way around.
 - `RunnerService` implements the runtime `Observe` service and `RunnerAcceptor`
   routes `"Observe"` to that implementation.
+- `vx-daemon` advertises and routes `"Observe"` to the hosted `RunnerService`
+  when a runner is configured, so daemon-hosted runners expose the same
+  runner-backed observe endpoint.
 - The runner-backed observe implementation calls `run_exec` with the current
   minimal payload, converts the process result to `CompletedRun`, and calls
   `evaluate_observer`.
@@ -232,6 +235,10 @@ Once exec runs through the runner-backed path:
 - `cargo nextest run -p vx-runner --no-fail-fast`: 1/1 passed.
 - `cargo nextest run -p vx-runtime-graph -p vx-runtime-core -p vx-runtime-driver -p vx-runtime -p vx-runner --no-fail-fast`:
   173/173 passed.
+- `cargo check -p vx-daemon -p vx-runner -p vx-runtime` passed after adding the
+  daemon `"Observe"` route and removing a stale `Value::Closure` display arm.
+- `cargo nextest list -p vx-daemon` selected two service tests.
+- `cargo nextest run -p vx-daemon --no-fail-fast`: 2/2 passed.
 - The forbidden-symbol scans over `vx-runtime-core`, `vx-runtime-driver`, and the
   deleted tree-walker affordance scan over `vx-runtime/src` returned no matches.
 
