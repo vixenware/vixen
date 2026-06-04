@@ -6,7 +6,9 @@
 
 use std::collections::HashMap;
 
-use vx_runtime_graph::{BinKind, ConstValue, DemandGraph, KernelOp, NodeId, NodeKind, Span};
+use vx_runtime_graph::{
+    BinKind, ConstValue, DemandGraph, KernelOp, MatchPattern, NodeId, NodeKind, Span,
+};
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum NodeOutput {
@@ -80,6 +82,7 @@ pub fn step(graph: &DemandGraph, node: NodeId, inputs: ReadyInputs<'_>) -> Step 
         NodeKind::Project { index } => project(graph, node, n.inputs.as_slice(), *index, inputs),
         NodeKind::Kernel(op) => kernel(graph, node, n.inputs.as_slice(), *op, inputs),
         NodeKind::Closure => unsupported(node, "closure value is not executable in core yet"),
+        NodeKind::Match { arms } => match_node(node, n.inputs.as_slice(), arms, inputs),
         NodeKind::Boundary => Step::Boundary(BoundaryRequest { node }),
         NodeKind::Bomb => poisoned(graph, node, "bomb demanded"),
         NodeKind::Fail => fail(graph, node, n.inputs.as_slice(), inputs),
@@ -118,6 +121,48 @@ fn project(
     match inputs.get(field) {
         Some(output) => Step::Ready(output.clone()),
         None => Step::Need(NeedSet::Nodes(vec![field])),
+    }
+}
+
+fn match_node(
+    node: NodeId,
+    raw_inputs: &[NodeId],
+    arms: &[vx_runtime_graph::MatchArm],
+    inputs: ReadyInputs<'_>,
+) -> Step {
+    let Some(&scrutinee) = raw_inputs.first() else {
+        return unsupported(node, "match node has no scrutinee");
+    };
+    let Some(scrutinee_output) = inputs.get(scrutinee) else {
+        return Step::Need(NeedSet::Nodes(vec![scrutinee]));
+    };
+    let Some(arm) = arms
+        .iter()
+        .find(|arm| pattern_matches(&arm.pattern, scrutinee_output))
+    else {
+        return unsupported(node, "match had no matching arm");
+    };
+    match inputs.get(arm.body) {
+        Some(output) => Step::Ready(output.clone()),
+        None => Step::Need(NeedSet::Nodes(vec![arm.body])),
+    }
+}
+
+fn pattern_matches(pattern: &MatchPattern, output: &NodeOutput) -> bool {
+    match pattern {
+        MatchPattern::Wildcard | MatchPattern::Binding => true,
+        MatchPattern::Const(value) => const_matches(value, output),
+        MatchPattern::Variant { .. } | MatchPattern::Unsupported(_) => false,
+    }
+}
+
+fn const_matches(value: &ConstValue, output: &NodeOutput) -> bool {
+    match (value, output) {
+        (ConstValue::U64(a), NodeOutput::U64(b)) => *a == *b,
+        (ConstValue::Bool(a), NodeOutput::Bool(b)) => *a == *b,
+        (ConstValue::Str(a), NodeOutput::Str(b)) => a == b,
+        (ConstValue::Unit, NodeOutput::Unit) => true,
+        _ => false,
     }
 }
 

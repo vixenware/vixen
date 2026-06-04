@@ -54,11 +54,11 @@ fn source_entry_reports_assert_eq_poison() {
 #[test]
 fn source_entry_reports_unsupported_graph_shape() {
     let err = run_in_mode(
-        "fn main() -> U64 ( match true ( true => 42, false => 0 ) )",
+        "enum Light { struct Off }\nfn main() -> U64 ( let l = Off; match l ( Off => 42 ) )",
         "main",
         KernelMode::Off,
     )
-    .expect_err("graph-level match is still unsupported");
+    .expect_err("variants are still unsupported graph shapes");
     assert!(
         err.contains("graph unsupported"),
         "unexpected graph error: {err}"

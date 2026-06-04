@@ -184,6 +184,15 @@ MatchPayload {
 Demand rule: demand scrutinee enough to select an arm. Demand only selected arm
 body. Pattern binding creates param/binding node refs into the selected body.
 
+Current progress:
+
+- Graph has `NodeKind::Match { arms }` with source-blind `MatchPattern`
+  payloads.
+- Core supports literal constants, wildcard, and binding patterns.
+- Analyzer binds simple binding patterns to the scrutinee node while building the
+  selected arm body graph.
+- Variant and destructuring patterns remain explicit unsupported graph shapes.
+
 ### Fail and bomb
 
 Bomb payload is trivial:

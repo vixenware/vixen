@@ -87,6 +87,8 @@ Expected latest structural checkpoint:
   `Closure` nodes and known closure/function-value calls expand into graph nodes
   at analysis time.
 - `String.len()` executes through source-blind graph `KernelOp::StrLen`.
+- Literal/wildcard/binding `match` executes through source-blind
+  `NodeKind::Match` payloads.
 - `vx-runtime-driver` reports graph kernel executions for the transitional
   public dispatch counter.
 - `graph_exec` can expose graph-root lazy arrays/tuples as old public `Value`

@@ -155,6 +155,8 @@ Current progress:
 - Graph core executes arithmetic, comparisons, boolean ops, `if`, `assert`, and
   `assert_eq`.
 - Graph core executes `String.len()` as `KernelOp::StrLen`.
+- Graph core executes `match` for literal, wildcard, and binding patterns by
+  demanding only the scrutinee and selected arm body.
 - The graph driver counts ready kernel nodes for the transitional public
   dispatch counter.
 - `arithmetic.vx`, direct-call cases in `calls.vx`, and graph `if` demand tests

@@ -53,6 +53,22 @@ pub enum ConstValue {
     Unsupported(String),
 }
 
+#[derive(Debug, Clone, PartialEq, Eq, Facet)]
+pub struct MatchArm {
+    pub pattern: MatchPattern,
+    pub body: NodeId,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Facet)]
+#[repr(C)]
+pub enum MatchPattern {
+    Wildcard,
+    Binding,
+    Const(ConstValue),
+    Variant { tag: String },
+    Unsupported(String),
+}
+
 /// What a graph node is.
 #[derive(Debug, Clone, PartialEq, Eq, Facet)]
 #[repr(C)]
@@ -63,6 +79,7 @@ pub enum NodeKind {
     LazyData,
     Project { index: u32 },
     Closure,
+    Match { arms: Vec<MatchArm> },
     Boundary,
     Bomb,
     Fail,
@@ -117,6 +134,11 @@ impl DemandGraph {
                     stack.push(node.inputs[0]);
                     if let Some(v) = self.resolved_value(NodeId(i as u32)) {
                         stack.push(v);
+                    }
+                }
+                NodeKind::Match { .. } => {
+                    if let Some(&scrutinee) = node.inputs.first() {
+                        stack.push(scrutinee);
                     }
                 }
                 _ => stack.extend(node.inputs.iter().copied()),

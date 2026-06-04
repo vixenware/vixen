@@ -28,7 +28,10 @@ use vx_ir::scope::DefTarget;
 use vx_ir::stmt::StmtKind;
 use vx_types::{TypeEnv, TypeId};
 
-use crate::graph::{BinKind, ConstValue, DemandGraph, KernelOp, Node, NodeId, NodeKind, Span};
+use crate::graph::{
+    BinKind, ConstValue, DemandGraph, KernelOp, MatchArm, MatchPattern, Node, NodeId, NodeKind,
+    Span,
+};
 
 /// Intrinsic/boundary call names — effectful or non-deterministic, so the kernel
 /// partition cuts here (a call to one of these is a `Boundary`, not a `Kernel`).
@@ -465,6 +468,47 @@ impl Builder<'_> {
         }
     }
 
+    fn bind_match_pattern(&mut self, pat: PatternId, node: NodeId) {
+        let prog = self.program;
+        let p = &prog.arena[pat];
+        match &p.kind {
+            PatternKind::Binding(pb) => {
+                self.bindings.insert(pb.binding, node);
+            }
+            PatternKind::At(at) => {
+                self.bindings.insert(at.binding, node);
+                self.bind_match_pattern(at.inner, node);
+            }
+            PatternKind::Tuple(_)
+            | PatternKind::Struct(_)
+            | PatternKind::Array(_)
+            | PatternKind::ArrayRest(_)
+            | PatternKind::Variant(_)
+            | PatternKind::Or(_) => {}
+            PatternKind::Wildcard
+            | PatternKind::Literal(_)
+            | PatternKind::Unit
+            | PatternKind::Error => {}
+        }
+    }
+
+    fn match_pattern(&self, pat: PatternId) -> MatchPattern {
+        let p = &self.program.arena[pat];
+        match &p.kind {
+            PatternKind::Binding(_) => MatchPattern::Binding,
+            PatternKind::Wildcard => MatchPattern::Wildcard,
+            PatternKind::Literal(lit) => {
+                let (value, _) = const_value_and_label(&lit.value);
+                MatchPattern::Const(value)
+            }
+            PatternKind::Unit => MatchPattern::Const(ConstValue::Unit),
+            PatternKind::Variant(vp) => MatchPattern::Variant {
+                tag: vp.name.clone(),
+            },
+            other => MatchPattern::Unsupported(format!("{other:?}")),
+        }
+    }
+
     fn walk(&mut self, e: ExprId) -> NodeId {
         if let Some(&n) = self.memo.get(&e) {
             return n;
@@ -786,23 +830,34 @@ impl Builder<'_> {
                 )
             }
 
-            // `match scrutinee { pat => body, ... }` — control flow, kernel-internal
-            // (short-circuit on the scrutinee). Static snapshot draws all arms.
-            // Arm patterns that bind a simple name are bound best-effort.
+            // `match scrutinee { pat => body, ... }`: demand the scrutinee, then
+            // only the selected arm body. Binding patterns alias the scrutinee's
+            // node inside that arm.
             ExprKind::Match(mx) => {
                 let scrutinee = mx.scrutinee;
                 let arms: Vec<(PatternId, ExprId)> =
                     mx.arms.iter().map(|a| (a.pattern, a.body)).collect();
-                let mut inputs = vec![self.walk(scrutinee)];
+                let scrutinee_node = self.walk(scrutinee);
+                let mut match_arms = Vec::with_capacity(arms.len());
                 for (pat, body) in arms {
-                    self.bind_pattern(pat);
-                    inputs.push(self.walk(body));
+                    let saved_bindings = self.bindings.clone();
+                    let saved_param_bindings = self.param_bindings.clone();
+                    let saved_memo = self.memo.clone();
+                    self.bind_match_pattern(pat, scrutinee_node);
+                    let body_node = self.walk(body);
+                    self.bindings = saved_bindings;
+                    self.param_bindings = saved_param_bindings;
+                    self.memo = saved_memo;
+                    match_arms.push(MatchArm {
+                        pattern: self.match_pattern(pat),
+                        body: body_node,
+                    });
                 }
                 self.emit(
-                    NodeKind::Kernel(KernelOp::Opaque),
+                    NodeKind::Match { arms: match_arms },
                     "match".into(),
                     span,
-                    inputs,
+                    vec![scrutinee_node],
                 )
             }
 

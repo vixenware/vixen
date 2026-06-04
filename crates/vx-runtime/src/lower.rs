@@ -409,9 +409,9 @@ mod tests {
     }
 
     #[test]
-    fn unsupported_calls_decline_lowering() {
-        // Graph-level match is not an executable graph payload yet, so lowering
-        // rejects it honestly instead of recovering source expressions.
+    fn graph_match_declines_scalar_lowering() {
+        // Graph-level match is executable in core, but is not a scalar kernel
+        // region yet, so lowering rejects it honestly.
         let g = analyze_source(
             "fn f() -> U64 ( match true ( true => 42, false => 0 ) )",
             "f",
