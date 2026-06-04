@@ -223,7 +223,9 @@ Observed result:
   projection of the imported grammar coordinate.
 - `hello_world` passes through requested-toolchain capability injection and
   backtick observe dispatch on the graph path.
-- `lang_suite` passes through `run_in_mode` graph execution.
+- `lang_suite` passes through `run_in_mode` graph execution, including
+  `exec_boundaries.vx`, which leaves a real backtick exec undemanded in a lazy
+  tuple slot without an observe client.
 - `source_blind_guardrails` passes, including the source-blind execution-crate
   scan and the runtime deleted tree-walker scan.
 - The raw forbidden-symbol scan returns no matches in core/driver.
@@ -250,7 +252,7 @@ into public `Outcome`; `i6_eval_outcome_carries_the_source_span` passes through
 graph driver.
 
 The `.vx` language harness runs through graph driver for source entries and
-passes 68 of 68 Vixen-language cases.
+passes 69 of 69 Vixen-language cases.
 
 ## Verification commands
 

@@ -137,7 +137,8 @@ Latest focused verification:
 - `cargo nextest run -p vx-runtime -E 'binary(remote_tree_via_eval)' --no-fail-fast`:
   3/3 passed.
 - `cargo nextest run -p vx-runtime -E 'binary(lang_suite)' --no-fail-fast`:
-  1/1 passed.
+  1/1 passed; the `.vx` cases include `exec_boundaries.vx`, where an undemanded
+  backtick exec in a lazy tuple slot stays cold with no observe client.
 - `cargo nextest run -p vx-runtime -E 'binary(cc_probe) | binary(hello_world)' --no-fail-fast`:
   2/2 passed.
 - `cargo nextest run -p vx-runtime-driver --no-fail-fast`: 4/4 passed,
@@ -161,6 +162,7 @@ The `.vx` suite is important because it expresses language behavior:
 - `calls.vx`
 - `closures.vx`
 - `control_flow.vx`
+- `exec_boundaries.vx`
 - `match.vx`
 - `poisons.vx`
 - `variants.vx`

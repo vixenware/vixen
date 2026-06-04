@@ -136,6 +136,9 @@ Current progress:
   handle entry keyed by the exec node.
 - `exec_on_strands` passes, including a cold-field tripwire where a failing exec
   in tuple slot 0 stays undemanded while slot 1 is selected.
+- `exec_boundaries.vx` passes through `lang_suite`: a real backtick exec in an
+  undemanded tuple slot stays cold even though the source entry has no observe
+  client available.
 
 ### Observer execution
 

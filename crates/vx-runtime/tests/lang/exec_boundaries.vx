@@ -1,0 +1,10 @@
+// Exec boundaries are graph boundary nodes. Constructing one inside a lazy value
+// does not demand it; without an observe client, any accidental dispatch poisons.
+
+#[test]
+fn undemanded_exec_boundary_stays_cold() (
+    let g = import "@vixen/grammar-cc";
+    let tool = { command: g.cc, binary: "false" };
+    let pair = ( `$tool` with { observer: (run) => run.ok }, 42 );
+    assert_eq(pair[1], 42)
+)
