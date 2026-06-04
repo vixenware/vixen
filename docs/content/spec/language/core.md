@@ -60,9 +60,12 @@ weight = 20
 
 > r[lex.dollar-ident]
 >
-> `$`, `$0`, `$1`, ... are reserved closure-shorthand identifiers. They are
-> lexed distinctly from ordinary identifiers and are only meaningful in
-> closure shorthand positions.
+> `$`, `$0`, `$1`, ... are reserved closure-shorthand identifiers
+> (`r[expr.closure.dollar]`). They are lexed distinctly from ordinary
+> identifiers and are only meaningful in closure-shorthand positions.
+> Inside a double-quoted string or a backtick command invocation, `$name` /
+> `${ expr }` are interpolation holes (`r[lex.string.interpolation]`), not
+> closure shorthand — the enclosing literal disambiguates.
 
 > r[lex.ident.case]
 >
@@ -184,16 +187,23 @@ weight = 20
 
 > r[lex.string]
 >
-> String literals are enclosed in double quotes: `"hello"`. Escape
-> sequences: `\\`, `\"`, `\n`, `\t`, `\r`, `\0`, `\u{...}` (Unicode code
-> point).
+> Two string forms, on the shell convention:
+>
+> - **Raw**, single-quoted: `'hello'`. No interpolation; the only escapes
+>   are `\'` and `\\`. Every other character — including `$` and `` ` `` —
+>   is literal. Best for paths, regexes, and text that carries sigils.
+> - **Interpolated**, double-quoted: `"hello"`. Escape sequences `\\`,
+>   `\"`, `\n`, `\t`, `\r`, `\0`, `\u{...}` (Unicode code point), plus
+>   interpolation (`r[lex.string.interpolation]`).
 
 > r[lex.string.interpolation]
 >
-> Interpolated strings use backticks: `` `Hello ${name}` ``. Arbitrary
-> expressions are allowed inside `${ }`. Each interpolation calls
-> `.to_string()` on the interpolated value. There is no bare-identifier
-> shorthand — `${ }` is the only interpolation syntax.
+> Inside a double-quoted string, `$name` interpolates the binding `name`,
+> and `${ expr }` interpolates an arbitrary expression (calls, field
+> access, `if`, `match`, nested interpolation). A `$` not followed by an
+> identifier start — or a `\$` — is a literal `$`. Each interpolation calls
+> `.to_string()` on its value. Single-quoted strings never interpolate, and
+> backticks are command invocations (`r[expr.command]`), not strings.
 
 > r[lex.heredoc]
 >
@@ -201,10 +211,13 @@ weight = 20
 > backticks with an optional tag, the content lines, and a closing line of
 > three backticks — the same fence Markdown uses. The tag (`c`, `sh`,
 > `styx`, …) is a highlighting / tooling hint only and carries no
-> semantics. Heredocs interpolate `${ ... }` exactly like single-backtick
-> strings, and leading indentation is stripped to the column of the closing
-> fence. A heredoc evaluates to a `String`. A non-interpolating raw variant
-> (for embedding literal `${ }`) is deferred — `r[lex.heredoc.raw]` TBD.
+> semantics. A heredoc interpolates `$name` / `${ ... }` like a
+> double-quoted string (`r[lex.string.interpolation]`), and leading
+> indentation is stripped to the column of the closing fence. A heredoc
+> evaluates to a `String`. Three backticks fence a multi-line *string*; a
+> single backtick is a *command invocation* (`r[expr.command]`) — the same
+> block-vs-inline split Markdown uses. A non-interpolating raw heredoc
+> (single-quote-style) is deferred — `r[lex.heredoc.raw]` TBD.
 
 ### Operator precedence
 
@@ -399,7 +412,7 @@ weight = 20
 > )
 >
 > fn greet({ first, last }: Name) -> String (
->   `Hello ${first} ${last}`
+>   "Hello ${first} ${last}"
 > )
 > ```
 
@@ -424,7 +437,7 @@ weight = 20
 > fn greet(name: String) with {
 >   cheerful: Bool = false,
 > } -> String (
->   if cheerful (`Hey ${name}!!!`) else (`Hello ${name}`)
+>   if cheerful ("Hey ${name}!!!") else ("Hello ${name}")
 > )
 >
 > greet("Amos") with { cheerful: true }
@@ -466,24 +479,43 @@ weight = 20
 
 > r[expr.literal.string]
 >
-> String literals are enclosed in double quotes: `"hello world"`. Escape
-> sequences: `\\`, `\"`, `\n`, `\t`, `\r`, `\0`, `\u{...}` (Unicode code
-> point by hex value).
+> A string literal is single-quoted (raw) or double-quoted (interpolated):
+> `'a raw string'`, `"hello world"`. See `r[lex.string]` and
+> `r[lex.string.interpolation]` for the lexical detail.
 
 > r[expr.literal.interpolation]
 >
-> Interpolated strings use backticks: `` `Hello ${name}` ``. The `${ }`
-> delimiter contains an arbitrary expression — any expression valid in
-> Vixen can appear inside, including function calls, field access, `if`,
-> `match`, and nested interpolations:
+> A double-quoted string interpolates `$name` (a binding) and `${ expr }`
+> (any Vixen expression — calls, field access, `if`, `match`, nested
+> interpolation):
 >
 > ```vixen
-> let msg = `found ${results.len()} results in ${elapsed}s`
-> let label = `status: ${if ok ("pass") else ("fail")}`
+> let msg = "found ${results.len()} results in ${elapsed}s"
+> let label = "status: ${if ok ('pass') else ('fail')}"
 > ```
 >
-> There is no bare-identifier shorthand — `${ }` is the only
-> interpolation syntax.
+> `$name` is shorthand for `${ name }`; `${ }` is the general form.
+
+### Command invocations
+
+> r[expr.command]
+>
+> A command invocation is written in backticks:
+> `` `$tool -c main.c -o out/x.o` ``. Unlike a string, the content is parsed
+> as command-line **tokens** — a leading hole, then whitespace-separated
+> arguments — not as Vixen text. Holes use interpolation syntax: `$name` for
+> a binding, `${ expr }` for an expression.
+>
+> The leading hole must be a **Tool** (`r[exec.tool]`); the tokens after it
+> are validated against, and classified (input / output / text) by, that
+> tool's **command** — its grammar (`r[exec.command]`). A backtick
+> invocation whose lead is not a tool is a compile error.
+>
+> An invocation is the value an executor runs. Forcing its value runs it and
+> yields the observer's result (default `run.ok.out`); a trailing
+> `with { observer: …, writable: …, … }` decorates it. The execution model —
+> tools, the `Run`, observers, sandboxing — is `r[exec.*]` in the build
+> standard library.
 
 ### Identifier expressions
 
@@ -1150,7 +1182,7 @@ weight = 20
 
 > r[type.coerce.stringify]
 >
-> String interpolation (`` `${expr}` ``) calls `.to_string()` on the
+> String interpolation (`"${expr}"`) calls `.to_string()` on the
 > interpolated value. Built-in scalar and path-like types provide
 > canonical `to_string()` methods. User-defined types participate by
 > defining `to_string(self) -> String` in their canonical namespace.
@@ -1287,9 +1319,9 @@ weight = 20
 > ```vixen
 > match items (
 >   [] => "empty",
->   [only] => `just ${only}`,
->   [first, ..] => `starts with ${first}`,
->   [first, .., last] => `${first} to ${last}`,
+>   [only] => "just ${only}",
+>   [first, ..] => "starts with ${first}",
+>   [first, .., last] => "${first} to ${last}",
 >   [_, second, ..rest] => use(second, rest),
 > )
 > ```
