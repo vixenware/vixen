@@ -162,6 +162,10 @@ Current progress:
 
 Next executor/control-plane cut:
 
+The detailed production morph sequence for this cut lives in
+`07-exec-observe-morph.md`. Treat that file as the active plan for replacing the
+scratch observe service with the runner-backed exec path.
+
 - Do not make `vx-runtime` depend on `vx-runner` or execute the runner protocol
   directly. `vx-runtime` should surface an exec boundary need plus the
   materialized request-shaping graph payload. The daemon/orchestrator layer owns

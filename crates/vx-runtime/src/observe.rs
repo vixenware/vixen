@@ -86,6 +86,41 @@ pub enum Observed {
     Poisoned(String),
 }
 
+/// A completed process result supplied by an executor.
+///
+/// This is the only part of exec observation that belongs in `vx-runtime`: given
+/// executor-owned facts about a completed run, evaluate the observer using the
+/// graph-backed body path and cross the result to wire. Process spawning, scratch
+/// directories, CAS-VFS mounts, sandbox policy, output flushing, and retry logic
+/// must stay outside this helper.
+#[derive(Debug, Clone)]
+pub struct CompletedRun {
+    pub proc: ProcOutcome,
+}
+
+impl CompletedRun {
+    pub fn new(proc: ProcOutcome) -> Self {
+        Self { proc }
+    }
+}
+
+pub fn evaluate_observer(run: CompletedRun, observer: Option<Bundle>) -> Observed {
+    match observer {
+        Some(bundle) => {
+            let run = run_value::build(run.proc);
+            let (program, env) = bundle.install();
+            match eval_body_wire(&program, &env, bundle.entry, vec![run], KernelMode::Off) {
+                Ok(value) => Observed::Value(value),
+                Err(reason) => Observed::Poisoned(reason),
+            }
+        }
+        None => match run_value::ok_gate_result(&run.proc) {
+            Ok(()) => Observed::Value(WireValue::Tree),
+            Err(reason) => Observed::Poisoned(reason),
+        },
+    }
+}
+
 /// The runner-side service: ship a bundle + command, get the observer's result.
 #[vox::service]
 pub trait Observe {
@@ -141,27 +176,7 @@ impl Observe for ScratchObserveService {
         let _ = std::fs::remove_dir_all(&scratch);
         *self.outputs.lock().unwrap() = Some(service);
 
-        // Apply the observer against the run. With a bundle, build the `Run` (its
-        // `.ok` gate forces on the real exit code) and evaluate the observer against
-        // it on a fresh mirror, deep-forcing its result into a `WireValue` to cross
-        // back — the whole value, not a lossy projection; a returned `run.*.out`
-        // crosses as `WireValue::Tree` (a handle into the producer above). Without a
-        // bundle, apply the default `run.ok.out` natively: gate on success, then the
-        // output tree crosses back as that same handle.
-        match request.observer {
-            Some(bundle) => {
-                let run = run_value::build(proc);
-                let (program, env) = bundle.install();
-                match eval_body_wire(&program, &env, bundle.entry, vec![run], KernelMode::Off) {
-                    Ok(value) => Observed::Value(value),
-                    Err(reason) => Observed::Poisoned(reason),
-                }
-            }
-            None => match run_value::ok_gate_result(&proc) {
-                Ok(()) => Observed::Value(WireValue::Tree),
-                Err(reason) => Observed::Poisoned(reason),
-            },
-        }
+        evaluate_observer(CompletedRun::new(proc), request.observer)
     }
 }
 
@@ -270,6 +285,36 @@ mod tests {
             program: program.to_string(),
             args: vec![],
         }
+    }
+
+    #[test]
+    fn observer_evaluation_accepts_a_completed_process_without_spawning() {
+        let bundle = observer_bundle();
+        let ok = evaluate_observer(
+            CompletedRun::new(ProcOutcome {
+                exit_code: 0,
+                stdout: b"OUT".to_vec(),
+                stderr: b"ERR".to_vec(),
+            }),
+            Some(bundle.clone()),
+        );
+        assert_eq!(
+            ok,
+            Observed::Value(WireValue::Struct(vec![
+                ("stdout".to_string(), WireValue::Str("OUT".to_string())),
+                ("stderr".to_string(), WireValue::Str("ERR".to_string())),
+            ]))
+        );
+
+        let bad = evaluate_observer(
+            CompletedRun::new(ProcOutcome {
+                exit_code: 7,
+                stdout: Vec::new(),
+                stderr: Vec::new(),
+            }),
+            Some(bundle),
+        );
+        assert!(matches!(bad, Observed::Poisoned(_)));
     }
 
     /// The first real exec over vox: ship the observer + a command, the executor runs

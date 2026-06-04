@@ -18,6 +18,7 @@ rustdoc-args = ["--html-in-header", "arborium-header.html"]
 [dependencies]
 vox = { workspace = true }
 tracing = { workspace = true }
+vx-runtime = { path = "../vx-runtime" }
 vx-services.workspace = true
 vx-vfsd.workspace = true
 moire = { workspace = true }

@@ -4043,6 +4043,7 @@ dependencies = [
  "moire",
  "tracing",
  "vox",
+ "vx-runtime",
  "vx-services",
  "vx-vfsd",
 ]

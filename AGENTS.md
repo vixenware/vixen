@@ -53,6 +53,27 @@ they are the thing being deleted.
 7. **Cache key = inputs, computed *before* running. Read-set = post-hoc validity,
    never the key** (`r[eval.readset]`).
 
+## Tests during the runtime rebuild
+
+The target is the architecture, not "all green all the time." Green tests are
+evidence only when they exercise the intended graph-driven path. A passing suite
+through a cheat path, fallback, source tree-walker, scratch executor, or fake
+oracle is negative evidence.
+
+- Do not restore deleted architecture, add compatibility fallbacks, or keep a
+  runtime-local cheat path just to make tests pass.
+- Some tests are contracts; some are scaffolding that can hold the rebuild back.
+  When a test enforces the wrong architecture, change, delete, or quarantine it
+  in the same committed state as the architectural cut, with the reason recorded.
+- Honest red states are allowed when the failure is an explicit unsupported
+  graph/runtime boundary or a missing production service. Red is not acceptable
+  when the proposed "fix" is to recreate the old eager evaluator or scratch
+  process runner.
+- Prefer integration tests that exercise Vixen language and production-shaped
+  boundary paths. Do not let the current test suite define the architecture.
+- Record failing test names and failure modes for honest red commits. The record
+  must explain why the failure moves the code toward the specified model.
+
 ## Repo conventions
 
 - No `serde` — use `facet` / `facet-json`. Never hand-emit JSON.

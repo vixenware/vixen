@@ -7,6 +7,7 @@ pub(crate) mod sandbox;
 pub(crate) mod service;
 
 use std::sync::Arc;
+use vx_runtime::observe::ObserveDispatcher;
 use vx_services::{RunnerDispatcher, StoreClient};
 use vx_vfsd::VfsdService;
 
@@ -61,6 +62,10 @@ impl vox::ConnectionAcceptor for RunnerAcceptor {
         match request.service() {
             "Runner" => {
                 connection.handle_with(RunnerDispatcher::new(self.service.clone()));
+                Ok(())
+            }
+            "Observe" => {
+                connection.handle_with(ObserveDispatcher::new(self.service.clone()));
                 Ok(())
             }
             other => {

@@ -37,7 +37,9 @@ source-expression tree-walker plus `dispatch.rs` scalar planner are deleted.
 
 5. Inspect `crates/vx-runtime/src/eval.rs` before assuming no API-edge thunk
    cleanup remains.
-6. Continue the earliest incomplete phase, currently value-model/cache work.
+6. Continue the earliest incomplete phase. If the work is exec/observer related,
+   the active phase is `07-exec-observe-morph.md`: move scratch observe toward
+   runner-backed production execution, not another runtime-local fake.
 7. Commit the known state before switching tasks.
 
 ## Verification layers
@@ -68,6 +70,10 @@ For a red demolition phase, record:
 - why the red state is honest
 
 Do not mark a red state acceptable if any failure path uses `eval_inner`.
+Do not rebuild a deleted eager evaluator, scratch process runner, source fallback,
+or oracle path just to make the suite green. Some tests are scaffolding: if a test
+keeps the wrong architecture alive, change or quarantine it in the same committed
+state as the cut and record the reason.
 
 ### Forbidden-symbol verification
 
@@ -147,7 +153,7 @@ Current partial state:
 
 Latest focused verification:
 
-- `cargo check -p vx-runtime-graph -p vx-runtime-core -p vx-runtime-driver -p vx-runtime`
+- `cargo check -p vx-runtime-graph -p vx-runtime-core -p vx-runtime-driver -p vx-runtime -p vx-runner`
   passes with no old-evaluator dead-code warnings.
 - `cargo nextest run -p vx-runtime -E 'binary(source_blind_guardrails)' --no-fail-fast`:
   3/3 passed.
@@ -179,8 +185,12 @@ Latest focused verification:
   unresolved arguments or captures are not demanded to build a call memo key.
 - `cargo nextest run -p vx-runtime --no-fail-fast`: 154 run, 154 passed,
   0 failed, 0 skipped.
-- `cargo nextest run -p vx-runtime-graph -p vx-runtime-core -p vx-runtime-driver -p vx-runtime --no-fail-fast`:
-  171 run, 171 passed, 0 skipped.
+- `cargo nextest run -p vx-runtime-graph -p vx-runtime-core -p vx-runtime-driver -p vx-runtime -p vx-runner --no-fail-fast`:
+  173 run, 173 passed, 0 skipped.
+- `vx-runner` implements the runtime `Observe` service and routes it through
+  `RunnerAcceptor`, but runtime exec tests still use `local_observer()`. Treat
+  those green exec tests as compatibility evidence, not as proof that
+  runner-backed observe is the production runtime path.
 - The forbidden-symbol scan over `vx-runtime-core` and `vx-runtime-driver`
   returns no matches.
 - The deleted tree-walker affordance scan over `vx-runtime/src` returns no

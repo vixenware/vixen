@@ -81,6 +81,10 @@ Expected latest structural checkpoint:
   source-evaluator affordances, scans `vx-runtime/src` for the deleted runtime
   tree-walker affordances, and guards the temporary scratch observe executor from
   being renamed back into a production-looking `ObserveService`.
+- `docs/design/runtime-graph-execution/07-exec-observe-morph.md` records the
+  active plan for turning the quarantined scratch observe path into the
+  runner-backed production exec path instead of preserving it as a green-test
+  fallback.
 - `vx-runtime::eval::{run, run_with_dispatches, run_in_mode}` enter through
   `graph_exec::run_source` and `vx-runtime-driver`.
 - `vx-runtime-graph::NodeKind::Const` carries `ConstValue`; core execution and
@@ -134,6 +138,11 @@ Expected latest structural checkpoint:
   disk L2 hit keyed by the materialized request plus the pre-run executable
   content fingerprint, and memoizes the graph output.
 - Observer execution uses graph body execution and graph/native wire crossing.
+- `vx-runner` now implements the runtime `Observe` service and routes `"Observe"`
+  through `RunnerAcceptor`; the implementation calls `run_exec`, converts the
+  process result to `CompletedRun`, and invokes the shared observer-evaluation
+  helper. Runtime tests still use `local_observer()` and therefore do not yet
+  prove the runner-backed observe path.
 - Top-level producing trees returned by observe cross as remote handles attached
   to graph `OutputTree` nodes. Demanding `tree.file(path)` is a separate graph
   boundary that materializes only that path through strand remote-part demand.
@@ -156,7 +165,7 @@ Expected latest structural checkpoint:
 
 Latest verified red/green shape:
 
-- `cargo check -p vx-runtime-graph -p vx-runtime-core -p vx-runtime-driver -p vx-runtime`
+- `cargo check -p vx-runtime-graph -p vx-runtime-core -p vx-runtime-driver -p vx-runtime -p vx-runner`
   passes with no old-evaluator dead-code warnings.
 - `cargo nextest run -p vx-runtime -E 'binary(source_blind_guardrails)' --no-fail-fast`:
   3/3 passed.
@@ -189,8 +198,8 @@ Latest verified red/green shape:
   unresolved arguments or captures are not demanded to build a call memo key.
 - `cargo nextest run -p vx-runtime --no-fail-fast`: 154 run, 154 passed,
   0 failed, 0 skipped.
-- `cargo nextest run -p vx-runtime-graph -p vx-runtime-core -p vx-runtime-driver -p vx-runtime --no-fail-fast`:
-  171 run, 171 passed, 0 skipped.
+- `cargo nextest run -p vx-runtime-graph -p vx-runtime-core -p vx-runtime-driver -p vx-runtime -p vx-runner --no-fail-fast`:
+  173 run, 173 passed, 0 skipped.
 - The forbidden-symbol scan over `crates/vx-runtime-core` and
   `crates/vx-runtime-driver` returns no matches.
 - The deleted tree-walker affordance scan over `crates/vx-runtime/src` returns
@@ -199,8 +208,8 @@ Latest verified red/green shape:
 Verification commands:
 
 ```bash
-cargo check -p vx-runtime-graph -p vx-runtime-core -p vx-runtime-driver -p vx-runtime
-cargo nextest run -p vx-runtime-graph -p vx-runtime-core -p vx-runtime-driver -p vx-runtime
+cargo check -p vx-runtime-graph -p vx-runtime-core -p vx-runtime-driver -p vx-runtime -p vx-runner
+cargo nextest run -p vx-runtime-graph -p vx-runtime-core -p vx-runtime-driver -p vx-runtime -p vx-runner
 cargo nextest run -p vx-runtime -E 'binary(source_blind_guardrails)'
 rg -n 'vx[_-]ir|ExprKind|StmtKind|PatternKind|VirProgram|BodyId|fn force|\.force\(|eval_inner|eval_expr' crates/vx-runtime-core crates/vx-runtime-driver
 rg -n 'struct Evaluator|impl Evaluator|fn eval_inner|fn force_node|ThunkState::Unforced|ThunkState::Node|enum NodeMemo|struct NodeRef|Value::Closure|pub mod dispatch|crate::dispatch|DispatchPlan|struct Dispatcher|dispatch_scalar|force_frame_binding' crates/vx-runtime/src
@@ -240,6 +249,7 @@ The detailed phase documents are:
 - [04 - Value Model And Pure Execution](04-value-model-and-pure-execution.md)
 - [05 - Boundaries, Cross-Executor Runtime, And Cache](05-boundaries-cross-executor-cache.md)
 - [06 - Verification And Resume Protocol](06-verification-and-resume.md)
+- [07 - Exec/Observe Production Morph](07-exec-observe-morph.md)
 
 ## Resume protocol after compaction
 
@@ -249,7 +259,8 @@ When resuming this task after context compaction:
 2. Verify the checkpoint with `cargo check`, `cargo nextest`, and the forbidden
    symbol scan.
 3. Inspect `vx-runtime::eval` before assuming the tree-walker is gone.
-4. Continue the earliest incomplete phase.
+4. Continue the earliest incomplete phase. If the work is exec/observer related,
+   read `07-exec-observe-morph.md` before touching code.
 5. Commit each known state. A known state may be honestly red if the failure is
    explicit graph unsupported behavior and not a fallback.
 
