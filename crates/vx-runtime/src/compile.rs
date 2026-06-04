@@ -317,6 +317,54 @@ fn probe() -> Bool (
     }
 
     #[test]
+    fn invocation_validates_against_the_const_evaluated_command() {
+        use vx_package::CompositeResolver;
+        let root = concat!(env!("CARGO_MANIFEST_DIR"), "/../../packages");
+        let resolver = CompositeResolver::new(root);
+
+        // A valid `cc` invocation: the tool's command is const-evaluated from
+        // `gcc.command` (= the imported `g.cc` coordinate) and `-c <in> -o <out>`
+        // checks clean (`r[exec.validate.static]`).
+        let good = r#"
+fn build() (
+  let g = import "@vixen/grammar-cc";
+  let gcc = { command: g.cc, binary: "cc" };
+  `$gcc -c src.c -o out.o`
+)
+"#;
+        let (_p, resolve_errors, tc_errors) = front_end(good, &resolver);
+        assert!(
+            resolve_errors.is_empty(),
+            "the valid invocation resolves, got {resolve_errors:#?}"
+        );
+        assert!(
+            tc_errors.is_empty(),
+            "a valid cc invocation has no grammar diagnostics, got {tc_errors:#?}"
+        );
+
+        // An unknown flag is rejected at check time — the same const-evaluated command
+        // drives the structural check.
+        let bad = r#"
+fn build() (
+  let g = import "@vixen/grammar-cc";
+  let gcc = { command: g.cc, binary: "cc" };
+  `$gcc --definitely-not-a-real-flag src.c`
+)
+"#;
+        let (_p, _re, tc_errors) = front_end(bad, &resolver);
+        assert!(
+            !tc_errors.is_empty(),
+            "an unknown flag must be a check-time error, got no diagnostics"
+        );
+        assert!(
+            tc_errors
+                .iter()
+                .any(|e| e.contains("UnknownFlag") || e.contains("definitely-not-a-real-flag")),
+            "expected an unknown-flag diagnostic, got {tc_errors:#?}"
+        );
+    }
+
+    #[test]
     fn semantic_pipeline_resolves_invocation_and_observer_from_stdlib() {
         let mut program = semantically_analyze(SOURCE_EXEC_STDOUT);
         let mut types = collect_types_vir(&mut program.arena);

@@ -18,11 +18,12 @@ use command_model::{ArgRole, Arity, Grammar, GrammarSet, Kind, Lint, Policy, Val
 use vx_parser::SourceSpan;
 use vx_types::{Scalar, TypeId};
 
-use vx_ir::arena::VirArena;
+use vx_ir::BindingId;
+use vx_ir::ExprId;
 use vx_ir::diagnostic::{CliDiagnosticKind, CliHoleExpect, IrDiagnostic};
-use vx_ir::expr::{CliLiteralExpr, StringPart};
-use vx_ir::scope::{self, DefTarget};
-use vx_ir::{ExprId, ScopeId};
+use vx_ir::expr::{CliLiteralExpr, ExprKind, FieldKey, RecordField, StringPart};
+use vx_ir::scope::DefTarget;
+use vx_ir::stmt::StmtKind;
 
 use super::TypeChecker;
 
@@ -64,17 +65,32 @@ struct HoleReq {
 
 pub(crate) fn infer_cli_literal(
     tc: &mut TypeChecker,
-    expr_id: ExprId,
+    _expr_id: ExprId,
     cli: &CliLiteralExpr,
 ) -> TypeId {
-    let scope = tc.arena[expr_id].scope;
+    // The leading argument is the **tool**; the rest are its grammar-checked
+    // arguments (`r[exec.invocation]`). Infer the lead's hole(s) for their type, then
+    // validate only the tokens after it — against the command the tool carries.
+    let Some((lead, rest)) = cli.args.split_first() else {
+        return tc.nominal_ty("Tree");
+    };
+    for piece in &lead.pieces {
+        if let StringPart::Expr(id) = piece {
+            tc.infer_expr(*id);
+        }
+    }
+    // A single `$tool` hole is a const-evaluable tool; a multi-piece lead is not.
+    let tool_expr = match lead.pieces.as_slice() {
+        [StringPart::Expr(id)] => Some(*id),
+        _ => None,
+    };
 
-    // Lower the literal to a synthetic argv: static text verbatim, each hole a
-    // unique sentinel the engine's parser can tag. Record each hole's spliced
-    // expression so we can infer + position-check it.
-    let mut argv = vec![cli.grammar.clone()];
+    // Lower the argument tokens (after the tool) to a synthetic argv: static text
+    // verbatim, each hole a unique sentinel. argv[0] is the program slot, filled with
+    // the grammar's name once the command is const-evaluated.
+    let mut arg_strs: Vec<String> = Vec::new();
     let mut hole_exprs: Vec<ExprId> = Vec::new();
-    for arg in &cli.args {
+    for arg in rest {
         let mut s = String::new();
         for piece in &arg.pieces {
             match piece {
@@ -85,37 +101,38 @@ pub(crate) fn infer_cli_literal(
                 }
             }
         }
-        argv.push(s);
+        arg_strs.push(s);
     }
 
     // Holes are real, checked sub-expressions — infer them up front (mutable),
     // so the grammar phase below can run entirely on an immutable arena borrow.
     let hole_tys: Vec<TypeId> = hole_exprs.iter().map(|&id| tc.infer_expr(id)).collect();
 
-    // Resolve the grammar `@name` refers to. All grammar work is immutable on
-    // the arena; structural diagnostics + per-hole requirements are collected
-    // owned so the borrow releases before we type-check holes / push.
+    // Const-evaluate the tool's `command` to a grammar coordinate
+    // (`r[exec.validate.static]`) and validate the argument tokens against it. Where
+    // the command isn't statically determined — a tool parameter, a runtime branch —
+    // `const_command_coord` returns `None` and the invocation is not grammar-checked
+    // ("generic over some tool"). Diagnostics + per-hole requirements are collected
+    // owned so the immutable arena borrow releases before we type-check holes / push.
     let mut diags: Vec<(SourceSpan, CliDiagnosticKind)> = Vec::new();
     let mut hole_reqs: Vec<(usize, HoleReq)> = Vec::new();
-    // The `@[ ${cmd} … ]` form carries no grammar name — its grammar comes from the
-    // leading hole's type, resolved in a later pass (the holes are still inferred
-    // above). Only the named `@grammar[ … ]` form validates against a named grammar.
-    if !cli.grammar.is_empty() {
-        match resolve_grammar_set(tc.arena, &cli.grammar, scope) {
-            Some(set) if set.get(&cli.grammar).is_some() => {
-                let grammar = set.get(&cli.grammar).unwrap();
-                check_structural(set, grammar, &cli.grammar, &argv, cli, &mut diags);
+    if let Some(tx) = tool_expr
+        && let Some((spec, name)) = const_command_coord(tc, tx)
+    {
+        let tool_span = tc.arena[tx].span;
+        if let Some(set) = tc.arena.grammars.get(&spec) {
+            if let Some(grammar) = set.get(&name) {
+                let mut argv = vec![name.clone()];
+                argv.extend(arg_strs.iter().cloned());
+                check_structural(set, grammar, &name, &argv, cli, &mut diags);
                 hole_reqs = collect_hole_reqs(grammar, &argv);
-            }
-            _ => {
-                diags.push((
-                    cli.grammar_span,
-                    CliDiagnosticKind::UnknownGrammar {
-                        name: cli.grammar.clone(),
-                    },
-                ));
+            } else {
+                // The package is loaded but has no such grammar — a genuine typo.
+                diags.push((tool_span, CliDiagnosticKind::UnknownGrammar { name }));
             }
         }
+        // A coordinate whose package isn't loaded is a loading gap, not a user error;
+        // leave the invocation unchecked rather than reporting a phantom.
     }
 
     // Type each hole against the position it lands on.
@@ -159,19 +176,68 @@ pub(crate) fn infer_cli_literal(
     tc.nominal_ty("Tree")
 }
 
-/// Find the [`GrammarSet`] that `@name` resolves to: `name` must be a binding in
-/// scope brought in by importing a grammar package, and that package's set is
-/// recorded on the arena under the import spec.
-fn resolve_grammar_set<'a>(
-    arena: &'a VirArena,
-    name: &str,
-    scope: ScopeId,
-) -> Option<&'a GrammarSet> {
-    let DefTarget::Binding(bid) = scope::lookup_at(arena, name, scope, u32::MAX)? else {
+/// Const-evaluate the leading tool's `command` to a grammar coordinate
+/// `(package, name)` — statically, by tracing the tool's construction
+/// (`r[exec.validate.static]`). The command is provider-independent, so this works
+/// through `let`/field-access wherever the tool is statically determined; it returns
+/// `None` for a tool parameter or a runtime branch (no statically-known command).
+fn const_command_coord(tc: &TypeChecker, tool_expr: ExprId) -> Option<(String, String)> {
+    let fields = trace_record_fields(tc, tool_expr)?;
+    let command_expr = fields.iter().find(|f| f.name == "command")?.value;
+    grammar_coord_from_field(tc, command_expr)
+}
+
+/// Trace `expr` to the fields of the record it is built from: a record literal
+/// directly, or a `let`-binding whose initializer is one (following the binding to
+/// its `let` statement). Other shapes (a parameter, a call) are not const-records.
+fn trace_record_fields(tc: &TypeChecker, expr: ExprId) -> Option<Vec<RecordField>> {
+    match &tc.arena[expr].kind {
+        ExprKind::Record(rec) => Some(rec.fields.clone()),
+        ExprKind::NameRef(nr) => {
+            let DefTarget::Binding(bid) = nr.resolved? else {
+                return None;
+            };
+            let init = let_init_for_binding(tc, bid)?;
+            trace_record_fields(tc, init)
+        }
+        _ => None,
+    }
+}
+
+/// A grammar coordinate `(package, name)` from a `g.cc` field access on an imported
+/// grammar package: the receiver `g` resolves to an `import` binding whose origin
+/// carries the package spec, and the field name is the grammar's name.
+fn grammar_coord_from_field(tc: &TypeChecker, expr: ExprId) -> Option<(String, String)> {
+    let ExprKind::Field(f) = &tc.arena[expr].kind else {
         return None;
     };
-    let origin = arena[bid].import_origin.as_ref()?;
-    arena.grammars.get(&origin.spec)
+    let FieldKey::Name(grammar_name) = &f.field else {
+        return None;
+    };
+    let ExprKind::NameRef(nr) = &tc.arena[f.receiver].kind else {
+        return None;
+    };
+    let DefTarget::Binding(bid) = nr.resolved? else {
+        return None;
+    };
+    let spec = tc.arena[bid].import_origin.as_ref()?.spec.clone();
+    Some((spec, grammar_name.clone()))
+}
+
+/// The initializer expression of the `let` statement that binds `binding`.
+fn let_init_for_binding(tc: &TypeChecker, binding: BindingId) -> Option<ExprId> {
+    tc.arena.stmts.iter().find_map(|stmt| match &stmt.kind {
+        StmtKind::Let(let_) if let_binds_pattern(tc, let_.pattern, binding) => Some(let_.init),
+        _ => None,
+    })
+}
+
+/// Whether `pattern` is the simple binding pattern for `binding`.
+fn let_binds_pattern(tc: &TypeChecker, pattern: vx_ir::PatternId, binding: BindingId) -> bool {
+    matches!(
+        &tc.arena[pattern].kind,
+        vx_ir::pattern::PatternKind::Binding(bp) if bp.binding == binding
+    )
 }
 
 /// Structural checks on the static argv: unknown flag, flag illegal in the
