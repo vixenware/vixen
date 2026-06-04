@@ -75,3 +75,60 @@ impl vox::ConnectionAcceptor for RunnerAcceptor {
         }
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use vx_runtime::observe::{ExecCommand, ObserveClient, ObserveRequest};
+    use vx_runtime::strand::{ObserveOutcome, Outcome, ResourceId, Scheduler, dispatch_observe};
+
+    use super::{RunnerAcceptor, RunnerService};
+
+    async fn observe_client_for(service: RunnerService) -> ObserveClient {
+        let (client_link, server_link) = vox::memory_link_pair(64);
+        tokio::spawn(async move {
+            if let Ok(client) = vox::acceptor_on(server_link)
+                .on_connection(RunnerAcceptor::new(service))
+                .establish::<vox::NoopClient>()
+                .await
+            {
+                client.caller.closed().await;
+            }
+        });
+        vox::initiator_on(client_link, vox::TransportMode::Bare)
+            .establish::<ObserveClient>()
+            .await
+            .expect("establish runner-backed Observe client")
+    }
+
+    #[test]
+    fn strand_observe_reaches_runner_backed_service() {
+        let scheduler = Scheduler::new(&[1]);
+        let client = scheduler.block_on(observe_client_for(RunnerService::default()));
+        let client = scheduler.register_observe_client(client);
+        let strand = scheduler.spawn(ResourceId(0), move || {
+            let observed = dispatch_observe(
+                client,
+                ObserveRequest {
+                    observer: None,
+                    command: ExecCommand {
+                        program: "true".to_string(),
+                        args: Vec::new(),
+                    },
+                },
+            );
+            match observed.as_ref() {
+                ObserveOutcome::Poisoned(reason)
+                    if reason.contains("runner-backed observe has no CAS-VFS configured") =>
+                {
+                    Outcome::Clean
+                }
+                other => Outcome::Poisoned(format!(
+                    "expected runner-backed no-CAS-VFS poison, got {other:?}"
+                )),
+            }
+        });
+        scheduler.demand(strand);
+        scheduler.run();
+        assert_eq!(scheduler.outcome(strand), Some(Outcome::Clean));
+    }
+}

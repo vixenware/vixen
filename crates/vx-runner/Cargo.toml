@@ -23,5 +23,8 @@ vx-services.workspace = true
 vx-vfsd.workspace = true
 moire = { workspace = true }
 
+[dev-dependencies]
+tokio = { workspace = true }
+
 [lints]
 workspace = true

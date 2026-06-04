@@ -186,7 +186,10 @@ Latest focused verification:
 - `cargo nextest run -p vx-runtime --no-fail-fast`: 154 run, 154 passed,
   0 failed, 0 skipped.
 - `cargo nextest run -p vx-runtime-graph -p vx-runtime-core -p vx-runtime-driver -p vx-runtime -p vx-runner --no-fail-fast`:
-  173 run, 173 passed, 0 skipped.
+  174 run, 174 passed, 0 skipped.
+- `vx-runner::tests::strand_observe_reaches_runner_backed_service` drives a
+  `vx-runtime` strand against a runner-backed `Observe` service and reaches the
+  explicit no-CAS-VFS poison without importing `vx-runner` into `vx-runtime`.
 - `vx-runner` implements the runtime `Observe` service and routes it through
   `RunnerAcceptor`; `vx-daemon` advertises and routes `"Observe"` to its hosted
   `RunnerService` when a runner is configured. Runtime exec tests still use

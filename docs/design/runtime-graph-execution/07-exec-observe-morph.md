@@ -153,6 +153,19 @@ If a test cannot be moved in one slice, it must be marked as an honest missing
 production feature by failing through an explicit unsupported boundary, not by
 continuing to use the scratch process runner.
 
+Current checkpoint:
+
+- `vx-runner::tests::strand_observe_reaches_runner_backed_service` creates a
+  runner-backed `ObserveClient`, registers it with `vx-runtime`'s strand
+  scheduler, dispatches observe from a strand, and reaches the explicit
+  no-CAS-VFS poison from `RunnerService`.
+- This proves the strand/Observe seam can target runner code without adding a
+  `vx-runtime -> vx-runner` dependency.
+- It does not prove live CAS-VFS execution, output-root flushing, or producing
+  tree serving. The production output path is still incomplete.
+- The old runtime tests still use `local_observer()` until a live-VFS or
+  explicitly-unsupported runner-backed harness replaces them.
+
 ### Phase M4 - Remove scratch process execution from runtime production code
 
 Delete `ScratchObserveService`, `scratch_dir`, and `capture_outputs` from
@@ -231,10 +244,11 @@ Once exec runs through the runner-backed path:
 - `cargo nextest run -p vx-runtime -E 'binary(source_blind_guardrails) | binary(exec_on_strands) | binary(exec_output_tree)' --no-fail-fast`:
   14/14 passed.
 - `cargo nextest list -p vx-runner` selected
-  `sandbox::tests::seatbelt_confines_writes_to_the_output_root`.
-- `cargo nextest run -p vx-runner --no-fail-fast`: 1/1 passed.
+  `sandbox::tests::seatbelt_confines_writes_to_the_output_root` and
+  `tests::strand_observe_reaches_runner_backed_service`.
+- `cargo nextest run -p vx-runner --no-fail-fast`: 2/2 passed.
 - `cargo nextest run -p vx-runtime-graph -p vx-runtime-core -p vx-runtime-driver -p vx-runtime -p vx-runner --no-fail-fast`:
-  173/173 passed.
+  174/174 passed.
 - `cargo check -p vx-daemon -p vx-runner -p vx-runtime` passed after adding the
   daemon `"Observe"` route and removing a stale `Value::Closure` display arm.
 - `cargo nextest list -p vx-daemon` selected two service tests.
@@ -253,9 +267,8 @@ Finish M2/M3:
 
 1. Teach the runtime/orchestrator test harness to obtain an observe client from a
    runner-backed service instead of `local_observer()`.
-2. Repoint at least one observe-over-strands path to the runner-backed service.
-3. Wire or explicitly quarantine `Producing` output serving for the runner-backed
+2. Wire or explicitly quarantine `Producing` output serving for the runner-backed
    path.
-4. If output-tree serving from CAS is not complete in the slice, document the
+3. If output-tree serving from CAS is not complete in the slice, document the
    exact unsupported result and leave tests red rather than rebuilding scratch
    output walking in `vx-runtime`.

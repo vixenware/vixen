@@ -201,7 +201,12 @@ Latest verified red/green shape:
 - `cargo nextest run -p vx-runtime --no-fail-fast`: 154 run, 154 passed,
   0 failed, 0 skipped.
 - `cargo nextest run -p vx-runtime-graph -p vx-runtime-core -p vx-runtime-driver -p vx-runtime -p vx-runner --no-fail-fast`:
-  173 run, 173 passed, 0 skipped.
+  174 run, 174 passed, 0 skipped.
+- `vx-runner::tests::strand_observe_reaches_runner_backed_service` drives
+  `vx-runtime` strands against a runner-backed `Observe` client and reaches the
+  explicit no-CAS-VFS poison. This proves the strand/Observe seam can target the
+  runner service without a runtime-to-runner dependency; it does not prove live
+  CAS-VFS execution or output tree serving.
 - The forbidden-symbol scan over `crates/vx-runtime-core` and
   `crates/vx-runtime-driver` returns no matches.
 - The deleted tree-walker affordance scan over `crates/vx-runtime/src` returns
