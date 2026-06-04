@@ -38,10 +38,11 @@ engine. Commit `4c55d433` created the first structural wall:
 - `vx-runtime-driver`: external demand requests, memo table, and work loop.
 - `vx-runtime::graph`: compatibility re-export of `vx-runtime-graph`.
 
-The old `vx-runtime::eval` tree-walker still exists. The next implementation work
-is to remove it from public runtime paths and rebuild behavior through the graph
-driver. Many tests may go red during that cut. Red `UnsupportedNode` failures are
-acceptable. Green tests produced by expression interpretation are not.
+The old `vx-runtime::eval` tree-walker has been deleted from compiled runtime
+code. The next implementation work is to keep collapsing the temporary public
+`Value`/`Thunk` edge into graph node references and then implement the specified
+input-keyed cache. Green tests produced by expression interpretation are still
+invalid; there should be no expression interpreter left to produce them.
 
 ## Non-negotiables
 
@@ -55,8 +56,9 @@ acceptable. Green tests produced by expression interpretation are not.
 - Public runtime entry points must enter through graph driver APIs.
 - Unsupported graph shapes fail explicitly as graph unsupported errors. They do
   not fall back to source evaluation.
-- `KernelMode::Off` must not mean "tree-walker oracle." It should eventually mean
-  graph interpreter with JIT disabled, or disappear.
+- `KernelMode::Off` must not mean "tree-walker oracle." It is currently a
+  transitional graph-entry mode and should eventually disappear or become an
+  explicit graph-kernel policy.
 - The bomb detonates only when the graph driver demands its node.
 - Cache keys are input-keyed and computed before running; read-sets are
   post-run provenance, never key material.
@@ -121,14 +123,15 @@ Expected latest structural checkpoint:
   runtime metadata. Demand on that boundary selects an advertised provider,
   demands only provider attributes needed by the predicate, and memoizes the
   selected provider as graph output.
-- `vx-runtime::eval` still contains the legacy tree-walker code, now producing
-  dead-code warnings. It remains a demolition target; it must not become a
-  fallback or oracle.
+- The old `vx-runtime::eval` source tree-walker and `dispatch.rs` scalar planner
+  are deleted. The remaining `Thunk` type is an API-edge graph/native boundary
+  wrapper with only `Done`, `Native`, and `Forcing` states; it cannot capture
+  source expressions.
 
 Latest verified red/green shape:
 
 - `cargo check -p vx-runtime-graph -p vx-runtime-core -p vx-runtime-driver -p vx-runtime`
-  passes, with dead-code warnings from the old `dispatch.rs`/`eval.rs` code.
+  passes with no old-evaluator dead-code warnings.
 - `cargo nextest run -p vx-runtime -E 'binary(exec_on_strands)' --no-fail-fast`:
   3/3 passed, including `undemanded_exec_in_tuple_does_not_dispatch`.
 - `cargo nextest run -p vx-runtime -E 'binary(exec_output_tree)' --no-fail-fast`:
@@ -139,10 +142,10 @@ Latest verified red/green shape:
   1/1 passed.
 - `cargo nextest run -p vx-runtime -E 'binary(cc_probe) | binary(hello_world)' --no-fail-fast`:
   2/2 passed.
-- `cargo nextest run -p vx-runtime --no-fail-fast`: 135 run, 135 passed,
+- `cargo nextest run -p vx-runtime --no-fail-fast`: 134 run, 134 passed,
   0 failed, 0 skipped.
 - `cargo nextest run -p vx-runtime-graph -p vx-runtime-core -p vx-runtime-driver -p vx-runtime --no-fail-fast`:
-  142 run, 142 passed, 0 skipped.
+  141 run, 141 passed, 0 skipped.
 - The forbidden-symbol scan over `crates/vx-runtime-core` and
   `crates/vx-runtime-driver` returns no matches.
 

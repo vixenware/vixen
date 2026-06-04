@@ -128,7 +128,7 @@ fn test_kind(func: &vx_parser::FnDecl) -> Option<Expect> {
 
 /// A canonical key for an outcome, for cross-mode comparison. A clean scalar
 /// compares by value; **any** poison compares equal to any poison (the reason and
-/// span legitimately differ between the tree-walker and the kernel — what parity
+/// span may legitimately differ across graph kernel policies — what parity
 /// asserts is "same value, or both poison", not identical error text). A
 /// non-scalar clean result is rejected: tests should end in `assert_eq` (a Bool),
 /// not return a raw compound, so parity stays decidable.

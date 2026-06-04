@@ -7,10 +7,11 @@ tree-walker from public runtime execution paths.
 
 Vixen's runtime must be graph-driven. The analyzer can traverse VIR to construct
 graph nodes. The executor/driver/core must not traverse VIR or recover source
-expressions. The current repository has a structural start: graph/core/driver
-crates exist and are source-blind. The old runtime path in `vx-runtime::eval`
-still contains `eval_inner`, expression-capturing thunks, and source-shaped
-helper methods. That code must stop being the engine.
+expressions. The repository has graph/core/driver crates that are source-blind.
+The old runtime path in `vx-runtime::eval` previously contained `eval_inner`,
+expression-capturing thunks, and source-shaped helper methods. That code is now
+deleted from compiled runtime code; this document remains the checklist and
+evidence record for the cut.
 
 The goal of this phase is not to keep the suite green. The goal is to make every
 public execution path go through graph driver, with unsupported behavior reported
@@ -152,6 +153,8 @@ The demolition phase is complete when:
 - Any remaining red tests fail through graph-driver unsupported/boundary/poison
   errors.
 - There is no source-expression fallback path in public runtime execution.
+- `vx-runtime::eval` no longer defines `Evaluator`, `eval_inner`, `force_node`,
+  `ThunkState::Unforced`, or `Value::Closure`.
 
 ## Current demolition progress
 
@@ -198,10 +201,8 @@ rg -n 'vx[_-]ir|ExprKind|ExprId|StmtKind|PatternKind|PatternId|VirProgram|BodyId
 
 Observed result:
 
-- `cargo check` passes, with dead-code warnings from the old `dispatch.rs` and
-  `eval.rs` tree-walker. Those warnings are not acceptable as a final state; they
-  are current evidence that public production paths have moved away from that
-  code.
+- `cargo check` passes with no old-evaluator dead-code warnings. The old
+  evaluator and `dispatch.rs` scalar planner are deleted.
 - `host_probe` passes 3/3 through graph body execution. `host.which` and
   `host.exec` lower to typed `HostMethod` graph boundary nodes and materialize
   through the driver.
@@ -235,10 +236,12 @@ Current broad runtime result:
 cargo nextest run -p vx-runtime --no-fail-fast
 ```
 
-Observed result: 135 tests run, 135 passed, 0 failed, 0 skipped. The former red
+Observed result: 134 tests run, 134 passed, 0 failed, 0 skipped. The former red
 `cc_probe_builds_a_content_identified_ctoolchain` and
 `hello_world_compiles_through_a_requested_toolchain` cases are now green through
-graph execution.
+graph execution. The count dropped by one when the private tree-walker
+demand-path oracle test was removed instead of being kept as a false engine
+anchor.
 
 Graph poison source spans are threaded from graph node into `CorePoison` and then
 into public `Outcome`; `i6_eval_outcome_carries_the_source_span` passes through

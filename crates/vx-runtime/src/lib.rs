@@ -10,8 +10,7 @@
 //! (`KernelOp`/`lower`/`demand`) remain until the daemon cuts over.
 //!
 //! The pieces, demand-in to value-out:
-//! - [`analyze`] — VIR → the [`graph`] demand graph (with the expr/binding indices
-//!   [`dispatch`] needs).
+//! - [`analyze`] — VIR → the [`graph`] demand graph.
 //! - [`graph`] — the demand graph: lazy nodes, spans, bombs.
 //! - `graph_exec` — source entry → graph driver. This is the new public source
 //!   execution path while the rest of the runtime is being cut over.
@@ -20,8 +19,6 @@
 //! - [`kernel`] — the kernel IR + its interpreter, used by the JIT path.
 //! - [`jit`] — the native copy-and-patch JIT (native target only; the interpreter
 //!   is the path elsewhere).
-//! - [`dispatch`] — legacy scalar-kernel planning for the old evaluator while it
-//!   is being removed.
 //! - [`strand`] — the demand-driven scheduler (our own, **not** tokio tasks; the
 //!   I1–I7 contract on the strand-scheduler wiki page).
 //! - [`remote`] — cross-executor values as progressive per-part handles over vox.
@@ -34,7 +31,6 @@ pub mod ability;
 pub mod analyze;
 pub mod command;
 pub mod compile;
-pub mod dispatch;
 pub mod error_union;
 pub mod eval;
 pub mod graph;

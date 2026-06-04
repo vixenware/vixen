@@ -5,16 +5,18 @@ order for making pure Vixen programs run through graph execution.
 
 ## Complete task context
 
-The current `vx-runtime::eval` uses a payload enum (`Value::U64`, `Value::Struct`,
-`Value::Tuple`, etc.) plus thunks that can capture expressions. That shape invites
-internal forcing and expression fallback. The intended model is different: a
+The current public `vx-runtime::eval` API still exposes a payload enum
+(`Value::U64`, `Value::Struct`, `Value::Tuple`, etc.) plus API-edge thunks for
+graph/native boundary fields. Expression-capturing thunks have been deleted, but
+the public value shape is still transitional. The intended model is different: a
 value in the orchestrator is a node reference; resolved payload is per-node memo
 state. Cheap scalars live inside kernels or boundary materialization, not as
-arbitrary values passed through a tree-walker.
+arbitrary values passed through an interpreter.
 
-The graph/core/driver split exists. The tree-walker still exists. The work here
-is to migrate runtime currency to node references and make pure language features
-run through the graph driver.
+The graph/core/driver split exists and the source tree-walker is deleted. The
+work here is to finish migrating runtime currency to node references and make
+pure language features run through the graph driver without relying on public
+`Value` as an internal currency.
 
 ## Value model target
 
@@ -47,8 +49,9 @@ NodeOutput {
 
 Things to remove from execution:
 
-- expression-capturing thunks
-- `ThunkState::Unforced { expr, env, body }`
+- expression-capturing thunks (deleted in the demolition checkpoint)
+- `ThunkState::Unforced { expr, env, body }` (deleted in the demolition
+  checkpoint)
 - `Value` as the orchestrator's primary currency
 - helper methods that force a thunk to inspect it
 - source-shaped pattern matching in execution

@@ -904,8 +904,8 @@ impl Builder<'_> {
             // Explicit failure — poisons when reached. Its message is an input so
             // lowering can reconstruct it: a `fail e` carries `e`'s value to the
             // kernel through the value-pool side table (`lower::const_value` →
-            // `Kernel::value_pool`), so a caught `?` gets the same typed `err` on the
-            // kernel path as on the tree-walk.
+            // `Kernel::value_pool`), so a caught `?` gets the same typed `err` when
+            // the graph path lowers this region into a kernel.
             ExprKind::Fail(fx) => {
                 let inputs = match fx.message {
                     Some(m) => vec![self.walk(m)],

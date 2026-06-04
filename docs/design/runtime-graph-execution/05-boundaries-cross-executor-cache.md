@@ -152,8 +152,8 @@ Current progress:
 - `Run` is bound as a graph external struct argument. Demanding `run.ok` or
   `run.stream` materializes native boundary fields only when reached.
 - Graph observer results cross to `WireValue` through graph/native boundary
-  thunks. The old evaluator's `to_wire` method is not used by the public
-  observer path.
+  thunks. The old evaluator's `to_wire` method has been deleted; the public
+  observer path uses graph body execution plus API-edge graph/native crossing.
 - The executor-local `run.stream` value now matches the stdlib `Live` layout:
   `stdout`, `stderr`, then `out`. The stream fields poison explicitly if
   demanded before streaming lands; `out` crosses as `WireValue::Tree`.

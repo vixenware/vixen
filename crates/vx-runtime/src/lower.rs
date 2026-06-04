@@ -11,13 +11,14 @@
 //! parameters, scalar arithmetic/comparison/logic, `not`, `if`, and the poisons
 //! (`💣`/`fail`). Everything else — string/compound values, `++`/`|>`, calls (no
 //! inlining yet), boundaries, lazy-data *as a value* — returns [`NotLowerable`],
-//! and the evaluator falls back to tree-walking (`eval.rs`). It never silently
-//! miscompiles. The lowerable set grows example by example: the build fixtures
-//! bring boundaries, which become multi-region extraction (each boundary result
+//! and remains in the source-blind graph step loop. It never silently miscompiles.
+//! The lowerable set grows example by example: the build fixtures bring
+//! boundaries, which become multi-region extraction (each boundary result
 //! threaded in as a parameter).
 //!
-//! `eval.rs` is the **oracle**: for any pure no-arg body, `run(lower_root(g))`
-//! equals `eval::run` — the test at the bottom asserts exactly that.
+//! Graph execution is the oracle: for any pure no-arg body, `run(lower_root(g))`
+//! equals `eval::run` through the public graph entry — the test at the bottom
+//! asserts exactly that.
 
 use std::collections::HashSet;
 use std::rc::Rc;
@@ -27,7 +28,7 @@ use crate::graph::{BinKind, ConstValue, DemandGraph, KernelOp, Node, NodeId, Nod
 use crate::kernel::{Block, Kernel, Op, OpKind, Slot, Term, Word};
 
 /// Why a region wasn't lowered to the scalar kernel IR — the kind of node that
-/// stopped it. Not an error: the signal for the evaluator to tree-walk instead.
+/// stopped it. Not an error: the signal to keep this region in the graph step loop.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct NotLowerable(pub String);
 
@@ -447,10 +448,10 @@ mod tests {
         }
     }
 
-    /// `eval.rs` is the oracle: lowering must agree with the tree-walker on every
-    /// pure no-arg scalar body — same value, or both poison.
+    /// Graph execution is the oracle: lowering must agree with the public graph
+    /// entry on every pure no-arg scalar body — same value, or both poison.
     #[test]
-    fn lowering_agrees_with_the_evaluator() {
+    fn lowering_agrees_with_graph_execution() {
         let cases = [
             "fn f() -> U64 ( (1 + 2) * 3 )",
             "fn f() -> U64 ( 100 - 58 )",

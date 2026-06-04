@@ -20,8 +20,9 @@ mechanically visible.
 
 Current expected checkpoint: `vx-runtime-graph`, `vx-runtime-core`, and
 `vx-runtime-driver` exist. Core and driver have no VIR dependencies and have
-source/manifests tripwires. The old `vx-runtime::eval` still exists and must be
-cut off from public runtime paths in the demolition phase.
+source/manifests tripwires. The old `vx-runtime::eval` source tree-walker has
+been deleted; these guardrails remain to keep it from regrowing in execution
+crates or public runtime paths.
 
 ## Crate boundary
 

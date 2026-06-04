@@ -11,9 +11,9 @@ shape is graph driver plus graph core: external demand enters through sealed
 requests, driver schedules dependencies, core steps nodes and reports needs, and
 node outputs are memoized by the driver. Unsupported graph shapes fail explicitly.
 
-Current expected structural checkpoint: graph/core/driver crates exist and are
-committed as `4c55d433`. The old tree-walker still exists in `vx-runtime::eval`
-and must be removed from public execution paths.
+Current expected structural checkpoint: graph/core/driver crates exist, public
+runtime entries go through graph execution, and the old `vx-runtime::eval`
+source-expression tree-walker plus `dispatch.rs` scalar planner are deleted.
 
 ## After-compaction resume checklist
 
@@ -34,9 +34,9 @@ and must be removed from public execution paths.
    rg -n 'vx[_-]ir|ExprKind|ExprId|StmtKind|PatternKind|PatternId|VirProgram|BodyId|node_exprs|exprmap|eval_inner|eval_expr|walk_expr|legacy_eval|fn force|\.force\(' crates/vx-runtime-core crates/vx-runtime-driver
    ```
 
-5. Inspect `crates/vx-runtime/src/eval.rs` before assuming the old runtime path is
-   gone.
-6. Continue the earliest incomplete phase.
+5. Inspect `crates/vx-runtime/src/eval.rs` before assuming no API-edge thunk
+   cleanup remains.
+6. Continue the earliest incomplete phase, currently value-model/cache work.
 7. Commit the known state before switching tasks.
 
 ## Verification layers
@@ -98,8 +98,8 @@ rg -n 'run_in_mode|eval_body|eval_body_wire|eval_body_with_exec|eval_inner|Evalu
 Expected long-term:
 
 - public runtime entry points call graph driver
-- `eval_inner` is deleted or unreachable
-- tests do not instantiate old evaluator as engine
+- `eval_inner` is deleted
+- tests do not instantiate an old evaluator as engine
 
 Current partial state:
 
@@ -115,11 +115,14 @@ Current partial state:
   capability tests exercise graph body paths.
 - The `.vx` harness uses `run_in_mode`, so source-language tests now exercise the
   graph driver and fail explicitly where graph payloads are unsupported.
+- The old `Evaluator`, `eval_inner`, `force_node`, expression-capturing
+  `ThunkState::Unforced`, `Value::Closure`, and `dispatch.rs` scalar planner are
+  deleted from compiled runtime code.
 
 Latest focused verification:
 
 - `cargo check -p vx-runtime-graph -p vx-runtime-core -p vx-runtime-driver -p vx-runtime`
-  passes with dead-code warnings from old evaluator/dispatch code.
+  passes with no old-evaluator dead-code warnings.
 - `cargo nextest run -p vx-runtime -E 'binary(exec_on_strands)' --no-fail-fast`:
   3/3 passed.
 - `cargo nextest run -p vx-runtime -E 'binary(exec_output_tree)' --no-fail-fast`:
@@ -130,10 +133,10 @@ Latest focused verification:
   1/1 passed.
 - `cargo nextest run -p vx-runtime -E 'binary(cc_probe) | binary(hello_world)' --no-fail-fast`:
   2/2 passed.
-- `cargo nextest run -p vx-runtime --no-fail-fast`: 135 run, 135 passed,
+- `cargo nextest run -p vx-runtime --no-fail-fast`: 134 run, 134 passed,
   0 failed, 0 skipped.
 - `cargo nextest run -p vx-runtime-graph -p vx-runtime-core -p vx-runtime-driver -p vx-runtime --no-fail-fast`:
-  142 run, 142 passed, 0 skipped.
+  141 run, 141 passed, 0 skipped.
 - The forbidden-symbol scan over `vx-runtime-core` and `vx-runtime-driver`
   returns no matches.
 
