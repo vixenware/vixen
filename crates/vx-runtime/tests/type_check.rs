@@ -549,7 +549,7 @@ fn no_none_after_full_check() {
 
 #[test]
 fn interpolated_string_type() {
-    let (arena, tc, _) = check_source("`hello {42}`");
+    let (arena, tc, _) = check_source("\"hello ${42}\"");
     let id = find_expr(&arena, |k| {
         matches!(k, vx_ir::expr::ExprKind::InterpolatedString(_))
     })

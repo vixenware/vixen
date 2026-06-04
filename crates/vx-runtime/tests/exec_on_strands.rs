@@ -8,7 +8,7 @@
 //! against it, and **deep-forces the result into a value**); the strand resumes, and
 //! `exec(…)` evaluates to that value — reconstructed from the wire.
 //!
-//! So `exec(@[ ${cmd} ]) with { observer: (run) => run.ok }` returns the actual
+//! So `` exec(`$cmd`) with { observer: (run) => run.ok } `` returns the actual
 //! `Exit` struct that crossed back, not a placeholder. (`observe_on_strands` drives
 //! `dispatch_observe` directly; `observe`'s own test asserts the crossed `WireValue`.)
 
@@ -20,13 +20,13 @@ use vx_runtime::eval::{
 use vx_runtime::observe::local_observer;
 use vx_runtime::strand::{Outcome, ResourceId, Scheduler};
 
-/// Compile `exec(@[ ${cmd} ]) with { observer: (run) => run.ok }`, run it on a
+/// Compile `` exec(`$cmd`) with { observer: (run) => run.ok } ``, run it on a
 /// strand against a local executor running `binary`, and return the strand outcome.
 /// On success the observer's value is the `Exit` struct — verified worker-side (a
 /// `Value` can't cross the strand boundary), so a regression to `Unit` fails here.
 fn exec_outcome(binary: &str) -> Option<Outcome> {
     let fe = compile_source(
-        "fn t(cmd: Command) -> Exit ( exec(@[ ${cmd} ]) with { observer: (run) => run.ok } )",
+        "fn t(cmd: Command) -> Exit ( exec(`$cmd`) with { observer: (run) => run.ok } )",
         "t",
     )
     .expect("exec program compiles");
@@ -53,7 +53,7 @@ fn exec_outcome(binary: &str) -> Option<Outcome> {
     let binary = binary.to_string();
     let strand = s.spawn(ResourceId(0), move || {
         // A `cc`-grammar command whose binary is the real `true`/`false`. The
-        // `@[ ${cmd} ]` literal carries the grammar coordinate forward and applies no
+        // `` `$cmd` `` literal carries the grammar coordinate forward and applies no
         // args, so `exec` runs the bare `binary`.
         let cmd = command_value("@vixen/grammar-cc", "cc", &binary, vec![]);
         match eval_body_with_exec(&program, &env, entry, vec![cmd], KernelMode::Off, cid) {

@@ -43,7 +43,7 @@ fn metadata(path: String) -> Map[String, String];
 
 /// Run a sandboxed process on an executor and return the observer result.
 ///
-/// `exec` takes a **`Command`** — a `@[ ${cmd} args… ]` CLI literal whose leading
+/// `exec` takes a **`Command`** — a `` `${cmd} args…` `` invocation whose leading
 /// interpolated command carries the grammar (there is no grammar name and no
 /// separate grammar import; see the wiki: "The exec primitive" §4). The grammar
 /// classifies each argument's `Kind`, so the VFS mount set (inputs) and the

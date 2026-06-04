@@ -6,8 +6,6 @@
 //! in the introspectable tier (data / small expressions), so they lower here
 //! too; only a genuinely Turing-complete reducer would ever need the evaluator.
 
-pub mod check;
-
 use command_model::{
     Arity, Compat, EnvDecl, Flag, Grammar, GrammarSet, Kind, Mode, Operation, Policy, Positional,
     Spelling, ValueDomain,

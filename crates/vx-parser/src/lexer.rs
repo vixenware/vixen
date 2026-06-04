@@ -401,12 +401,10 @@ impl<'a> Lexer<'a> {
                 '\\' => {
                     chars.next();
                 }
-                '$' => {
-                    if matches!(chars.peek(), Some('{'))
-                        || matches!(chars.peek(), Some(&n) if is_ident_start(n))
-                    {
-                        return true;
-                    }
+                '$' if matches!(chars.peek(), Some('{'))
+                    || matches!(chars.peek(), Some(&n) if is_ident_start(n)) =>
+                {
+                    return true;
                 }
                 _ => {}
             }

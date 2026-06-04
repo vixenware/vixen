@@ -163,11 +163,11 @@ fn build(ws: Path, args: Array[String], env: Map[String, String]) -> Tree (
         cexec [
           cc,
           "-c",
-          `src/{file}`,
+          "src/${file}",
           "-o",
-          `out/{file}.o`,
+          "out/${file}.o",
           ..includes.map((include) => ["-I", include]).flatten().to_array(),
-          ..defines.map((define) => `-D${define}`),
+          ..defines.map((define) => "-D${define}"),
           ..common_cflags,
           ..flags,
         ] with {
@@ -178,14 +178,14 @@ fn build(ws: Path, args: Array[String], env: Map[String, String]) -> Tree (
   );
 
   fn static_archive(name: Path, objects: Tree) -> Tree (
-    cexec [ar, "rcs", `out/{name}`, ..objects]
+    cexec [ar, "rcs", "out/${name}", ..objects]
   );
 
   fn shared_library(name: Path, objects: Tree) with {
     link_flags: Array[ExecInput] = [],
     mounts: Map[Path, TreeEntry] = %{},
   } -> Tree (
-    cexec [cc, "-shared", "-o", `out/{name}`, ..objects, ..link_flags] with {
+    cexec [cc, "-shared", "-o", "out/${name}", ..objects, ..link_flags] with {
       mounts,
     }
   );

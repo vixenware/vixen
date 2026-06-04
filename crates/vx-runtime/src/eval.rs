@@ -1913,7 +1913,7 @@ mod tests {
         (binary.to_string(), args)
     }
 
-    /// The CLI-literal resolver, on the real eval path: `@[ ${cmd} -c x.c -o x.o ]`
+    /// The CLI-literal resolver, on the real eval path: `` `$cmd -c x.c -o x.o` ``
     /// forces the leading hole to a command record, carries its grammar **coordinate**
     /// forward, and applies the literal's args. The coordinate resolves on the arena,
     /// and the cc grammar classifies `x.c` as an input and the `-o` target an output.
@@ -1926,7 +1926,7 @@ mod tests {
         use vx_ir::item::ItemKind;
         use vx_ir::pattern::PatternKind;
 
-        let src = "fn t(cmd: Command) -> Command ( @[ ${cmd} -c x.c -o x.o ] )";
+        let src = "fn t(cmd: Command) -> Command ( `$cmd -c x.c -o x.o` )";
         let (mut program, tenv) = crate::analyze::front_end(src).expect("front-end");
         // The grammar set lives on the arena, keyed by import spec; the command value
         // carries only its coordinate.
@@ -2052,7 +2052,7 @@ mod tests {
     }
 
     /// The whole grammar-as-value path from real `.vx`: import a grammar, build a
-    /// command record `{ grammar: g.cc, binary: "cc" }`, and have `@[ ${cmd} … ]`
+    /// command record `{ grammar: g.cc, binary: "cc" }`, and have `` `$cmd …` ``
     /// carry its coordinate forward — no test-injected value, no grammar name in the
     /// syntax. The set the import loaded onto the arena then classifies the argv.
     #[test]
@@ -2068,7 +2068,7 @@ mod tests {
         let src = "fn t() ( \
                    let g = import \"@vixen/grammar-cc\"; \
                    let cmd = { grammar: g.cc, binary: \"cc\" }; \
-                   @[ ${cmd} -c x.c -o x.o ] )";
+                   `$cmd -c x.c -o x.o` )";
         let fe = semantic_front_end(src, &resolver, &mut NoopObserver).expect("front-end");
 
         let primary = *fe.program.source_units.first().unwrap();

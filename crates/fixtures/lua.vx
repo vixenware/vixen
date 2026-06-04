@@ -55,7 +55,7 @@ fn build(ws: Path, args: Array[String], env: Map[String, String]) -> Tree (
   let common = {
     observer: (proc, vfs) => (
       if proc.exit_code != 0 (
-        fail `process failed`
+        fail "process failed"
       ) else (
         vfs.subtree("out")
       )
@@ -70,8 +70,8 @@ fn build(ws: Path, args: Array[String], env: Map[String, String]) -> Tree (
       "-c",
       ..cflags,
       "-o",
-      `out/obj/{file}.o`,
-      `src/{file}`,
+      "out/obj/${file}.o",
+      "src/${file}",
     ] with {
       mounts: %{ "src" => src_tree },
     }

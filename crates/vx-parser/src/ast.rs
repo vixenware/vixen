@@ -575,6 +575,8 @@ impl AstNode for Stmt {
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
 pub enum StringPart {
     Text(SyntaxToken),
+    /// A `$name` shorthand hole — the `INTERP_VAR` token, interpolating the binding.
+    Var(SyntaxToken),
     Interpolation(StringInterpolation),
 }
 
@@ -1351,6 +1353,9 @@ impl InterpolatedStringExpr {
                 }
                 NodeOrToken::Token(token) if token.kind() == SyntaxKind::INTERP_TEXT => {
                     Some(StringPart::Text(token))
+                }
+                NodeOrToken::Token(token) if token.kind() == SyntaxKind::INTERP_VAR => {
+                    Some(StringPart::Var(token))
                 }
                 _ => None,
             })

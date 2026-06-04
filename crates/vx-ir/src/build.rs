@@ -2384,6 +2384,25 @@ impl VirBuilder {
             .parts()
             .map(|part| match part {
                 vx_parser::StringPart::Text(tok) => StringPart::Text(tok.text().to_string()),
+                // A `$name` shorthand hole lowers to a `NameRef`, the same as the
+                // `${name}` form — a real sub-expression that resolves + type-checks.
+                vx_parser::StringPart::Var(tok) => {
+                    let text = tok.text();
+                    let name = text.strip_prefix('$').unwrap_or(text).to_string();
+                    let name_span = self.token_span(&tok);
+                    let nr = self.arena.alloc_expr(Expr {
+                        span: name_span,
+                        body: self.current_body(),
+                        scope: self.current_scope(),
+                        kind: ExprKind::NameRef(VirNameRefExpr {
+                            name,
+                            name_span,
+                            resolved: None,
+                        }),
+                        ty: None,
+                    });
+                    StringPart::Expr(nr)
+                }
                 vx_parser::StringPart::Interpolation(interp) => {
                     if let Some(expr) = interp.expr() {
                         StringPart::Expr(self.build_expr(&expr))
