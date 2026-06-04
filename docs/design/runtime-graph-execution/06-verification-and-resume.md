@@ -119,6 +119,10 @@ Current partial state:
 - Direct and closure call nodes carry a code identity and share a per-run driver
   call memo when all argument and capture outputs are already resolved before the
   body runs. Unresolved arguments or captures are not demanded to build the key.
+- Source-derived direct and closure identities are content-sensitive local body
+  hashes (`fn:<name>:blake3:<hash>` or `closure:blake3:<hash>`), not the earlier
+  `fn:name` / source-span placeholders. The final canonical transitive/SCC
+  function identity is still open and blocks persistent function-output L2.
 - Observer execution calls graph body execution and graph/native wire crossing.
 - Mirror, host, intrinsic, observer, observe-on-strands, backtick exec,
   exec-output-tree, remote-tree body, import/toolchain, and requested-toolchain
@@ -165,10 +169,10 @@ Latest focused verification:
   call memo reuse, resolved-argument disambiguation, closure capture memo reuse,
   and proof that unresolved arguments or captures are not demanded to build a
   call memo key.
-- `cargo nextest run -p vx-runtime --no-fail-fast`: 147 run, 147 passed,
+- `cargo nextest run -p vx-runtime --no-fail-fast`: 149 run, 149 passed,
   0 failed, 0 skipped.
 - `cargo nextest run -p vx-runtime-graph -p vx-runtime-core -p vx-runtime-driver -p vx-runtime --no-fail-fast`:
-  163 run, 163 passed, 0 skipped.
+  165 run, 165 passed, 0 skipped.
 - The forbidden-symbol scan over `vx-runtime-core` and `vx-runtime-driver`
   returns no matches.
 - The deleted tree-walker affordance scan over `vx-runtime/src` returns no

@@ -19,14 +19,15 @@ use std::collections::HashMap;
 
 use vx_ir::build::VirProgram;
 use vx_ir::expr::{
-    ArrayElement, BinOp, CliLiteralExpr, ExprKind, FieldKey, LitKind, MapElement, PrefixOp,
-    StringPart,
+    ArrayElement, BinOp, CliLiteralExpr, ExprKind, FieldKey, LitKind, MapElement, MapKey,
+    PartialArg, PrefixOp, StringPart, UpdateField,
 };
 use vx_ir::ids::{BindingId, BodyId, ExprId, ItemId, PatternId};
 use vx_ir::item::ItemKind;
 use vx_ir::pattern::PatternKind;
 use vx_ir::scope::DefTarget;
 use vx_ir::stmt::StmtKind;
+use vx_ir::type_ref::TypeRefKind;
 use vx_types::{Ty, TypeDef, TypeEnv, TypeId};
 
 use crate::graph::{
@@ -320,7 +321,11 @@ impl Builder<'_> {
             ItemKind::Function(function) => Some(CallableTemplate {
                 body: function.body,
                 captures: HashMap::new(),
-                code_identity: Some(format!("fn:{}", name.name)),
+                code_identity: Some(function_code_identity(
+                    self.program,
+                    &name.name,
+                    function.body,
+                )),
             }),
             _ => None,
         }
@@ -971,7 +976,7 @@ impl Builder<'_> {
                     "(…)=>".into(),
                     span,
                     captures,
-                    Some(format!("closure:{}:{}", span.start, span.end)),
+                    Some(closure_code_identity(self.program, body)),
                 )
             }
 
@@ -1192,7 +1197,7 @@ impl Builder<'_> {
                             n.name.clone(),
                             span,
                             HashMap::new(),
-                            Some(format!("fn:{}", n.name)),
+                            Some(function_code_identity(prog, &n.name, function.body)),
                         ),
                         _ => self.emit(NodeKind::Unresolved, n.name.clone(), span, vec![]),
                     },
@@ -1378,6 +1383,883 @@ fn sorted_capture_nodes(captures: &HashMap<BindingId, NodeId>) -> Vec<NodeId> {
     captures.into_iter().map(|(_, node)| node).collect()
 }
 
+fn function_code_identity(program: &VirProgram, name: &str, body: BodyId) -> String {
+    format!("fn:{name}:{}", body_code_hash(program, body))
+}
+
+fn closure_code_identity(program: &VirProgram, body: BodyId) -> String {
+    format!("closure:{}", body_code_hash(program, body))
+}
+
+fn body_code_hash(program: &VirProgram, body: BodyId) -> String {
+    let material = CodeIdentityMaterial {
+        schema: "vixen.body-code-identity.v1".into(),
+        body: body_identity_node(program, body),
+    };
+    let json = facet_json::to_string(&material).expect("code identity material is serializable");
+    format!("blake3:{}", blake3::hash(json.as_bytes()).to_hex())
+}
+
+#[derive(facet::Facet, Debug)]
+struct CodeIdentityMaterial {
+    schema: String,
+    body: IdentityNode,
+}
+
+#[derive(facet::Facet, Debug)]
+struct IdentityNode {
+    tag: String,
+    data: Vec<IdentityField>,
+    children: Vec<IdentityNode>,
+}
+
+#[derive(facet::Facet, Debug)]
+struct IdentityField {
+    name: String,
+    value: String,
+}
+
+fn inode(
+    tag: impl Into<String>,
+    data: Vec<IdentityField>,
+    children: Vec<IdentityNode>,
+) -> IdentityNode {
+    IdentityNode {
+        tag: tag.into(),
+        data,
+        children,
+    }
+}
+
+fn idata(name: impl Into<String>, value: impl Into<String>) -> IdentityField {
+    IdentityField {
+        name: name.into(),
+        value: value.into(),
+    }
+}
+
+fn body_identity_node(program: &VirProgram, body: BodyId) -> IdentityNode {
+    let body = &program.arena[body];
+    let mut children: Vec<IdentityNode> = body
+        .params
+        .iter()
+        .map(|param| {
+            let mut children = vec![pattern_identity_node(program, param.pattern)];
+            if let Some(ty) = param.ty {
+                children.push(type_ref_identity_node(program, ty));
+            }
+            inode(
+                "param",
+                vec![
+                    idata("keyword", param.is_keyword.to_string()),
+                    idata("has_default", param.has_default.to_string()),
+                ],
+                children,
+            )
+        })
+        .collect();
+    if let Some(ret) = body.return_ty {
+        children.push(inode(
+            "return_ty",
+            Vec::new(),
+            vec![type_ref_identity_node(program, ret)],
+        ));
+    }
+    children.push(inode(
+        "root",
+        Vec::new(),
+        vec![expr_identity_node(program, body.root_expr)],
+    ));
+    inode("body", Vec::new(), children)
+}
+
+fn expr_identity_node(program: &VirProgram, expr: ExprId) -> IdentityNode {
+    match &program.arena[expr].kind {
+        ExprKind::Literal(lit) => inode("literal", lit_identity_data(&lit.value), Vec::new()),
+        ExprKind::NameRef(name) => inode(
+            "name_ref",
+            vec![
+                idata("name", name.name.clone()),
+                idata(
+                    "resolved",
+                    def_target_identity(program, name.resolved).unwrap_or_else(|| "none".into()),
+                ),
+            ],
+            Vec::new(),
+        ),
+        ExprKind::Block(block) => {
+            let mut children: Vec<IdentityNode> = block
+                .stmts
+                .iter()
+                .map(|&stmt| stmt_identity_node(program, stmt))
+                .collect();
+            children.push(optional_expr_identity(program, "tail", block.tail));
+            inode(
+                "block",
+                vec![idata("synthetic", block.synthetic.to_string())],
+                children,
+            )
+        }
+        ExprKind::Closure(closure) => inode(
+            "closure",
+            Vec::new(),
+            vec![body_identity_node(program, closure.body)],
+        ),
+        ExprKind::Tuple(tuple) => inode(
+            "tuple",
+            Vec::new(),
+            tuple
+                .elements
+                .iter()
+                .map(|&expr| expr_identity_node(program, expr))
+                .collect(),
+        ),
+        ExprKind::Array(array) => inode(
+            "array",
+            Vec::new(),
+            array
+                .elements
+                .iter()
+                .map(|element| match element {
+                    ArrayElement::Expr(expr) => inode(
+                        "array_expr",
+                        Vec::new(),
+                        vec![expr_identity_node(program, *expr)],
+                    ),
+                    ArrayElement::Spread(expr) => inode(
+                        "array_spread",
+                        Vec::new(),
+                        vec![expr_identity_node(program, *expr)],
+                    ),
+                })
+                .collect(),
+        ),
+        ExprKind::Record(record) => inode(
+            "record",
+            Vec::new(),
+            record
+                .fields
+                .iter()
+                .map(|field| {
+                    inode(
+                        "record_field",
+                        vec![idata("name", field.name.clone())],
+                        vec![expr_identity_node(program, field.value)],
+                    )
+                })
+                .collect(),
+        ),
+        ExprKind::Map(map) => inode(
+            "map",
+            Vec::new(),
+            map.entries
+                .iter()
+                .map(|element| match element {
+                    MapElement::Entry(entry) => {
+                        let mut children = vec![map_key_identity_node(program, &entry.key)];
+                        children.push(expr_identity_node(program, entry.value));
+                        inode("map_entry", Vec::new(), children)
+                    }
+                    MapElement::Spread(expr) => inode(
+                        "map_spread",
+                        Vec::new(),
+                        vec![expr_identity_node(program, *expr)],
+                    ),
+                })
+                .collect(),
+        ),
+        ExprKind::StructLiteral(strukt) => inode(
+            "struct_literal",
+            vec![
+                idata("name", strukt.name.clone()),
+                idata("variant", strukt.variant.clone().unwrap_or_default()),
+                idata(
+                    "resolved",
+                    strukt
+                        .resolved
+                        .map(|item| program.arena.item_name(item).to_string())
+                        .unwrap_or_else(|| "none".into()),
+                ),
+            ],
+            strukt
+                .fields
+                .iter()
+                .map(|field| {
+                    inode(
+                        "struct_field",
+                        vec![idata("name", field.name.clone())],
+                        vec![expr_identity_node(program, field.value)],
+                    )
+                })
+                .collect(),
+        ),
+        ExprKind::Call(call) => {
+            let mut children = vec![inode(
+                "callee",
+                Vec::new(),
+                vec![expr_identity_node(program, call.callee)],
+            )];
+            children.extend(call.args.iter().map(|arg| {
+                inode(
+                    "arg",
+                    Vec::new(),
+                    vec![expr_identity_node(program, arg.expr)],
+                )
+            }));
+            children.extend(call.type_args.iter().map(|&ty| {
+                inode(
+                    "type_arg",
+                    Vec::new(),
+                    vec![type_ref_identity_node(program, ty)],
+                )
+            }));
+            inode("call", Vec::new(), children)
+        }
+        ExprKind::Where(w) => inode(
+            "where",
+            vec![idata("constraint", w.is_constraint.to_string())],
+            vec![
+                expr_identity_node(program, w.callee),
+                expr_identity_node(program, w.keywords),
+            ],
+        ),
+        ExprKind::Invoke(invoke) => inode(
+            "invoke",
+            Vec::new(),
+            vec![expr_identity_node(program, invoke.callee)],
+        ),
+        ExprKind::PartialApp(partial) => {
+            let mut children = vec![inode(
+                "callee",
+                Vec::new(),
+                vec![expr_identity_node(program, partial.callee)],
+            )];
+            children.extend(partial.args.iter().map(|arg| match arg {
+                PartialArg::Expr(expr) => inode(
+                    "partial_expr",
+                    Vec::new(),
+                    vec![expr_identity_node(program, *expr)],
+                ),
+                PartialArg::Placeholder { .. } => {
+                    inode("partial_placeholder", Vec::new(), Vec::new())
+                }
+            }));
+            inode("partial_app", Vec::new(), children)
+        }
+        ExprKind::Index(index) => inode(
+            "index",
+            Vec::new(),
+            vec![
+                expr_identity_node(program, index.receiver),
+                expr_identity_node(program, index.index),
+            ],
+        ),
+        ExprKind::Field(field) => inode(
+            "field",
+            vec![idata("field", field_key_identity(&field.field))],
+            vec![expr_identity_node(program, field.receiver)],
+        ),
+        ExprKind::If(if_expr) => inode(
+            "if",
+            Vec::new(),
+            vec![
+                inode(
+                    "condition",
+                    Vec::new(),
+                    vec![expr_identity_node(program, if_expr.condition)],
+                ),
+                inode(
+                    "then",
+                    Vec::new(),
+                    vec![expr_identity_node(program, if_expr.then_branch)],
+                ),
+                optional_expr_identity(program, "else", if_expr.else_branch),
+            ],
+        ),
+        ExprKind::Match(match_expr) => {
+            let mut children = vec![inode(
+                "scrutinee",
+                Vec::new(),
+                vec![expr_identity_node(program, match_expr.scrutinee)],
+            )];
+            children.extend(match_expr.arms.iter().map(|arm| {
+                inode(
+                    "arm",
+                    Vec::new(),
+                    vec![
+                        pattern_identity_node(program, arm.pattern),
+                        expr_identity_node(program, arm.body),
+                    ],
+                )
+            }));
+            inode("match", Vec::new(), children)
+        }
+        ExprKind::Binary(binary) => inode(
+            "binary",
+            vec![idata("op", format!("{:?}", binary.op))],
+            vec![
+                expr_identity_node(program, binary.lhs),
+                expr_identity_node(program, binary.rhs),
+            ],
+        ),
+        ExprKind::Prefix(prefix) => inode(
+            "prefix",
+            vec![idata("op", format!("{:?}", prefix.op))],
+            vec![expr_identity_node(program, prefix.operand)],
+        ),
+        ExprKind::Range(range) => inode(
+            "range",
+            vec![idata("inclusive", range.inclusive.to_string())],
+            vec![
+                optional_expr_identity(program, "start", range.start),
+                optional_expr_identity(program, "end", range.end),
+            ],
+        ),
+        ExprKind::TypeOp(type_op) => inode(
+            "type_op",
+            vec![idata("op", format!("{:?}", type_op.op))],
+            vec![
+                expr_identity_node(program, type_op.expr),
+                type_ref_identity_node(program, type_op.ty),
+            ],
+        ),
+        ExprKind::With(with) => {
+            let mut children = vec![inode(
+                "receiver",
+                Vec::new(),
+                vec![expr_identity_node(program, with.receiver)],
+            )];
+            children.extend(
+                with.updates
+                    .iter()
+                    .map(|update| update_field_identity_node(program, update)),
+            );
+            inode("with", Vec::new(), children)
+        }
+        ExprKind::Fallible(fallible) => inode(
+            "fallible",
+            Vec::new(),
+            vec![expr_identity_node(program, fallible.expr)],
+        ),
+        ExprKind::InterpolatedString(s) => inode(
+            "interpolated_string",
+            Vec::new(),
+            s.parts
+                .iter()
+                .map(|part| string_part_identity_node(program, part))
+                .collect(),
+        ),
+        ExprKind::Import(import) => inode(
+            "import",
+            vec![
+                idata("path", import.path.clone()),
+                idata("resolved", import.resolved_source.is_some().to_string()),
+            ],
+            Vec::new(),
+        ),
+        ExprKind::CliLiteral(cli) => inode(
+            "cli_literal",
+            vec![idata("grammar", cli.grammar.clone())],
+            cli.args
+                .iter()
+                .map(|arg| {
+                    inode(
+                        "cli_arg",
+                        Vec::new(),
+                        arg.pieces
+                            .iter()
+                            .map(|part| string_part_identity_node(program, part))
+                            .collect(),
+                    )
+                })
+                .collect(),
+        ),
+        ExprKind::Fail(fail) => inode(
+            "fail",
+            Vec::new(),
+            vec![optional_expr_identity(program, "message", fail.message)],
+        ),
+        ExprKind::Coerce(coerce) => inode(
+            "coerce",
+            vec![idata(
+                "function",
+                program.arena.item_name(coerce.coerce_fn).to_string(),
+            )],
+            vec![expr_identity_node(program, coerce.expr)],
+        ),
+        ExprKind::Bomb => inode("bomb", Vec::new(), Vec::new()),
+        ExprKind::Error => inode("error", Vec::new(), Vec::new()),
+    }
+}
+
+fn stmt_identity_node(program: &VirProgram, stmt: vx_ir::ids::StmtId) -> IdentityNode {
+    match &program.arena[stmt].kind {
+        StmtKind::Let(let_stmt) => {
+            let mut children = vec![pattern_identity_node(program, let_stmt.pattern)];
+            if let Some(ty) = let_stmt.ty {
+                children.push(type_ref_identity_node(program, ty));
+            }
+            children.push(expr_identity_node(program, let_stmt.init));
+            inode("let", Vec::new(), children)
+        }
+        StmtKind::Assign(assign) => inode(
+            "assign",
+            vec![
+                idata("name", assign.name.clone()),
+                idata(
+                    "resolved",
+                    assign
+                        .resolved
+                        .map(|binding| program.arena[binding].name.clone())
+                        .unwrap_or_else(|| "none".into()),
+                ),
+            ],
+            vec![expr_identity_node(program, assign.value)],
+        ),
+        StmtKind::CompoundUpdate(update) => inode(
+            "compound_update",
+            vec![
+                idata("name", update.name.clone()),
+                idata(
+                    "resolved",
+                    update
+                        .resolved
+                        .map(|binding| program.arena[binding].name.clone())
+                        .unwrap_or_else(|| "none".into()),
+                ),
+            ],
+            update
+                .updates
+                .iter()
+                .map(|field| update_field_identity_node(program, field))
+                .collect(),
+        ),
+        StmtKind::FieldAssign(assign) => inode(
+            "field_assign",
+            vec![
+                idata("base", assign.base.clone()),
+                idata("path", assign.field_path.join(".")),
+                idata(
+                    "resolved",
+                    assign
+                        .resolved
+                        .map(|binding| program.arena[binding].name.clone())
+                        .unwrap_or_else(|| "none".into()),
+                ),
+            ],
+            vec![expr_identity_node(program, assign.value)],
+        ),
+        StmtKind::Return(ret) => inode(
+            "return",
+            Vec::new(),
+            vec![optional_expr_identity(program, "value", ret.value)],
+        ),
+        StmtKind::Item(item) => inode(
+            "item_stmt",
+            Vec::new(),
+            vec![item_identity_node(program, *item)],
+        ),
+        StmtKind::Expr(expr) => inode(
+            "expr_stmt",
+            Vec::new(),
+            vec![expr_identity_node(program, *expr)],
+        ),
+        StmtKind::Error => inode("stmt_error", Vec::new(), Vec::new()),
+    }
+}
+
+fn pattern_identity_node(program: &VirProgram, pattern: PatternId) -> IdentityNode {
+    match &program.arena[pattern].kind {
+        PatternKind::Binding(binding) => inode(
+            "binding_pattern",
+            vec![idata("name", binding.name.clone())],
+            Vec::new(),
+        ),
+        PatternKind::Wildcard => inode("wildcard_pattern", Vec::new(), Vec::new()),
+        PatternKind::Literal(lit) => {
+            inode("literal_pattern", lit_identity_data(&lit.value), Vec::new())
+        }
+        PatternKind::Tuple(tuple) => inode(
+            "tuple_pattern",
+            Vec::new(),
+            tuple
+                .elements
+                .iter()
+                .map(|&pat| pattern_identity_node(program, pat))
+                .collect(),
+        ),
+        PatternKind::Struct(strukt) => inode(
+            "struct_pattern",
+            Vec::new(),
+            strukt
+                .fields
+                .iter()
+                .map(|field| {
+                    inode(
+                        "struct_pattern_field",
+                        vec![idata("name", field.name.clone())],
+                        vec![pattern_identity_node(program, field.pattern)],
+                    )
+                })
+                .collect(),
+        ),
+        PatternKind::Array(array) => inode(
+            "array_pattern",
+            Vec::new(),
+            array
+                .elements
+                .iter()
+                .map(|&pat| pattern_identity_node(program, pat))
+                .collect(),
+        ),
+        PatternKind::ArrayRest(rest) => inode(
+            "array_rest_pattern",
+            vec![idata("name", rest.name.clone().unwrap_or_default())],
+            Vec::new(),
+        ),
+        PatternKind::Unit => inode("unit_pattern", Vec::new(), Vec::new()),
+        PatternKind::Variant(variant) => inode(
+            "variant_pattern",
+            vec![
+                idata("name", variant.name.clone()),
+                idata(
+                    "resolved",
+                    variant
+                        .resolved
+                        .map(|item| program.arena.item_name(item).to_string())
+                        .unwrap_or_else(|| "none".into()),
+                ),
+            ],
+            variant
+                .fields
+                .as_ref()
+                .map(|fields| {
+                    fields
+                        .iter()
+                        .map(|field| {
+                            inode(
+                                "variant_pattern_field",
+                                vec![idata("name", field.name.clone())],
+                                vec![pattern_identity_node(program, field.pattern)],
+                            )
+                        })
+                        .collect()
+                })
+                .unwrap_or_default(),
+        ),
+        PatternKind::At(at) => inode(
+            "at_pattern",
+            vec![idata("name", at.name.clone())],
+            vec![pattern_identity_node(program, at.inner)],
+        ),
+        PatternKind::Or(or) => inode(
+            "or_pattern",
+            Vec::new(),
+            or.alternatives
+                .iter()
+                .map(|&pat| pattern_identity_node(program, pat))
+                .collect(),
+        ),
+        PatternKind::Error => inode("pattern_error", Vec::new(), Vec::new()),
+    }
+}
+
+fn item_identity_node(program: &VirProgram, item: ItemId) -> IdentityNode {
+    match &program.arena[item].kind {
+        ItemKind::Function(function) => inode(
+            "function_item",
+            vec![
+                idata("name", function.name.clone()),
+                idata("type_params", function.type_params.join(",")),
+            ],
+            vec![
+                body_identity_node(program, function.body),
+                attributes_identity_node(program, &function.attributes),
+            ],
+        ),
+        ItemKind::Struct(strukt) => inode(
+            "struct_item",
+            vec![
+                idata("name", strukt.name.clone()),
+                idata("type_params", strukt.type_params.join(",")),
+            ],
+            strukt
+                .fields
+                .iter()
+                .map(|field| field_decl_identity_node(program, field))
+                .chain(std::iter::once(attributes_identity_node(
+                    program,
+                    &strukt.attributes,
+                )))
+                .collect(),
+        ),
+        ItemKind::Enum(enum_item) => inode(
+            "enum_item",
+            vec![
+                idata("name", enum_item.name.clone()),
+                idata("type_params", enum_item.type_params.join(",")),
+            ],
+            enum_item
+                .variants
+                .iter()
+                .map(|variant| {
+                    inode(
+                        "variant_decl",
+                        vec![idata("name", variant.name.clone())],
+                        variant
+                            .fields
+                            .iter()
+                            .map(|field| field_decl_identity_node(program, field))
+                            .chain(std::iter::once(attributes_identity_node(
+                                program,
+                                &variant.attributes,
+                            )))
+                            .collect(),
+                    )
+                })
+                .chain(std::iter::once(attributes_identity_node(
+                    program,
+                    &enum_item.attributes,
+                )))
+                .collect(),
+        ),
+        ItemKind::Newtype(newtype) => {
+            let mut children = Vec::new();
+            if let Some(ty) = newtype.inner_ty {
+                children.push(type_ref_identity_node(program, ty));
+            }
+            children.push(attributes_identity_node(program, &newtype.attributes));
+            inode(
+                "newtype_item",
+                vec![
+                    idata("name", newtype.name.clone()),
+                    idata("type_params", newtype.type_params.join(",")),
+                ],
+                children,
+            )
+        }
+        ItemKind::TypeAlias(alias) => {
+            let mut children = Vec::new();
+            if let Some(ty) = alias.aliased_ty {
+                children.push(type_ref_identity_node(program, ty));
+            }
+            children.push(attributes_identity_node(program, &alias.attributes));
+            inode(
+                "type_alias_item",
+                vec![
+                    idata("name", alias.name.clone()),
+                    idata("type_params", alias.type_params.join(",")),
+                ],
+                children,
+            )
+        }
+        ItemKind::Namespace(namespace) => inode(
+            "namespace_item",
+            vec![
+                idata("name", namespace.name.clone()),
+                idata("type_params", namespace.type_params.join(",")),
+            ],
+            namespace
+                .items
+                .iter()
+                .map(|&item| item_identity_node(program, item))
+                .chain(std::iter::once(attributes_identity_node(
+                    program,
+                    &namespace.attributes,
+                )))
+                .collect(),
+        ),
+        ItemKind::Error => inode("item_error", Vec::new(), Vec::new()),
+    }
+}
+
+fn field_decl_identity_node(program: &VirProgram, field: &vx_ir::item::FieldDecl) -> IdentityNode {
+    let mut children = Vec::new();
+    if let Some(ty) = field.ty {
+        children.push(type_ref_identity_node(program, ty));
+    }
+    if let Some(default) = field.default_value {
+        children.push(expr_identity_node(program, default));
+    }
+    children.push(attributes_identity_node(program, &field.attributes));
+    inode(
+        "field_decl",
+        vec![
+            idata("name", field.name.clone()),
+            idata("has_default", field.has_default.to_string()),
+        ],
+        children,
+    )
+}
+
+fn attributes_identity_node(
+    program: &VirProgram,
+    attrs: &[vx_ir::item::Attribute],
+) -> IdentityNode {
+    inode(
+        "attributes",
+        Vec::new(),
+        attrs
+            .iter()
+            .map(|attr| {
+                inode(
+                    "attribute",
+                    Vec::new(),
+                    attr.entries
+                        .iter()
+                        .map(|entry| {
+                            inode(
+                                "attribute_entry",
+                                vec![idata("key", entry.key.clone())],
+                                entry
+                                    .value
+                                    .map(|value| vec![expr_identity_node(program, value)])
+                                    .unwrap_or_default(),
+                            )
+                        })
+                        .collect(),
+                )
+            })
+            .collect(),
+    )
+}
+
+fn type_ref_identity_node(program: &VirProgram, ty: vx_ir::ids::TypeRefId) -> IdentityNode {
+    match &program.arena[ty].kind {
+        TypeRefKind::Path(path) => inode(
+            "type_path",
+            vec![idata("segments", path.segments.join("."))],
+            path.type_args
+                .iter()
+                .map(|&ty| type_ref_identity_node(program, ty))
+                .collect(),
+        ),
+        TypeRefKind::Function(function) => {
+            let mut children: Vec<IdentityNode> = function
+                .params
+                .iter()
+                .map(|&ty| type_ref_identity_node(program, ty))
+                .collect();
+            children.push(inode(
+                "return",
+                Vec::new(),
+                vec![type_ref_identity_node(program, function.ret)],
+            ));
+            inode("type_function", Vec::new(), children)
+        }
+        TypeRefKind::Tuple(tuple) => inode(
+            "type_tuple",
+            Vec::new(),
+            tuple
+                .elements
+                .iter()
+                .map(|&ty| type_ref_identity_node(program, ty))
+                .collect(),
+        ),
+        TypeRefKind::Sum(sum) => inode(
+            "type_sum",
+            Vec::new(),
+            sum.alternatives
+                .iter()
+                .map(|&ty| type_ref_identity_node(program, ty))
+                .collect(),
+        ),
+        TypeRefKind::Error => inode("type_error", Vec::new(), Vec::new()),
+    }
+}
+
+fn update_field_identity_node(program: &VirProgram, field: &UpdateField) -> IdentityNode {
+    match field {
+        UpdateField::Set { path, value, .. } => inode(
+            "update_set",
+            vec![idata("path", path.join("."))],
+            vec![expr_identity_node(program, *value)],
+        ),
+        UpdateField::Nested { path, updates, .. } => inode(
+            "update_nested",
+            vec![idata("path", path.join("."))],
+            updates
+                .iter()
+                .map(|update| update_field_identity_node(program, update))
+                .collect(),
+        ),
+    }
+}
+
+fn string_part_identity_node(program: &VirProgram, part: &StringPart) -> IdentityNode {
+    match part {
+        StringPart::Text(text) => {
+            inode("string_text", vec![idata("text", text.clone())], Vec::new())
+        }
+        StringPart::Expr(expr) => inode(
+            "string_expr",
+            Vec::new(),
+            vec![expr_identity_node(program, *expr)],
+        ),
+    }
+}
+
+fn map_key_identity_node(program: &VirProgram, key: &MapKey) -> IdentityNode {
+    match key {
+        MapKey::Expr(expr) => inode(
+            "map_key_expr",
+            Vec::new(),
+            vec![expr_identity_node(program, *expr)],
+        ),
+        MapKey::Name { name, .. } => inode(
+            "map_key_name",
+            vec![idata("name", name.clone())],
+            Vec::new(),
+        ),
+    }
+}
+
+fn optional_expr_identity(
+    program: &VirProgram,
+    tag: impl Into<String>,
+    expr: Option<ExprId>,
+) -> IdentityNode {
+    match expr {
+        Some(expr) => inode(
+            tag,
+            vec![idata("present", "true")],
+            vec![expr_identity_node(program, expr)],
+        ),
+        None => inode(tag, vec![idata("present", "false")], Vec::new()),
+    }
+}
+
+fn lit_identity_data(lit: &LitKind) -> Vec<IdentityField> {
+    match lit {
+        LitKind::Int { raw } => vec![idata("kind", "int"), idata("raw", raw.clone())],
+        LitKind::Float { raw } => vec![idata("kind", "float"), idata("raw", raw.clone())],
+        LitKind::String { raw } => vec![idata("kind", "string"), idata("raw", raw.clone())],
+        LitKind::Bool(value) => vec![idata("kind", "bool"), idata("value", value.to_string())],
+    }
+}
+
+fn field_key_identity(field: &FieldKey) -> String {
+    match field {
+        FieldKey::Name(name) => name.clone(),
+        FieldKey::Index(index) => index.to_string(),
+    }
+}
+
+fn def_target_identity(program: &VirProgram, target: Option<DefTarget>) -> Option<String> {
+    target.map(|target| match target {
+        DefTarget::Binding(binding) => format!("binding:{}", program.arena[binding].name.as_str()),
+        DefTarget::Item(item) => format!("item:{}", program.arena.item_name(item)),
+        DefTarget::Variant {
+            enum_item,
+            variant_index,
+        } => format!(
+            "variant:{}:{}",
+            program.arena.item_name(enum_item),
+            variant_index
+        ),
+    })
+}
+
 /// Map a front-end [`BinOp`] to the graph's [`KernelOp`]. Scalar operators get a
 /// [`BinKind`]; `++` (concat) and `|>` (pipe) aren't scalar, so they're
 /// [`KernelOp::Opaque`] — the lowering will decline them, the evaluator handles
@@ -1448,6 +2330,28 @@ mod tests {
         }
     }
 
+    struct CallIdentity<'a> {
+        value: &'a str,
+        arg_count: u32,
+        capture_count: u32,
+    }
+
+    fn call_code_identity<'a>(g: &'a DemandGraph, name: &str) -> Option<CallIdentity<'a>> {
+        g.nodes.iter().find_map(|node| match &node.kind {
+            NodeKind::Call {
+                function,
+                code_identity: Some(code_identity),
+                arg_count,
+                capture_count,
+            } if function == name => Some(CallIdentity {
+                value: code_identity.as_str(),
+                arg_count: *arg_count,
+                capture_count: *capture_count,
+            }),
+            _ => None,
+        })
+    }
+
     #[test]
     fn direct_tuple_projection() {
         bombs_unreached(&analyze_source("fn d() -> U64 ( (42, 💣)[0] )", "d").unwrap());
@@ -1506,20 +2410,47 @@ mod tests {
     #[test]
     fn direct_function_call_leaves_a_graph_call_node() {
         let g = analyze_source("fn id(x: U64) -> U64 ( x ) fn d() -> U64 ( id(42) )", "d").unwrap();
+        let code_identity = call_code_identity(&g, "id").expect("id call identity");
+        assert_eq!(code_identity.arg_count, 1);
+        assert_eq!(code_identity.capture_count, 0);
         assert!(
-            g.nodes.iter().any(|node| {
-                matches!(
-                    &node.kind,
-                    NodeKind::Call {
-                        function,
-                        code_identity: Some(code_identity),
-                        arg_count: 1,
-                        capture_count: 0
-                    } if function == "id" && code_identity == "fn:id"
-                )
-            }),
+            code_identity.value.starts_with("fn:id:blake3:"),
             "direct calls must leave a source-blind Call node for runtime memo hooks: {:?}",
             g.nodes
+        );
+    }
+
+    #[test]
+    fn direct_function_call_identity_changes_with_body_content() {
+        let first =
+            analyze_source("fn id(x: U64) -> U64 ( x ) fn d() -> U64 ( id(42) )", "d").unwrap();
+        let second = analyze_source(
+            "fn id(x: U64) -> U64 ( x + 0 ) fn d() -> U64 ( id(42) )",
+            "d",
+        )
+        .unwrap();
+        let first_identity = call_code_identity(&first, "id").expect("first id identity");
+        let second_identity = call_code_identity(&second, "id").expect("second id identity");
+        assert_ne!(
+            first_identity.value, second_identity.value,
+            "code identity must change when the function body changes"
+        );
+    }
+
+    #[test]
+    fn direct_function_call_identity_ignores_formatting() {
+        let compact =
+            analyze_source("fn id(x: U64) -> U64 ( x ) fn d() -> U64 ( id(42) )", "d").unwrap();
+        let spaced = analyze_source(
+            "fn id(x: U64) -> U64 (\n    x\n)\n\nfn d() -> U64 (\n    id(42)\n)",
+            "d",
+        )
+        .unwrap();
+        let compact_identity = call_code_identity(&compact, "id").expect("compact id identity");
+        let spaced_identity = call_code_identity(&spaced, "id").expect("spaced id identity");
+        assert_eq!(
+            compact_identity.value, spaced_identity.value,
+            "code identity material must not include source spans"
         );
     }
 
@@ -1534,18 +2465,11 @@ mod tests {
     #[test]
     fn closure_call_leaves_a_graph_call_node() {
         let g = analyze_source("fn d() -> U64 ( let f = (x) => x + 1; f(41) )", "d").unwrap();
+        let code_identity = call_code_identity(&g, "f").expect("f call identity");
+        assert_eq!(code_identity.arg_count, 1);
+        assert_eq!(code_identity.capture_count, 0);
         assert!(
-            g.nodes.iter().any(|node| {
-                matches!(
-                    &node.kind,
-                    NodeKind::Call {
-                        function,
-                        code_identity: Some(code_identity),
-                        arg_count: 1,
-                        capture_count: 0
-                    } if function == "f" && code_identity.starts_with("closure:")
-                )
-            }),
+            code_identity.value.starts_with("closure:blake3:"),
             "closure calls must leave a source-blind Call node for runtime memo hooks: {:?}",
             g.nodes
         );

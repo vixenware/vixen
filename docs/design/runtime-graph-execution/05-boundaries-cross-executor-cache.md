@@ -271,6 +271,11 @@ Current progress:
   argument and capture outputs that are already resolved before the body runs.
 - Unresolved argument or capture nodes deliberately do not participate: the
   driver skips the call memo key instead of demanding them.
+- Source-derived direct and closure identities are structured local body hashes
+  (`fn:<name>:blake3:<hash>` and `closure:blake3:<hash>`), so body edits no
+  longer alias under `fn:name` or closure source spans. This remains weaker than
+  the spec's canonical transitive/SCC code identity and is not yet sufficient for
+  persistent function-output L2.
 
 ### 3. Boundary L1 input-keyed cache
 
@@ -306,8 +311,9 @@ Current progress:
   part of a backtick exec key.
 - Function calls now leave a source-blind graph `Call` node around the expanded
   body root. Direct and closure calls have a per-run memo keyed by code identity
-  plus already-ready argument and capture outputs; unresolved arguments and
-  captures are not demanded to build keys.
+  plus already-ready argument and capture outputs; source-derived identities are
+  content-sensitive local body hashes, and unresolved arguments and captures are
+  not demanded to build keys.
 - Backtick exec has a local in-process exact L1 for successful observer values
   and output-tree handles. The current key covers the command coordinate, binary
   string, pre-run executable content fingerprint, declared tool fingerprint when
@@ -400,7 +406,9 @@ Newly green boundary payloads:
 - Per-run node memo is explicit driver state for in-progress, ready, and poisoned
   nodes.
 - Direct and closure calls have a local per-run call memo keyed by code identity
-  plus already-ready argument and capture outputs.
+  plus already-ready argument and capture outputs. Source-derived code identity
+  is currently a structured local body hash, not the final transitive/SCC
+  identity needed before function outputs can persist to L2.
 - `host.exec` has a local input-keyed L1 cache.
 - `host.exec` has an opt-in local disk L2 for successful results.
 - Backtick exec has a local exact L1 cache for the current materialized request
@@ -409,8 +417,9 @@ Newly green boundary payloads:
 - Backtick exec has an opt-in local disk L2 for successful observer data values.
 
 No memo path demands unresolved arguments or captures to build a key. CAS-backed
-L2 storage, output-tree-handle persistence, function-output persistence, and
-read-set provenance have not been implemented in this checkpoint.
+L2 storage, output-tree-handle persistence, final transitive function code
+identity, function-output persistence, and read-set provenance have not been
+implemented in this checkpoint.
 
 ## Acceptance criteria
 
