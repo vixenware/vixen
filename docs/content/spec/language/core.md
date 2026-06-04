@@ -768,7 +768,7 @@ weight = 20
 >
 > ```vixen
 > get_blob(my_blob) |> _.utf8()
-> value |> cexec [ranlib, _]
+> archive |> `$ranlib ${_}`
 > ```
 
 ### Update expressions
@@ -790,6 +790,28 @@ weight = 20
 > ```
 >
 > Paths can be arbitrarily deep: `config with { a.b.c: value }`.
+
+### Constraint expressions
+
+> r[expr.where]
+>
+> `Type where (constraint)` requests an **ability** — `Type` is a capability
+> spec and `constraint` is a boolean **constraint expression** (see
+> `r[ability.request]` in the build standard library for the runtime model).
+> The free identifiers in `constraint` desugar to **fields of `Type`**, not to
+> bindings in scope:
+>
+> ```vixen
+> RustToolchain where (version >= 1.91 && targets contains "aarch64-apple-darwin")
+> ```
+>
+> Here `version` and `targets` resolve to fields of `RustToolchain`. The body
+> uses the comparison, logical, membership, and semver-match operators
+> (`==`, `!=`, `<`, `<=`, `>`, `>=`, `^=`, `~=`, `&&`, `||`, `contains`, `in`),
+> and is extracted as a **structured predicate** — not run as ordinary code —
+> so the orchestrator can index advertised providers by it. The result is a
+> **predicate-identified value**: a thunk whose identity is the constraint,
+> bound to a concrete provider lazily, when something downstream demands it.
 
 ### Duplicate resolution
 
