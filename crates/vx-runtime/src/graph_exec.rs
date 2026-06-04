@@ -13,7 +13,7 @@ pub(crate) fn run_source(source: &str, entry: &str) -> Result<(Outcome, u64), St
         Ok(output) => Outcome::Clean(value_from_output(output)?),
         Err(DriverError::Poison(poison)) => Outcome::Poisoned {
             reason: poison.reason,
-            span: None,
+            span: poison.span,
         },
         Err(DriverError::Unsupported(unsupported)) => {
             return Err(format!(

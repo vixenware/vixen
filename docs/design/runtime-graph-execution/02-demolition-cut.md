@@ -199,8 +199,8 @@ Current broad-suite result:
 cargo nextest run -p vx-runtime-graph -p vx-runtime-core -p vx-runtime-driver -p vx-runtime --no-fail-fast
 ```
 
-Observed result after assertion kernel payloads: 141 tests run, 128 passed, 13
-failed, 0 skipped.
+Observed result after assertion kernel payloads and graph poison span threading:
+141 tests run, 129 passed, 12 failed, 0 skipped.
 
 The red surface is honest graph-driver fallout from the source-entry cut:
 
@@ -208,7 +208,6 @@ The red surface is honest graph-driver fallout from the source-entry cut:
 - `eval::tests::bool_returning_kernel_wraps_as_bool`
 - `eval::tests::conditionally_used_param_declines_dispatch`
 - `eval::tests::block_tail_sub_expression_dispatches_with_a_param`
-- `eval::tests::i6_eval_outcome_carries_the_source_span`
 - `eval::tests::non_scalar_args_fall_back_to_tree_walk`
 - `eval::tests::scalar_function_dispatches_and_computes`
 - `eval::tests::sub_expression_dispatches_not_just_whole_bodies`
@@ -224,9 +223,9 @@ Several failures still stop with explicit messages like:
 graph unsupported at node NodeId(...): opaque kernel is not executable in core
 ```
 
-`i6_eval_outcome_carries_the_source_span` is a graph poison-context gap: divide
-by zero now poisons through core, but the source span has not yet been threaded
-from graph node spans into `Outcome`.
+Graph poison source spans are now threaded from the graph node into `CorePoison`
+and then into the public `Outcome`; `i6_eval_outcome_carries_the_source_span`
+passes through graph driver.
 
 The `.vx` language harness now runs through graph driver for source entries.
 After `KernelOp::Assert` and `KernelOp::AssertEq`, it fails 43 of 68

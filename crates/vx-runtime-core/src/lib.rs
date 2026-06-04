@@ -6,7 +6,7 @@
 
 use std::collections::HashMap;
 
-use vx_runtime_graph::{BinKind, DemandGraph, KernelOp, NodeId, NodeKind};
+use vx_runtime_graph::{BinKind, DemandGraph, KernelOp, NodeId, NodeKind, Span};
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum NodeOutput {
@@ -21,6 +21,7 @@ pub enum NodeOutput {
 pub struct CorePoison {
     pub node: NodeId,
     pub reason: String,
+    pub span: Option<Span>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -79,11 +80,8 @@ pub fn step(graph: &DemandGraph, node: NodeId, inputs: ReadyInputs<'_>) -> Step 
         NodeKind::Project { index } => project(graph, node, n.inputs.as_slice(), *index, inputs),
         NodeKind::Kernel(op) => kernel(graph, node, n.inputs.as_slice(), *op, inputs),
         NodeKind::Boundary => Step::Boundary(BoundaryRequest { node }),
-        NodeKind::Bomb => Step::Poison(CorePoison {
-            node,
-            reason: "bomb demanded".to_string(),
-        }),
-        NodeKind::Fail => fail(node, n.inputs.as_slice(), inputs),
+        NodeKind::Bomb => poisoned(graph, node, "bomb demanded"),
+        NodeKind::Fail => fail(graph, node, n.inputs.as_slice(), inputs),
         NodeKind::Unresolved => unsupported(node, format!("unresolved node `{}`", n.label)),
     }
 }
@@ -123,7 +121,7 @@ fn project(
 }
 
 fn kernel(
-    _graph: &DemandGraph,
+    graph: &DemandGraph,
     node: NodeId,
     raw_inputs: &[NodeId],
     op: KernelOp,
@@ -138,7 +136,13 @@ fn kernel(
             if !missing.is_empty() {
                 return Step::Need(NeedSet::Nodes(missing));
             }
-            bin_kernel(node, bin, inputs.get(a).unwrap(), inputs.get(b).unwrap())
+            bin_kernel(
+                graph,
+                node,
+                bin,
+                inputs.get(a).unwrap(),
+                inputs.get(b).unwrap(),
+            )
         }
         KernelOp::Not => {
             let Some(&a) = raw_inputs.first() else {
@@ -184,10 +188,7 @@ fn kernel(
             };
             match output {
                 NodeOutput::Bool(true) => Step::Ready(NodeOutput::Unit),
-                NodeOutput::Bool(false) => Step::Poison(CorePoison {
-                    node,
-                    reason: "assertion failed".to_string(),
-                }),
+                NodeOutput::Bool(false) => poisoned(graph, node, "assertion failed"),
                 _ => unsupported(node, "assert kernel needs bool input"),
             }
         }
@@ -202,37 +203,31 @@ fn kernel(
             if inputs.get(a).unwrap() == inputs.get(b).unwrap() {
                 Step::Ready(NodeOutput::Unit)
             } else {
-                Step::Poison(CorePoison {
-                    node,
-                    reason: "assert_eq failed".to_string(),
-                })
+                poisoned(graph, node, "assert_eq failed")
             }
         }
         KernelOp::Opaque => unsupported(node, "opaque kernel is not executable in core"),
     }
 }
 
-fn fail(node: NodeId, raw_inputs: &[NodeId], inputs: ReadyInputs<'_>) -> Step {
+fn fail(graph: &DemandGraph, node: NodeId, raw_inputs: &[NodeId], inputs: ReadyInputs<'_>) -> Step {
     let Some(&message_node) = raw_inputs.first() else {
-        return Step::Poison(CorePoison {
-            node,
-            reason: "fail".to_string(),
-        });
+        return poisoned(graph, node, "fail");
     };
     match inputs.get(message_node) {
-        Some(NodeOutput::Str(reason)) => Step::Poison(CorePoison {
-            node,
-            reason: reason.clone(),
-        }),
-        Some(_) => Step::Poison(CorePoison {
-            node,
-            reason: "fail".to_string(),
-        }),
+        Some(NodeOutput::Str(reason)) => poisoned(graph, node, reason.clone()),
+        Some(_) => poisoned(graph, node, "fail"),
         None => Step::Need(NeedSet::Nodes(vec![message_node])),
     }
 }
 
-fn bin_kernel(node: NodeId, bin: BinKind, a: &NodeOutput, b: &NodeOutput) -> Step {
+fn bin_kernel(
+    graph: &DemandGraph,
+    node: NodeId,
+    bin: BinKind,
+    a: &NodeOutput,
+    b: &NodeOutput,
+) -> Step {
     use BinKind::*;
     match bin {
         Add | Sub | Mul | Div | Rem | Lt | Le | Gt | Ge => {
@@ -243,15 +238,9 @@ fn bin_kernel(node: NodeId, bin: BinKind, a: &NodeOutput, b: &NodeOutput) -> Ste
                 Add => Step::Ready(NodeOutput::U64(a.wrapping_add(*b))),
                 Sub => Step::Ready(NodeOutput::U64(a.wrapping_sub(*b))),
                 Mul => Step::Ready(NodeOutput::U64(a.wrapping_mul(*b))),
-                Div if *b == 0 => Step::Poison(CorePoison {
-                    node,
-                    reason: "divide by zero".to_string(),
-                }),
+                Div if *b == 0 => poisoned(graph, node, "divide by zero"),
                 Div => Step::Ready(NodeOutput::U64(a / b)),
-                Rem if *b == 0 => Step::Poison(CorePoison {
-                    node,
-                    reason: "remainder by zero".to_string(),
-                }),
+                Rem if *b == 0 => poisoned(graph, node, "remainder by zero"),
                 Rem => Step::Ready(NodeOutput::U64(a % b)),
                 Lt => Step::Ready(NodeOutput::Bool(a < b)),
                 Le => Step::Ready(NodeOutput::Bool(a <= b)),
@@ -275,6 +264,14 @@ fn bin_kernel(node: NodeId, bin: BinKind, a: &NodeOutput, b: &NodeOutput) -> Ste
             }))
         }
     }
+}
+
+fn poisoned(graph: &DemandGraph, node: NodeId, reason: impl Into<String>) -> Step {
+    Step::Poison(CorePoison {
+        node,
+        reason: reason.into(),
+        span: graph.nodes.get(node.0 as usize).and_then(|node| node.span),
+    })
 }
 
 fn two_inputs(_node: NodeId, raw_inputs: &[NodeId]) -> Option<(NodeId, NodeId)> {

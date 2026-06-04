@@ -263,6 +263,12 @@ Implement:
 - `?` as graph-level catch/reify
 - `Failure { err, context }` values as graph outputs
 
+Current implemented slice:
+
+- `CorePoison` carries the demanded graph node and the node's source span.
+- `graph_exec` converts that span into the public `Outcome::Poisoned` while the
+  old public value/outcome API is still being used as a temporary adapter.
+
 Vixen tests targeted:
 
 - `failures.vx`
@@ -293,4 +299,3 @@ graph driver with no expression fallback:
 
 If a test is still red, it must be red as graph unsupported/poison behavior, not
 because the old evaluator was invoked.
-
