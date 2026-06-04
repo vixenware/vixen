@@ -102,15 +102,15 @@ Expected latest structural checkpoint:
   edges are retained for graph identity and future call-memo keys without making
   the call boundary strict.
 - Direct and closure call nodes now carry a code identity and share a per-run
-  driver call memo when all argument and capture outputs are already resolved
-  before the body runs. Unresolved arguments or captures are not demanded to
-  build the key.
+  driver call memo keyed by function entry, code identity, and already-resolved
+  argument/capture outputs before the body runs. Unresolved arguments or
+  captures are not demanded to build the key.
 - Source-derived direct and closure code identities are now content-sensitive
-  hashes (`fn:<name>:blake3:<hash>` or `closure:blake3:<hash>`) computed from
-  structured VIR body material plus transitive identities for referenced
-  function items. Mutually recursive SCCs still do not share a single canonical
-  component identity, so persistent function-output L2 must wait for that
-  stronger identity.
+  hashes (`blake3:<hash>` for functions, `closure:blake3:<hash>` for closures)
+  computed from structured VIR body material plus transitive identities for
+  referenced function items. Mutually recursive functions share one SCC
+  fingerprint; the `Call` node's `function` field disambiguates the entry point
+  for memo keys.
 - `vx-runtime-driver` reports graph kernel executions for the transitional
   public dispatch counter.
 - `graph_exec` can expose graph-root lazy arrays/tuples/variants and caught
@@ -182,10 +182,10 @@ Latest verified red/green shape:
   call memo reuse, resolved-argument disambiguation, closure capture memo reuse,
   and proof that unresolved arguments or captures are not demanded to build a
   call memo key.
-- `cargo nextest run -p vx-runtime --no-fail-fast`: 151 run, 151 passed,
+- `cargo nextest run -p vx-runtime --no-fail-fast`: 152 run, 152 passed,
   0 failed, 0 skipped.
 - `cargo nextest run -p vx-runtime-graph -p vx-runtime-core -p vx-runtime-driver -p vx-runtime --no-fail-fast`:
-  167 run, 167 passed, 0 skipped.
+  169 run, 169 passed, 0 skipped.
 - The forbidden-symbol scan over `crates/vx-runtime-core` and
   `crates/vx-runtime-driver` returns no matches.
 - The deleted tree-walker affordance scan over `crates/vx-runtime/src` returns

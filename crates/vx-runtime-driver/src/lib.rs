@@ -114,6 +114,7 @@ enum NodeMemo {
 
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
 struct CallMemoKey {
+    function: String,
     code_identity: String,
     args: Vec<NodeOutput>,
 }
@@ -284,10 +285,10 @@ impl Driver {
         let graph_node = self.graph.nodes.get(node.0 as usize)?;
         match &graph_node.kind {
             NodeKind::Call {
+                function,
                 code_identity: Some(code_identity),
                 arg_count,
                 capture_count,
-                ..
             } => {
                 let key_nodes = graph_node.inputs.get(1..)?;
                 let key_input_count = *arg_count as usize + *capture_count as usize;
@@ -299,6 +300,7 @@ impl Driver {
                     args.push(self.output(input)?.clone());
                 }
                 Some(CallMemoKey {
+                    function: function.clone(),
                     code_identity: code_identity.clone(),
                     args,
                 })
@@ -659,6 +661,80 @@ mod tests {
         );
         assert_eq!(driver.memo_state(NodeId(4)), Some(MemoState::Ready));
         assert_eq!(driver.memo_state(NodeId(5)), Some(MemoState::Ready));
+    }
+
+    #[test]
+    fn function_entry_disambiguates_shared_code_identity() {
+        let graph = DemandGraph {
+            nodes: vec![
+                Node {
+                    id: NodeId(0),
+                    kind: NodeKind::Const(vx_runtime_graph::ConstValue::U64(9)),
+                    span: None,
+                    label: "shared arg".to_string(),
+                    ty: "U64".to_string(),
+                    inputs: Vec::new(),
+                },
+                Node {
+                    id: NodeId(1),
+                    kind: NodeKind::Const(vx_runtime_graph::ConstValue::U64(42)),
+                    span: None,
+                    label: "left body".to_string(),
+                    ty: "U64".to_string(),
+                    inputs: Vec::new(),
+                },
+                Node {
+                    id: NodeId(2),
+                    kind: NodeKind::Call {
+                        function: "left".to_string(),
+                        code_identity: Some("component:shared".to_string()),
+                        arg_count: 1,
+                        capture_count: 0,
+                    },
+                    span: None,
+                    label: "left(arg)".to_string(),
+                    ty: "U64".to_string(),
+                    inputs: vec![NodeId(1), NodeId(0)],
+                },
+                Node {
+                    id: NodeId(3),
+                    kind: NodeKind::Const(vx_runtime_graph::ConstValue::U64(7)),
+                    span: None,
+                    label: "right body".to_string(),
+                    ty: "U64".to_string(),
+                    inputs: Vec::new(),
+                },
+                Node {
+                    id: NodeId(4),
+                    kind: NodeKind::Call {
+                        function: "right".to_string(),
+                        code_identity: Some("component:shared".to_string()),
+                        arg_count: 1,
+                        capture_count: 0,
+                    },
+                    span: None,
+                    label: "right(arg)".to_string(),
+                    ty: "U64".to_string(),
+                    inputs: vec![NodeId(3), NodeId(0)],
+                },
+            ],
+            root: NodeId(2),
+        };
+        let mut driver = Driver::new(graph);
+        assert_eq!(
+            driver.drive(DemandRequest::test_probe(NodeId(0))),
+            Ok(NodeOutput::U64(9))
+        );
+        assert_eq!(
+            driver.drive(DemandRequest::root(NodeId(2))),
+            Ok(NodeOutput::U64(42))
+        );
+        assert_eq!(
+            driver.drive(DemandRequest::root(NodeId(4))),
+            Ok(NodeOutput::U64(7))
+        );
+        assert_eq!(driver.memo_state(NodeId(3)), Some(MemoState::Ready));
+        assert_eq!(driver.memo_state(NodeId(4)), Some(MemoState::Ready));
     }
 
     #[test]

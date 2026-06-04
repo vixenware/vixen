@@ -15,7 +15,7 @@
 //! `let pair = (42, 💣); pair[0]` and `Pair { a: 42, b: 💣 }.a` turn inside out
 //! correctly from real source — the bomb stays unreached for the right reason.
 
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 
 use vx_ir::build::VirProgram;
 use vx_ir::expr::{
@@ -1383,8 +1383,8 @@ fn sorted_capture_nodes(captures: &HashMap<BindingId, NodeId>) -> Vec<NodeId> {
     captures.into_iter().map(|(_, node)| node).collect()
 }
 
-fn function_code_identity(program: &VirProgram, name: &str, body: BodyId) -> String {
-    format!("fn:{name}:{}", body_code_hash(program, body))
+fn function_code_identity(program: &VirProgram, _name: &str, body: BodyId) -> String {
+    body_code_hash(program, body)
 }
 
 fn closure_code_identity(program: &VirProgram, body: BodyId) -> String {
@@ -1399,31 +1399,135 @@ fn closure_code_identity(program: &VirProgram, body: BodyId) -> String {
 }
 
 fn body_code_hash(program: &VirProgram, body: BodyId) -> String {
-    let mut active = Vec::new();
-    body_code_hash_inner(program, body, &mut active)
+    let mut graph = FunctionCodeIdentityGraph::new(program);
+    graph.body_code_hash(body)
 }
 
-fn body_code_hash_inner(program: &VirProgram, body: BodyId, active: &mut Vec<BodyId>) -> String {
-    if active.contains(&body) {
-        return body_local_code_hash(program, body);
+struct FunctionCodeIdentityGraph<'a> {
+    program: &'a VirProgram,
+    functions: HashMap<BodyId, String>,
+    edges: HashMap<BodyId, Vec<(String, BodyId)>>,
+    sccs: Vec<Vec<BodyId>>,
+    body_to_scc: HashMap<BodyId, usize>,
+    scc_hashes: HashMap<usize, String>,
+}
+
+impl<'a> FunctionCodeIdentityGraph<'a> {
+    fn new(program: &'a VirProgram) -> Self {
+        let mut functions = HashMap::new();
+        for item in &program.arena.items {
+            if let ItemKind::Function(function) = &item.kind {
+                functions.insert(function.body, function.name.clone());
+            }
+        }
+
+        let edges: HashMap<BodyId, Vec<(String, BodyId)>> = functions
+            .keys()
+            .copied()
+            .map(|body| {
+                let refs = function_refs_in_body_and_child_closures(program, body)
+                    .into_iter()
+                    .filter(|(_, callee)| functions.contains_key(callee))
+                    .collect();
+                (body, refs)
+            })
+            .collect();
+        let sccs = strongly_connected_function_bodies(&functions, &edges);
+        let body_to_scc = sccs
+            .iter()
+            .enumerate()
+            .flat_map(|(scc, bodies)| bodies.iter().map(move |&body| (body, scc)))
+            .collect();
+
+        Self {
+            program,
+            functions,
+            edges,
+            sccs,
+            body_to_scc,
+            scc_hashes: HashMap::new(),
+        }
     }
 
-    active.push(body);
-    let callees = function_refs_in_body_and_child_closures(program, body)
-        .into_iter()
-        .map(|(name, body)| FunctionRefIdentity {
-            name,
-            body_hash: body_code_hash_inner(program, body, active),
-        })
-        .collect();
-    active.pop();
+    fn body_code_hash(&mut self, body: BodyId) -> String {
+        if let Some(&scc) = self.body_to_scc.get(&body) {
+            return self.scc_code_hash(scc);
+        }
+        let mut active = Vec::new();
+        self.non_scc_body_code_hash(body, &mut active)
+    }
 
-    let material = TransitiveCodeIdentityMaterial {
-        schema: "vixen.body-code-identity.v2".into(),
-        local_body_hash: body_local_code_hash(program, body),
-        function_refs: callees,
-    };
-    hash_identity_material(&material)
+    fn non_scc_body_code_hash(&mut self, body: BodyId, active: &mut Vec<BodyId>) -> String {
+        if active.contains(&body) {
+            return body_local_code_hash(self.program, body);
+        }
+
+        active.push(body);
+        let function_refs = function_refs_in_body_and_child_closures(self.program, body)
+            .into_iter()
+            .map(|(name, body)| FunctionRefIdentity {
+                name,
+                body_hash: self.body_code_hash(body),
+            })
+            .collect();
+        active.pop();
+
+        let material = TransitiveCodeIdentityMaterial {
+            schema: "vixen.body-code-identity.v3".into(),
+            local_body_hash: body_local_code_hash(self.program, body),
+            function_refs,
+        };
+        hash_identity_material(&material)
+    }
+
+    fn scc_code_hash(&mut self, scc: usize) -> String {
+        if let Some(hash) = self.scc_hashes.get(&scc) {
+            return hash.clone();
+        }
+
+        let members = self.sccs[scc].clone();
+        let mut member_identities: Vec<SccMemberIdentity> = members
+            .iter()
+            .map(|&body| SccMemberIdentity {
+                name: self.functions[&body].clone(),
+                local_body_hash: body_local_code_hash(self.program, body),
+            })
+            .collect();
+        member_identities.sort_by(|left, right| left.name.cmp(&right.name));
+
+        let mut function_refs = Vec::new();
+        for &body in &members {
+            let refs = self.edges.get(&body).cloned().unwrap_or_default();
+            for (name, callee) in refs {
+                let Some(&dep_scc) = self.body_to_scc.get(&callee) else {
+                    continue;
+                };
+                if dep_scc == scc {
+                    continue;
+                }
+                function_refs.push(FunctionRefIdentity {
+                    name,
+                    body_hash: self.scc_code_hash(dep_scc),
+                });
+            }
+        }
+        function_refs.sort_by(|left, right| {
+            left.name
+                .cmp(&right.name)
+                .then_with(|| left.body_hash.cmp(&right.body_hash))
+        });
+        function_refs
+            .dedup_by(|left, right| left.name == right.name && left.body_hash == right.body_hash);
+
+        let material = SccCodeIdentityMaterial {
+            schema: "vixen.function-scc-code-identity.v1".into(),
+            members: member_identities,
+            function_refs,
+        };
+        let hash = hash_identity_material(&material);
+        self.scc_hashes.insert(scc, hash.clone());
+        hash
+    }
 }
 
 fn body_local_code_hash(program: &VirProgram, body: BodyId) -> String {
@@ -1476,6 +1580,82 @@ fn function_refs_in_body_and_child_closures(
     refs
 }
 
+fn strongly_connected_function_bodies(
+    functions: &HashMap<BodyId, String>,
+    edges: &HashMap<BodyId, Vec<(String, BodyId)>>,
+) -> Vec<Vec<BodyId>> {
+    struct Tarjan<'a> {
+        edges: &'a HashMap<BodyId, Vec<(String, BodyId)>>,
+        index: usize,
+        stack: Vec<BodyId>,
+        on_stack: HashSet<BodyId>,
+        indices: HashMap<BodyId, usize>,
+        lowlinks: HashMap<BodyId, usize>,
+        sccs: Vec<Vec<BodyId>>,
+    }
+
+    impl Tarjan<'_> {
+        fn strong_connect(&mut self, body: BodyId) {
+            let index = self.index;
+            self.index += 1;
+            self.indices.insert(body, index);
+            self.lowlinks.insert(body, index);
+            self.stack.push(body);
+            self.on_stack.insert(body);
+
+            for (_, callee) in self.edges.get(&body).into_iter().flatten() {
+                if !self.indices.contains_key(callee) {
+                    self.strong_connect(*callee);
+                    let callee_lowlink = self.lowlinks[callee];
+                    let body_lowlink = self.lowlinks[&body];
+                    self.lowlinks.insert(body, body_lowlink.min(callee_lowlink));
+                } else if self.on_stack.contains(callee) {
+                    let callee_index = self.indices[callee];
+                    let body_lowlink = self.lowlinks[&body];
+                    self.lowlinks.insert(body, body_lowlink.min(callee_index));
+                }
+            }
+
+            if self.lowlinks[&body] == self.indices[&body] {
+                let mut scc = Vec::new();
+                loop {
+                    let member = self.stack.pop().expect("tarjan stack member");
+                    self.on_stack.remove(&member);
+                    scc.push(member);
+                    if member == body {
+                        break;
+                    }
+                }
+                scc.sort();
+                self.sccs.push(scc);
+            }
+        }
+    }
+
+    let mut bodies: Vec<BodyId> = functions.keys().copied().collect();
+    bodies.sort_by(|left, right| {
+        functions[left]
+            .cmp(&functions[right])
+            .then_with(|| left.cmp(right))
+    });
+
+    let mut tarjan = Tarjan {
+        edges,
+        index: 0,
+        stack: Vec::new(),
+        on_stack: HashSet::new(),
+        indices: HashMap::new(),
+        lowlinks: HashMap::new(),
+        sccs: Vec::new(),
+    };
+    for body in bodies {
+        if !tarjan.indices.contains_key(&body) {
+            tarjan.strong_connect(body);
+        }
+    }
+    tarjan.sccs
+}
+
 #[derive(facet::Facet, Debug)]
 struct CodeIdentityMaterial {
     schema: String,
@@ -1493,6 +1673,19 @@ struct TransitiveCodeIdentityMaterial {
 struct FunctionRefIdentity {
     name: String,
     body_hash: String,
+}
+
+#[derive(facet::Facet, Debug)]
+struct SccCodeIdentityMaterial {
+    schema: String,
+    members: Vec<SccMemberIdentity>,
+    function_refs: Vec<FunctionRefIdentity>,
+}
+
+#[derive(facet::Facet, Debug)]
+struct SccMemberIdentity {
+    name: String,
+    local_body_hash: String,
 }
 
 #[derive(facet::Facet, Debug)]
@@ -2510,7 +2703,7 @@ mod tests {
         assert_eq!(code_identity.arg_count, 1);
         assert_eq!(code_identity.capture_count, 0);
         assert!(
-            code_identity.value.starts_with("fn:id:blake3:"),
+            code_identity.value.starts_with("blake3:"),
             "direct calls must leave a source-blind Call node for runtime memo hooks: {:?}",
             g.nodes
         );
@@ -2587,6 +2780,23 @@ mod tests {
         assert_eq!(
             first_identity.value, second_identity.value,
             "unreferenced function edits must not invalidate this function identity"
+        );
+    }
+
+    #[test]
+    fn direct_function_call_identity_is_shared_by_recursive_scc() {
+        let graph = analyze_source(
+            "fn f(x: U64) -> U64 ( g(x) ) \
+             fn g(x: U64) -> U64 ( f(x) ) \
+             fn d() -> U64 ( f(1) )",
+            "d",
+        )
+        .unwrap();
+        let f_identity = call_code_identity(&graph, "f").expect("f identity");
+        let g_identity = call_code_identity(&graph, "g").expect("g identity");
+        assert_eq!(
+            f_identity.value, g_identity.value,
+            "mutually recursive functions must share one SCC code identity"
         );
     }
 

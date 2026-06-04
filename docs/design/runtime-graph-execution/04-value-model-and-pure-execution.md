@@ -291,13 +291,13 @@ Current progress:
   input. Additional argument inputs are retained as graph identity/memo-hook
   material, not as strict dependencies.
 - `vx-runtime-driver` has a per-run memo for direct and closure calls keyed by
-  code identity plus already-ready argument and capture outputs. It does not
-  demand unresolved arguments or captures to build a key.
+  function entry, code identity, and already-ready argument/capture outputs. It
+  does not demand unresolved arguments or captures to build a key.
 - The analyzer now emits source-derived direct/closure code identities from
   structured body material plus transitive identities for referenced function
-  items (`fn:<name>:blake3:<hash>` or `closure:blake3:<hash>`), not from names
-  alone or source spans. Mutually recursive SCCs still do not share a canonical
-  component identity, so this is not yet the spec's final function identity.
+  items (`blake3:<hash>` for functions, `closure:blake3:<hash>` for closures),
+  not from names alone or source spans. Mutually recursive functions share one
+  SCC fingerprint; the call node's function entry disambiguates memo keys.
 
 ### 9. Closures and captures
 
