@@ -77,9 +77,17 @@ pub enum NodeKind {
     Param,
     Kernel(KernelOp),
     LazyData,
-    Project { index: u32 },
+    Project {
+        index: u32,
+    },
+    Variant {
+        tag: String,
+        field_names: Vec<String>,
+    },
     Closure,
-    Match { arms: Vec<MatchArm> },
+    Match {
+        arms: Vec<MatchArm>,
+    },
     Boundary,
     Bomb,
     Fail,
@@ -129,7 +137,7 @@ impl DemandGraph {
             reached[i] = true;
             let node = &self.nodes[i];
             match &node.kind {
-                NodeKind::LazyData | NodeKind::Closure => {}
+                NodeKind::LazyData | NodeKind::Variant { .. } | NodeKind::Closure => {}
                 NodeKind::Project { .. } => {
                     stack.push(node.inputs[0]);
                     if let Some(v) = self.resolved_value(NodeId(i as u32)) {
@@ -160,7 +168,7 @@ impl DemandGraph {
                         let slot = *cnode.inputs.get(*index as usize)?;
                         Some(self.resolved_value(slot).unwrap_or(slot))
                     }
-                    _ => Some(container),
+                    _ => None,
                 }
             }
             _ => Some(n),

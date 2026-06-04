@@ -114,6 +114,17 @@ bug treated bare unit variant names as `Param`, which confused lowering.
 Pattern matching should inspect the variant tag and demand payload fields only
 when the selected arm reads them.
 
+Current progress:
+
+- Graph has `NodeKind::Variant { tag, field_names }` with payload fields stored
+  as input node refs.
+- Core constructs `NodeOutput::Variant` without demanding payload fields.
+- Projection works over variant payload fields, so payload reads demand only the
+  selected field node.
+- `MatchPattern::Variant { tag }` selects by variant tag in graph core.
+- Analyzer binds variant match payload fields through projection nodes while
+  building the selected arm body graph.
+
 ### Functions and calls
 
 Function entry payload:
@@ -189,9 +200,12 @@ Current progress:
 - Graph has `NodeKind::Match { arms }` with source-blind `MatchPattern`
   payloads.
 - Core supports literal constants, wildcard, and binding patterns.
+- Core supports variant-tag patterns.
 - Analyzer binds simple binding patterns to the scrutinee node while building the
   selected arm body graph.
-- Variant and destructuring patterns remain explicit unsupported graph shapes.
+- Analyzer binds variant payload patterns through projection nodes. Broader
+  tuple/struct/array destructuring patterns remain explicit unsupported graph
+  shapes in graph-level match.
 
 ### Fail and bomb
 

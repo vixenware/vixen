@@ -89,6 +89,8 @@ Expected latest structural checkpoint:
 - `String.len()` executes through source-blind graph `KernelOp::StrLen`.
 - Literal/wildcard/binding `match` executes through source-blind
   `NodeKind::Match` payloads.
+- Variant construction carries tag and field-name payloads. Core can construct
+  variant outputs, project payload fields, and select match arms by variant tag.
 - `vx-runtime-driver` reports graph kernel executions for the transitional
   public dispatch counter.
 - `graph_exec` can expose graph-root lazy arrays/tuples as old public `Value`

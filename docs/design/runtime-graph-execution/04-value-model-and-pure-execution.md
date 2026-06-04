@@ -157,6 +157,9 @@ Current progress:
 - Graph core executes `String.len()` as `KernelOp::StrLen`.
 - Graph core executes `match` for literal, wildcard, and binding patterns by
   demanding only the scrutinee and selected arm body.
+- Graph core executes variant construction, variant projection, and variant-tag
+  match selection. Analyzer binds variant payload fields as graph projection
+  nodes inside selected arm bodies.
 - The graph driver counts ready kernel nodes for the transitional public
   dispatch counter.
 - `arithmetic.vx`, direct-call cases in `calls.vx`, and graph `if` demand tests
@@ -220,6 +223,15 @@ Acceptance:
 - `Off`/`Zero` are executable graph values.
 - Unselected match arms are not demanded.
 - Pattern-bound payload is lazy until read.
+
+Current progress:
+
+- Unit variants and payload variants are graph values, not params.
+- Variant constructors carry the selected tag and field-name payloads.
+- Variant payloads are stored as node refs and are only demanded through
+  projection.
+- Variant match selection is tag-driven in graph core.
+- Variant payload bindings are graph projection aliases inside selected arms.
 
 ### 8. Function calls
 

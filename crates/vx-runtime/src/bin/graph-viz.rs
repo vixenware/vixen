@@ -42,6 +42,7 @@ fn kind_str(kind: &NodeKind) -> &'static str {
         NodeKind::Kernel(_) => "Kernel",
         NodeKind::LazyData => "LazyData",
         NodeKind::Project { .. } => "Project",
+        NodeKind::Variant { .. } => "Variant",
         NodeKind::Closure => "Closure",
         NodeKind::Match { .. } => "Match",
         NodeKind::Boundary => "Boundary",

@@ -213,6 +213,9 @@ Observed result:
 - Graph-level `match` carries structured arm payloads for literal, wildcard, and
   binding patterns. Core demands the scrutinee and then only the selected arm
   body.
+- Graph variants carry structured tag and field-name payloads. Unit, tuple, and
+  struct variant construction execute through graph core, and variant match
+  payload bindings are wired as projection nodes.
 - The graph driver reports graph kernel executions for the transitional
   `dispatches` counter.
 - Public `Outcome` conversion can wrap a graph-root lazy array/tuple as old
@@ -226,8 +229,8 @@ cargo nextest run -p vx-runtime-graph -p vx-runtime-core -p vx-runtime-driver -p
 ```
 
 Observed result after direct/closure call graph expansion, graph string length,
-literal/binding graph match, graph kernel execution counting, and lazy public
-compound materialization:
+literal/binding/variant graph match, graph variants, graph kernel execution
+counting, and lazy public compound materialization:
 141 tests run, 140 passed, 1 failed, 0 skipped.
 
 The red surface is honest graph-driver fallout from the source-entry cut:
@@ -245,11 +248,11 @@ and then into the public `Outcome`; `i6_eval_outcome_carries_the_source_span`
 passes through graph driver.
 
 The `.vx` language harness now runs through graph driver for source entries. It
-fails 15 of 68 Vixen-language cases. Direct calls, closure calls/function values,
+fails 9 of 68 Vixen-language cases. Direct calls, closure calls/function values,
 arithmetic kernel cases, control-flow kernel cases, simple call laziness,
-`String.len()`, and literal/wildcard/binding `match` now pass. Remaining failures
-are concentrated in failure unions/catch and variants. Those failures are
-explicit graph unsupported errors and are not a fallback.
+`String.len()`, literal/wildcard/binding `match`, and variant construction/match
+now pass. Remaining failures are concentrated in failure unions and catch. Those
+failures are explicit graph unsupported errors and are not a fallback.
 
 ## Verification commands
 

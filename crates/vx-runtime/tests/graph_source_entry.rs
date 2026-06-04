@@ -54,11 +54,12 @@ fn source_entry_reports_assert_eq_poison() {
 #[test]
 fn source_entry_reports_unsupported_graph_shape() {
     let err = run_in_mode(
-        "enum Light { struct Off }\nfn main() -> U64 ( let l = Off; match l ( Off => 42 ) )",
+        "fn checked(x: U64) -> U64 ( if x > 0 ( x ) else ( fail \"no\" ) )\n\
+         fn main() -> U64 ( match checked(0)? ( Ok(v) => v, Err(Failure { err: e }) => 7 ) )",
         "main",
         KernelMode::Off,
     )
-    .expect_err("variants are still unsupported graph shapes");
+    .expect_err("failure catch is still an unsupported graph shape");
     assert!(
         err.contains("graph unsupported"),
         "unexpected graph error: {err}"

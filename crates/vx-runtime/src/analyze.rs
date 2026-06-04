@@ -21,7 +21,7 @@ use vx_ir::build::VirProgram;
 use vx_ir::expr::{
     ArrayElement, BinOp, ExprKind, FieldKey, LitKind, MapElement, PrefixOp, StringPart,
 };
-use vx_ir::ids::{BindingId, BodyId, ExprId, PatternId};
+use vx_ir::ids::{BindingId, BodyId, ExprId, ItemId, PatternId};
 use vx_ir::item::ItemKind;
 use vx_ir::pattern::PatternKind;
 use vx_ir::scope::DefTarget;
@@ -320,6 +320,26 @@ impl Builder<'_> {
         }
     }
 
+    fn variant_call(&mut self, callee: ExprId, arg_exprs: &[ExprId], span: Span) -> Option<NodeId> {
+        let ExprKind::NameRef(name) = &self.program.arena[callee].kind else {
+            return None;
+        };
+        let Some(DefTarget::Variant {
+            enum_item,
+            variant_index,
+        }) = name.resolved
+        else {
+            return None;
+        };
+        let tag = self.variant_name(enum_item, variant_index, &name.name);
+        let fields = arg_exprs
+            .iter()
+            .enumerate()
+            .map(|(index, &expr)| (index.to_string(), expr))
+            .collect();
+        Some(self.variant_value(tag, fields, span))
+    }
+
     fn callable_template(&mut self, callee: ExprId) -> Option<CallableTemplate> {
         let node = self.walk(callee);
         self.callables.get(&node).cloned()
@@ -479,11 +499,25 @@ impl Builder<'_> {
                 self.bindings.insert(at.binding, node);
                 self.bind_match_pattern(at.inner, node);
             }
+            PatternKind::Variant(vp) => {
+                if let Some(fields) = &vp.fields {
+                    for (fallback, field) in fields.iter().enumerate() {
+                        let field_node = self.emit(
+                            NodeKind::Project {
+                                index: fallback as u32,
+                            },
+                            format!(".{}", field.name),
+                            to_span(field.name_span),
+                            vec![node],
+                        );
+                        self.bind_match_pattern(field.pattern, field_node);
+                    }
+                }
+            }
             PatternKind::Tuple(_)
             | PatternKind::Struct(_)
             | PatternKind::Array(_)
             | PatternKind::ArrayRest(_)
-            | PatternKind::Variant(_)
             | PatternKind::Or(_) => {}
             PatternKind::Wildcard
             | PatternKind::Literal(_)
@@ -549,7 +583,12 @@ impl Builder<'_> {
                 let label = s.name.clone();
                 let pairs: Vec<(String, ExprId)> =
                     s.fields.iter().map(|f| (f.name.clone(), f.value)).collect();
-                self.lazy_record(label, pairs, span)
+                if s.resolved_variant.is_some() {
+                    let tag = s.variant.clone().unwrap_or(label);
+                    self.variant_value(tag, pairs, span)
+                } else {
+                    self.lazy_record(label, pairs, span)
+                }
             }
             ExprKind::Record(r) => {
                 let pairs: Vec<(String, ExprId)> =
@@ -589,6 +628,11 @@ impl Builder<'_> {
                     _ => "call".to_string(),
                 };
                 let arg_exprs: Vec<ExprId> = c.args.iter().map(|a| a.expr).collect();
+
+                if let Some(variant_node) = self.variant_call(callee, &arg_exprs, span) {
+                    self.memo.insert(e, variant_node);
+                    return variant_node;
+                }
 
                 if let Some(method_node) = self.method_kernel_call(callee, &arg_exprs, span) {
                     self.memo.insert(e, method_node);
@@ -905,8 +949,20 @@ impl Builder<'_> {
                     return node;
                 }
                 match n.resolved {
-                    Some(DefTarget::Variant { .. }) => {
-                        self.emit(NodeKind::LazyData, n.name.clone(), span, vec![])
+                    Some(DefTarget::Variant {
+                        enum_item,
+                        variant_index,
+                    }) => {
+                        let tag = self.variant_name(enum_item, variant_index, &n.name);
+                        self.emit(
+                            NodeKind::Variant {
+                                tag: tag.clone(),
+                                field_names: Vec::new(),
+                            },
+                            tag,
+                            span,
+                            vec![],
+                        )
                     }
                     Some(DefTarget::Item(item)) => match &prog.arena[item].kind {
                         ItemKind::Function(function) => self.emit_callable_value(
@@ -955,6 +1011,31 @@ impl Builder<'_> {
         let id = self.emit(NodeKind::LazyData, label, span, inputs);
         self.field_names.insert(id, names);
         id
+    }
+
+    fn variant_value(&mut self, tag: String, fields: Vec<(String, ExprId)>, span: Span) -> NodeId {
+        let field_names: Vec<String> = fields.iter().map(|(name, _)| name.clone()).collect();
+        let inputs = fields.into_iter().map(|(_, v)| self.walk(v)).collect();
+        self.emit(
+            NodeKind::Variant {
+                tag: tag.clone(),
+                field_names,
+            },
+            tag,
+            span,
+            inputs,
+        )
+    }
+
+    fn variant_name(&self, enum_item: ItemId, variant_index: u32, fallback: &str) -> String {
+        match &self.program.arena[enum_item].kind {
+            ItemKind::Enum(e) => e
+                .variants
+                .get(variant_index as usize)
+                .map(|variant| variant.name.clone())
+                .unwrap_or_else(|| fallback.to_string()),
+            _ => fallback.to_string(),
+        }
     }
 
     /// If `e` is an integer literal, its value (for projection indices).

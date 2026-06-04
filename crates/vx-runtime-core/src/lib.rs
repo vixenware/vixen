@@ -16,7 +16,15 @@ pub enum NodeOutput {
     Bool(bool),
     Str(String),
     Unit,
-    LazyData { label: String, fields: Vec<NodeId> },
+    LazyData {
+        label: String,
+        fields: Vec<NodeId>,
+    },
+    Variant {
+        tag: String,
+        field_names: Vec<String>,
+        fields: Vec<NodeId>,
+    },
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -79,6 +87,11 @@ pub fn step(graph: &DemandGraph, node: NodeId, inputs: ReadyInputs<'_>) -> Step 
             label: n.label.clone(),
             fields: n.inputs.clone(),
         }),
+        NodeKind::Variant { tag, field_names } => Step::Ready(NodeOutput::Variant {
+            tag: tag.clone(),
+            field_names: field_names.clone(),
+            fields: n.inputs.clone(),
+        }),
         NodeKind::Project { index } => project(graph, node, n.inputs.as_slice(), *index, inputs),
         NodeKind::Kernel(op) => kernel(graph, node, n.inputs.as_slice(), *op, inputs),
         NodeKind::Closure => unsupported(node, "closure value is not executable in core yet"),
@@ -112,8 +125,9 @@ fn project(
     let Some(container_output) = inputs.get(container) else {
         return Step::Need(NeedSet::Nodes(vec![container]));
     };
-    let NodeOutput::LazyData { fields, .. } = container_output else {
-        return unsupported(node, "project container is not lazy data");
+    let fields = match container_output {
+        NodeOutput::LazyData { fields, .. } | NodeOutput::Variant { fields, .. } => fields,
+        _ => return unsupported(node, "project container is not lazy data or variant"),
     };
     let Some(&field) = fields.get(index as usize) else {
         return unsupported(node, "project index out of bounds");
@@ -152,7 +166,13 @@ fn pattern_matches(pattern: &MatchPattern, output: &NodeOutput) -> bool {
     match pattern {
         MatchPattern::Wildcard | MatchPattern::Binding => true,
         MatchPattern::Const(value) => const_matches(value, output),
-        MatchPattern::Variant { .. } | MatchPattern::Unsupported(_) => false,
+        MatchPattern::Variant { tag } => match output {
+            NodeOutput::Variant {
+                tag: actual_tag, ..
+            } => actual_tag == tag,
+            _ => false,
+        },
+        MatchPattern::Unsupported(_) => false,
     }
 }
 

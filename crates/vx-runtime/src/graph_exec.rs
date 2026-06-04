@@ -59,6 +59,18 @@ fn value_from_output(output: NodeOutput, driver: SharedDriver) -> Result<Value, 
                 Ok(Value::Tuple(fields))
             }
         }
+        NodeOutput::Variant {
+            tag,
+            field_names,
+            fields,
+        } => {
+            let fields = field_names
+                .into_iter()
+                .zip(fields)
+                .map(|(name, node)| (name, graph_field_thunk(Rc::clone(&driver), node)))
+                .collect();
+            Ok(Value::Variant { tag, fields })
+        }
     }
 }
 
