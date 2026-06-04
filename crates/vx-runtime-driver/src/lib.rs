@@ -113,16 +113,22 @@ enum NodeMemo {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
-struct CallMemoKey {
-    function: String,
-    code_identity: String,
-    args: Vec<NodeOutput>,
+pub struct CallCacheKey {
+    pub function: String,
+    pub code_identity: String,
+    pub args: Vec<NodeOutput>,
+}
+
+pub trait CallCache {
+    fn get(&mut self, key: &CallCacheKey) -> Option<NodeOutput>;
+    fn put(&mut self, key: &CallCacheKey, output: &NodeOutput);
 }
 
 pub struct Driver {
     graph: DemandGraph,
     memo: HashMap<NodeId, NodeMemo>,
-    call_memo: HashMap<CallMemoKey, NodeOutput>,
+    call_memo: HashMap<CallCacheKey, NodeOutput>,
+    call_cache: Option<Box<dyn CallCache>>,
     kernel_executions: u64,
 }
 
@@ -132,8 +138,14 @@ impl Driver {
             graph,
             memo: HashMap::new(),
             call_memo: HashMap::new(),
+            call_cache: None,
             kernel_executions: 0,
         }
+    }
+
+    pub fn with_call_cache(mut self, cache: impl CallCache + 'static) -> Self {
+        self.call_cache = Some(Box::new(cache));
+        self
     }
 
     pub fn with_seed(mut self, node: NodeId, output: NodeOutput) -> Self {
@@ -199,12 +211,16 @@ impl Driver {
         }
 
         let call_memo_key = self.call_memo_key(node);
-        if let Some(output) = call_memo_key
-            .as_ref()
-            .and_then(|key| self.call_memo.get(key).cloned())
-        {
-            self.memo.insert(node, NodeMemo::Ready(output.clone()));
-            return Ok(output);
+        if let Some(key) = &call_memo_key {
+            if let Some(output) = self.call_memo.get(key).cloned() {
+                self.memo.insert(node, NodeMemo::Ready(output.clone()));
+                return Ok(output);
+            }
+            if let Some(output) = self.call_cache.as_mut().and_then(|cache| cache.get(key)) {
+                self.call_memo.insert(key.clone(), output.clone());
+                self.memo.insert(node, NodeMemo::Ready(output.clone()));
+                return Ok(output);
+            }
         }
 
         self.memo.insert(node, NodeMemo::InProgress);
@@ -223,6 +239,9 @@ impl Driver {
                     }
                     if let Some(key) = &call_memo_key {
                         self.call_memo.insert(key.clone(), output.clone());
+                        if let Some(cache) = self.call_cache.as_mut() {
+                            cache.put(key, &output);
+                        }
                     }
                     self.memo.insert(node, NodeMemo::Ready(output.clone()));
                     return Ok(output);
@@ -281,7 +300,7 @@ impl Driver {
             .collect()
     }
 
-    fn call_memo_key(&self, node: NodeId) -> Option<CallMemoKey> {
+    fn call_memo_key(&self, node: NodeId) -> Option<CallCacheKey> {
         let graph_node = self.graph.nodes.get(node.0 as usize)?;
         match &graph_node.kind {
             NodeKind::Call {
@@ -299,7 +318,7 @@ impl Driver {
                 for &input in key_nodes {
                     args.push(self.output(input)?.clone());
                 }
-                Some(CallMemoKey {
+                Some(CallCacheKey {
                     function: function.clone(),
                     code_identity: code_identity.clone(),
                     args,

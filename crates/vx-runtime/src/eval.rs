@@ -580,6 +580,58 @@ mod tests {
     }
 
     #[test]
+    fn function_output_l2_reuses_scalar_result_across_fresh_graphs() {
+        let src = "fn answer() -> U64 ( 40 + 2 ) fn main() -> U64 ( answer() )";
+        let fe = crate::compile::semantic_front_end_bundled(src).expect("front-end");
+        let body = body_in(&fe.program, "main");
+        let cache_dir = std::env::temp_dir().join(format!(
+            "vx-function-output-l2-{}-{}",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .expect("system time")
+                .as_nanos()
+        ));
+        let _ = std::fs::remove_dir_all(&cache_dir);
+
+        let (first, first_dispatches) = crate::graph_exec::run_body_with_cache_dir(
+            &fe.program,
+            &fe.env,
+            body,
+            vec![],
+            cache_dir.clone(),
+        )
+        .expect("first graph run");
+        assert!(
+            matches!(first, Outcome::Clean(Value::U64(42))),
+            "first run got {first:?}"
+        );
+        assert!(
+            first_dispatches >= 1,
+            "first run should execute the answer body kernel"
+        );
+
+        let (second, second_dispatches) = crate::graph_exec::run_body_with_cache_dir(
+            &fe.program,
+            &fe.env,
+            body,
+            vec![],
+            cache_dir.clone(),
+        )
+        .expect("second graph run");
+        assert!(
+            matches!(second, Outcome::Clean(Value::U64(42))),
+            "second run got {second:?}"
+        );
+        assert_eq!(
+            second_dispatches, 0,
+            "fresh graph should load the scalar call output from L2"
+        );
+
+        let _ = std::fs::remove_dir_all(cache_dir);
+    }
+
+    #[test]
     fn if_kernel_does_not_force_dead_branch() {
         // `a`/`b` are read only inside their branches. The graph `if` kernel
         // demands the condition, then only the selected branch, so the bomb in the

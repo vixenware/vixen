@@ -278,6 +278,11 @@ Current progress:
   body and ordinary callee edits no longer alias under `fn:name` or closure
   source spans. Mutually recursive functions share one SCC fingerprint; the
   call node's function entry disambiguates memo keys.
+- When an L2 cache directory is configured, self-contained function outputs
+  (`U64`, `Bool`, `String`, `Unit`) persist by the same call key and can be
+  reused by a fresh graph evaluation. Calls whose key would require demanding
+  unresolved arguments/captures still skip memoization, and outputs containing
+  graph-local node refs are not persisted.
 
 ### 3. Boundary L1 input-keyed cache
 
@@ -323,7 +328,7 @@ Current progress:
   Successful observer data values can persist to the opt-in local disk L2 by
   that key. Output-tree handles remain L1-only because scheduler handle ids are
   per run. Full env/mount identities, richer capability/toolchain identities,
-  CAS-backed L2, function-output L2, and read-set provenance are still
+  CAS-backed L2, graph-local function outputs, and read-set provenance are still
   unimplemented.
 
 ### 4. L2 content-addressed storage
@@ -337,6 +342,10 @@ Current slice:
   runtime cache directory is provided or `VX_RUNTIME_L2_DIR` is set.
 - Backtick exec persists successful observer data values in the same local disk
   L2. It deliberately does not persist output-tree handles yet.
+- Function calls persist self-contained outputs (`U64`, `Bool`, `String`, `Unit`)
+  in the same local disk L2 when the call key is available without demanding
+  unresolved arguments or captures. Product/variant/tree outputs are deliberately
+  skipped because they contain graph-local node refs or per-run handles.
 - Cache records are encoded with `facet-json`, and file paths are derived from a
   blake3 hash of the Facet JSON cache key.
 - This is not the final CAS-backed L2 and it does not record read-set witnesses.
@@ -411,6 +420,8 @@ Newly green boundary payloads:
   entry, code identity, and already-ready argument/capture outputs.
   Source-derived code identity includes transitive referenced-function identities
   and shared SCC fingerprints.
+- Self-contained function outputs persist to the opt-in local disk L2 and can be
+  reused across fresh graph evaluations.
 - `host.exec` has a local input-keyed L1 cache.
 - `host.exec` has an opt-in local disk L2 for successful results.
 - Backtick exec has a local exact L1 cache for the current materialized request
@@ -419,8 +430,9 @@ Newly green boundary payloads:
 - Backtick exec has an opt-in local disk L2 for successful observer data values.
 
 No memo path demands unresolved arguments or captures to build a key. CAS-backed
-L2 storage, output-tree-handle persistence, function-output persistence, and
-read-set provenance have not been implemented in this checkpoint.
+L2 storage, output-tree-handle persistence, graph-local function-output
+persistence, and read-set provenance have not been implemented in this
+checkpoint.
 
 ## Acceptance criteria
 

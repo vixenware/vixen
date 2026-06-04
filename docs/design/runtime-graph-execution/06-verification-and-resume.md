@@ -126,6 +126,10 @@ Current partial state:
   closures), not the earlier `fn:name` / source-span placeholders. Mutually
   recursive functions share one SCC fingerprint; the call node's function entry
   disambiguates memo keys.
+- Self-contained function outputs (`U64`, `Bool`, `String`, `Unit`) persist to
+  the opt-in local disk L2 when the call key is available without demanding
+  unresolved arguments/captures. Graph-local product/variant/tree outputs remain
+  per-run only.
 - Observer execution calls graph body execution and graph/native wire crossing.
 - Mirror, host, intrinsic, observer, observe-on-strands, backtick exec,
   exec-output-tree, remote-tree body, import/toolchain, and requested-toolchain
@@ -166,16 +170,16 @@ Latest focused verification:
   backtick exec in a lazy tuple slot stays cold with no observe client.
 - `cargo nextest run -p vx-runtime -E 'binary(cc_probe) | binary(hello_world)' --no-fail-fast`:
   2/2 passed.
-- `cargo nextest run -p vx-runtime-driver --no-fail-fast`: 11/11 passed,
+- `cargo nextest run -p vx-runtime-driver --no-fail-fast`: 12/12 passed,
   including poison memoization, boundary in-progress cleanup, call-node
   non-strict argument edges, zero-arg direct call memo reuse, resolved-argument
   call memo reuse, resolved-argument disambiguation, closure capture memo reuse,
-  and proof that unresolved arguments or captures are not demanded to build a
-  call memo key.
-- `cargo nextest run -p vx-runtime --no-fail-fast`: 152 run, 152 passed,
+  function-entry disambiguation for shared code identities, and proof that
+  unresolved arguments or captures are not demanded to build a call memo key.
+- `cargo nextest run -p vx-runtime --no-fail-fast`: 153 run, 153 passed,
   0 failed, 0 skipped.
 - `cargo nextest run -p vx-runtime-graph -p vx-runtime-core -p vx-runtime-driver -p vx-runtime --no-fail-fast`:
-  169 run, 169 passed, 0 skipped.
+  170 run, 170 passed, 0 skipped.
 - The forbidden-symbol scan over `vx-runtime-core` and `vx-runtime-driver`
   returns no matches.
 - The deleted tree-walker affordance scan over `vx-runtime/src` returns no

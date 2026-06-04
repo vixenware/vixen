@@ -298,6 +298,9 @@ Current progress:
   items (`blake3:<hash>` for functions, `closure:blake3:<hash>` for closures),
   not from names alone or source spans. Mutually recursive functions share one
   SCC fingerprint; the call node's function entry disambiguates memo keys.
+- When an L2 cache directory is configured, graph execution can persist
+  self-contained function outputs (`U64`, `Bool`, `String`, `Unit`) under the
+  call key. Outputs containing graph-local node refs remain per-run only.
 
 ### 9. Closures and captures
 

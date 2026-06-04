@@ -111,6 +111,10 @@ Expected latest structural checkpoint:
   referenced function items. Mutually recursive functions share one SCC
   fingerprint; the `Call` node's `function` field disambiguates the entry point
   for memo keys.
+- The runtime L2 can persist self-contained function call outputs (`U64`, `Bool`,
+  `String`, `Unit`) under that same call key when an explicit cache directory or
+  `VX_RUNTIME_L2_DIR` is configured. Outputs containing graph-local node refs
+  remain per-run only.
 - `vx-runtime-driver` reports graph kernel executions for the transitional
   public dispatch counter.
 - `graph_exec` can expose graph-root lazy arrays/tuples/variants and caught
@@ -176,16 +180,16 @@ Latest verified red/green shape:
   backtick exec in a lazy tuple slot stays cold with no observe client.
 - `cargo nextest run -p vx-runtime -E 'binary(cc_probe) | binary(hello_world)' --no-fail-fast`:
   2/2 passed.
-- `cargo nextest run -p vx-runtime-driver --no-fail-fast`: 11/11 passed,
+- `cargo nextest run -p vx-runtime-driver --no-fail-fast`: 12/12 passed,
   including poison memoization, boundary in-progress cleanup, call-node
   non-strict argument edges, zero-arg direct call memo reuse, resolved-argument
   call memo reuse, resolved-argument disambiguation, closure capture memo reuse,
-  and proof that unresolved arguments or captures are not demanded to build a
-  call memo key.
-- `cargo nextest run -p vx-runtime --no-fail-fast`: 152 run, 152 passed,
+  function-entry disambiguation for shared code identities, and proof that
+  unresolved arguments or captures are not demanded to build a call memo key.
+- `cargo nextest run -p vx-runtime --no-fail-fast`: 153 run, 153 passed,
   0 failed, 0 skipped.
 - `cargo nextest run -p vx-runtime-graph -p vx-runtime-core -p vx-runtime-driver -p vx-runtime --no-fail-fast`:
-  169 run, 169 passed, 0 skipped.
+  170 run, 170 passed, 0 skipped.
 - The forbidden-symbol scan over `crates/vx-runtime-core` and
   `crates/vx-runtime-driver` returns no matches.
 - The deleted tree-walker affordance scan over `crates/vx-runtime/src` returns

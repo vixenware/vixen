@@ -8,7 +8,9 @@ use vx_ir::build::VirProgram;
 use vx_ir::ids::{BodyId, PatternId};
 use vx_ir::pattern::PatternKind;
 use vx_runtime_core::{CoreFailureContext, CorePoison, NodeOutput, UnsupportedNode};
-use vx_runtime_driver::{BoundaryDemand, DemandRequest, Driver, DriverError};
+use vx_runtime_driver::{
+    BoundaryDemand, CallCache, CallCacheKey, DemandRequest, Driver, DriverError,
+};
 use vx_runtime_graph::{ConstValue, HostMethod, NodeId, NodeKind};
 use vx_types::TypeEnv;
 
@@ -89,6 +91,14 @@ impl BoundaryL2Cache {
         self.write_json("exec-value-v1", key, value);
     }
 
+    fn function_output(&self, key: &FunctionOutputCacheKey) -> Option<CacheableNodeOutput> {
+        self.read_json("function-output-v1", key)
+    }
+
+    fn put_function_output(&self, key: &FunctionOutputCacheKey, value: &CacheableNodeOutput) {
+        self.write_json("function-output-v1", key, value);
+    }
+
     fn read_json<K: for<'a> facet::Facet<'a>, V: for<'a> facet::Facet<'a>>(
         &self,
         namespace: &str,
@@ -158,6 +168,86 @@ struct ExecInvocationCacheKey {
     declared_tool_fingerprint: Option<String>,
     args: Vec<String>,
     observer: ObserverCacheIdentity,
+}
+
+#[derive(facet::Facet, Debug, Clone, PartialEq, Eq, Hash)]
+struct FunctionOutputCacheKey {
+    function: String,
+    code_identity: String,
+    args: Vec<CacheableNodeOutput>,
+}
+
+#[derive(facet::Facet, Debug, Clone, PartialEq, Eq, Hash)]
+#[repr(u8)]
+enum CacheableNodeOutput {
+    U64(u64),
+    Bool(bool),
+    Str(String),
+    Unit,
+}
+
+impl CacheableNodeOutput {
+    fn from_output(output: &NodeOutput) -> Option<Self> {
+        match output {
+            NodeOutput::U64(value) => Some(Self::U64(*value)),
+            NodeOutput::Bool(value) => Some(Self::Bool(*value)),
+            NodeOutput::Str(value) => Some(Self::Str(value.clone())),
+            NodeOutput::Unit => Some(Self::Unit),
+            NodeOutput::OutputTree
+            | NodeOutput::LazyData { .. }
+            | NodeOutput::Struct { .. }
+            | NodeOutput::Variant { .. }
+            | NodeOutput::Failure { .. }
+            | NodeOutput::FailureContext(_) => None,
+        }
+    }
+
+    fn into_output(self) -> NodeOutput {
+        match self {
+            Self::U64(value) => NodeOutput::U64(value),
+            Self::Bool(value) => NodeOutput::Bool(value),
+            Self::Str(value) => NodeOutput::Str(value),
+            Self::Unit => NodeOutput::Unit,
+        }
+    }
+}
+
+impl FunctionOutputCacheKey {
+    fn from_call_key(key: &CallCacheKey) -> Option<Self> {
+        let args = key
+            .args
+            .iter()
+            .map(CacheableNodeOutput::from_output)
+            .collect::<Option<Vec<_>>>()?;
+        Some(Self {
+            function: key.function.clone(),
+            code_identity: key.code_identity.clone(),
+            args,
+        })
+    }
+}
+
+struct FunctionOutputL2Cache {
+    cache: Rc<BoundaryL2Cache>,
+}
+
+impl CallCache for FunctionOutputL2Cache {
+    fn get(&mut self, key: &CallCacheKey) -> Option<NodeOutput> {
+        let key = FunctionOutputCacheKey::from_call_key(key)?;
+        self.cache
+            .function_output(&key)
+            .map(|value| value.into_output())
+    }
+
+    fn put(&mut self, key: &CallCacheKey, output: &NodeOutput) {
+        let Some(key) = FunctionOutputCacheKey::from_call_key(key) else {
+            return;
+        };
+        let Some(value) = CacheableNodeOutput::from_output(output) else {
+            return;
+        };
+        self.cache.put_function_output(&key, &value);
+    }
 }
 
 #[derive(facet::Facet, Debug, Clone, PartialEq, Eq, Hash)]
@@ -323,6 +413,9 @@ fn drive_graph(
 ) -> Result<(Outcome, u64), String> {
     let root = graph.root;
     let mut driver = Driver::new(graph);
+    if let Some(cache) = runtime.l2_cache.clone() {
+        driver = driver.with_call_cache(FunctionOutputL2Cache { cache });
+    }
     for (node, output) in seeds {
         driver = driver.with_seed(node, output);
     }
