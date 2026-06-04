@@ -97,6 +97,10 @@ Expected latest structural checkpoint:
 - `expr?` executes as graph-level catch/reify through `NodeKind::Fallible` and a
   paired `NodeKind::CaughtFailure`. The driver catches poison from the inner
   demand and memoizes `Failure { err, context }` as graph output.
+- Direct and known closure calls leave source-blind `NodeKind::Call` wrappers
+  around the expanded body root. Core demands only the body-root input; argument
+  edges are retained for graph identity and future call-memo keys without making
+  the call boundary strict.
 - `vx-runtime-driver` reports graph kernel executions for the transitional
   public dispatch counter.
 - `graph_exec` can expose graph-root lazy arrays/tuples/variants and caught
@@ -157,12 +161,13 @@ Latest verified red/green shape:
   backtick exec in a lazy tuple slot stays cold with no observe client.
 - `cargo nextest run -p vx-runtime -E 'binary(cc_probe) | binary(hello_world)' --no-fail-fast`:
   2/2 passed.
-- `cargo nextest run -p vx-runtime-driver --no-fail-fast`: 4/4 passed,
-  including poison memoization and boundary in-progress cleanup.
-- `cargo nextest run -p vx-runtime --no-fail-fast`: 139 run, 139 passed,
+- `cargo nextest run -p vx-runtime-driver --no-fail-fast`: 5/5 passed,
+  including poison memoization, boundary in-progress cleanup, and call-node
+  non-strict argument edges.
+- `cargo nextest run -p vx-runtime --no-fail-fast`: 142 run, 142 passed,
   0 failed, 0 skipped.
 - `cargo nextest run -p vx-runtime-graph -p vx-runtime-core -p vx-runtime-driver -p vx-runtime --no-fail-fast`:
-  148 run, 148 passed, 0 skipped.
+  152 run, 152 passed, 0 skipped.
 - The forbidden-symbol scan over `crates/vx-runtime-core` and
   `crates/vx-runtime-driver` returns no matches.
 - The deleted tree-walker affordance scan over `crates/vx-runtime/src` returns

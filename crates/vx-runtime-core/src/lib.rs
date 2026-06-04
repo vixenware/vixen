@@ -120,6 +120,7 @@ pub fn step(graph: &DemandGraph, node: NodeId, inputs: ReadyInputs<'_>) -> Step 
         NodeKind::Project { index } => project(graph, node, n.inputs.as_slice(), *index, inputs),
         NodeKind::Kernel(op) => kernel(graph, node, n.inputs.as_slice(), *op, inputs),
         NodeKind::Closure => unsupported(node, "closure value is not executable in core yet"),
+        NodeKind::Call { .. } => call(node, n.inputs.as_slice(), inputs),
         NodeKind::Match { arms } => match_node(node, n.inputs.as_slice(), arms, inputs),
         NodeKind::Fallible { caught_failure } => {
             fallible(node, n.inputs.as_slice(), *caught_failure, inputs)
@@ -130,6 +131,16 @@ pub fn step(graph: &DemandGraph, node: NodeId, inputs: ReadyInputs<'_>) -> Step 
         NodeKind::Bomb => poisoned(graph, node, "bomb demanded"),
         NodeKind::Fail => fail(graph, node, n.inputs.as_slice(), inputs),
         NodeKind::Unresolved => unsupported(node, format!("unresolved node `{}`", n.label)),
+    }
+}
+
+fn call(node: NodeId, raw_inputs: &[NodeId], inputs: ReadyInputs<'_>) -> Step {
+    let Some(&body_root) = raw_inputs.first() else {
+        return unsupported(node, "call node has no expanded body root");
+    };
+    match inputs.get(body_root) {
+        Some(output) => Step::Ready(output.clone()),
+        None => Step::Need(NeedSet::Nodes(vec![body_root])),
     }
 }
 

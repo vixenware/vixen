@@ -345,4 +345,48 @@ mod tests {
         );
         assert_eq!(driver.memo_state(NodeId(0)), Some(MemoState::Ready));
     }
+
+    #[test]
+    fn call_node_demands_expanded_body_not_argument_edges() {
+        let graph = DemandGraph {
+            nodes: vec![
+                Node {
+                    id: NodeId(0),
+                    kind: NodeKind::Const(vx_runtime_graph::ConstValue::U64(42)),
+                    span: None,
+                    label: "body root".to_string(),
+                    ty: "U64".to_string(),
+                    inputs: Vec::new(),
+                },
+                Node {
+                    id: NodeId(1),
+                    kind: NodeKind::Bomb,
+                    span: None,
+                    label: "dead arg".to_string(),
+                    ty: "bottom".to_string(),
+                    inputs: Vec::new(),
+                },
+                Node {
+                    id: NodeId(2),
+                    kind: NodeKind::Call {
+                        function: "pick_first".to_string(),
+                        arg_count: 1,
+                    },
+                    span: None,
+                    label: "pick_first(...)".to_string(),
+                    ty: "U64".to_string(),
+                    inputs: vec![NodeId(0), NodeId(1)],
+                },
+            ],
+            root: NodeId(2),
+        };
+        let mut driver = Driver::new(graph);
+        assert_eq!(
+            driver.drive(DemandRequest::root(NodeId(2))),
+            Ok(NodeOutput::U64(42))
+        );
+        assert_eq!(driver.memo_state(NodeId(0)), Some(MemoState::Ready));
+        assert_eq!(driver.memo_state(NodeId(1)), None);
+        assert_eq!(driver.memo_state(NodeId(2)), Some(MemoState::Ready));
+    }
 }

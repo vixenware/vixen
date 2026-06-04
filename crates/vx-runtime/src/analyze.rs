@@ -564,7 +564,18 @@ impl Builder<'_> {
         self.param_bindings = saved_param_bindings;
         self.memo = saved_memo;
 
-        root
+        let mut inputs = Vec::with_capacity(args.len() + 1);
+        inputs.push(root);
+        inputs.extend_from_slice(args);
+        self.emit(
+            NodeKind::Call {
+                function: callee_name.to_string(),
+                arg_count: args.len() as u32,
+            },
+            format!("{callee_name}(…)"),
+            span,
+            inputs,
+        )
     }
 
     fn bind_pattern_to_node(&mut self, pat: PatternId, node: NodeId) {
@@ -1319,6 +1330,10 @@ impl Builder<'_> {
                     _ => None,
                 }
             }
+            NodeKind::Call { .. } => {
+                let body_root = *graph_node.inputs.first()?;
+                Some(self.resolved_graph_node(body_root).unwrap_or(body_root))
+            }
             _ => Some(node),
         }
     }
@@ -1458,6 +1473,50 @@ mod tests {
         // assert_eq(pair[0], 42): the call must reach into its args.
         let g = analyze_source("fn d() -> Bool ( let pair = (7, 💣); pair[0] == 7 )", "d").unwrap();
         bombs_unreached(&g);
+    }
+
+    #[test]
+    fn direct_function_call_leaves_a_graph_call_node() {
+        let g = analyze_source("fn id(x: U64) -> U64 ( x ) fn d() -> U64 ( id(42) )", "d").unwrap();
+        assert!(
+            g.nodes.iter().any(|node| {
+                matches!(
+                    &node.kind,
+                    NodeKind::Call {
+                        function,
+                        arg_count: 1
+                    } if function == "id"
+                )
+            }),
+            "direct calls must leave a source-blind Call node for runtime memo hooks: {:?}",
+            g.nodes
+        );
+    }
+
+    #[test]
+    fn named_projection_resolves_through_call_wrapper() {
+        let src = "struct Pair { a: U64, b: U64 } \
+                   fn pair() -> Pair ( Pair { a: 💣, b: 42 } ) \
+                   fn d() -> U64 ( pair().b )";
+        bombs_unreached(&analyze_source(src, "d").unwrap());
+    }
+
+    #[test]
+    fn closure_call_leaves_a_graph_call_node() {
+        let g = analyze_source("fn d() -> U64 ( let f = (x) => x + 1; f(41) )", "d").unwrap();
+        assert!(
+            g.nodes.iter().any(|node| {
+                matches!(
+                    &node.kind,
+                    NodeKind::Call {
+                        function,
+                        arg_count: 1
+                    } if function == "f"
+                )
+            }),
+            "closure calls must leave a source-blind Call node for runtime memo hooks: {:?}",
+            g.nodes
+        );
     }
 
     #[test]

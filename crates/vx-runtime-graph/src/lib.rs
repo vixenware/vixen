@@ -92,6 +92,10 @@ pub enum NodeKind {
         field_names: Vec<String>,
     },
     Closure,
+    Call {
+        function: String,
+        arg_count: u32,
+    },
     Match {
         arms: Vec<MatchArm>,
     },
@@ -152,6 +156,11 @@ impl DemandGraph {
             let node = &self.nodes[i];
             match &node.kind {
                 NodeKind::LazyData | NodeKind::Variant { .. } | NodeKind::Closure => {}
+                NodeKind::Call { .. } => {
+                    if let Some(&body_root) = node.inputs.first() {
+                        stack.push(body_root);
+                    }
+                }
                 NodeKind::Project { .. } => {
                     stack.push(node.inputs[0]);
                     if let Some(v) = self.resolved_value(NodeId(i as u32)) {

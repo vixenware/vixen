@@ -149,8 +149,12 @@ Current progress:
 - Closure calls and named functions used as values expand when the analyzer can
   resolve the callable template. Closure construction stores capture node refs
   and does not demand them.
-- Callee expression memoization is scoped per expansion; two calls to the same
-  function do not reuse one instantiation's argument bindings.
+- Expanded direct and closure calls now leave a source-blind `Call` graph node
+  around the expanded body root. Core demands only that body-root input, not the
+  argument edges recorded for future memo keys.
+- Callee expression memoization remains scoped per expansion; two calls to the
+  same function still do not reuse one instantiation's argument bindings or share
+  a function-call cache entry yet.
 
 ### 4. Scalar kernels
 
@@ -274,6 +278,15 @@ Acceptance:
 
 - Function arguments are not forced at call boundary unless demanded by callee.
 - `pick_first((42, bomb))` does not demand bomb.
+
+Current progress:
+
+- Direct calls and known closure calls instantiate the body graph and wrap the
+  result in `NodeKind::Call { function, arg_count }`.
+- `vx-runtime-core` executes a call node by demanding only its expanded body-root
+  input. Additional argument inputs are retained as graph identity/memo-hook
+  material, not as strict dependencies.
+- Function-call memo storage is not implemented yet.
 
 ### 9. Closures and captures
 

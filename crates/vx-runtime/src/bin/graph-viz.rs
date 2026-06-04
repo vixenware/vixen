@@ -44,6 +44,7 @@ fn kind_str(kind: &NodeKind) -> &'static str {
         NodeKind::Project { .. } => "Project",
         NodeKind::Variant { .. } => "Variant",
         NodeKind::Closure => "Closure",
+        NodeKind::Call { .. } => "Call",
         NodeKind::Match { .. } => "Match",
         NodeKind::Fallible { .. } => "Fallible",
         NodeKind::CaughtFailure => "CaughtFailure",

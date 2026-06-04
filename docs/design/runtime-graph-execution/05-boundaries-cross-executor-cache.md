@@ -287,6 +287,9 @@ Current progress:
   host boundaries demand both outputs but spawn only once.
 - Observer bundles now have a content identity suitable for the observer-code
   part of a backtick exec key.
+- Function calls now leave a source-blind graph `Call` node around the expanded
+  body root, so a future function-call memo has a runtime node to attach to.
+  There is no function-call cache storage yet.
 - Backtick exec has a local in-process exact L1 for successful observer values
   and output-tree handles. The current key covers the command coordinate, binary,
   rendered argv, and observer identity for the materialized request; full

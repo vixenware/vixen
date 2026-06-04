@@ -240,7 +240,7 @@ Current broad runtime result:
 cargo nextest run -p vx-runtime --no-fail-fast
 ```
 
-Observed result: 139 tests run, 139 passed, 0 failed, 0 skipped. The former red
+Observed result: 142 tests run, 142 passed, 0 failed, 0 skipped. The former red
 `cc_probe_builds_a_content_identified_ctoolchain` and
 `hello_world_compiles_through_a_requested_toolchain` cases are now green through
 graph execution. The private tree-walker demand-path oracle test was removed
