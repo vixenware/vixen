@@ -12,8 +12,8 @@
 //! - `#[test]` — must evaluate **clean** (no poison) in every mode.
 //! - `#[test(poisons)]` — must **poison** in every mode (the error-path form: a
 //!   `fail`, a forced `💣`, a failed `assert`).
-//! - `#[test(kernel)]` — additionally, the body must dispatch ≥1 kernel (observed
-//!   in `Interp` mode), proving it took the kernel path rather than tree-walking.
+//! - `#[test(kernel)]` — additionally, the body must execute at least one graph
+//!   kernel node (observed in `Interp` mode).
 //!
 //! `assert`/`assert_eq` come from the stdlib prelude; `💣` is the over-forcing
 //! tripwire. The detonation site or explicit graph unsupported error is the
@@ -49,8 +49,9 @@ fn lang_dir() -> PathBuf {
     Path::new(env!("CARGO_MANIFEST_DIR")).join("tests/lang")
 }
 
-/// The modes to run each test in. `Off` and `Interp` everywhere; `Jit` only where
-/// the JIT exists — on other targets `Jit` would merely re-run the interpreter.
+/// The modes to run each test in. During the rebuild, source entries are
+/// graph-driven in every mode; `Interp`/`Jit` remain public mode labels while the
+/// kernel backend is being rewired.
 fn modes() -> Vec<KernelMode> {
     let mut m = vec![KernelMode::Off, KernelMode::Interp];
     #[cfg(all(target_os = "macos", target_arch = "aarch64"))]
@@ -219,7 +220,8 @@ fn lang_suite() {
             _ => {}
         }
 
-        // `#[test(kernel)]`: the body must have dispatched a kernel (Interp mode).
+        // `#[test(kernel)]`: the body must have executed a graph kernel node
+        // (observed through the Interp public mode).
         if t.expect.kernel {
             let interp_dispatches = outs
                 .iter()

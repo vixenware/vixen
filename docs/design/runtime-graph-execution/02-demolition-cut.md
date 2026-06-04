@@ -183,6 +183,7 @@ cargo nextest run -p vx-runtime source_entry
 cargo nextest run -p vx-runtime execution_crates_stay_source_blind
 cargo nextest run -p vx-runtime-core
 cargo nextest run -p vx-runtime lower::tests
+cargo nextest run -p vx-runtime --test coerce
 rg -n 'vx[_-]ir|ExprKind|ExprId|StmtKind|PatternKind|PatternId|VirProgram|BodyId|node_exprs|exprmap|eval_inner|eval_expr|walk_expr|legacy_eval|fn force|\.force\(' crates/vx-runtime-core crates/vx-runtime-driver
 ```
 
@@ -195,10 +196,20 @@ Observed result:
 - `execution_crates_stay_source_blind` passes.
 - `vx-runtime-core` passes 4/4.
 - `lower::tests` passes 8/8.
+- `coerce` passes 2/2.
 - The raw forbidden-symbol scan returns no matches in core/driver.
 - Constant nodes now carry structured `ConstValue` payloads. Core execution and
   executable lowering no longer parse constant display labels; literal parsing
   lives only at the analyzer boundary.
+- Statically resolved direct function calls are graph-expanded at analysis time
+  with argument node refs bound to callee parameter patterns. This is not the
+  final function-template payload system, but runtime execution remains
+  source-blind.
+- The graph driver reports graph kernel executions for the transitional
+  `dispatches` counter.
+- Public `Outcome` conversion can wrap a graph-root lazy array/tuple as old
+  `Value` thunks. Forcing one of those fields issues a `PublicValueField`
+  demand through the driver.
 
 Current broad-suite result:
 
@@ -206,23 +217,12 @@ Current broad-suite result:
 cargo nextest run -p vx-runtime-graph -p vx-runtime-core -p vx-runtime-driver -p vx-runtime --no-fail-fast
 ```
 
-Observed result after assertion kernel payloads, graph poison span threading, and
-structured constant graph payloads:
-141 tests run, 129 passed, 12 failed, 0 skipped.
+Observed result after direct-call graph expansion, graph kernel execution
+counting, and lazy public compound materialization:
+141 tests run, 140 passed, 1 failed, 0 skipped.
 
 The red surface is honest graph-driver fallout from the source-entry cut:
 
-- `eval::tests::asserts_dispatch_to_the_kernel`
-- `eval::tests::bool_returning_kernel_wraps_as_bool`
-- `eval::tests::conditionally_used_param_declines_dispatch`
-- `eval::tests::block_tail_sub_expression_dispatches_with_a_param`
-- `eval::tests::non_scalar_args_fall_back_to_tree_walk`
-- `eval::tests::scalar_function_dispatches_and_computes`
-- `eval::tests::sub_expression_dispatches_not_just_whole_bodies`
-- `eval::tests::unused_param_stays_lazy_through_dispatch`
-- `vx-runtime::coerce string_array_coerces_to_path_array_end_to_end`
-- `vx-runtime::coerce string_literal_coerces_to_path_end_to_end`
-- `vx-runtime::eval_on_strands clean_program_evaluates_to_clean_on_a_strand`
 - `vx-runtime::lang_suite lang_suite`
 
 Several failures still stop with explicit messages like:
@@ -235,12 +235,12 @@ Graph poison source spans are now threaded from the graph node into `CorePoison`
 and then into the public `Outcome`; `i6_eval_outcome_carries_the_source_span`
 passes through graph driver.
 
-The `.vx` language harness now runs through graph driver for source entries.
-After `KernelOp::Assert` and `KernelOp::AssertEq`, it fails 43 of 68
-Vixen-language cases. Assertion calls are no longer opaque; remaining failures
-are mostly function calls, closures, match, variants, strings/methods, failure
-context, and kernel-dispatch counters that no longer mean "source tree-walk vs
-kernel." That is expected for this cut and is not a fallback.
+The `.vx` language harness now runs through graph driver for source entries. It
+fails 29 of 68 Vixen-language cases. Direct calls, arithmetic kernel cases,
+control-flow kernel cases, and simple call laziness now pass. Remaining failures
+are concentrated in closure calls/function values, failure unions/catch,
+graph-level match, variants, and string methods. Those failures are explicit
+graph unsupported errors and are not a fallback.
 
 ## Verification commands
 

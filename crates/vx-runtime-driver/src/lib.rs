@@ -7,12 +7,13 @@
 use std::collections::HashMap;
 
 use vx_runtime_core::{CorePoison, NeedSet, NodeOutput, ReadyInputs, Step, UnsupportedNode};
-use vx_runtime_graph::{DemandGraph, NodeId};
+use vx_runtime_graph::{DemandGraph, NodeId, NodeKind};
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum DemandOrigin {
     RootResult,
     BoundaryPayload,
+    PublicValueField,
     TestProbe,
 }
 
@@ -36,6 +37,14 @@ impl DemandRequest {
         Self {
             node,
             origin: DemandOrigin::BoundaryPayload,
+            _sealed: private::Sealed,
+        }
+    }
+
+    pub fn public_value_field(node: NodeId) -> Self {
+        Self {
+            node,
+            origin: DemandOrigin::PublicValueField,
             _sealed: private::Sealed,
         }
     }
@@ -73,6 +82,7 @@ pub enum DriverError {
 pub struct Driver {
     graph: DemandGraph,
     memo: HashMap<NodeId, NodeOutput>,
+    kernel_executions: u64,
 }
 
 impl Driver {
@@ -80,6 +90,7 @@ impl Driver {
         Self {
             graph,
             memo: HashMap::new(),
+            kernel_executions: 0,
         }
     }
 
@@ -97,6 +108,10 @@ impl Driver {
         self.memo.contains_key(&node)
     }
 
+    pub fn kernel_executions(&self) -> u64 {
+        self.kernel_executions
+    }
+
     fn resolve_node(&mut self, node: NodeId) -> Result<NodeOutput, DriverError> {
         if let Some(output) = self.memo.get(&node) {
             return Ok(output.clone());
@@ -106,6 +121,14 @@ impl Driver {
             let step = vx_runtime_core::step(&self.graph, node, ReadyInputs::new(&self.memo));
             match step {
                 Step::Ready(output) => {
+                    if self
+                        .graph
+                        .nodes
+                        .get(node.0 as usize)
+                        .is_some_and(|n| matches!(n.kind, NodeKind::Kernel(_)))
+                    {
+                        self.kernel_executions += 1;
+                    }
                     self.memo.insert(node, output.clone());
                     return Ok(output);
                 }

@@ -139,6 +139,14 @@ Demand rule: demand callee enough to know which function/closure to enter, then
 enter the function graph with argument nodes bound as params. Do not force
 arguments merely because a call exists.
 
+Current progress:
+
+- Statically resolved direct calls to function items are expanded at analysis
+  time. The expanded graph binds parameter patterns to argument node refs.
+- This is intentionally not the final payload/template system. Closure calls,
+  function values, higher-order calls, and recursion still fail explicitly as
+  unsupported graph shapes.
+
 ### Closures
 
 Closure payload:

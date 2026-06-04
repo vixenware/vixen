@@ -118,6 +118,14 @@ Acceptance:
 - `let x = bomb; 42` does not demand `x`.
 - `let q = p; q[0]` reaches `p[0]` through graph refs.
 
+Current progress:
+
+- Let aliases bind names to graph node refs.
+- Statically resolved direct calls expand at analysis time. Callee params bind
+  to the caller's argument node refs, so unused arguments remain undemanded.
+- Callee expression memoization is scoped per expansion; two calls to the same
+  function do not reuse one instantiation's argument bindings.
+
 ### 4. Scalar kernels
 
 Implement:
@@ -138,6 +146,15 @@ Acceptance:
 
 - Kernel execution receives only ready strict inputs.
 - Kernel nodes do not recursively force arbitrary graph nodes.
+
+Current progress:
+
+- Graph core executes arithmetic, comparisons, boolean ops, `if`, `assert`, and
+  `assert_eq`.
+- The graph driver counts ready kernel nodes for the transitional public
+  dispatch counter.
+- `arithmetic.vx`, direct-call cases in `calls.vx`, and graph `if` demand tests
+  pass through the source-entry graph path.
 - Kernel failures become graph poison with source span when available.
 
 ### 5. If/control flow

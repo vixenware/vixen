@@ -81,6 +81,12 @@ Expected latest structural checkpoint:
   `graph_exec::run_source` and `vx-runtime-driver`.
 - `vx-runtime-graph::NodeKind::Const` carries `ConstValue`; core execution and
   executable lowering no longer parse constant labels for semantics.
+- Statically resolved direct function calls expand into graph nodes at analysis
+  time with argument node refs bound to callee parameter patterns.
+- `vx-runtime-driver` reports graph kernel executions for the transitional
+  public dispatch counter.
+- `graph_exec` can expose graph-root lazy arrays/tuples as old public `Value`
+  thunks whose fields demand graph nodes through `PublicValueField`.
 - `vx-runtime::eval` still contains the legacy tree-walker for `eval_body*`,
   observer execution, mirror tests, and other not-yet-cut public body paths.
 

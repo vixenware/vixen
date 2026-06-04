@@ -2021,10 +2021,10 @@ mod tests {
     }
 
     #[test]
-    fn conditionally_used_param_declines_dispatch() {
-        // `a`/`b` are read only inside their branches, not the entry block: the
-        // laziness gate must decline the kernel so the lazy walker takes the live
-        // branch and never forces the bomb in the dead one.
+    fn if_kernel_does_not_force_dead_branch() {
+        // `a`/`b` are read only inside their branches. The graph `if` kernel
+        // demands the condition, then only the selected branch, so the bomb in the
+        // dead branch is never demanded.
         let src = "fn pick(c: Bool, a: U64, b: U64) -> U64 ( if c ( a ) else ( b ) ) \
                    fn main() -> U64 ( pick(true, 7, 💣) )";
         let (outcome, dispatches) = run_with_dispatches(src, "main").unwrap();
@@ -2032,26 +2032,22 @@ mod tests {
             matches!(outcome, Outcome::Clean(Value::U64(7))),
             "got {outcome:?}"
         );
-        assert_eq!(
-            dispatches, 0,
-            "the gate should decline; the walker handles it"
-        );
+        assert!(dispatches >= 1, "the graph if kernel should execute");
     }
 
     #[test]
-    fn non_scalar_args_fall_back_to_tree_walk() {
-        // `a == b` on strings would mis-lower to a word compare — but the non-scalar
-        // argument trips the call-site gate, so it falls back to the tree-walker's
-        // real string equality. No dispatch.
+    fn string_equality_runs_as_graph_kernel() {
+        // String equality is a graph-visible pure kernel over resolved graph
+        // outputs, not a word-kernel fallback through source evaluation.
         let src = r#"fn eq(a: String, b: String) -> Bool ( a == b ) fn main() -> Bool ( eq("hi", "hi") )"#;
         let (outcome, dispatches) = run_with_dispatches(src, "main").unwrap();
         assert!(
             matches!(outcome, Outcome::Clean(Value::Bool(true))),
             "got {outcome:?}"
         );
-        assert_eq!(
-            dispatches, 0,
-            "string args must fall back, not run the word kernel"
+        assert!(
+            dispatches >= 1,
+            "string equality should execute as a graph kernel"
         );
     }
 

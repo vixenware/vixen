@@ -131,6 +131,7 @@ pub(crate) fn build_graph_indexed(
         bindings: HashMap::new(),
         param_bindings: HashMap::new(),
         field_names: HashMap::new(),
+        active_bodies: vec![body_id],
     };
     for pat in params {
         b.bind_pattern(pat);
@@ -158,6 +159,10 @@ struct Builder<'a> {
     /// For a lazy-data node built from a named struct/record: its field names in
     /// slot order, so a named projection (`.a`) can resolve to the right slot.
     field_names: HashMap<NodeId, Vec<String>>,
+    /// Function bodies currently being expanded into the graph. Direct calls are
+    /// graph-expanded at analysis time until graph templates exist; this prevents
+    /// recursive expansion from rebuilding the source tree forever.
+    active_bodies: Vec<BodyId>,
 }
 
 impl Builder<'_> {
@@ -237,6 +242,158 @@ impl Builder<'_> {
         }
     }
 
+    fn direct_function_body(&self, callee: ExprId) -> Option<BodyId> {
+        let ExprKind::NameRef(name) = &self.program.arena[callee].kind else {
+            return None;
+        };
+        let Some(DefTarget::Item(item)) = name.resolved else {
+            return None;
+        };
+        match &self.program.arena[item].kind {
+            ItemKind::Function(function) => Some(function.body),
+            _ => None,
+        }
+    }
+
+    fn expand_direct_call(
+        &mut self,
+        body: BodyId,
+        args: &[NodeId],
+        span: Span,
+        callee_name: &str,
+    ) -> NodeId {
+        if self.active_bodies.contains(&body) {
+            return self.emit(
+                NodeKind::Unresolved,
+                format!("recursive call `{callee_name}`"),
+                span,
+                args.to_vec(),
+            );
+        }
+
+        let prog = self.program;
+        let params: Vec<PatternId> = prog.arena[body]
+            .params
+            .iter()
+            .map(|param| param.pattern)
+            .collect();
+        if params.len() != args.len() {
+            return self.emit(
+                NodeKind::Unresolved,
+                format!(
+                    "call `{callee_name}` expected {} args, got {}",
+                    params.len(),
+                    args.len()
+                ),
+                span,
+                args.to_vec(),
+            );
+        }
+
+        let root_expr = prog.arena[body].root_expr;
+        let saved_bindings = self.bindings.clone();
+        let saved_param_bindings = self.param_bindings.clone();
+        let saved_memo = self.memo.clone();
+
+        self.active_bodies.push(body);
+        for (param, arg) in params.into_iter().zip(args.iter().copied()) {
+            self.bind_pattern_to_node(param, arg);
+        }
+        let root = self.walk(root_expr);
+        self.active_bodies.pop();
+
+        self.bindings = saved_bindings;
+        self.param_bindings = saved_param_bindings;
+        self.memo = saved_memo;
+
+        root
+    }
+
+    fn bind_pattern_to_node(&mut self, pat: PatternId, node: NodeId) {
+        let prog = self.program;
+        let p = &prog.arena[pat];
+        match &p.kind {
+            PatternKind::Binding(pb) => {
+                self.bindings.insert(pb.binding, node);
+            }
+            PatternKind::Tuple(tp) => {
+                for (index, &child) in tp.elements.iter().enumerate() {
+                    let field = self.emit(
+                        NodeKind::Project {
+                            index: index as u32,
+                        },
+                        format!("[{index}]"),
+                        to_span(p.span),
+                        vec![node],
+                    );
+                    self.bind_pattern_to_node(child, field);
+                }
+            }
+            PatternKind::Struct(sp) => {
+                for (fallback, field) in sp.fields.iter().enumerate() {
+                    let index = self
+                        .field_names
+                        .get(&node)
+                        .and_then(|names| names.iter().position(|name| name == &field.name))
+                        .unwrap_or(fallback) as u32;
+                    let field_node = self.emit(
+                        NodeKind::Project { index },
+                        format!(".{}", field.name),
+                        to_span(field.name_span),
+                        vec![node],
+                    );
+                    self.bind_pattern_to_node(field.pattern, field_node);
+                }
+            }
+            PatternKind::Array(ap) => {
+                for (index, &child) in ap.elements.iter().enumerate() {
+                    let field = self.emit(
+                        NodeKind::Project {
+                            index: index as u32,
+                        },
+                        format!("[{index}]"),
+                        to_span(p.span),
+                        vec![node],
+                    );
+                    self.bind_pattern_to_node(child, field);
+                }
+            }
+            PatternKind::ArrayRest(rest) => {
+                if let Some(binding) = rest.binding {
+                    self.bindings.insert(binding, node);
+                }
+            }
+            PatternKind::Variant(vp) => {
+                if let Some(fields) = &vp.fields {
+                    for (fallback, field) in fields.iter().enumerate() {
+                        let field_node = self.emit(
+                            NodeKind::Project {
+                                index: fallback as u32,
+                            },
+                            format!(".{}", field.name),
+                            to_span(field.name_span),
+                            vec![node],
+                        );
+                        self.bind_pattern_to_node(field.pattern, field_node);
+                    }
+                }
+            }
+            PatternKind::At(at) => {
+                self.bindings.insert(at.binding, node);
+                self.bind_pattern_to_node(at.inner, node);
+            }
+            PatternKind::Or(or) => {
+                for &child in &or.alternatives {
+                    self.bind_pattern_to_node(child, node);
+                }
+            }
+            PatternKind::Wildcard
+            | PatternKind::Literal(_)
+            | PatternKind::Unit
+            | PatternKind::Error => {}
+        }
+    }
+
     fn walk(&mut self, e: ExprId) -> NodeId {
         if let Some(&n) = self.memo.get(&e) {
             return n;
@@ -307,27 +464,58 @@ impl Builder<'_> {
                 )
             }
 
-            // A call: kernel (pure) or boundary (intrinsic/effect). Args are inputs;
-            // walking them is how `assert_eq(pair[0], 42)` reaches `pair[0]`.
+            // A call: assertions are pure kernel nodes, known effects are boundary
+            // nodes, and direct function calls are expanded into graph nodes with
+            // argument node refs bound to callee params.
             ExprKind::Call(c) => {
                 let callee = c.callee;
-                let args: Vec<ExprId> = c.args.iter().map(|a| a.expr).collect();
                 let callee_name = match &prog.arena[callee].kind {
                     ExprKind::NameRef(n) => n.name.clone(),
                     _ => "call".to_string(),
                 };
-                let inputs = args.into_iter().map(|x| self.walk(x)).collect();
-                let kind = match callee_name.as_str() {
-                    "assert" => NodeKind::Kernel(KernelOp::Assert),
-                    "assert_eq" => NodeKind::Kernel(KernelOp::AssertEq),
-                    name if BOUNDARY_CALLS.contains(&name) => NodeKind::Boundary,
-                    _ => {
-                        // A pure call: a kernel, but not lowerable to scalar IR
-                        // until we inline callee bodies. Opaque for now.
-                        NodeKind::Kernel(KernelOp::Opaque)
+                let arg_exprs: Vec<ExprId> = c.args.iter().map(|a| a.expr).collect();
+
+                match callee_name.as_str() {
+                    "assert" => {
+                        let inputs = arg_exprs.into_iter().map(|x| self.walk(x)).collect();
+                        self.emit(
+                            NodeKind::Kernel(KernelOp::Assert),
+                            format!("{callee_name}()"),
+                            span,
+                            inputs,
+                        )
                     }
-                };
-                self.emit(kind, format!("{callee_name}()"), span, inputs)
+                    "assert_eq" => {
+                        let inputs = arg_exprs.into_iter().map(|x| self.walk(x)).collect();
+                        self.emit(
+                            NodeKind::Kernel(KernelOp::AssertEq),
+                            format!("{callee_name}()"),
+                            span,
+                            inputs,
+                        )
+                    }
+                    name if BOUNDARY_CALLS.contains(&name) => {
+                        let inputs = arg_exprs.into_iter().map(|x| self.walk(x)).collect();
+                        self.emit(NodeKind::Boundary, format!("{callee_name}()"), span, inputs)
+                    }
+                    _ => {
+                        if let Some(body) = self.direct_function_body(callee) {
+                            let args: Vec<NodeId> =
+                                arg_exprs.into_iter().map(|x| self.walk(x)).collect();
+                            let expanded = self.expand_direct_call(body, &args, span, &callee_name);
+                            self.memo.insert(e, expanded);
+                            return expanded;
+                        }
+
+                        let inputs = arg_exprs.into_iter().map(|x| self.walk(x)).collect();
+                        self.emit(
+                            NodeKind::Unresolved,
+                            format!("unsupported call `{callee_name}`"),
+                            span,
+                            inputs,
+                        )
+                    }
+                }
             }
 
             // Projection — selects a slot. Positional from FieldKey; named resolved

@@ -409,10 +409,10 @@ mod tests {
     }
 
     #[test]
-    fn opaque_ops_decline_lowering() {
-        // A call isn't inlined yet → NotLowerable (honest), so the evaluator would
-        // tree-walk. (string `++` likewise.)
-        let g = analyze_source("fn f() -> U64 ( g(1) ) fn g(x: U64) -> U64 ( x )", "f").unwrap();
+    fn unsupported_calls_decline_lowering() {
+        // Closure calls are not executable graph payloads yet, so lowering rejects
+        // them honestly instead of recovering source expressions.
+        let g = analyze_source("fn f() -> U64 ( let h = (x) => x + 1; h(41) )", "f").unwrap();
         assert!(lower_root(&g).is_err());
     }
 
