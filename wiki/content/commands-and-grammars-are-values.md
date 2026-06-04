@@ -91,7 +91,9 @@ on the path would silently serve stale `.o` after a compiler upgrade).
    returns `CToolchain { cc: Command, … }` carrying the obligations the probe
    recorded.
 4. **The grammar-forcing resolver** — `infer_cli_literal` forces the leading
-   hole's grammar value; best-effort / pending.
+   hole's grammar value; best-effort / pending. This runs in the **engine**, not
+   `vx-ir`: checking forces values, so the checker lives with the evaluator — see
+   [[Checking is forcing]] for the (settled) structural decision and migration.
 5. **Content-identified exec + input mounting** — `ExecCommand` carries the
    fingerprint; the executor materializes the read-set (the deferred `run_exec`
    piece in `observe.rs`); a real `cc` compiles a mounted `hello.c`.
