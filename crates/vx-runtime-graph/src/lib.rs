@@ -114,7 +114,7 @@ pub enum NodeKind {
 }
 
 /// A byte range in the source, `[start, end)`.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Facet)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Facet)]
 pub struct Span {
     pub start: u32,
     pub end: u32,

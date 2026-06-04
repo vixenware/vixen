@@ -115,6 +115,7 @@ enum NodeMemo {
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
 struct CallMemoKey {
     code_identity: String,
+    args: Vec<NodeOutput>,
 }
 
 pub struct Driver {
@@ -196,7 +197,7 @@ impl Driver {
             None => {}
         }
 
-        let call_memo_key = self.zero_arg_call_memo_key(node);
+        let call_memo_key = self.call_memo_key(node);
         if let Some(output) = call_memo_key
             .as_ref()
             .and_then(|key| self.call_memo.get(key).cloned())
@@ -279,16 +280,27 @@ impl Driver {
             .collect()
     }
 
-    fn zero_arg_call_memo_key(&self, node: NodeId) -> Option<CallMemoKey> {
+    fn call_memo_key(&self, node: NodeId) -> Option<CallMemoKey> {
         let graph_node = self.graph.nodes.get(node.0 as usize)?;
         match &graph_node.kind {
             NodeKind::Call {
                 code_identity: Some(code_identity),
-                arg_count: 0,
+                arg_count,
                 ..
-            } => Some(CallMemoKey {
-                code_identity: code_identity.clone(),
-            }),
+            } => {
+                let arg_nodes = graph_node.inputs.get(1..)?;
+                if arg_nodes.len() != *arg_count as usize {
+                    return None;
+                }
+                let mut args = Vec::with_capacity(arg_nodes.len());
+                for &arg in arg_nodes {
+                    args.push(self.output(arg)?.clone());
+                }
+                Some(CallMemoKey {
+                    code_identity: code_identity.clone(),
+                    args,
+                })
+            }
             _ => None,
         }
     }
@@ -485,7 +497,163 @@ mod tests {
     }
 
     #[test]
-    fn calls_with_arguments_do_not_use_zero_arg_memo() {
+    fn calls_with_ready_arguments_share_per_run_memo() {
+        let graph = DemandGraph {
+            nodes: vec![
+                Node {
+                    id: NodeId(0),
+                    kind: NodeKind::Const(vx_runtime_graph::ConstValue::U64(9)),
+                    span: None,
+                    label: "shared arg".to_string(),
+                    ty: "U64".to_string(),
+                    inputs: Vec::new(),
+                },
+                Node {
+                    id: NodeId(1),
+                    kind: NodeKind::Const(vx_runtime_graph::ConstValue::U64(42)),
+                    span: None,
+                    label: "first body".to_string(),
+                    ty: "U64".to_string(),
+                    inputs: Vec::new(),
+                },
+                Node {
+                    id: NodeId(2),
+                    kind: NodeKind::Call {
+                        function: "id".to_string(),
+                        code_identity: Some("fn:id".to_string()),
+                        arg_count: 1,
+                    },
+                    span: None,
+                    label: "id(arg)".to_string(),
+                    ty: "U64".to_string(),
+                    inputs: vec![NodeId(1), NodeId(0)],
+                },
+                Node {
+                    id: NodeId(3),
+                    kind: NodeKind::Bomb,
+                    span: None,
+                    label: "duplicate expansion tripwire".to_string(),
+                    ty: "bottom".to_string(),
+                    inputs: Vec::new(),
+                },
+                Node {
+                    id: NodeId(4),
+                    kind: NodeKind::Call {
+                        function: "id".to_string(),
+                        code_identity: Some("fn:id".to_string()),
+                        arg_count: 1,
+                    },
+                    span: None,
+                    label: "id(arg) duplicate".to_string(),
+                    ty: "U64".to_string(),
+                    inputs: vec![NodeId(3), NodeId(0)],
+                },
+            ],
+            root: NodeId(2),
+        };
+        let mut driver = Driver::new(graph);
+        assert_eq!(
+            driver.drive(DemandRequest::test_probe(NodeId(0))),
+            Ok(NodeOutput::U64(9))
+        );
+        assert_eq!(
+            driver.drive(DemandRequest::root(NodeId(2))),
+            Ok(NodeOutput::U64(42))
+        );
+        assert_eq!(
+            driver.drive(DemandRequest::root(NodeId(4))),
+            Ok(NodeOutput::U64(42))
+        );
+        assert_eq!(driver.memo_state(NodeId(3)), None);
+        assert_eq!(driver.memo_state(NodeId(4)), Some(MemoState::Ready));
+    }
+
+    #[test]
+    fn ready_argument_values_disambiguate_call_memo() {
+        let graph = DemandGraph {
+            nodes: vec![
+                Node {
+                    id: NodeId(0),
+                    kind: NodeKind::Const(vx_runtime_graph::ConstValue::U64(9)),
+                    span: None,
+                    label: "arg 9".to_string(),
+                    ty: "U64".to_string(),
+                    inputs: Vec::new(),
+                },
+                Node {
+                    id: NodeId(1),
+                    kind: NodeKind::Const(vx_runtime_graph::ConstValue::U64(42)),
+                    span: None,
+                    label: "body 42".to_string(),
+                    ty: "U64".to_string(),
+                    inputs: Vec::new(),
+                },
+                Node {
+                    id: NodeId(2),
+                    kind: NodeKind::Call {
+                        function: "id".to_string(),
+                        code_identity: Some("fn:id".to_string()),
+                        arg_count: 1,
+                    },
+                    span: None,
+                    label: "id(9)".to_string(),
+                    ty: "U64".to_string(),
+                    inputs: vec![NodeId(1), NodeId(0)],
+                },
+                Node {
+                    id: NodeId(3),
+                    kind: NodeKind::Const(vx_runtime_graph::ConstValue::U64(10)),
+                    span: None,
+                    label: "arg 10".to_string(),
+                    ty: "U64".to_string(),
+                    inputs: Vec::new(),
+                },
+                Node {
+                    id: NodeId(4),
+                    kind: NodeKind::Const(vx_runtime_graph::ConstValue::U64(7)),
+                    span: None,
+                    label: "body 7".to_string(),
+                    ty: "U64".to_string(),
+                    inputs: Vec::new(),
+                },
+                Node {
+                    id: NodeId(5),
+                    kind: NodeKind::Call {
+                        function: "id".to_string(),
+                        code_identity: Some("fn:id".to_string()),
+                        arg_count: 1,
+                    },
+                    span: None,
+                    label: "id(10)".to_string(),
+                    ty: "U64".to_string(),
+                    inputs: vec![NodeId(4), NodeId(3)],
+                },
+            ],
+            root: NodeId(2),
+        };
+        let mut driver = Driver::new(graph);
+        assert_eq!(
+            driver.drive(DemandRequest::test_probe(NodeId(0))),
+            Ok(NodeOutput::U64(9))
+        );
+        assert_eq!(
+            driver.drive(DemandRequest::test_probe(NodeId(3))),
+            Ok(NodeOutput::U64(10))
+        );
+        assert_eq!(
+            driver.drive(DemandRequest::root(NodeId(2))),
+            Ok(NodeOutput::U64(42))
+        );
+        assert_eq!(
+            driver.drive(DemandRequest::root(NodeId(5))),
+            Ok(NodeOutput::U64(7))
+        );
+        assert_eq!(driver.memo_state(NodeId(4)), Some(MemoState::Ready));
+        assert_eq!(driver.memo_state(NodeId(5)), Some(MemoState::Ready));
+    }
+
+    #[test]
+    fn calls_with_unresolved_arguments_do_not_build_call_memo() {
         let graph = DemandGraph {
             nodes: vec![
                 Node {

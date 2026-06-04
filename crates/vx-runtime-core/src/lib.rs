@@ -10,7 +10,7 @@ use vx_runtime_graph::{
     BinKind, ConstValue, DemandGraph, KernelOp, MatchPattern, NodeId, NodeKind, Span,
 };
 
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
 pub enum NodeOutput {
     U64(u64),
     Bool(bool),
@@ -37,7 +37,7 @@ pub enum NodeOutput {
     FailureContext(CoreFailureContext),
 }
 
-#[derive(Debug, Clone, PartialEq, Eq, Default)]
+#[derive(Debug, Clone, PartialEq, Eq, Hash, Default)]
 pub struct CoreFailureContext {
     pub span: Option<Span>,
     pub demand_path: Vec<Span>,

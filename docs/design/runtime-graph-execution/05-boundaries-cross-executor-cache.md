@@ -262,12 +262,10 @@ Rules:
 
 Current progress:
 
-- Direct zero-argument calls have a per-run driver memo keyed by direct function
-  code identity. That key is available before running the body and requires no
-  argument demand.
-- Calls with arguments and closure calls deliberately do not use this memo yet.
-  Their correct keys require resolved argument and capture values, and that work
-  must not make the call boundary strict.
+- Direct calls have a per-run driver memo keyed by direct function code identity
+  plus argument outputs that are already resolved before the body runs.
+- Unresolved argument nodes deliberately do not participate: the driver skips the
+  call memo key instead of demanding them. Closure calls do not use this memo yet.
 
 ### 3. Boundary L1 input-keyed cache
 
@@ -297,9 +295,9 @@ Current progress:
 - Observer bundles now have a content identity suitable for the observer-code
   part of a backtick exec key.
 - Function calls now leave a source-blind graph `Call` node around the expanded
-  body root. Direct zero-argument calls have a per-run memo keyed by direct
-  function code identity; argument-valued calls and closure calls do not have
-  call-memo storage yet.
+  body root. Direct calls have a per-run memo keyed by direct function code
+  identity plus already-ready argument outputs; unresolved arguments are not
+  demanded to build keys. Closure calls do not have call-memo storage yet.
 - Backtick exec has a local in-process exact L1 for successful observer values
   and output-tree handles. The current key covers the command coordinate, binary,
   rendered argv, and observer identity for the materialized request; full
@@ -374,14 +372,15 @@ Newly green boundary payloads:
   capability metadata and materialize by selecting an advertised provider.
 - Per-run node memo is explicit driver state for in-progress, ready, and poisoned
   nodes.
-- Direct zero-argument function calls have a local per-run call memo keyed by
-  direct function code identity.
+- Direct function calls have a local per-run call memo keyed by direct function
+  code identity plus already-ready argument outputs.
 - `host.exec` has a local input-keyed L1 cache.
 - Backtick exec has a local exact L1 cache for the current materialized request
   identity.
 
-No argument-valued function-call memo, closure-call memo, persistent L2 cache, or
-read-set provenance has been implemented in this checkpoint.
+No memo path demands unresolved arguments to build a key. Closure-call memo,
+persistent L2 cache, and read-set provenance have not been implemented in this
+checkpoint.
 
 ## Acceptance criteria
 

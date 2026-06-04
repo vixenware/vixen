@@ -152,12 +152,13 @@ Current progress:
 - Expanded direct and closure calls now leave a source-blind `Call` graph node
   around the expanded body root. Core demands only that body-root input, not the
   argument edges recorded for future memo keys.
-- Callee expression memoization remains scoped per expansion; two argument
-  bearing calls to the same function still do not reuse one instantiation's
-  argument bindings or share a function-call cache entry yet.
-- Direct zero-argument call nodes carry a direct function code identity and share
-  a per-run driver call memo. The memo is intentionally not used for calls with
-  arguments or for closure calls yet.
+- Callee expression memoization remains scoped per expansion; call memo output
+  may share one expanded result only when the driver can compute a key before
+  running the body.
+- Direct call nodes carry a direct function code identity and share a per-run
+  driver call memo when every argument output is already resolved before the body
+  runs. The memo is intentionally not used for unresolved arguments or for
+  closure calls yet.
 
 ### 4. Scalar kernels
 
@@ -289,9 +290,9 @@ Current progress:
 - `vx-runtime-core` executes a call node by demanding only its expanded body-root
   input. Additional argument inputs are retained as graph identity/memo-hook
   material, not as strict dependencies.
-- `vx-runtime-driver` has a per-run memo for direct zero-argument calls keyed by
-  code identity. Argument-valued call memo storage and closure-call memo storage
-  are not implemented yet.
+- `vx-runtime-driver` has a per-run memo for direct calls keyed by code identity
+  plus already-ready argument outputs. It does not demand unresolved arguments to
+  build a key. Closure-call memo storage is not implemented yet.
 
 ### 9. Closures and captures
 
