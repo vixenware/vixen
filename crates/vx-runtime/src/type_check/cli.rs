@@ -1,11 +1,13 @@
-//! CLI-literal type checking (`@cc[ … ]`).
+//! Backtick-invocation type checking — tier-1 validation (`r[exec.validate.static]`).
 //!
-//! The command-line analogue of `sqlx::query!`: validate the literal against the
-//! tool grammar the name resolves to — unknown flag, value outside a fixed
+//! The command-line analogue of `sqlx::query!`: validate `` `$tool args…` `` against
+//! the **command** the leading tool carries — unknown flag, value outside a fixed
 //! domain, flag illegal in the command's mode — all at compile time, with zero
-//! Vixen evaluation. The grammar reaches us as a [`command_model::GrammarSet`]
-//! the compile driver loaded from the imported grammar package (keyed on the
-//! arena by import spec); we find it through the binding `@name` resolves to.
+//! observer/exec evaluation. The grammar reaches us as a [`command_model::GrammarSet`]
+//! the compile driver loaded from the imported grammar package (keyed on the arena by
+//! import spec); we find it by **const-evaluating** `tool.command` to a coordinate
+//! `(package, name)` (`const_command_coord`) — the command is a provider-independent
+//! constant, so this works wherever the tool is statically determined.
 //!
 //! Crucially, **holes are typed by position**: each `$x` / `${ … }` sits at a
 //! grammar position whose [`ValueDomain`]/[`Kind`] becomes the *expected type*

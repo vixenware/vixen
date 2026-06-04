@@ -1580,7 +1580,15 @@ pub fn eval_body(
     args: Vec<Value>,
     mode: KernelMode,
 ) -> Outcome {
-    eval_body_inner(program, env, body, args, mode, None)
+    eval_body_inner(
+        program,
+        env,
+        body,
+        args,
+        mode,
+        None,
+        ProviderRegistry::default(),
+    )
 }
 
 /// As [`eval_body`], but with the executor an `exec(…)` in `body` dispatches to —
@@ -1596,7 +1604,31 @@ pub fn eval_body_with_exec(
     mode: KernelMode,
     exec_client: ObserveClientId,
 ) -> Outcome {
-    eval_body_inner(program, env, body, args, mode, Some(exec_client))
+    eval_body_inner(
+        program,
+        env,
+        body,
+        args,
+        mode,
+        Some(exec_client),
+        ProviderRegistry::default(),
+    )
+}
+
+/// As [`eval_body_with_exec`], but also with the advertised capability `providers`
+/// the local control plane injects `Type where (predicate)` requests against
+/// (`r[ability.match]`) — the full orchestrator entry: exec **and** injection. This
+/// is the path a real build runs on (a tool requested by `where`, then invoked).
+pub fn eval_body_with_exec_and_providers(
+    program: &VirProgram,
+    env: &TypeEnv,
+    body: BodyId,
+    args: Vec<Value>,
+    mode: KernelMode,
+    exec_client: ObserveClientId,
+    providers: ProviderRegistry,
+) -> Outcome {
+    eval_body_inner(program, env, body, args, mode, Some(exec_client), providers)
 }
 
 fn eval_body_inner(
@@ -1606,6 +1638,7 @@ fn eval_body_inner(
     args: Vec<Value>,
     mode: KernelMode,
     exec_client: Option<ObserveClientId>,
+    providers: ProviderRegistry,
 ) -> Outcome {
     let ev = Evaluator {
         program,
@@ -1615,7 +1648,7 @@ fn eval_body_inner(
         dispatches: Cell::new(0),
         mode,
         exec_client,
-        providers: ProviderRegistry::default(),
+        providers,
     };
     match ev.invoke_body_values(body, args, Env::new()) {
         Ok(v) => Outcome::Clean(v),
