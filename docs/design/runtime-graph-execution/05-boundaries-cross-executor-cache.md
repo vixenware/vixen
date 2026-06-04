@@ -133,9 +133,10 @@ Current progress:
   containing one does not run the command.
 - Successful backtick invocations now have an in-process exact L1 keyed by the
   current materialized request identity: command coordinate, binary string,
-  pre-run executable content fingerprint, rendered argv, and observer identity.
-  Bare binary names are resolved through `PATH` for fingerprinting. Cache hits
-  seed the demanded graph node without calling `dispatch_observe`.
+  pre-run executable content fingerprint, declared tool fingerprint when present,
+  rendered argv, and observer identity. Bare binary names are resolved through
+  `PATH` for fingerprinting. Cache hits seed the demanded graph node without
+  calling `dispatch_observe`.
 - Observe dispatch happens from graph boundary materialization through
   `dispatch_observe`, then the resulting graph node is seeded and the same demand
   loop resumes.
@@ -147,7 +148,8 @@ Current progress:
   where two identical demanded backtick invocations dispatch once, a
   non-aliasing test where different observer bundles dispatch separately, and a
   binary-fingerprint test where a stable command path dispatches again after its
-  executable content changes.
+  executable content changes. A declared-fingerprint test proves two commands
+  with the same binary but different advertised tool identities do not alias.
 - `exec_boundaries.vx` passes through `lang_suite`: a real backtick exec in an
   undemanded tuple slot stays cold even though the source entry has no observe
   client available.
@@ -278,6 +280,7 @@ Exec key:
 observer code identity
 observer captures
 executable content fingerprint
+declared tool fingerprint
 argv
 env
 mount identities
@@ -307,12 +310,13 @@ Current progress:
   captures are not demanded to build keys.
 - Backtick exec has a local in-process exact L1 for successful observer values
   and output-tree handles. The current key covers the command coordinate, binary
-  string, pre-run executable content fingerprint, rendered argv, and observer
-  identity for the materialized request. Successful observer data values can
-  persist to the opt-in local disk L2 by that key. Output-tree handles remain
-  L1-only because scheduler handle ids are per run. Full env/mount/toolchain
-  identities, CAS-backed L2, function-output L2, and read-set provenance are
-  still unimplemented.
+  string, pre-run executable content fingerprint, declared tool fingerprint when
+  present, rendered argv, and observer identity for the materialized request.
+  Successful observer data values can persist to the opt-in local disk L2 by
+  that key. Output-tree handles remain L1-only because scheduler handle ids are
+  per run. Full env/mount identities, richer capability/toolchain identities,
+  CAS-backed L2, function-output L2, and read-set provenance are still
+  unimplemented.
 
 ### 4. L2 content-addressed storage
 
@@ -373,9 +377,10 @@ Verified green:
   passed, including stable, content-sensitive observer bundle identity.
 - `cargo nextest run -p vx-runtime -E 'test(observe_runs_a_real_command_and_returns_the_observer_value) | test(observe_crosses_the_output_tree_as_a_handle_marker) | binary(observe_on_strands)' --no-fail-fast`: 4/4 passed.
 - `cargo nextest run -p vx-runtime -E 'binary(exec_on_strands)' --no-fail-fast`:
-  7/7 passed, including cold exec non-demand, exact backtick exec L1 reuse,
-  observer-identity non-aliasing, executable-fingerprint non-aliasing, and
-  disk-L2 reuse across fresh graph evaluations.
+  8/8 passed, including cold exec non-demand, exact backtick exec L1 reuse,
+  observer-identity non-aliasing, executable-fingerprint non-aliasing,
+  declared-tool-fingerprint non-aliasing, and disk-L2 reuse across fresh graph
+  evaluations.
 - `cargo nextest run -p vx-runtime -E 'binary(exec_output_tree)' --no-fail-fast`:
   3/3 passed.
 - `cargo nextest run -p vx-runtime -E 'binary(remote_tree_via_eval)' --no-fail-fast`:
@@ -399,7 +404,8 @@ Newly green boundary payloads:
 - `host.exec` has a local input-keyed L1 cache.
 - `host.exec` has an opt-in local disk L2 for successful results.
 - Backtick exec has a local exact L1 cache for the current materialized request
-  identity, including a pre-run executable content fingerprint.
+  identity, including a pre-run executable content fingerprint and declared tool
+  fingerprint when present.
 - Backtick exec has an opt-in local disk L2 for successful observer data values.
 
 No memo path demands unresolved arguments or captures to build a key. CAS-backed

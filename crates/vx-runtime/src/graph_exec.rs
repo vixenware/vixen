@@ -155,6 +155,7 @@ struct ExecInvocationCacheKey {
     command_name: String,
     program: String,
     program_fingerprint: String,
+    declared_tool_fingerprint: Option<String>,
     args: Vec<String>,
     observer: ObserverCacheIdentity,
 }
@@ -177,6 +178,7 @@ struct ToolRequest {
     command_package: String,
     command_name: String,
     binary: String,
+    declared_fingerprint: Option<String>,
 }
 
 pub(crate) fn run_source(source: &str, entry: &str) -> Result<(Outcome, u64), String> {
@@ -618,6 +620,10 @@ fn tool_request(
         .position(|name| name == "binary")
         .and_then(|index| fields.get(index).copied())
         .ok_or_else(|| "tool value has no `binary` field".to_string())?;
+    let declared_fingerprint = field_names
+        .iter()
+        .position(|name| name == "fingerprint")
+        .and_then(|index| fields.get(index).copied());
     let command = demand_payload(
         Rc::clone(&driver),
         Rc::clone(&externals),
@@ -632,12 +638,27 @@ fn tool_request(
         boundary,
         command,
     )?;
+    let declared_fingerprint = declared_fingerprint
+        .map(|fingerprint| {
+            expect_string(
+                demand_payload(
+                    Rc::clone(&driver),
+                    Rc::clone(&externals),
+                    runtime.clone(),
+                    boundary,
+                    fingerprint,
+                )?,
+                "tool `fingerprint`",
+            )
+        })
+        .transpose()?;
     let binary = demand_payload(driver, externals, runtime, boundary, binary)?;
     let binary = expect_string(binary, "tool `binary`")?;
     Ok(ToolRequest {
         command_package,
         command_name,
         binary,
+        declared_fingerprint,
     })
 }
 
@@ -699,6 +720,7 @@ fn exec_invocation_cache_key(
         command_name: tool.command_name.clone(),
         program: tool.binary.clone(),
         program_fingerprint,
+        declared_tool_fingerprint: tool.declared_fingerprint.clone(),
         args,
         observer,
     }

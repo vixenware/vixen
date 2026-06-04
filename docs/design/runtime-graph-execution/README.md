@@ -150,10 +150,11 @@ Latest verified red/green shape:
 - `cargo nextest run -p vx-runtime -E 'binary(source_blind_guardrails)' --no-fail-fast`:
   2/2 passed.
 - `cargo nextest run -p vx-runtime -E 'binary(exec_on_strands)' --no-fail-fast`:
-  7/7 passed, including `undemanded_exec_in_tuple_does_not_dispatch`,
+  8/8 passed, including `undemanded_exec_in_tuple_does_not_dispatch`,
   exact-L1 reuse for identical demanded backtick invocations, observer identity
   non-aliasing, executable-fingerprint non-aliasing when a stable binary path
-  changes content, and disk-L2 reuse across fresh graph evaluations.
+  changes content, declared-tool-fingerprint non-aliasing, and disk-L2 reuse
+  across fresh graph evaluations.
 - `cargo nextest run -p vx-runtime -E 'binary(exec_output_tree)' --no-fail-fast`:
   3/3 passed.
 - `cargo nextest run -p vx-runtime -E 'binary(host_probe)' --no-fail-fast`:
@@ -175,10 +176,10 @@ Latest verified red/green shape:
   call memo reuse, resolved-argument disambiguation, closure capture memo reuse,
   and proof that unresolved arguments or captures are not demanded to build a
   call memo key.
-- `cargo nextest run -p vx-runtime --no-fail-fast`: 146 run, 146 passed,
+- `cargo nextest run -p vx-runtime --no-fail-fast`: 147 run, 147 passed,
   0 failed, 0 skipped.
 - `cargo nextest run -p vx-runtime-graph -p vx-runtime-core -p vx-runtime-driver -p vx-runtime --no-fail-fast`:
-  162 run, 162 passed, 0 skipped.
+  163 run, 163 passed, 0 skipped.
 - The forbidden-symbol scan over `crates/vx-runtime-core` and
   `crates/vx-runtime-driver` returns no matches.
 - The deleted tree-walker affordance scan over `crates/vx-runtime/src` returns

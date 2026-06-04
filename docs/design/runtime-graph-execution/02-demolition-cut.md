@@ -214,10 +214,11 @@ Observed result:
   `run.stream.out` through graph/native boundary thunks, and crosses the result
   to `WireValue`.
 - Backtick exec passes through graph boundary materialization. The
-  `exec_on_strands` binary passes 7/7, including a cold exec in an undemanded
+  `exec_on_strands` binary passes 8/8, including a cold exec in an undemanded
   tuple field, exact-L1 reuse for identical demanded invocations,
-  observer-identity non-aliasing, executable-fingerprint non-aliasing, and
-  disk-L2 reuse across fresh graph evaluations.
+  observer-identity non-aliasing, executable-fingerprint non-aliasing,
+  declared-tool-fingerprint non-aliasing, and disk-L2 reuse across fresh graph
+  evaluations.
 - `exec_output_tree` passes 3/3. A top-level producing tree returned by observe
   is represented as `NodeOutput::OutputTree` plus a graph-node-keyed remote
   handle, and `.file(path)` pulls only the demanded path.
@@ -244,7 +245,7 @@ Current broad runtime result:
 cargo nextest run -p vx-runtime --no-fail-fast
 ```
 
-Observed result: 146 tests run, 146 passed, 0 failed, 0 skipped. The former red
+Observed result: 147 tests run, 147 passed, 0 failed, 0 skipped. The former red
 `cc_probe_builds_a_content_identified_ctoolchain` and
 `hello_world_compiles_through_a_requested_toolchain` cases are now green through
 graph execution. The private tree-walker demand-path oracle test was removed
