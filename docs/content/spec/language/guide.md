@@ -21,15 +21,9 @@ The fastest way to understand Vixen is to read a small real build:
 ```vixen
 fn main(workspace: Tree) with { ..VixenMain } -> Tree (
   let rust = RustToolchain where (version >= 1.91);
-  let hello = exec [rust.rustc, workspace "src/main.rs", "-o", "out/hello"] with {
+  let hello = `${rust.rustc} ${workspace "src/main.rs"} -o out/hello` with {
     writable: ["out"],
-    observer: (proc, vfs) => (
-      if proc.exit_code != 0 (
-        fail `rustc failed`
-      ) else (
-        vfs.file "out/hello"
-      )
-    ),
+    observer: (run) => run.ok.out.file "out/hello",
   };
   Tree %{ "target/debug/hello" => hello }
 )
@@ -40,12 +34,13 @@ That one example already shows most of the authored surface:
 - `main` is the package entry point. It takes the workspace as a `Tree` and
   returns a `Tree` that overlays onto it.
 - `RustToolchain where (...)` requests a toolchain ability; the runtime
-  resolves it and routes the `exec` to a matching executor.
+  resolves it and routes the invocation to a matching executor.
 - `Tree %{ ... }` builds a tree from a map of path-strings to entries.
 - `Blob("...")` builds a file-like value from text.
-- `exec [ ... ] with { ... }` runs a process with positional inputs and a
-  keyword record.
-- `observer: (proc, vfs) => ...` is a closure that runs on the executor.
+- A backtick invocation `` `$tool args…` `` runs a process — the lead hole is
+  the tool, the rest its arguments; `with { ... }` supplies the non-defaults.
+- `observer: (run) => ...` is a closure that runs on the executor, against the
+  `Run`.
 - `if cond ( then ) else ( else )` is an expression.
 
 ## Records are not maps
@@ -76,14 +71,14 @@ There is no path-literal syntax. Path-shaped values are ordinary strings:
 ```vixen
 "src/main.rs"
 "out/hello"
-`out/${name}.o`
+"out/${name}.o"
 workspace "zoo/lua-src"
 ```
 
 What makes a string a "path" is **provenance**, not quoting. A string produced
 by projecting a `Tree` (`workspace "src/main.rs"`) carries tree-provenance, so
 the runtime mounts it into the sandbox and mixes it into cache keys; a plain
-`"-o"` does not. Build paths with `/` or backtick interpolation; `Path.join`
+`"-o"` does not. Build paths with `/` or string interpolation; `Path.join`
 and `Path.split` live on the value type. Provenance is preserved through `Path`
 joins and lost through arbitrary string munging.
 
@@ -107,7 +102,7 @@ The practical rule is:
 So these are different:
 
 ```vixen
-exec [cc, "-c", file] with { mounts: %{ "src" => source } }
+`$cc -c ${file}` with { mounts: %{ "src" => source } }
 Point { x: 1, y: 2 }
 Tree %{ "bin/app" => binary }
 ```
@@ -154,7 +149,7 @@ Closures use arrow syntax:
 
 ```vixen
 (x) => x + 1
-(proc, vfs) => vfs
+(run) => run.ok.out
 ```
 
 They are common in combinators:
@@ -165,27 +160,21 @@ config.platforms(env)
   .merge()
 ```
 
-And in reusable partially applied helpers:
+And in reusable helpers that fix the boilerplate behind a closure:
 
 ```vixen
-let cexec = partial exec with {
-  observer: (proc, vfs) => (
-    if proc.exit_code != 0 (
-      fail `process failed`
-    ) else (
-      vfs.subtree("out")
-    )
-  ),
-};
+let compile = (cc, file, src) =>
+  `$cc -c src/${file} -o out/obj/${file}.o` with {
+    mounts: %{ "src" => src },
+    writable: ["out"],
+    observer: (run) => run.ok.out.subtree("out"),
+  };
 ```
 
 That lets later calls supply only the changing parts:
 
 ```vixen
-cexec [tc.cc, "-c", `src/${file}`, "-o", `out/obj/${file}.o`] with {
-  mounts: %{ "src" => src },
-  writable: ["out"],
-}
+compile(tc.cc, file, src)
 ```
 
 ## What belongs where
