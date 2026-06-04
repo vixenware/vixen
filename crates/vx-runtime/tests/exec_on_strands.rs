@@ -12,13 +12,15 @@
 //! `Exit` struct that crossed back, not a placeholder. (`observe_on_strands` drives
 //! `dispatch_observe` directly; `observe`'s own test asserts the crossed `WireValue`.)
 
+use std::path::{Path, PathBuf};
 use std::rc::Rc;
 use std::sync::atomic::{AtomicU64, Ordering};
 
 use vx_ir::item::ItemKind;
 use vx_runtime::compile::compile_source;
 use vx_runtime::eval::{
-    KernelMode, Outcome as EvalOutcome, Value, eval_body_with_exec, tool_value,
+    KernelMode, Outcome as EvalOutcome, Value, eval_body_with_exec,
+    eval_body_with_exec_and_cache_dir, tool_value,
 };
 use vx_runtime::observe::local_observer;
 use vx_runtime::strand::{Outcome, ResourceId, Scheduler};
@@ -134,6 +136,15 @@ fn exec_cache_marker(name: &str) -> String {
         .into_owned()
 }
 
+fn exec_cache_dir(name: &str) -> PathBuf {
+    static NEXT_DIR: AtomicU64 = AtomicU64::new(0);
+    std::env::temp_dir().join(format!(
+        "vx-exec-l2-{name}-{}-{}",
+        std::process::id(),
+        NEXT_DIR.fetch_add(1, Ordering::Relaxed)
+    ))
+}
+
 /// `true` exits 0 → the observer's `run.ok` forces to an `Exit` → that whole struct
 /// crosses back and `exec(…)` evaluates to it (verified worker-side). The whole path
 /// — `with`-hook, command projection, observer bundling, observe + value crossing
@@ -235,6 +246,98 @@ fn identical_backtick_exec_boundaries_share_the_l1_entry() {
     assert_eq!(
         count, "x",
         "the second identical backtick exec must reuse the L1 result"
+    );
+}
+
+#[cfg(unix)]
+#[test]
+fn backtick_exec_l2_cache_survives_fresh_graph_eval() {
+    use std::os::unix::fs::PermissionsExt;
+
+    let binary = exec_cache_marker("l2-binary");
+    let marker = exec_cache_marker("l2-marker");
+    let cache_dir = exec_cache_dir("backtick");
+    let _ = std::fs::remove_file(&binary);
+    let _ = std::fs::remove_file(&marker);
+    let _ = std::fs::remove_dir_all(&cache_dir);
+    std::fs::write(
+        &binary,
+        format!("#!/bin/sh\nprintf x >> {marker}\nprintf same\n"),
+    )
+    .expect("write l2 executable");
+    let mut perms = std::fs::metadata(&binary)
+        .expect("l2 executable metadata")
+        .permissions();
+    perms.set_mode(0o755);
+    std::fs::set_permissions(&binary, perms).expect("make l2 executable runnable");
+
+    fn run_once(binary: &str, cache_dir: &Path) -> Option<Outcome> {
+        let fe = compile_source(
+            "fn t(cmd: Command) ( \
+               let run = `$cmd` with { observer: (run) => run.ok }; \
+               assert_eq(run.stdout, run.stdout) )",
+            "t",
+        )
+        .expect("exec l2 cache program compiles");
+        let entry = fe
+            .program
+            .arena
+            .items
+            .iter()
+            .find_map(|it| match &it.kind {
+                ItemKind::Function(f) if f.name == "t" => Some(f.body),
+                _ => None,
+            })
+            .expect("fn t");
+
+        let s = Scheduler::new(&[4]);
+        let client = s.block_on(local_observer());
+        let cid = s.register_observe_client(client);
+
+        let program = fe.program;
+        let env = fe.env;
+        let binary = binary.to_string();
+        let cache_dir = cache_dir.to_path_buf();
+        let strand = s.spawn(ResourceId(0), move || {
+            let cmd = tool_value("@vixen/grammar-cc", "cc", &binary);
+            match eval_body_with_exec_and_cache_dir(
+                &program,
+                &env,
+                entry,
+                vec![cmd],
+                KernelMode::Off,
+                cid,
+                &cache_dir,
+            ) {
+                EvalOutcome::Clean(Value::Unit) => Outcome::Clean,
+                EvalOutcome::Clean(other) => Outcome::Poisoned(format!(
+                    "expected cached exec assertion to return unit, got {other:?}"
+                )),
+                EvalOutcome::Poisoned { reason, .. } => Outcome::Poisoned(reason),
+            }
+        });
+        s.demand(strand);
+        s.run();
+        s.outcome(strand)
+    }
+
+    assert_eq!(
+        run_once(&binary, &cache_dir),
+        Some(Outcome::Clean),
+        "first demanded backtick run should spawn and populate L2"
+    );
+    assert_eq!(
+        run_once(&binary, &cache_dir),
+        Some(Outcome::Clean),
+        "fresh graph eval should reuse the persisted observer value"
+    );
+    let count = std::fs::read_to_string(&marker).expect("exec l2 marker file");
+    let _ = std::fs::remove_file(&binary);
+    let _ = std::fs::remove_file(&marker);
+    let _ = std::fs::remove_dir_all(&cache_dir);
+    assert_eq!(
+        count, "x",
+        "a fresh graph evaluation with the same L2 dir must not dispatch observe again"
     );
 }
 

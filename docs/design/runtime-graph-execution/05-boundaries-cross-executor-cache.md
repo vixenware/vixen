@@ -296,6 +296,9 @@ Current progress:
 - `host.exec` has a local in-process L1 keyed by argv plus the executable
   fingerprint. `host_exec_uses_input_keyed_l1_cache` proves two identical graph
   host boundaries demand both outputs but spawn only once.
+- `host.exec` also has an opt-in local disk L2 rooted at `VX_RUNTIME_L2_DIR` or
+  an explicit runtime cache directory. Successful `HostExec` records persist by
+  the same input key and can be reused by a fresh graph evaluation.
 - Observer bundles now have a content identity suitable for the observer-code
   part of a backtick exec key.
 - Function calls now leave a source-blind graph `Call` node around the expanded
@@ -305,13 +308,26 @@ Current progress:
 - Backtick exec has a local in-process exact L1 for successful observer values
   and output-tree handles. The current key covers the command coordinate, binary
   string, pre-run executable content fingerprint, rendered argv, and observer
-  identity for the materialized request; full env/mount/toolchain identities,
-  persistent L2 storage, and read-set provenance are still unimplemented.
+  identity for the materialized request. Successful observer data values can
+  persist to the opt-in local disk L2 by that key. Output-tree handles remain
+  L1-only because scheduler handle ids are per run. Full env/mount/toolchain
+  identities, CAS-backed L2, function-output L2, and read-set provenance are
+  still unimplemented.
 
 ### 4. L2 content-addressed storage
 
 Persist boundary/function outputs by content identity. This is the storage layer,
 not a reason to change cache key semantics.
+
+Current slice:
+
+- `host.exec` persists successful `HostExec` records in a local disk L2 when a
+  runtime cache directory is provided or `VX_RUNTIME_L2_DIR` is set.
+- Backtick exec persists successful observer data values in the same local disk
+  L2. It deliberately does not persist output-tree handles yet.
+- Cache records are encoded with `facet-json`, and file paths are derived from a
+  blake3 hash of the Facet JSON cache key.
+- This is not the final CAS-backed L2 and it does not record read-set witnesses.
 
 ### 5. Read-set provenance
 
@@ -350,15 +366,16 @@ bounded:
 
 Verified green:
 
-- `cargo nextest run -p vx-runtime -E 'binary(host_probe)'`: 5/5 passed,
-  including the input-keyed `host.exec` L1 cache test and bare executable-name
-  fingerprint resolution.
+- `cargo nextest run -p vx-runtime -E 'binary(host_probe)'`: 6/6 passed,
+  including the input-keyed `host.exec` L1 cache test, bare executable-name
+  fingerprint resolution, and disk-L2 reuse across fresh graph evaluations.
 - `cargo nextest run -p vx-runtime -E 'binary(bundle)' --no-fail-fast`: 3/3
   passed, including stable, content-sensitive observer bundle identity.
 - `cargo nextest run -p vx-runtime -E 'test(observe_runs_a_real_command_and_returns_the_observer_value) | test(observe_crosses_the_output_tree_as_a_handle_marker) | binary(observe_on_strands)' --no-fail-fast`: 4/4 passed.
 - `cargo nextest run -p vx-runtime -E 'binary(exec_on_strands)' --no-fail-fast`:
-  6/6 passed, including cold exec non-demand, exact backtick exec L1 reuse,
-  observer-identity non-aliasing, and executable-fingerprint non-aliasing.
+  7/7 passed, including cold exec non-demand, exact backtick exec L1 reuse,
+  observer-identity non-aliasing, executable-fingerprint non-aliasing, and
+  disk-L2 reuse across fresh graph evaluations.
 - `cargo nextest run -p vx-runtime -E 'binary(exec_output_tree)' --no-fail-fast`:
   3/3 passed.
 - `cargo nextest run -p vx-runtime -E 'binary(remote_tree_via_eval)' --no-fail-fast`:
@@ -380,11 +397,14 @@ Newly green boundary payloads:
 - Direct and closure calls have a local per-run call memo keyed by code identity
   plus already-ready argument and capture outputs.
 - `host.exec` has a local input-keyed L1 cache.
+- `host.exec` has an opt-in local disk L2 for successful results.
 - Backtick exec has a local exact L1 cache for the current materialized request
   identity, including a pre-run executable content fingerprint.
+- Backtick exec has an opt-in local disk L2 for successful observer data values.
 
-No memo path demands unresolved arguments or captures to build a key. Persistent
-L2 cache and read-set provenance have not been implemented in this checkpoint.
+No memo path demands unresolved arguments or captures to build a key. CAS-backed
+L2 storage, output-tree-handle persistence, function-output persistence, and
+read-set provenance have not been implemented in this checkpoint.
 
 ## Acceptance criteria
 

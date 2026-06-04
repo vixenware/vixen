@@ -9,7 +9,7 @@ use std::sync::atomic::{AtomicUsize, Ordering};
 
 use vx_ir::item::ItemKind;
 use vx_runtime::compile::compile_source;
-use vx_runtime::eval::{KernelMode, Outcome, Value, eval_body};
+use vx_runtime::eval::{KernelMode, Outcome, Value, eval_body, eval_body_with_cache_dir};
 use vx_runtime::host::local_host_value;
 
 static NEXT_MARKER: AtomicUsize = AtomicUsize::new(0);
@@ -143,6 +143,62 @@ fn host_exec_resolves_bare_program_names_for_fingerprinting() {
         Outcome::Clean(Value::Str(s)) => assert_eq!(&*s, "hi", "bare sh stdout crosses back"),
         other => panic!("expected stdout `hi`, got {other:?}"),
     }
+}
+
+#[test]
+fn host_exec_l2_cache_survives_fresh_graph_eval() {
+    let cache_dir = std::env::temp_dir().join(format!(
+        "vixen-host-exec-l2-{}-{}",
+        std::process::id(),
+        NEXT_MARKER.fetch_add(1, Ordering::Relaxed)
+    ));
+    let marker = std::env::temp_dir().join(format!(
+        "vixen-host-exec-l2-marker-{}-{}",
+        std::process::id(),
+        NEXT_MARKER.fetch_add(1, Ordering::Relaxed)
+    ));
+    let marker = marker.to_string_lossy().into_owned();
+    let _ = std::fs::remove_dir_all(&cache_dir);
+    let _ = std::fs::remove_file(&marker);
+    let script = format!("printf x >> {marker}; cat {marker}");
+    let fe = compile_source(
+        &format!(
+            "fn probe(host: Host) -> String ( \
+             let script = \"{script}\"; \
+             host.exec([\"sh\", \"-c\", script]).stdout )"
+        ),
+        "probe",
+    )
+    .expect("host exec l2 program compiles");
+    let body = fn_body(&fe, "probe");
+
+    let run_once = || {
+        eval_body_with_cache_dir(
+            &fe.program,
+            &fe.env,
+            body,
+            vec![local_host_value()],
+            KernelMode::Off,
+            &cache_dir,
+        )
+    };
+
+    match run_once() {
+        Outcome::Clean(Value::Str(s)) => assert_eq!(&*s, "x", "first host.exec run spawns"),
+        other => panic!("expected first stdout `x`, got {other:?}"),
+    }
+    match run_once() {
+        Outcome::Clean(Value::Str(s)) => assert_eq!(&*s, "x", "second run uses L2"),
+        other => panic!("expected cached stdout `x`, got {other:?}"),
+    }
+
+    let count = std::fs::read_to_string(&marker).expect("host.exec l2 marker file");
+    let _ = std::fs::remove_file(&marker);
+    let _ = std::fs::remove_dir_all(&cache_dir);
+    assert_eq!(
+        count, "x",
+        "a fresh graph evaluation with the same L2 dir must not spawn again"
+    );
 }
 
 #[test]

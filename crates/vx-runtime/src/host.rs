@@ -49,7 +49,7 @@ pub fn which(name: &str) -> Option<String> {
 /// **fingerprint** of the binary that ran. `host.exec` *implies `host.hash`* —
 /// running `args[0]` depends on its exact bytes, so we hash it as part of the same
 /// observation (one call yields the tool's version *and* its content identity).
-#[derive(Clone, Debug, PartialEq, Eq)]
+#[derive(facet::Facet, Clone, Debug, PartialEq, Eq)]
 pub struct HostExec {
     pub exit_code: i64,
     pub stdout: String,
