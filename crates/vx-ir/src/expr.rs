@@ -372,13 +372,18 @@ pub struct Arg {
     pub span: SourceSpan,
 }
 
-/// A keyword-argument call: `callee with { key: val }`.
+/// A keyword-argument call `callee with { key: val }`, or an ability request
+/// `Type where (constraint)` (when `is_constraint`). The two share this node.
 #[derive(facet::Facet, Debug, Clone)]
 pub struct WhereExpr {
-    /// The callee expression (may be a Call or a NameRef).
+    /// The callee: a backtick invocation, a Call/PartialApp (for `with` keyword
+    /// args), or — when `is_constraint` — a capability spec `Type`.
     pub callee: ExprId,
-    /// The keyword record expression after `where`.
+    /// The keyword record (`with { … }`) or the constraint predicate (`where ( … )`).
     pub keywords: ExprId,
+    /// `true` for `Type where (constraint)` — an ability request (`r[expr.where]`);
+    /// `false` for `expr with { … }` keyword arguments.
+    pub is_constraint: bool,
 }
 
 /// A bare invocation (no-arg call): `callee!`.

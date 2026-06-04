@@ -1058,6 +1058,17 @@ impl WhereExpr {
     pub fn keywords(&self) -> Option<Expr> {
         nth_expr(self.syntax(), 1)
     }
+
+    /// `true` for `Type where (constraint)` — an ability request whose body is a
+    /// structured predicate (`r[expr.where]`); `false` for `expr with { … }`
+    /// keyword arguments. They share `WHERE_EXPR`, told apart by which keyword token
+    /// the node carries.
+    pub fn is_constraint(&self) -> bool {
+        self.syntax().children_with_tokens().any(|c| {
+            c.as_token()
+                .is_some_and(|t| t.kind() == SyntaxKind::WHERE_KW)
+        })
+    }
 }
 
 impl InvokeExpr {

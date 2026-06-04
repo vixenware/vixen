@@ -224,8 +224,14 @@ fn resolve_expr(
             }
         }
         ExprKind::Where(w) => {
-            resolve_expr(arena, w.callee, ref_order, errors);
-            resolve_expr(arena, w.keywords, ref_order, errors);
+            let (callee, keywords, is_constraint) = (w.callee, w.keywords, w.is_constraint);
+            resolve_expr(arena, callee, ref_order, errors);
+            // `Type where (constraint)` — the predicate's free identifiers are *fields
+            // of the spec*, not scope bindings (`r[expr.where]`), so they are not
+            // resolved here; the structured predicate reads their names directly.
+            if !is_constraint {
+                resolve_expr(arena, keywords, ref_order, errors);
+            }
         }
         ExprKind::Invoke(inv) => {
             resolve_expr(arena, inv.callee, ref_order, errors);

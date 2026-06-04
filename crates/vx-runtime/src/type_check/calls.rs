@@ -345,12 +345,35 @@ fn infer_invocation(tc: &mut TypeChecker, w: &WhereExpr) -> TypeId {
     result
 }
 
+/// Type `Type where (constraint)` — an ability request (`r[ability.request]`). The
+/// value is a **provider of the spec**, so its type is the spec's nominal type. The
+/// constraint's free identifiers are the spec's provider attributes (`r[expr.where]`)
+/// — not scope bindings — so the predicate body is not inferred as ordinary code here
+/// (its structural validation against the spec is `r[exec.validate]`, a later phase).
+fn infer_constraint(tc: &mut TypeChecker, w: &WhereExpr) -> TypeId {
+    let spec_name = match &tc.arena[w.callee].kind {
+        ExprKind::NameRef(nr) => Some(nr.name.clone()),
+        _ => None,
+    };
+    match spec_name {
+        Some(name) => tc.nominal_ty(&name),
+        None => tc.poison(),
+    }
+}
+
 pub(crate) fn infer_where(tc: &mut TypeChecker, w: &WhereExpr) -> TypeId {
     // A `with` decorates a backtick **invocation** (`` `$tool …` with {...} ``), a
     // Call, or a PartialApp (`partial f with {...}`). For an invocation the observer
     // determines the type (`infer_invocation`); for the others we inspect the
     // underlying function's signature to bind callback params and feed the closure
     // body's return type back into type-parameter substitution.
+
+    // `Type where (constraint)` — an ability request (`r[expr.where]`). The result is
+    // a provider of the spec; the constraint's identifiers are spec fields, not
+    // scope bindings, so the predicate body is not inferred here.
+    if w.is_constraint {
+        return infer_constraint(tc, w);
+    }
 
     let callee_kind = tc.arena[w.callee].kind.clone();
 

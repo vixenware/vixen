@@ -29,6 +29,7 @@
 //! demand-driven-runtime + strand-scheduler pages. The non-negotiables (no `Pending(String)`,
 //! no flat ISA, pending-is-a-resolver, bomb-detonates-on-force) are load-bearing.
 
+pub mod ability;
 pub mod analyze;
 pub mod command;
 pub mod compile;

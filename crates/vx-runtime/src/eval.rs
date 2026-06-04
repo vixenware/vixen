@@ -29,6 +29,7 @@ use vx_ir::scope::DefTarget;
 use vx_ir::stmt::StmtKind;
 use vx_types::TypeEnv;
 
+use crate::ability::{self, AttrLit, Constraint, ProviderRegistry};
 use crate::dispatch::{self, Dispatcher};
 use crate::graph::Span;
 use crate::observe::{ExecCommand, ObserveRequest, WireValue};
@@ -187,6 +188,20 @@ fn host_output_value(o: crate::host::HostExec) -> Value {
     ])
 }
 
+/// Whether a forced provider attribute `attr` satisfies `op value` (`r[ability.match]`).
+/// Compares like-with-like — `U64`↔`Int`, `Str`↔`Str`, `Bool`↔`Bool`; a type or kind
+/// mismatch never satisfies (so a constraint on an absent or wrong-typed attribute
+/// simply fails to match a provider rather than erroring out the whole request).
+fn attr_satisfies(attr: &Value, op: ability::CmpOp, value: &AttrLit) -> bool {
+    let ordering = match (attr, value) {
+        (Value::U64(a), AttrLit::Int(b)) => a.cmp(b),
+        (Value::Str(a), AttrLit::Str(b)) => a.as_ref().cmp(b.as_str()),
+        (Value::Bool(a), AttrLit::Bool(b)) => a.cmp(b),
+        _ => return false,
+    };
+    op.holds(ordering)
+}
+
 /// A runtime value. Compound fields are [`Thunk`]s, so they stay unforced until
 /// demanded (`r[eval.pending]`/`r[eval.forcing]`).
 #[derive(Debug, Clone)]
@@ -327,6 +342,10 @@ struct Evaluator<'a> {
     /// with an observe client registered; an `exec` without it poisons honestly
     /// (dispatch_observe must park, which only a strand can do).
     exec_client: Option<ObserveClientId>,
+    /// Advertised capability providers (`r[ability.advertise]`) the local control
+    /// plane matches `Type where (predicate)` requests against (`r[ability.match]`).
+    /// Empty on the pure paths; populated where injection is exercised.
+    providers: ProviderRegistry,
 }
 
 impl Evaluator<'_> {
@@ -1067,12 +1086,17 @@ impl Evaluator<'_> {
         result
     }
 
-    /// A backtick invocation with explicit `with { observer: (run) => … }` keywords
-    /// (`r[exec.invocation]`): run it with the supplied observer instead of the
-    /// default `run.ok.out`. `with` does not evaluate the invocation to a value first
-    /// — forcing the invocation *is* the run, and these keywords just carry the
-    /// observer (and, later, env / mounts / writable) into it.
+    /// A `where`/`with` decorated expression. `Type where (constraint)` is an ability
+    /// request (`r[expr.where]`) — match its structured predicate against the local
+    /// provider registry and inject a provider. Otherwise it is a backtick invocation
+    /// with explicit `with { observer: (run) => … }` keywords (`r[exec.invocation]`):
+    /// run it with the supplied observer instead of the default `run.ok.out`. `with`
+    /// does not evaluate the invocation to a value first — forcing the invocation *is*
+    /// the run, and these keywords just carry the observer into it.
     fn eval_where(&self, w: &WhereExpr, env: &Env) -> Result<Value, Poison> {
+        if w.is_constraint {
+            return self.eval_constraint(w);
+        }
         // The only `with`-decorated form wired so far is a backtick invocation; the
         // callee is the `CliLiteral` itself — there is no `exec` function
         // (`r[exec.invocation]`).
@@ -1083,6 +1107,61 @@ impl Evaluator<'_> {
         };
         let observer = self.observer_body(w.keywords)?;
         self.run_invocation(cli, Some(observer), env)
+    }
+
+    /// Resolve an ability request `Type where (constraint)` (`r[ability.request]`):
+    /// read the spec name from the callee, extract the constraint into a structured
+    /// predicate (`r[expr.where]`), and inject the first advertised provider that
+    /// satisfies it (`r[ability.match]`). Forcing the request is what binds it — the
+    /// predicate-identified value resolves lazily, here. Poisons if no provider
+    /// matches (the local registry is the whole fleet for now).
+    fn eval_constraint(&self, w: &WhereExpr) -> Result<Value, Poison> {
+        let spec = match &self.program.arena[w.callee].kind {
+            ExprKind::NameRef(nr) => nr.name.clone(),
+            other => {
+                return Err(poison(format!(
+                    "a `where` constraint must apply to a capability spec, got {other:?}"
+                )));
+            }
+        };
+        let constraint = ability::extract(&self.program.arena, w.keywords).map_err(poison)?;
+
+        for provider in self.providers.providers(&spec) {
+            if self.constraint_holds(&constraint, provider)? {
+                return Ok(provider.clone());
+            }
+        }
+        Err(poison(format!(
+            "no advertised provider of `{spec}` satisfies the requested constraint"
+        )))
+    }
+
+    /// Whether `provider` satisfies `constraint` — projecting each named attribute off
+    /// the provider value and comparing it to the constraint literal.
+    fn constraint_holds(&self, constraint: &Constraint, provider: &Value) -> Result<bool, Poison> {
+        match constraint {
+            Constraint::Always => Ok(true),
+            Constraint::All(cs) => {
+                for c in cs {
+                    if !self.constraint_holds(c, provider)? {
+                        return Ok(false);
+                    }
+                }
+                Ok(true)
+            }
+            Constraint::Any(cs) => {
+                for c in cs {
+                    if self.constraint_holds(c, provider)? {
+                        return Ok(true);
+                    }
+                }
+                Ok(false)
+            }
+            Constraint::Cmp { field, op, value } => {
+                let attr = self.project_name(provider, field)?;
+                Ok(attr_satisfies(&attr, *op, value))
+            }
+        }
     }
 
     /// The observer body from an invocation's `with { observer: … }` record: find the
@@ -1476,6 +1555,7 @@ pub fn run_in_mode(source: &str, entry: &str, mode: KernelMode) -> Result<(Outco
         dispatches: Cell::new(0),
         mode,
         exec_client: None,
+        providers: ProviderRegistry::default(),
     };
     let outcome = match ev.eval(root, &Env::new()) {
         Ok(v) => Outcome::Clean(v),
@@ -1535,6 +1615,7 @@ fn eval_body_inner(
         dispatches: Cell::new(0),
         mode,
         exec_client,
+        providers: ProviderRegistry::default(),
     };
     match ev.invoke_body_values(body, args, Env::new()) {
         Ok(v) => Outcome::Clean(v),
@@ -1566,6 +1647,7 @@ pub fn eval_body_wire(
         dispatches: Cell::new(0),
         mode,
         exec_client: None,
+        providers: ProviderRegistry::default(),
     };
     ev.invoke_body_values(body, args, Env::new())
         .and_then(|v| ev.to_wire(&v))
@@ -1794,6 +1876,7 @@ mod tests {
             dispatches: Cell::new(0),
             mode: KernelMode::Off,
             exec_client: None,
+            providers: ProviderRegistry::default(),
         };
         match ev.eval(root, &Env::new()) {
             Ok(v) => panic!("expected a poison, evaluated clean: {v:?}"),
@@ -1864,6 +1947,7 @@ mod tests {
             dispatches: Cell::new(0),
             mode: KernelMode::Off,
             exec_client: None,
+            providers: ProviderRegistry::default(),
         }
     }
 
@@ -1941,6 +2025,7 @@ mod tests {
             dispatches: Cell::new(0),
             mode: KernelMode::Off,
             exec_client: None,
+            providers: ProviderRegistry::default(),
         };
         let coord = ev
             .eval(root_expr, &Env::new())
@@ -2022,6 +2107,108 @@ mod tests {
             projected.outputs.iter().any(|o| o.path == "x.o"),
             "x.o is an output: {:?}",
             projected.outputs
+        );
+    }
+
+    /// A `Gcc` provider value: its `version`/`target` provider attributes plus a
+    /// `binary` (`r[ability.advertise]`).
+    fn gcc_provider(version: u64, target: &str, binary: &str) -> Value {
+        Value::Struct(vec![
+            ("version".to_string(), Thunk::done(Value::U64(version))),
+            (
+                "target".to_string(),
+                Thunk::done(Value::Str(Rc::from(target))),
+            ),
+            (
+                "binary".to_string(),
+                Thunk::done(Value::Str(Rc::from(binary))),
+            ),
+        ])
+    }
+
+    /// Request `Gcc where (constraint)` against an advertised `providers` set, and
+    /// return the injected provider's `binary` (or the poison message). Exercises the
+    /// real `where` path: front-end (resolver skips the predicate, checker types it
+    /// `Gcc`) → `eval_constraint` extracts the structured predicate and matches.
+    fn inject_binary(constraint: &str, providers: ProviderRegistry) -> Result<String, String> {
+        use crate::dispatch::Dispatcher;
+        use std::cell::Cell;
+        use vx_ir::item::ItemKind;
+
+        let src = format!(
+            "struct Gcc {{ version: U64, target: String }} \
+             fn t() ( Gcc where ({constraint}) )"
+        );
+        let (program, tenv) = crate::analyze::front_end(&src).expect("front-end");
+        let primary = *program.source_units.first().unwrap();
+        let body = program.arena[primary]
+            .items
+            .iter()
+            .find_map(|&id| match &program.arena[id].kind {
+                ItemKind::Function(f) if f.name == "t" => Some(f.body),
+                _ => None,
+            })
+            .expect("fn t");
+        let root = program.arena[body].root_expr;
+
+        let ev = Evaluator {
+            program: &program,
+            env: &tenv,
+            current_body: Cell::new(body),
+            dispatch: Dispatcher::default(),
+            dispatches: Cell::new(0),
+            mode: KernelMode::Off,
+            exec_client: None,
+            providers,
+        };
+        match ev.eval(root, &Env::new()) {
+            Ok(v) => match ev.project_name(&v, "binary") {
+                Ok(Value::Str(s)) => Ok(s.to_string()),
+                Ok(other) => Err(format!("`binary` is not a string: {other:?}")),
+                Err(p) => Err(p.message()),
+            },
+            Err(p) => Err(p.message()),
+        }
+    }
+
+    /// `Type where (predicate)` injects the first advertised provider whose attributes
+    /// satisfy the structured constraint (`r[ability.request]`/`r[ability.match]`): of
+    /// two advertised gccs, `version >= 11` selects the v12 one, skipping v10.
+    #[test]
+    fn where_injects_the_first_matching_provider() {
+        let mut providers = ProviderRegistry::new();
+        providers.advertise("Gcc", gcc_provider(10, "x86_64-linux", "gcc-10"));
+        providers.advertise("Gcc", gcc_provider(12, "x86_64-linux", "gcc-12"));
+        assert_eq!(
+            inject_binary("version >= 11", providers),
+            Ok("gcc-12".to_string()),
+            "v10 fails the constraint; v12 is injected"
+        );
+    }
+
+    /// A multi-clause constraint requires *every* clause (`r[expr.where]`): the v12
+    /// linux provider is injected; the v12 darwin one fails the `target` clause.
+    #[test]
+    fn where_matches_every_clause() {
+        let mut providers = ProviderRegistry::new();
+        providers.advertise("Gcc", gcc_provider(12, "aarch64-darwin", "gcc-darwin"));
+        providers.advertise("Gcc", gcc_provider(12, "x86_64-linux", "gcc-linux"));
+        assert_eq!(
+            inject_binary("version >= 11 && target == \"x86_64-linux\"", providers),
+            Ok("gcc-linux".to_string()),
+        );
+    }
+
+    /// When no advertised provider satisfies the constraint, the request poisons —
+    /// the local registry is the whole fleet, so an unmet demand is honest failure.
+    #[test]
+    fn where_poisons_when_no_provider_matches() {
+        let mut providers = ProviderRegistry::new();
+        providers.advertise("Gcc", gcc_provider(10, "x86_64-linux", "gcc-10"));
+        let result = inject_binary("version >= 20", providers);
+        assert!(
+            result.is_err(),
+            "no provider satisfies version >= 20, got {result:?}"
         );
     }
 }

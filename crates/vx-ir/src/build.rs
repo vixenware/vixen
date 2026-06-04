@@ -1478,7 +1478,11 @@ impl VirBuilder {
             span: where_span,
             body: self.current_body(),
             scope: self.current_scope(),
-            kind: ExprKind::Where(VirWhereExpr { callee, keywords }),
+            kind: ExprKind::Where(VirWhereExpr {
+                callee,
+                keywords,
+                is_constraint: w.is_constraint(),
+            }),
             ty: None,
         })
     }
