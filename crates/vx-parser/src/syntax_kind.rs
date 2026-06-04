@@ -35,16 +35,20 @@ syntax_kinds!(
     FN_TYPE_KW,
     INT,
     FLOAT,
+    // `'…'` raw string. `"…"` interpolated string is delimited by `DQUOTE` and a
+    // body of `INTERP_TEXT` / `INTERP_VAR` (`$name`) / `INTERP_START`..`INTERP_END`
+    // (`${ expr }`).
     STRING,
+    DQUOTE,
     BACKTICK,
     INTERP_TEXT,
+    INTERP_VAR,
     INTERP_START,
     INTERP_END,
     INTERP_STRING,
-    // CLI-literal tokens (`@cc[ … ]`): the opener bracket, a bare command word,
-    // and a `$ident` interpolation. `${ expr }` reuses INTERP_START/INTERP_END;
-    // the body is lexed in a dedicated command mode.
-    CLI_OPEN,
+    // Command-invocation tokens (`` `$tool args…` ``): the body, between BACKTICKs,
+    // is lexed in command mode — bare command words, quoted-string args, and
+    // `$name` / `${ expr }` interpolation holes.
     CLI_WORD,
     CLI_INTERP_VAR,
     FN_KW,

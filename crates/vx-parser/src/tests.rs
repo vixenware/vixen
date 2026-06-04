@@ -377,7 +377,7 @@ fn demo(flag: Bool) -> String (
   fn observer(tool: Tool) -> String (
     ((item) => (
       if flag (
-        fail `bad tool`
+        fail "bad tool"
       );
       item.to_string
     ))(tool)
@@ -635,13 +635,13 @@ fn build(run: Fn(Array[String]) -> Tree) {
 
 #[test]
 fn string_literals_are_juxtaposed_application_args() {
-    // Paths are strings now, so a string literal applies by juxtaposition just as
-    // an `@`-path once did: `f "x"` is `f("x")`, `` g `a/{b}` `` is `g(...)`.
+    // Paths are strings now, so a string literal applies by juxtaposition:
+    // `f "x"` is `f("x")`, and an interpolated `"src/${name}.c"` does too.
     let parse = parse(
         r#"
 fn build(compile: Fn(String) -> Tree, name: String) {
   compile "main.c";
-  compile `src/{name}.c`;
+  compile "src/${name}.c";
 }
 "#,
     );
@@ -1123,27 +1123,22 @@ fn only_cli_literal(src: &str) -> (Parse, CliLiteralExpr) {
 }
 
 #[test]
-fn cli_literal_parses_into_grammar_and_args() {
-    let (_p, lit) = only_cli_literal("let o = @cc[ -c -O2 -I src main.c ]\n");
-    assert_eq!(
-        lit.grammar().map(|t| t.text().to_string()).as_deref(),
-        Some("cc"),
-        "the grammar name follows @"
+fn command_invocation_parses_into_args() {
+    // A backtick invocation: the lead `$cc` hole is the tool, the rest are args.
+    let (_p, lit) = only_cli_literal("let o = `$cc -c -O2 -I src main.c`\n");
+    assert!(
+        lit.grammar().is_none(),
+        "backtick invocations carry no grammar name"
     );
     let args: Vec<String> = lit.args().map(|a| a.text().trim().to_string()).collect();
-    assert_eq!(args, ["-c", "-O2", "-I", "src", "main.c"]);
+    assert_eq!(args, ["$cc", "-c", "-O2", "-I", "src", "main.c"]);
 }
 
 #[test]
-fn cli_literal_without_grammar_parses() {
-    // The `@[ ${cmd} … ]` form: `[` follows `@` directly, no grammar name; the
-    // leading `${cmd}` hole carries the grammar.
-    let (_p, lit) = only_cli_literal("let o = @[ ${cmd} -c main.c ]\n");
-    assert_eq!(
-        lit.grammar().map(|t| t.text().to_string()),
-        None,
-        "the `@[ … ]` form has no grammar name"
-    );
+fn command_invocation_lead_expr_hole() {
+    // The leading hole can be a full `${cmd}` expression.
+    let (_p, lit) = only_cli_literal("let o = `${cmd} -c main.c`\n");
+    assert!(lit.grammar().is_none());
     let args: Vec<String> = lit.args().map(|a| a.text().trim().to_string()).collect();
     assert_eq!(args, ["${cmd}", "-c", "main.c"]);
     let holes: Vec<Expr> = lit
@@ -1155,14 +1150,21 @@ fn cli_literal_without_grammar_parses() {
 }
 
 #[test]
-fn cli_literal_handles_quotes_and_interpolation() {
+fn command_invocation_quotes_and_interpolation() {
     // A quoted value with a space stays one argument; `$out` is a short
     // interpolation; `${ … }` splices a full Vixen expression.
-    let (_p, lit) = only_cli_literal("let o = @cc[ -DMSG=\"hi there\" -o $out --jobs ${n + 1} ]\n");
+    let (_p, lit) = only_cli_literal("let o = `$cc -DMSG=\"hi there\" -o $out --jobs ${n + 1}`\n");
     let args: Vec<String> = lit.args().map(|a| a.text().trim().to_string()).collect();
     assert_eq!(
         args,
-        ["-DMSG=\"hi there\"", "-o", "$out", "--jobs", "${n + 1}"]
+        [
+            "$cc",
+            "-DMSG=\"hi there\"",
+            "-o",
+            "$out",
+            "--jobs",
+            "${n + 1}"
+        ]
     );
 
     // The `${ … }` hole exposes its Vixen expression to the checker.
@@ -1179,9 +1181,9 @@ fn cli_literal_handles_quotes_and_interpolation() {
 }
 
 #[test]
-fn cli_literal_glued_interpolation_is_one_arg() {
+fn command_invocation_glued_interpolation_is_one_arg() {
     // `-I$dir` (no gap) is a single argument: a word piece + an interpolation.
-    let (_p, lit) = only_cli_literal("let o = @cc[ -I$dir main.c ]\n");
+    let (_p, lit) = only_cli_literal("let o = `$cc -I$dir main.c`\n");
     let args: Vec<String> = lit.args().map(|a| a.text().trim().to_string()).collect();
-    assert_eq!(args, ["-I$dir", "main.c"]);
+    assert_eq!(args, ["$cc", "-I$dir", "main.c"]);
 }

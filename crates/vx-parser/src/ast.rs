@@ -1358,15 +1358,11 @@ impl InterpolatedStringExpr {
 }
 
 impl CliLiteralExpr {
-    /// The grammar name in `@grammar[ … ]`, or `None` for the grammar-less
-    /// `@[ ${cmd} … ]` form. Only an identifier *before* `CLI_OPEN` counts — idents
-    /// inside the body (e.g. a `${cmd}` hole) are arguments, not the grammar name.
+    /// A backtick command invocation carries no grammar *name* — the grammar comes
+    /// from the leading hole's tool (`r[expr.command]`), so this is always `None`.
+    /// (Kept for the IR lowering's shape until that field is retired.)
     pub fn grammar(&self) -> Option<SyntaxToken> {
-        self.syntax()
-            .children_with_tokens()
-            .take_while(|el| el.kind() != SyntaxKind::CLI_OPEN)
-            .filter_map(|el| el.into_token())
-            .find(|t| matches!(t.kind(), SyntaxKind::LOWER_IDENT | SyntaxKind::UPPER_IDENT))
+        None
     }
 
     /// The command's arguments, in order (each a whitespace-delimited run).

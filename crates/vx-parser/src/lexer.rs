@@ -17,29 +17,19 @@ struct Lexer<'a> {
     pos: usize,
     tokens: Vec<Token>,
     modes: Vec<Mode>,
-    /// Tracks the `@ ident [` CLI-literal opener across iterations so the opener
-    /// bracket can be emitted as `CLI_OPEN` (and command mode entered).
-    cli: CliOpen,
 }
 
 #[derive(Debug, Clone, Copy)]
 enum Mode {
-    Template,
-    TemplateExpr {
-        brace_depth: usize,
-    },
-    /// The body of a CLI literal (`@cc[ … ]`): command words, quoted strings,
-    /// and `$`/`${ }` interpolation, until the matching `]`.
+    /// The body of a `"…"` interpolated string: literal text plus `$name` /
+    /// `${ expr }` holes, until the closing `"`.
+    Str,
+    /// A `${ … }` interpolation expression. Popping it returns to the enclosing
+    /// string / command mode — the mode stack remembers which.
+    Interp { brace_depth: usize },
+    /// The body of a `` `…` `` command invocation: command words, quoted-string
+    /// args, and `$name` / `${ }` holes, until the closing backtick.
     Command,
-}
-
-/// Progress through a CLI-literal opener. `@` (recognised as an opener) → `AfterAt`;
-/// the grammar identifier → `AfterIdent`; the `[` → emit `CLI_OPEN`, enter command mode.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-enum CliOpen {
-    None,
-    AfterAt,
-    AfterIdent,
 }
 
 impl<'a> Lexer<'a> {
@@ -49,7 +39,6 @@ impl<'a> Lexer<'a> {
             pos: 0,
             tokens: Vec::new(),
             modes: Vec::new(),
-            cli: CliOpen::None,
         }
     }
 
@@ -58,8 +47,8 @@ impl<'a> Lexer<'a> {
         while !self.is_eof() {
             let start = self.pos;
             let kind = match self.modes.last().copied() {
-                Some(Mode::Template) => self.template_chunk(),
-                Some(Mode::TemplateExpr { .. }) => self.template_expr_token(),
+                Some(Mode::Str) => self.str_chunk(),
+                Some(Mode::Interp { .. }) => self.interp_expr_token(),
                 Some(Mode::Command) => self.command_chunk(),
                 None => match self.normal_token() {
                     Some(kind) => kind,
@@ -100,37 +89,15 @@ impl<'a> Lexer<'a> {
         self.pos = end;
     }
 
-    // r[lex.cli-literal] — does `@` at the cursor open a CLI literal? Either
-    // `@[` (grammar-less; the grammar comes from the leading hole) or `@<ident>[`
-    // (named grammar), with no gaps. Distinguishes it from a path literal / bare `@`.
-    fn is_cli_opener(&self) -> bool {
-        let Some(after_at) = self.source[self.pos..].strip_prefix('@') else {
-            return false;
-        };
-        if after_at.starts_with('[') {
-            return true;
-        }
-        if !matches!(after_at.chars().next(), Some(c) if is_ident_start(c)) {
-            return false;
-        }
-        let ident_end = after_at
-            .char_indices()
-            .take_while(|(_, c)| is_ident_continue(*c))
-            .map(|(i, c)| i + c.len_utf8())
-            .last()
-            .unwrap_or(0);
-        after_at[ident_end..].starts_with('[')
-    }
-
-    // r[lex.cli-literal] — one piece of a CLI-literal body: the closing `]`,
-    // whitespace, a quoted string, a `${ expr }` hole (delegates to template-expr
-    // mode), a `$ident` interpolation, or a bare command word (backslash-escaped).
+    // r[expr.command] — one piece of a command-invocation body: the closing
+    // backtick, whitespace, a quoted-string arg, a `${ expr }` hole (delegates to
+    // interp-expr mode), a `$name` hole, or a bare command word (backslash-escaped).
     fn command_chunk(&mut self) -> SyntaxKind {
         match self.current_char() {
-            Some(']') => {
+            Some('`') => {
                 self.bump_char();
                 self.modes.pop();
-                SyntaxKind::R_BRACKET
+                SyntaxKind::BACKTICK
             }
             Some(c) if c.is_whitespace() => {
                 self.bump_char();
@@ -140,9 +107,10 @@ impl<'a> Lexer<'a> {
                 SyntaxKind::WHITESPACE
             }
             Some('"') => self.string(),
+            Some('\'') => self.raw_string(),
             Some('$') if self.peek_char() == Some('{') => {
                 self.pos += 2; // consume "${"
-                self.modes.push(Mode::TemplateExpr { brace_depth: 0 });
+                self.modes.push(Mode::Interp { brace_depth: 0 });
                 SyntaxKind::INTERP_START
             }
             Some('$') if matches!(self.peek_char(), Some(c) if is_ident_start(c)) => {
@@ -152,9 +120,8 @@ impl<'a> Lexer<'a> {
                 }
                 SyntaxKind::CLI_INTERP_VAR
             }
-            // A bare word runs until whitespace / `]` / `"` / `$`; `\` escapes the
-            // next char (so `\]`, `\$`, `\"` stay in the word). A lone `$` that
-            // started neither form above is itself a one-char word.
+            // A bare word runs until whitespace / `` ` `` / `"` / `'` / `$`; `\`
+            // escapes the next char. A lone `$` starting no hole is a one-char word.
             Some('$') => {
                 self.bump_char();
                 SyntaxKind::CLI_WORD
@@ -168,7 +135,15 @@ impl<'a> Lexer<'a> {
                                 self.bump_char();
                             }
                         }
-                        Some(c) if c.is_whitespace() || c == ']' || c == '"' || c == '$' => break,
+                        Some(c)
+                            if c.is_whitespace()
+                                || c == '`'
+                                || c == '"'
+                                || c == '\''
+                                || c == '$' =>
+                        {
+                            break;
+                        }
                         Some(_) => self.bump_char(),
                         None => break,
                     }
@@ -180,31 +155,6 @@ impl<'a> Lexer<'a> {
     }
 
     fn normal_token(&mut self) -> Option<SyntaxKind> {
-        // r[lex.cli-literal] — drive the contiguous `@ [` / `@ ident [` opener:
-        // after a recognised `@`, either `[` opens the body directly (grammar-less
-        // `@[`), or the grammar name comes first and then `[` becomes CLI_OPEN.
-        // Either way the body enters command mode. (is_cli_opener guarantees the
-        // sequence, so this always completes.)
-        match self.cli {
-            CliOpen::AfterAt if self.current_char() == Some('[') => {
-                self.cli = CliOpen::None;
-                self.bump_char();
-                self.modes.push(Mode::Command);
-                return Some(SyntaxKind::CLI_OPEN);
-            }
-            CliOpen::AfterAt if matches!(self.current_char(), Some(c) if is_ident_start(c)) => {
-                self.cli = CliOpen::AfterIdent;
-                return Some(self.ident_or_keyword());
-            }
-            CliOpen::AfterIdent if self.current_char() == Some('[') => {
-                self.cli = CliOpen::None;
-                self.bump_char();
-                self.modes.push(Mode::Command);
-                return Some(SyntaxKind::CLI_OPEN);
-            }
-            CliOpen::None => {}
-            _ => self.cli = CliOpen::None,
-        }
         let kind = match self.current_char() {
             // r[lex.whitespace]
             Some(ch) if ch.is_whitespace() => {
@@ -216,12 +166,20 @@ impl<'a> Lexer<'a> {
             }
             Some('/') if self.starts_with("//") => self.line_comment(), // r[lex.comments]
             Some('/') if self.starts_with("/*") => self.block_comment(), // r[lex.comments]
-            Some('"') => self.string(),                                 // r[lex.string]
-            Some('\'') => self.raw_string(),                            // r[lex.string] (raw)
-            // r[lex.string.interpolation]
+            // r[lex.string] / r[lex.string.interpolation] — a `"…"` that contains a
+            // `$name` / `${ }` hole opens an interpolated string (DQUOTE + Str mode);
+            // a `"…"` with no hole is a plain string; `'…'` is a raw string.
+            Some('"') if self.dquote_has_interp() => {
+                self.bump_char();
+                self.modes.push(Mode::Str);
+                SyntaxKind::DQUOTE
+            }
+            Some('"') => self.string(),
+            Some('\'') => self.raw_string(),
+            // r[expr.command] — a single backtick opens a command invocation.
             Some('`') => {
                 self.bump_char();
-                self.modes.push(Mode::Template);
+                self.modes.push(Mode::Command);
                 SyntaxKind::BACKTICK
             }
             Some('$') => self.dollar_ident(), // r[lex.dollar-ident]
@@ -262,11 +220,6 @@ impl<'a> Lexer<'a> {
             Some('|') if self.starts_with("|>") => self.bump_two(SyntaxKind::PIPE_GT),
             Some('|') if self.starts_with("||") => self.bump_two(SyntaxKind::PIPE2),
             Some('|') => self.bump_one(SyntaxKind::PIPE),
-            Some('@') if self.is_cli_opener() => {
-                self.bump_char();
-                self.cli = CliOpen::AfterAt;
-                SyntaxKind::AT
-            }
             Some('@') => self.bump_one(SyntaxKind::AT),
             Some('#') => self.bump_one(SyntaxKind::HASH),
             Some('?') => self.bump_one(SyntaxKind::QUESTION),
@@ -282,43 +235,59 @@ impl<'a> Lexer<'a> {
         Some(kind)
     }
 
-    // r[lex.string.interpolation]
-    fn template_chunk(&mut self) -> SyntaxKind {
-        if self.current_char() == Some('`') {
-            self.bump_char();
-            self.modes.pop();
-            return SyntaxKind::BACKTICK;
-        }
-        if self.current_char() == Some('{') {
-            self.bump_char();
-            self.modes.push(Mode::TemplateExpr { brace_depth: 0 });
-            return SyntaxKind::INTERP_START;
-        }
-
-        while let Some(ch) = self.current_char() {
-            if ch == '`' || ch == '{' {
-                break;
-            }
-            if ch == '\\' {
+    // r[lex.string.interpolation] — one piece of a `"…"` body: the closing quote,
+    // a `${ expr }` hole, a `$name` hole, or a run of literal text.
+    fn str_chunk(&mut self) -> SyntaxKind {
+        match self.current_char() {
+            Some('"') => {
                 self.bump_char();
-                if !self.is_eof() {
+                self.modes.pop();
+                SyntaxKind::DQUOTE
+            }
+            Some('$') if self.peek_char() == Some('{') => {
+                self.pos += 2; // consume "${"
+                self.modes.push(Mode::Interp { brace_depth: 0 });
+                SyntaxKind::INTERP_START
+            }
+            Some('$') if matches!(self.peek_char(), Some(c) if is_ident_start(c)) => {
+                self.bump_char(); // '$'
+                while matches!(self.current_char(), Some(c) if is_ident_continue(c)) {
                     self.bump_char();
                 }
-            } else {
-                self.bump_char();
+                SyntaxKind::INTERP_VAR
+            }
+            // A run of literal text up to the next `"` or interpolating `$`. `\`
+            // escapes the next char; a `$` that starts no hole is literal text.
+            _ => {
+                loop {
+                    match self.current_char() {
+                        Some('"') => break,
+                        Some('\\') => {
+                            self.bump_char();
+                            if !self.is_eof() {
+                                self.bump_char();
+                            }
+                        }
+                        Some('$')
+                            if self.peek_char() == Some('{')
+                                || matches!(self.peek_char(), Some(c) if is_ident_start(c)) =>
+                        {
+                            break;
+                        }
+                        Some(_) => self.bump_char(),
+                        None => break,
+                    }
+                }
+                SyntaxKind::INTERP_TEXT
             }
         }
-        SyntaxKind::INTERP_TEXT
     }
 
-    // r[lex.string.interpolation]
-    fn template_expr_token(&mut self) -> SyntaxKind {
-        if self.current_char() == Some('`') {
-            self.bump_char();
-            self.modes.push(Mode::Template);
-            return SyntaxKind::BACKTICK;
-        }
-
+    // r[lex.string.interpolation] — a token inside a `${ … }` interpolation. Brace
+    // depth tracks nested `{ }`; the matching `}` closes the hole, popping back to
+    // the enclosing string/command mode. Nested `"…"` / `` `…` `` recurse through
+    // `normal_token` (which pushes the right mode).
+    fn interp_expr_token(&mut self) -> SyntaxKind {
         match self.current_char() {
             Some('%') if self.starts_with("%{") => {
                 self.pos += 2;
@@ -342,19 +311,19 @@ impl<'a> Lexer<'a> {
             }
             _ => self
                 .normal_token()
-                .expect("template expr mode should only run before eof"),
+                .expect("interp expr mode should only run before eof"),
         }
     }
 
     fn template_brace_depth(&self) -> usize {
         match self.modes.last().copied() {
-            Some(Mode::TemplateExpr { brace_depth }) => brace_depth,
+            Some(Mode::Interp { brace_depth }) => brace_depth,
             _ => 0,
         }
     }
 
     fn bump_template_brace_depth(&mut self, delta: isize) {
-        if let Some(Mode::TemplateExpr { brace_depth }) = self.modes.last_mut() {
+        if let Some(Mode::Interp { brace_depth }) = self.modes.last_mut() {
             if delta.is_positive() {
                 *brace_depth += delta as usize;
             } else {
@@ -419,6 +388,30 @@ impl<'a> Lexer<'a> {
             }
         }
         SyntaxKind::ERROR_TOKEN
+    }
+
+    // Does the `"…"` starting at the cursor contain an interpolation hole — a `$`
+    // followed by `{` or an identifier start, not backslash-escaped? Decides whether
+    // `"…"` is a plain string (`STRING`) or an interpolated one (`DQUOTE` + body).
+    fn dquote_has_interp(&self) -> bool {
+        let mut chars = self.source[self.pos + 1..].chars().peekable();
+        while let Some(c) = chars.next() {
+            match c {
+                '"' => return false,
+                '\\' => {
+                    chars.next();
+                }
+                '$' => {
+                    if matches!(chars.peek(), Some('{'))
+                        || matches!(chars.peek(), Some(&n) if is_ident_start(n))
+                    {
+                        return true;
+                    }
+                }
+                _ => {}
+            }
+        }
+        false // unterminated → treat as plain (string() reports the error)
     }
 
     // r[lex.string] — a raw (single-quoted) string: no interpolation, only `\'`

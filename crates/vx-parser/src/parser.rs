@@ -1213,13 +1213,9 @@ fn multiplicative_expr(p: &mut Parser<'_>) -> CompletedMarker {
 
 fn prefix_expr(p: &mut Parser<'_>) -> CompletedMarker {
     match p.current() {
-        // `@[ … ]` (CLI_OPEN at 1, no grammar) or `@grammar[ … ]` (CLI_OPEN at 2).
-        // `@` no longer introduces anything else — paths are plain strings now.
-        SyntaxKind::AT if p.nth(1) == SyntaxKind::CLI_OPEN || p.nth(2) == SyntaxKind::CLI_OPEN => {
-            cli_literal_expr(p)
-        }
-        // A bare `@` is the old `@key(...)` attribute syntax (now `#[...]`): flag it
-        // and recover by consuming the `@` as an error node.
+        // `@` no longer introduces anything — commands are backticks now, paths are
+        // plain strings. A bare `@` is the old `@key(...)` attribute syntax (now
+        // `#[...]`): flag it and recover by consuming the `@` as an error node.
         SyntaxKind::AT => {
             let marker = p.start();
             p.diagnose_legacy(LegacySyntaxKind::AtAttribute);
@@ -1251,18 +1247,13 @@ fn partial_app_expr(p: &mut Parser<'_>) -> CompletedMarker {
     marker.complete(p, SyntaxKind::PARTIAL_APP_EXPR)
 }
 
-// r[expr.cli-literal] — `@[ ${cmd} … ]` (the leading hole carries the grammar) or
-// `@grammar[ … ]` (named grammar). The body is lexed in command mode; here we just
-// group its tokens into args.
-fn cli_literal_expr(p: &mut Parser<'_>) -> CompletedMarker {
+// r[expr.command] — a backtick command invocation `` `$tool args…` ``. The leading
+// hole carries the tool (and its grammar); the body is lexed in command mode, and
+// here we group its tokens into args, between the opening and closing backtick.
+fn command_invocation_expr(p: &mut Parser<'_>) -> CompletedMarker {
     let marker = p.start();
-    p.expect(SyntaxKind::AT);
-    // Optional grammar name: `@grammar[ … ]` names it; `@[ … ]` omits it.
-    if p.at(SyntaxKind::LOWER_IDENT) || p.at(SyntaxKind::UPPER_IDENT) {
-        p.bump();
-    }
-    p.expect(SyntaxKind::CLI_OPEN);
-    while !p.at(SyntaxKind::R_BRACKET) && !p.at(SyntaxKind::EOF) {
+    p.expect(SyntaxKind::BACKTICK);
+    while !p.at(SyntaxKind::BACKTICK) && !p.at(SyntaxKind::EOF) {
         if at_cli_arg_start(p) {
             cli_arg(p);
         } else {
@@ -1272,7 +1263,7 @@ fn cli_literal_expr(p: &mut Parser<'_>) -> CompletedMarker {
             p.bump();
         }
     }
-    p.expect(SyntaxKind::R_BRACKET);
+    p.expect(SyntaxKind::BACKTICK);
     marker.complete(p, SyntaxKind::CLI_LITERAL_EXPR)
 }
 
@@ -1429,7 +1420,8 @@ fn atom_expr(p: &mut Parser<'_>) -> CompletedMarker {
         SyntaxKind::IMPORT_KW => import_expr(p),       // r[expr.import]
         SyntaxKind::LOWER_IDENT | SyntaxKind::DOLLAR_IDENT | SyntaxKind::UNDERSCORE => name_expr(p), // r[expr.ident]
         SyntaxKind::UPPER_IDENT => upper_expr(p), // r[expr.named-constructor]
-        SyntaxKind::BACKTICK => interpolated_string_expr(p), // r[expr.literal.interpolation]
+        SyntaxKind::DQUOTE => interpolated_string_expr(p), // r[expr.literal.interpolation]
+        SyntaxKind::BACKTICK => command_invocation_expr(p), // r[expr.command]
         // r[expr.literal.int] r[expr.literal.float] r[expr.literal.bool] r[expr.literal.string]
         SyntaxKind::INT
         | SyntaxKind::FLOAT
@@ -1505,9 +1497,10 @@ fn literal_expr(p: &mut Parser<'_>) -> CompletedMarker {
 // r[expr.literal.interpolation]
 fn interpolated_string_expr(p: &mut Parser<'_>) -> CompletedMarker {
     let marker = p.start();
-    p.expect(SyntaxKind::BACKTICK);
-    while !p.at(SyntaxKind::BACKTICK) && !p.at(SyntaxKind::EOF) {
-        if p.at(SyntaxKind::INTERP_TEXT) {
+    p.expect(SyntaxKind::DQUOTE);
+    while !p.at(SyntaxKind::DQUOTE) && !p.at(SyntaxKind::EOF) {
+        // `INTERP_TEXT` is literal text; `INTERP_VAR` is a `$name` shorthand hole.
+        if p.at(SyntaxKind::INTERP_TEXT) || p.at(SyntaxKind::INTERP_VAR) {
             p.bump();
         } else if p.at(SyntaxKind::INTERP_START) {
             let interpolation = p.start();
@@ -1519,7 +1512,7 @@ fn interpolated_string_expr(p: &mut Parser<'_>) -> CompletedMarker {
             p.diagnose_and_bump(ExpectedKind::InterpolatedStringContent);
         }
     }
-    p.expect(SyntaxKind::BACKTICK);
+    p.expect(SyntaxKind::DQUOTE);
     marker.complete(p, SyntaxKind::INTERPOLATED_STRING_EXPR)
 }
 
