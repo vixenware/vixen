@@ -1388,22 +1388,118 @@ fn function_code_identity(program: &VirProgram, name: &str, body: BodyId) -> Str
 }
 
 fn closure_code_identity(program: &VirProgram, body: BodyId) -> String {
-    format!("closure:{}", body_code_hash(program, body))
+    let material = ClosureCodeIdentityMaterial {
+        schema: "vixen.closure-code-identity.v1".into(),
+        parent_body_hash: program.arena[body]
+            .parent
+            .map(|parent| body_local_code_hash(program, parent)),
+        closure_body_hash: body_code_hash(program, body),
+    };
+    format!("closure:{}", hash_identity_material(&material))
 }
 
 fn body_code_hash(program: &VirProgram, body: BodyId) -> String {
+    let mut active = Vec::new();
+    body_code_hash_inner(program, body, &mut active)
+}
+
+fn body_code_hash_inner(program: &VirProgram, body: BodyId, active: &mut Vec<BodyId>) -> String {
+    if active.contains(&body) {
+        return body_local_code_hash(program, body);
+    }
+
+    active.push(body);
+    let callees = function_refs_in_body_and_child_closures(program, body)
+        .into_iter()
+        .map(|(name, body)| FunctionRefIdentity {
+            name,
+            body_hash: body_code_hash_inner(program, body, active),
+        })
+        .collect();
+    active.pop();
+
+    let material = TransitiveCodeIdentityMaterial {
+        schema: "vixen.body-code-identity.v2".into(),
+        local_body_hash: body_local_code_hash(program, body),
+        function_refs: callees,
+    };
+    hash_identity_material(&material)
+}
+
+fn body_local_code_hash(program: &VirProgram, body: BodyId) -> String {
     let material = CodeIdentityMaterial {
-        schema: "vixen.body-code-identity.v1".into(),
+        schema: "vixen.body-local-code-identity.v1".into(),
         body: body_identity_node(program, body),
     };
-    let json = facet_json::to_string(&material).expect("code identity material is serializable");
+    hash_identity_material(&material)
+}
+
+fn hash_identity_material<T: for<'facet> facet::Facet<'facet>>(material: &T) -> String {
+    let json = facet_json::to_string(material).expect("code identity material is serializable");
     format!("blake3:{}", blake3::hash(json.as_bytes()).to_hex())
+}
+
+fn function_refs_in_body_and_child_closures(
+    program: &VirProgram,
+    body: BodyId,
+) -> Vec<(String, BodyId)> {
+    let mut bodies = vec![body];
+    let mut cursor = 0;
+    while cursor < bodies.len() {
+        let parent = bodies[cursor];
+        for (child, _) in program.arena.child_bodies(parent) {
+            bodies.push(child);
+        }
+        cursor += 1;
+    }
+
+    let mut refs: Vec<(String, BodyId)> = program
+        .arena
+        .exprs
+        .iter()
+        .filter(|expr| bodies.contains(&expr.body))
+        .filter_map(|expr| {
+            let ExprKind::NameRef(name) = &expr.kind else {
+                return None;
+            };
+            let Some(DefTarget::Item(item)) = name.resolved else {
+                return None;
+            };
+            let ItemKind::Function(function) = &program.arena[item].kind else {
+                return None;
+            };
+            Some((name.name.clone(), function.body))
+        })
+        .collect();
+    refs.sort();
+    refs.dedup();
+    refs
 }
 
 #[derive(facet::Facet, Debug)]
 struct CodeIdentityMaterial {
     schema: String,
     body: IdentityNode,
+}
+
+#[derive(facet::Facet, Debug)]
+struct TransitiveCodeIdentityMaterial {
+    schema: String,
+    local_body_hash: String,
+    function_refs: Vec<FunctionRefIdentity>,
+}
+
+#[derive(facet::Facet, Debug)]
+struct FunctionRefIdentity {
+    name: String,
+    body_hash: String,
+}
+
+#[derive(facet::Facet, Debug)]
+struct ClosureCodeIdentityMaterial {
+    schema: String,
+    parent_body_hash: Option<String>,
+    closure_body_hash: String,
 }
 
 #[derive(facet::Facet, Debug)]
@@ -2451,6 +2547,46 @@ mod tests {
         assert_eq!(
             compact_identity.value, spaced_identity.value,
             "code identity material must not include source spans"
+        );
+    }
+
+    #[test]
+    fn direct_function_call_identity_changes_with_callee_body_content() {
+        let first = analyze_source(
+            "fn helper() -> U64 ( 1 ) fn id(x: U64) -> U64 ( helper() + x ) fn d() -> U64 ( id(41) )",
+            "d",
+        )
+        .unwrap();
+        let second = analyze_source(
+            "fn helper() -> U64 ( 2 ) fn id(x: U64) -> U64 ( helper() + x ) fn d() -> U64 ( id(41) )",
+            "d",
+        )
+        .unwrap();
+        let first_identity = call_code_identity(&first, "id").expect("first id identity");
+        let second_identity = call_code_identity(&second, "id").expect("second id identity");
+        assert_ne!(
+            first_identity.value, second_identity.value,
+            "caller identity must include referenced function body identity"
+        );
+    }
+
+    #[test]
+    fn direct_function_call_identity_ignores_unreferenced_function_edits() {
+        let first = analyze_source(
+            "fn other() -> U64 ( 1 ) fn id(x: U64) -> U64 ( x ) fn d() -> U64 ( id(41) )",
+            "d",
+        )
+        .unwrap();
+        let second = analyze_source(
+            "fn other() -> U64 ( 2 ) fn id(x: U64) -> U64 ( x ) fn d() -> U64 ( id(41) )",
+            "d",
+        )
+        .unwrap();
+        let first_identity = call_code_identity(&first, "id").expect("first id identity");
+        let second_identity = call_code_identity(&second, "id").expect("second id identity");
+        assert_eq!(
+            first_identity.value, second_identity.value,
+            "unreferenced function edits must not invalidate this function identity"
         );
     }
 
