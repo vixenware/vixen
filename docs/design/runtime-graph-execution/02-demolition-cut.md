@@ -195,7 +195,7 @@ cargo nextest run -p vx-runtime -E 'binary(exec_on_strands)' --no-fail-fast
 cargo nextest run -p vx-runtime -E 'binary(exec_output_tree)' --no-fail-fast
 cargo nextest run -p vx-runtime -E 'binary(remote_tree_via_eval)' --no-fail-fast
 cargo nextest run -p vx-runtime -E 'binary(lang_suite)' --no-fail-fast
-cargo nextest run -p vx-runtime execution_crates_stay_source_blind
+cargo nextest run -p vx-runtime -E 'binary(source_blind_guardrails)'
 rg -n 'vx[_-]ir|ExprKind|ExprId|StmtKind|PatternKind|PatternId|VirProgram|BodyId|node_exprs|exprmap|eval_inner|eval_expr|walk_expr|legacy_eval|fn force|\.force\(' crates/vx-runtime-core crates/vx-runtime-driver
 ```
 
@@ -223,7 +223,8 @@ Observed result:
 - `hello_world` passes through requested-toolchain capability injection and
   backtick observe dispatch on the graph path.
 - `lang_suite` passes through `run_in_mode` graph execution.
-- `execution_crates_stay_source_blind` passes.
+- `source_blind_guardrails` passes, including the source-blind execution-crate
+  scan and the runtime deleted tree-walker scan.
 - The raw forbidden-symbol scan returns no matches in core/driver.
 - Public graph-root arrays, tuples, structs, variants, caught failures, and
   output-tree markers convert to old public `Value` shapes only at the API edge.
@@ -236,12 +237,12 @@ Current broad runtime result:
 cargo nextest run -p vx-runtime --no-fail-fast
 ```
 
-Observed result: 134 tests run, 134 passed, 0 failed, 0 skipped. The former red
+Observed result: 135 tests run, 135 passed, 0 failed, 0 skipped. The former red
 `cc_probe_builds_a_content_identified_ctoolchain` and
 `hello_world_compiles_through_a_requested_toolchain` cases are now green through
-graph execution. The count dropped by one when the private tree-walker
-demand-path oracle test was removed instead of being kept as a false engine
-anchor.
+graph execution. The private tree-walker demand-path oracle test was removed
+instead of being kept as a false engine anchor, and a runtime deleted-symbol
+guardrail now covers that demolition.
 
 Graph poison source spans are threaded from graph node into `CorePoison` and then
 into public `Outcome`; `i6_eval_outcome_carries_the_source_span` passes through
@@ -257,6 +258,8 @@ Use these after demolition:
 ```bash
 cargo check -p vx-runtime-graph -p vx-runtime-core -p vx-runtime-driver -p vx-runtime
 cargo nextest run -p vx-runtime-graph -p vx-runtime-core -p vx-runtime-driver -p vx-runtime
+cargo nextest run -p vx-runtime -E 'binary(source_blind_guardrails)'
 rg -n 'run_in_mode|eval_body|eval_body_wire|eval_body_with_exec|eval_inner|Evaluator::eval|\.eval\(' crates/vx-runtime/src crates/vx-runtime/tests
 rg -n 'vx[_-]ir|ExprKind|ExprId|StmtKind|PatternKind|PatternId|VirProgram|BodyId|node_exprs|exprmap|eval_inner|eval_expr|walk_expr|legacy_eval|fn force|\.force\(' crates/vx-runtime-core crates/vx-runtime-driver
+rg -n 'struct Evaluator|impl Evaluator|fn eval_inner|fn force_node|ThunkState::Unforced|ThunkState::Node|enum NodeMemo|struct NodeRef|Value::Closure|pub mod dispatch|crate::dispatch|DispatchPlan|struct Dispatcher|dispatch_scalar|force_frame_binding' crates/vx-runtime/src
 ```

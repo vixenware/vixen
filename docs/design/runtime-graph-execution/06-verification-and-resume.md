@@ -25,13 +25,14 @@ source-expression tree-walker plus `dispatch.rs` scalar planner are deleted.
    git status --short
    cargo check -p vx-runtime-graph -p vx-runtime-core -p vx-runtime-driver -p vx-runtime
    cargo nextest run -p vx-runtime-graph -p vx-runtime-core -p vx-runtime-driver -p vx-runtime
-   cargo nextest run -p vx-runtime execution_crates_stay_source_blind
+   cargo nextest run -p vx-runtime -E 'binary(source_blind_guardrails)'
    ```
 
 4. Run the forbidden-symbol scan:
 
    ```bash
    rg -n 'vx[_-]ir|ExprKind|ExprId|StmtKind|PatternKind|PatternId|VirProgram|BodyId|node_exprs|exprmap|eval_inner|eval_expr|walk_expr|legacy_eval|fn force|\.force\(' crates/vx-runtime-core crates/vx-runtime-driver
+   rg -n 'struct Evaluator|impl Evaluator|fn eval_inner|fn force_node|ThunkState::Unforced|ThunkState::Node|enum NodeMemo|struct NodeRef|Value::Closure|pub mod dispatch|crate::dispatch|DispatchPlan|struct Dispatcher|dispatch_scalar|force_frame_binding' crates/vx-runtime/src
    ```
 
 5. Inspect `crates/vx-runtime/src/eval.rs` before assuming no API-edge thunk
@@ -79,13 +80,15 @@ rg -n 'vx[_-]ir|ExprKind|ExprId|StmtKind|PatternKind|PatternId|VirProgram|BodyId
 The repo-level guardrail test is:
 
 ```bash
-cargo nextest run -p vx-runtime execution_crates_stay_source_blind
+cargo nextest run -p vx-runtime -E 'binary(source_blind_guardrails)'
 ```
 
 It scans `crates/vx-runtime-core/src`, `crates/vx-runtime-core/Cargo.toml`,
-`crates/vx-runtime-driver/src`, and `crates/vx-runtime-driver/Cargo.toml`.
-Add future execution crates to the guarded list before relying on this check for
-them.
+`crates/vx-runtime-driver/src`, and `crates/vx-runtime-driver/Cargo.toml` for
+source-blindness. It also scans `crates/vx-runtime/src` for the deleted
+tree-walker affordances and asserts `crates/vx-runtime/src/dispatch.rs` remains
+absent. Add future execution crates to the guarded list before relying on this
+check for them.
 
 ### Runtime-path verification
 
@@ -123,6 +126,8 @@ Latest focused verification:
 
 - `cargo check -p vx-runtime-graph -p vx-runtime-core -p vx-runtime-driver -p vx-runtime`
   passes with no old-evaluator dead-code warnings.
+- `cargo nextest run -p vx-runtime -E 'binary(source_blind_guardrails)' --no-fail-fast`:
+  2/2 passed.
 - `cargo nextest run -p vx-runtime -E 'binary(exec_on_strands)' --no-fail-fast`:
   3/3 passed.
 - `cargo nextest run -p vx-runtime -E 'binary(exec_output_tree)' --no-fail-fast`:
@@ -133,12 +138,14 @@ Latest focused verification:
   1/1 passed.
 - `cargo nextest run -p vx-runtime -E 'binary(cc_probe) | binary(hello_world)' --no-fail-fast`:
   2/2 passed.
-- `cargo nextest run -p vx-runtime --no-fail-fast`: 134 run, 134 passed,
+- `cargo nextest run -p vx-runtime --no-fail-fast`: 135 run, 135 passed,
   0 failed, 0 skipped.
 - `cargo nextest run -p vx-runtime-graph -p vx-runtime-core -p vx-runtime-driver -p vx-runtime --no-fail-fast`:
-  141 run, 141 passed, 0 skipped.
+  142 run, 142 passed, 0 skipped.
 - The forbidden-symbol scan over `vx-runtime-core` and `vx-runtime-driver`
   returns no matches.
+- The deleted tree-walker affordance scan over `vx-runtime/src` returns no
+  matches.
 
 ### Vixen-language verification
 

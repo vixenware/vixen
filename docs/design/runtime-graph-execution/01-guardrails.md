@@ -103,6 +103,20 @@ The crate-local tripwires are useful but not enough. The guardrail check is now
 
 It fails on the forbidden symbol list above.
 
+The same guardrail binary also scans `crates/vx-runtime/src` for deleted
+source-expression tree-walker affordances that must not return after demolition:
+
+- `struct Evaluator` / `impl Evaluator`
+- `eval_inner`
+- `force_node`
+- `force_frame_binding`
+- `NodeMemo`
+- `NodeRef`
+- expression-capturing `ThunkState::Unforced` or `ThunkState::Node`
+- `Value::Closure`
+- `dispatch.rs`, `pub mod dispatch`, `crate::dispatch`, `DispatchPlan`, or
+  scalar dispatch helpers
+
 The check should be mechanically boring and hard to miss. A simple Rust test or
 xtask command is acceptable. It is not a substitute for type boundaries, but it
 catches the predictable "temporary fallback" edits.
@@ -110,7 +124,7 @@ catches the predictable "temporary fallback" edits.
 Run it directly with:
 
 ```bash
-cargo nextest run -p vx-runtime execution_crates_stay_source_blind
+cargo nextest run -p vx-runtime -E 'binary(source_blind_guardrails)'
 ```
 
 If a new execution crate is added, add it to `GUARDED_CRATES` in that test in
@@ -181,6 +195,7 @@ Run before and after every phase touching runtime execution:
 ```bash
 cargo check -p vx-runtime-graph -p vx-runtime-core -p vx-runtime-driver -p vx-runtime
 cargo nextest run -p vx-runtime-graph -p vx-runtime-core -p vx-runtime-driver -p vx-runtime
-cargo nextest run -p vx-runtime execution_crates_stay_source_blind
+cargo nextest run -p vx-runtime -E 'binary(source_blind_guardrails)'
 rg -n 'vx[_-]ir|ExprKind|ExprId|StmtKind|PatternKind|PatternId|VirProgram|BodyId|node_exprs|exprmap|eval_inner|eval_expr|walk_expr|legacy_eval|fn force|\.force\(' crates/vx-runtime-core crates/vx-runtime-driver
+rg -n 'struct Evaluator|impl Evaluator|fn eval_inner|fn force_node|ThunkState::Unforced|ThunkState::Node|enum NodeMemo|struct NodeRef|Value::Closure|pub mod dispatch|crate::dispatch|DispatchPlan|struct Dispatcher|dispatch_scalar|force_frame_binding' crates/vx-runtime/src
 ```

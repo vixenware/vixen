@@ -25,33 +25,93 @@ const FORBIDDEN_NEEDLES: &[&str] = &[
     ".force(",
 ];
 
+const RUNTIME_TREE_WALKER_NEEDLES: &[&str] = &[
+    "struct Evaluator",
+    "impl Evaluator",
+    "fn eval_inner",
+    "fn force_node",
+    "fn force_frame_binding",
+    "enum NodeMemo",
+    "struct NodeRef",
+    "ThunkState::Unforced",
+    "ThunkState::Node",
+    "Value::Closure",
+    "pub mod dispatch",
+    "crate::dispatch",
+    "DispatchPlan",
+    "struct Dispatcher",
+    "dispatch_scalar",
+];
+
 #[test]
 fn execution_crates_stay_source_blind() {
     let root = workspace_root();
+    let files = GUARDED_CRATES
+        .iter()
+        .flat_map(|krate| {
+            let crate_dir = root.join("crates").join(krate);
+            guarded_files(&crate_dir)
+        })
+        .collect::<Vec<_>>();
+
+    assert_no_forbidden_needles(
+        &root,
+        files,
+        FORBIDDEN_NEEDLES,
+        "execution crates must remain source-blind",
+        "forbidden runtime source affordance",
+    );
+}
+
+#[test]
+fn runtime_tree_walker_affordances_stay_deleted() {
+    let root = workspace_root();
+    let dispatch_rs = root.join("crates/vx-runtime/src/dispatch.rs");
+    assert!(
+        !dispatch_rs.exists(),
+        "{} must stay deleted; graph execution must not regain the scalar dispatch planner",
+        dispatch_rs
+            .strip_prefix(&root)
+            .unwrap_or(&dispatch_rs)
+            .display()
+    );
+
+    let mut files = Vec::new();
+    collect_rs_files(&root.join("crates/vx-runtime/src"), &mut files);
+
+    assert_no_forbidden_needles(
+        &root,
+        files,
+        RUNTIME_TREE_WALKER_NEEDLES,
+        "runtime tree-walker affordances must stay deleted",
+        "deleted tree-walker affordance",
+    );
+}
+
+fn assert_no_forbidden_needles(
+    root: &Path,
+    files: Vec<PathBuf>,
+    needles: &[&str],
+    assertion: &str,
+    label: &str,
+) {
     let mut failures = Vec::new();
 
-    for krate in GUARDED_CRATES {
-        let crate_dir = root.join("crates").join(krate);
-        for path in guarded_files(&crate_dir) {
-            let text = fs::read_to_string(&path)
-                .unwrap_or_else(|err| panic!("failed to read {}: {err}", path.display()));
+    for path in files {
+        let text = fs::read_to_string(&path)
+            .unwrap_or_else(|err| panic!("failed to read {}: {err}", path.display()));
 
-            for needle in FORBIDDEN_NEEDLES {
-                if text.contains(needle) {
-                    failures.push(format!(
-                        "{} contains forbidden runtime source affordance `{needle}`",
-                        path.strip_prefix(&root).unwrap_or(&path).display()
-                    ));
-                }
+        for needle in needles {
+            if text.contains(needle) {
+                failures.push(format!(
+                    "{} contains {label} `{needle}`",
+                    path.strip_prefix(root).unwrap_or(&path).display()
+                ));
             }
         }
     }
 
-    assert!(
-        failures.is_empty(),
-        "execution crates must remain source-blind:\n{}",
-        failures.join("\n")
-    );
+    assert!(failures.is_empty(), "{assertion}:\n{}", failures.join("\n"));
 }
 
 fn workspace_root() -> PathBuf {
