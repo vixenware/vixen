@@ -61,6 +61,7 @@ pub enum NodeKind {
     Kernel(KernelOp),
     LazyData,
     Project { index: u32 },
+    Closure,
     Boundary,
     Bomb,
     Fail,
@@ -110,7 +111,7 @@ impl DemandGraph {
             reached[i] = true;
             let node = &self.nodes[i];
             match &node.kind {
-                NodeKind::LazyData => {}
+                NodeKind::LazyData | NodeKind::Closure => {}
                 NodeKind::Project { .. } => {
                     stack.push(node.inputs[0]);
                     if let Some(v) = self.resolved_value(NodeId(i as u32)) {

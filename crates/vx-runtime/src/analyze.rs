@@ -132,6 +132,7 @@ pub(crate) fn build_graph_indexed(
         param_bindings: HashMap::new(),
         field_names: HashMap::new(),
         active_bodies: vec![body_id],
+        callables: HashMap::new(),
     };
     for pat in params {
         b.bind_pattern(pat);
@@ -163,6 +164,16 @@ struct Builder<'a> {
     /// graph-expanded at analysis time until graph templates exist; this prevents
     /// recursive expansion from rebuilding the source tree forever.
     active_bodies: Vec<BodyId>,
+    /// Analyzer-local callable templates keyed by their graph value node. The
+    /// executable graph does not store VIR ids; this table is used only while
+    /// expanding call sites into graph nodes.
+    callables: HashMap<NodeId, CallableTemplate>,
+}
+
+#[derive(Clone)]
+struct CallableTemplate {
+    body: BodyId,
+    captures: HashMap<BindingId, NodeId>,
 }
 
 impl Builder<'_> {
@@ -255,13 +266,41 @@ impl Builder<'_> {
         }
     }
 
-    fn expand_direct_call(
+    fn emit_callable_value(
         &mut self,
         body: BodyId,
+        label: String,
+        span: Span,
+        captures: HashMap<BindingId, NodeId>,
+    ) -> NodeId {
+        let inputs = captures.values().copied().collect();
+        let node = self.emit(NodeKind::Closure, label, span, inputs);
+        self.callables
+            .insert(node, CallableTemplate { body, captures });
+        node
+    }
+
+    fn captures_for_body(&self, body: BodyId) -> HashMap<BindingId, NodeId> {
+        self.program.arena[body]
+            .captures
+            .iter()
+            .filter_map(|binding| self.bindings.get(binding).map(|&node| (*binding, node)))
+            .collect()
+    }
+
+    fn callable_template(&mut self, callee: ExprId) -> Option<CallableTemplate> {
+        let node = self.walk(callee);
+        self.callables.get(&node).cloned()
+    }
+
+    fn expand_callable(
+        &mut self,
+        template: CallableTemplate,
         args: &[NodeId],
         span: Span,
         callee_name: &str,
     ) -> NodeId {
+        let body = template.body;
         if self.active_bodies.contains(&body) {
             return self.emit(
                 NodeKind::Unresolved,
@@ -296,6 +335,9 @@ impl Builder<'_> {
         let saved_memo = self.memo.clone();
 
         self.active_bodies.push(body);
+        for (binding, node) in template.captures {
+            self.bindings.insert(binding, node);
+        }
         for (param, arg) in params.into_iter().zip(args.iter().copied()) {
             self.bind_pattern_to_node(param, arg);
         }
@@ -502,7 +544,24 @@ impl Builder<'_> {
                         if let Some(body) = self.direct_function_body(callee) {
                             let args: Vec<NodeId> =
                                 arg_exprs.into_iter().map(|x| self.walk(x)).collect();
-                            let expanded = self.expand_direct_call(body, &args, span, &callee_name);
+                            let expanded = self.expand_callable(
+                                CallableTemplate {
+                                    body,
+                                    captures: HashMap::new(),
+                                },
+                                &args,
+                                span,
+                                &callee_name,
+                            );
+                            self.memo.insert(e, expanded);
+                            return expanded;
+                        }
+
+                        if let Some(template) = self.callable_template(callee) {
+                            let args: Vec<NodeId> =
+                                arg_exprs.into_iter().map(|x| self.walk(x)).collect();
+                            let expanded =
+                                self.expand_callable(template, &args, span, &callee_name);
                             self.memo.insert(e, expanded);
                             return expanded;
                         }
@@ -581,24 +640,12 @@ impl Builder<'_> {
                 self.emit(NodeKind::Boundary, "where".into(), span, vec![c, k])
             }
 
-            // A closure (observer / probe): a shipped kernel. Inline its body's
-            // subgraph — captures resolve through the shared binding map, and its
-            // own params are bound first. You see the observer's demand graph.
+            // A closure value: captures are node refs, not demanded values. The
+            // body is expanded only when a call site demands the callable.
             ExprKind::Closure(cl) => {
                 let body = cl.body;
-                let cparams: Vec<PatternId> =
-                    prog.arena[body].params.iter().map(|p| p.pattern).collect();
-                for p in cparams {
-                    self.bind_pattern(p);
-                }
-                let croot = prog.arena[body].root_expr;
-                let child = self.walk(croot);
-                self.emit(
-                    NodeKind::Kernel(KernelOp::Opaque),
-                    "(…)=>".into(),
-                    span,
-                    vec![child],
-                )
+                let captures = self.captures_for_body(body);
+                self.emit_callable_value(body, "(…)=>".into(), span, captures)
             }
 
             // An interpolated string is a kernel over its embedded expressions.
@@ -772,12 +819,15 @@ impl Builder<'_> {
                     Some(DefTarget::Variant { .. }) => {
                         self.emit(NodeKind::LazyData, n.name.clone(), span, vec![])
                     }
-                    Some(DefTarget::Item(_)) => self.emit(
-                        NodeKind::Kernel(KernelOp::Opaque),
-                        n.name.clone(),
-                        span,
-                        vec![],
-                    ),
+                    Some(DefTarget::Item(item)) => match &prog.arena[item].kind {
+                        ItemKind::Function(function) => self.emit_callable_value(
+                            function.body,
+                            n.name.clone(),
+                            span,
+                            HashMap::new(),
+                        ),
+                        _ => self.emit(NodeKind::Unresolved, n.name.clone(), span, vec![]),
+                    },
                     Some(DefTarget::Binding(_)) | None => {
                         self.emit(NodeKind::Unresolved, n.name.clone(), span, vec![])
                     }

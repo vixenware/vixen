@@ -54,11 +54,11 @@ fn source_entry_reports_assert_eq_poison() {
 #[test]
 fn source_entry_reports_unsupported_graph_shape() {
     let err = run_in_mode(
-        "fn main() -> U64 ( let f = (x) => x + 1; f(41) )",
+        "fn main() -> U64 ( match true ( true => 42, false => 0 ) )",
         "main",
         KernelMode::Off,
     )
-    .expect_err("closure calls are still unsupported graph shapes");
+    .expect_err("graph-level match is still unsupported");
     assert!(
         err.contains("graph unsupported"),
         "unexpected graph error: {err}"

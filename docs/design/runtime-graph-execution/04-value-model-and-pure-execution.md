@@ -123,6 +123,9 @@ Current progress:
 - Let aliases bind names to graph node refs.
 - Statically resolved direct calls expand at analysis time. Callee params bind
   to the caller's argument node refs, so unused arguments remain undemanded.
+- Closure calls and named functions used as values expand when the analyzer can
+  resolve the callable template. Closure construction stores capture node refs
+  and does not demand them.
 - Callee expression memoization is scoped per expansion; two calls to the same
   function do not reuse one instantiation's argument bindings.
 

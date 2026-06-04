@@ -79,6 +79,7 @@ pub fn step(graph: &DemandGraph, node: NodeId, inputs: ReadyInputs<'_>) -> Step 
         }),
         NodeKind::Project { index } => project(graph, node, n.inputs.as_slice(), *index, inputs),
         NodeKind::Kernel(op) => kernel(graph, node, n.inputs.as_slice(), *op, inputs),
+        NodeKind::Closure => unsupported(node, "closure value is not executable in core yet"),
         NodeKind::Boundary => Step::Boundary(BoundaryRequest { node }),
         NodeKind::Bomb => poisoned(graph, node, "bomb demanded"),
         NodeKind::Fail => fail(graph, node, n.inputs.as_slice(), inputs),

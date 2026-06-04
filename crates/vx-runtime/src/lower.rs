@@ -410,9 +410,13 @@ mod tests {
 
     #[test]
     fn unsupported_calls_decline_lowering() {
-        // Closure calls are not executable graph payloads yet, so lowering rejects
-        // them honestly instead of recovering source expressions.
-        let g = analyze_source("fn f() -> U64 ( let h = (x) => x + 1; h(41) )", "f").unwrap();
+        // Graph-level match is not an executable graph payload yet, so lowering
+        // rejects it honestly instead of recovering source expressions.
+        let g = analyze_source(
+            "fn f() -> U64 ( match true ( true => 42, false => 0 ) )",
+            "f",
+        )
+        .unwrap();
         assert!(lower_root(&g).is_err());
     }
 

@@ -205,6 +205,9 @@ Observed result:
   with argument node refs bound to callee parameter patterns. This is not the
   final function-template payload system, but runtime execution remains
   source-blind.
+- Closure literals and named functions used as values produce graph `Closure`
+  nodes with capture node refs. Calls to those values are expanded at analysis
+  time when the callable template is known.
 - The graph driver reports graph kernel executions for the transitional
   `dispatches` counter.
 - Public `Outcome` conversion can wrap a graph-root lazy array/tuple as old
@@ -236,11 +239,11 @@ and then into the public `Outcome`; `i6_eval_outcome_carries_the_source_span`
 passes through graph driver.
 
 The `.vx` language harness now runs through graph driver for source entries. It
-fails 29 of 68 Vixen-language cases. Direct calls, arithmetic kernel cases,
-control-flow kernel cases, and simple call laziness now pass. Remaining failures
-are concentrated in closure calls/function values, failure unions/catch,
-graph-level match, variants, and string methods. Those failures are explicit
-graph unsupported errors and are not a fallback.
+fails 24 of 68 Vixen-language cases. Direct calls, closure calls/function values,
+arithmetic kernel cases, control-flow kernel cases, and simple call laziness now
+pass. Remaining failures are concentrated in failure unions/catch, graph-level
+match, variants, and string methods. Those failures are explicit graph
+unsupported errors and are not a fallback.
 
 ## Verification commands
 

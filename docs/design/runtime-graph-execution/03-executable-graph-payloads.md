@@ -143,9 +143,10 @@ Current progress:
 
 - Statically resolved direct calls to function items are expanded at analysis
   time. The expanded graph binds parameter patterns to argument node refs.
-- This is intentionally not the final payload/template system. Closure calls,
-  function values, higher-order calls, and recursion still fail explicitly as
-  unsupported graph shapes.
+- Closure calls and named functions used as values also expand when the analyzer
+  can resolve the callable template.
+- This is intentionally not the final payload/template system. Recursion and
+  returned callable values still fail explicitly as unsupported graph shapes.
 
 ### Closures
 
@@ -159,6 +160,14 @@ ClosurePayload {
 ```
 
 Closure construction should not evaluate captures. Captures are node references.
+
+Current progress:
+
+- Graph has a source-blind `Closure` node kind whose inputs are capture node refs.
+- `DemandGraph::demand_reachable` does not demand closure captures merely because
+  the closure value exists.
+- Analyzer-local callable templates expand known closure/function-value calls
+  into graph nodes. The executable graph still does not store VIR ids.
 
 ### Match and control flow
 
