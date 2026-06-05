@@ -123,7 +123,7 @@ mod tests {
     use std::sync::{Arc, Mutex};
 
     use vx_exec_protocol::{
-        ExecCommand, Observe, ObserveClient, ObserveDispatcher, ObserveRequest, Observed,
+        ExecCommand, Observe, ObserveClient, ObserveDispatcher, ObserveRequest, Observed, WireValue,
     };
     use vx_ir::item::ItemKind;
     use vx_ir::reachable;
@@ -169,6 +169,23 @@ mod tests {
             .establish::<ObserveClient>()
             .await
             .expect("establish runner-backed Observe client")
+    }
+
+    async fn producing_client_for(service: RunnerService) -> ProducingClient {
+        let (client_link, server_link) = vox::memory_link_pair(64);
+        tokio::spawn(async move {
+            if let Ok(client) = vox::acceptor_on(server_link)
+                .on_connection(RunnerAcceptor::new(service))
+                .establish::<vox::NoopClient>()
+                .await
+            {
+                client.caller.closed().await;
+            }
+        });
+        vox::initiator_on(client_link, vox::TransportMode::Bare)
+            .establish::<ProducingClient>()
+            .await
+            .expect("establish runner-backed Producing client")
     }
 
     #[derive(Clone)]
@@ -1075,22 +1092,34 @@ mod tests {
                 tree,
             }],
         )));
-        let producing: ProducingClient = scheduler.block_on(async {
-            let (client_link, server_link) = vox::memory_link_pair(64);
-            tokio::spawn(async move {
-                if let Ok(client) = vox::acceptor_on(server_link)
-                    .on_connection(RunnerAcceptor::new(service))
-                    .establish::<vox::NoopClient>()
-                    .await
-                {
-                    client.caller.closed().await;
-                }
-            });
-            vox::initiator_on(client_link, vox::TransportMode::Bare)
-                .establish::<ProducingClient>()
-                .await
-                .expect("establish runner-backed Producing client")
-        });
+        let producing = scheduler.block_on(producing_client_for(service));
+        let got = scheduler
+            .block_on(producing.force(PartKey::TreePath("out/y.txt".to_string())))
+            .expect("force output path");
+        assert_eq!(got, Part::Bytes(b"vconn-payload".to_vec()));
+    }
+
+    #[test]
+    fn value_with_tree_observe_installs_runner_output_tree_from_cas() {
+        let scheduler = Scheduler::new(&[1]);
+        let (_temp, store) = scheduler.block_on(store_client());
+        let tree = scheduler.block_on(output_tree(&store));
+        let service = RunnerService::new(Some(Arc::new(store)));
+        let observed = service.install_producing_outputs_for_observed(
+            Observed::ValueWithTree(WireValue::Struct(vec![(
+                "out".to_string(),
+                WireValue::Tree,
+            )])),
+            vec![ExecOutput {
+                path: "out".to_string(),
+                tree,
+            }],
+        );
+        assert!(
+            matches!(observed, Observed::ValueWithTree(value) if value.contains_tree()),
+            "tree-bearing observer values should cross unchanged after installing Producing"
+        );
+        let producing = scheduler.block_on(producing_client_for(service));
         let got = scheduler
             .block_on(producing.force(PartKey::TreePath("out/y.txt".to_string())))
             .expect("force output path");

@@ -275,6 +275,15 @@ Latest verified red/green shape:
   10/10 passed.
 - `cargo nextest run -p vx-exec-protocol -p vx-runtime -p vx-runner -p vx-daemon --no-fail-fast`:
   163/163 passed, 12 skipped, after nested output-tree crossing.
+- `cargo nextest run -p vx-runner -E 'test(producing_vconn_serves_runner_output_tree_from_cas) | test(value_with_tree_observe_installs_runner_output_tree_from_cas)' --no-fail-fast`:
+  2/2 passed, proving both top-level `Observed::Tree` and compound
+  `Observed::ValueWithTree` runner outputs install the CAS-backed `Producing`
+  service before a path is forced over the vconn.
+- `cargo nextest run -p vx-runner --no-fail-fast`: 7/7 passed, 11 skipped, after
+  adding runner-side `Observed::ValueWithTree` Producing coverage.
+- `cargo nextest run -p vx-exec-protocol -p vx-runtime -p vx-runner -p vx-daemon --no-fail-fast`:
+  164/164 passed, 12 skipped, after the runner-backed `ValueWithTree`
+  Producing branch was wired.
 - `cargo check -p vx-runtime -p vx-runner -p vx-daemon`: passed after making
   `Value::OutputTree` carry a sealed executor-local marker.
 - `cargo check -p vx-runtime -p vx-runner -p vx-daemon`: passed after making

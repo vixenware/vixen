@@ -8,6 +8,38 @@ use crate::exec::run_exec;
 use crate::output_tree::CasOutputTreeService;
 
 impl RunnerService {
+    pub(crate) fn install_producing_outputs_for_observed(
+        &self,
+        observed: Observed,
+        outputs: Vec<vx_services::ExecOutput>,
+    ) -> Observed {
+        match observed {
+            Observed::Tree => match self.store() {
+                Some(store) => {
+                    self.install_produced_outputs(Some(CasOutputTreeService::new(store, outputs)));
+                    Observed::Tree
+                }
+                None => Observed::Poisoned(
+                    "runner-backed observe returned a tree, but the runner has no CAS store \
+                     configured for Producing output serving"
+                        .to_string(),
+                ),
+            },
+            Observed::ValueWithTree(value) => match self.store() {
+                Some(store) => {
+                    self.install_produced_outputs(Some(CasOutputTreeService::new(store, outputs)));
+                    Observed::ValueWithTree(value)
+                }
+                None => Observed::Poisoned(
+                    "runner-backed observe returned a value containing a tree, but the runner \
+                     has no CAS store configured for Producing output serving"
+                        .to_string(),
+                ),
+            },
+            other => other,
+        }
+    }
+
     async fn exec(&self, request: ExecRequest) -> ExecResult {
         let Some(vfsd) = self.vfsd() else {
             return ExecResult {
@@ -62,20 +94,7 @@ impl RunnerService {
             }),
             request.observer,
         );
-        match observed {
-            Observed::Tree => match self.store() {
-                Some(store) => {
-                    self.install_produced_outputs(Some(CasOutputTreeService::new(store, outputs)));
-                    Observed::Tree
-                }
-                None => Observed::Poisoned(
-                    "runner-backed observe returned a tree, but the runner has no CAS store \
-                     configured for Producing output serving"
-                        .to_string(),
-                ),
-            },
-            other => other,
-        }
+        self.install_producing_outputs_for_observed(observed, outputs)
     }
 }
 

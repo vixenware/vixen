@@ -149,6 +149,9 @@ Current checkpoint:
   `ExecResult.outputs`; the orchestrator opens the `"Producing"` virtual
   connection on the same Vox session and demands individual paths from the
   returned write-set tree.
+- `vx-runner::tests::value_with_tree_observe_installs_runner_output_tree_from_cas`
+  proves the compound `Observed::ValueWithTree` branch installs the same
+  CAS-backed `Producing` service as a top-level tree result.
 - The first CAS-backed producer resolves paths from the declared output-root
   namespace (`out/foo.o` for `writable: ["out"]`) by walking the flushed
   `DirectoryNode` tree and fetching small/large file chunks from `vx-store`.
@@ -194,6 +197,10 @@ Current checkpoint:
   runner CAS-backed `Producing` implementation.
 - `vx-runner::tests::producing_vconn_serves_runner_output_tree_from_cas` proves
   `RunnerAcceptor` routes a `"Producing"` connection to that CAS-backed service.
+- `vx-runner::tests::value_with_tree_observe_installs_runner_output_tree_from_cas`
+  proves a compound observer result containing a tree leaf installs the same
+  CAS-backed output-tree service before the orchestrator demands a path over the
+  virtual connection.
 - `vx-runner::tests::demanded_vixen_exec_reaches_runner_backed_observe` compiles
   a real `.vx` backtick invocation and proves a demanded exec reaches
   `RunnerService::observe` by receiving the runner-backed no-CAS-VFS poison.
