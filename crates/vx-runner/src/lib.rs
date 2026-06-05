@@ -114,6 +114,7 @@ mod tests {
                         program: "true".to_string(),
                         args: Vec::new(),
                     },
+                    outputs: Vec::new(),
                 },
             );
             match observed.as_ref() {

@@ -39,7 +39,7 @@ impl RunnerService {
                 args: request.command.args,
                 env: Vec::new(),
                 mounts: Vec::new(),
-                outputs: Vec::new(),
+                outputs: request.outputs,
             },
         )
         .await;

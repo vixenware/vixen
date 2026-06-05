@@ -59,6 +59,7 @@ pub(crate) struct GraphRuntimeMeta {
 pub(crate) struct ExecInvocationMeta {
     pub(crate) args: Vec<CliArgTemplate>,
     pub(crate) observer: Option<vx_ir::Bundle>,
+    pub(crate) writable_roots: Vec<NodeId>,
 }
 
 #[derive(Debug, Clone)]
@@ -233,6 +234,12 @@ struct CallableTemplate {
     code_identity: Option<String>,
 }
 
+#[derive(Default)]
+struct ExecKeywords {
+    observer: Option<BodyId>,
+    writable_roots: Vec<NodeId>,
+}
+
 impl Builder<'_> {
     fn emit(&mut self, kind: NodeKind, label: String, span: Span, inputs: Vec<NodeId>) -> NodeId {
         let id = NodeId(self.nodes.len() as u32);
@@ -363,11 +370,11 @@ impl Builder<'_> {
     fn emit_exec_invocation(
         &mut self,
         cli: &CliLiteralExpr,
-        observer: Option<BodyId>,
+        meta: ExecKeywords,
         span: Span,
     ) -> NodeId {
         let args = self.cli_arg_templates(cli);
-        let inputs = args
+        let mut inputs: Vec<NodeId> = args
             .iter()
             .flat_map(|arg| arg.pieces.iter())
             .filter_map(|piece| match piece {
@@ -375,11 +382,19 @@ impl Builder<'_> {
                 CliArgPiece::Node(node) => Some(*node),
             })
             .collect();
+        inputs.extend(meta.writable_roots.iter().copied());
         let node = self.emit(NodeKind::Boundary, "`…`".into(), span, inputs);
-        let observer = observer.map(|body| vx_ir::reachable(&self.program.arena, self.env, body));
-        self.runtime_meta
-            .execs
-            .insert(node, ExecInvocationMeta { args, observer });
+        let observer = meta
+            .observer
+            .map(|body| vx_ir::reachable(&self.program.arena, self.env, body));
+        self.runtime_meta.execs.insert(
+            node,
+            ExecInvocationMeta {
+                args,
+                observer,
+                writable_roots: meta.writable_roots,
+            },
+        );
         node
     }
 
@@ -399,19 +414,50 @@ impl Builder<'_> {
             .collect()
     }
 
-    fn observer_body(&self, keywords: ExprId) -> Result<BodyId, String> {
+    fn invocation_keywords(&mut self, keywords: ExprId) -> Result<ExecKeywords, String> {
         let ExprKind::Record(record) = &self.program.arena[keywords].kind else {
             return Err("an invocation's `with` clause must be a keyword record".into());
         };
-        let observer = record
-            .fields
-            .iter()
-            .find(|field| field.name == "observer")
-            .ok_or_else(|| "this `with` clause needs an `observer`".to_string())?;
-        match &self.program.arena[observer.value].kind {
-            ExprKind::Closure(closure) => Ok(closure.body),
-            _ => Err("an invocation's `observer` must be a closure".into()),
+        let observer = match record.fields.iter().find(|field| field.name == "observer") {
+            Some(field) => match &self.program.arena[field.value].kind {
+                ExprKind::Closure(closure) => Some(closure.body),
+                _ => return Err("an invocation's `observer` must be a closure".into()),
+            },
+            None => None,
+        };
+        let writable_roots = self.keyword_path_array(record, "writable")?;
+        Ok(ExecKeywords {
+            observer,
+            writable_roots,
+        })
+    }
+
+    fn keyword_path_array(
+        &mut self,
+        record: &vx_ir::expr::RecordExpr,
+        name: &str,
+    ) -> Result<Vec<NodeId>, String> {
+        let Some(field) = record.fields.iter().find(|field| field.name == name) else {
+            return Ok(Vec::new());
+        };
+        let ExprKind::Array(array) = &self.program.arena[field.value].kind else {
+            return Err(format!(
+                "an invocation's `{name}` keyword must be an array literal in graph exec"
+            ));
+        };
+        let elements = array.elements.clone();
+        let mut roots = Vec::with_capacity(elements.len());
+        for element in elements {
+            match element {
+                ArrayElement::Expr(expr) => roots.push(self.walk(expr)),
+                ArrayElement::Spread(_) => {
+                    return Err(format!(
+                        "an invocation's `{name}` keyword does not support spreads in graph exec yet"
+                    ));
+                }
+            }
         }
+        Ok(roots)
     }
 
     fn capability_request(&mut self, w: &vx_ir::expr::WhereExpr, span: Span) -> NodeId {
@@ -950,8 +996,8 @@ impl Builder<'_> {
                 } else if !w.is_constraint
                     && let ExprKind::CliLiteral(cli) = &prog.arena[w.callee].kind
                 {
-                    match self.observer_body(w.keywords) {
-                        Ok(observer) => self.emit_exec_invocation(cli, Some(observer), span),
+                    match self.invocation_keywords(w.keywords) {
+                        Ok(keywords) => self.emit_exec_invocation(cli, keywords, span),
                         Err(reason) => {
                             let c = self.walk(w.callee);
                             let k = self.walk(w.keywords);
@@ -1002,7 +1048,7 @@ impl Builder<'_> {
             // A backtick command invocation (`r[expr.command]`): forcing it runs an
             // external process, so it is a Boundary. Its inputs are the holes — the
             // leading `$tool` and each `${arg}` — so the graph reaches them.
-            ExprKind::CliLiteral(cli) => self.emit_exec_invocation(cli, None, span),
+            ExprKind::CliLiteral(cli) => self.emit_exec_invocation(cli, ExecKeywords::default(), span),
 
             // Bare invocation `f!` — a no-arg call.
             ExprKind::Invoke(iv) => {
@@ -2665,6 +2711,40 @@ mod tests {
         // Pair { a: 42, b: 💣 }.a — `.a` must resolve to slot 0, leaving b's bomb dark.
         let src = "struct Pair { a: U64, b: U64 } fn d() -> U64 ( Pair { a: 42, b: 💣 }.a )";
         bombs_unreached(&analyze_source(src, "d").unwrap());
+    }
+
+    #[test]
+    fn exec_invocation_metadata_carries_writable_roots() {
+        let src = "fn t(cmd: Command) -> Tree ( \
+                   `$cmd` with { writable: [\"out\"], observer: (run) => run.ok.out } )";
+        let fe = crate::compile::compile_source(src, "t").expect("program compiles");
+        let entry = fe
+            .program
+            .arena
+            .items
+            .iter()
+            .find_map(|item| match &item.kind {
+                ItemKind::Function(function) if function.name == "t" => Some(function.body),
+                _ => None,
+            })
+            .expect("entry body");
+        let (graph, _, _, _, meta) = build_graph_indexed_with_meta(&fe.program, &fe.env, entry);
+        let exec = meta
+            .execs
+            .values()
+            .next()
+            .expect("one exec boundary is recorded");
+        assert_eq!(
+            exec.writable_roots.len(),
+            1,
+            "the writable root is part of exec runtime metadata"
+        );
+        let root = exec.writable_roots[0];
+        let node = &graph.nodes[root.0 as usize];
+        assert!(
+            matches!(&node.kind, NodeKind::Const(ConstValue::Str(value)) if value == "out"),
+            "writable root node should be the literal path, got {node:?}"
+        );
     }
 
     #[test]

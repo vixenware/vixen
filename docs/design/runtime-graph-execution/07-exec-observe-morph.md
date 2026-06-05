@@ -131,7 +131,12 @@ Current checkpoint:
   minimal payload, converts the process result to `CompletedRun`, and calls
   `evaluate_observer`.
 - This path currently sends no mounts, env, or output roots because the
-  runtime-local observe payload cannot represent them yet.
+- This path currently sends no mounts or env because the runtime-local observe
+  payload cannot represent them yet.
+- `writable: [...]` roots now cross as `ObserveRequest.outputs`. They are
+  extracted as graph node refs, demanded only when the exec boundary materializes,
+  included in the exec cache key, and forwarded by `vx-runner` as
+  `ExecRequest.outputs`.
 - If an observer result is `WireValue::Tree`, the runner-backed path poisons
   explicitly because `Producing` output serving from flushed CAS trees is not
   wired yet. It does not fake a tree handle.
@@ -243,12 +248,14 @@ Once exec runs through the runner-backed path:
   selected 14 tests.
 - `cargo nextest run -p vx-runtime -E 'binary(source_blind_guardrails) | binary(exec_on_strands) | binary(exec_output_tree)' --no-fail-fast`:
   14/14 passed.
+- `cargo nextest run -p vx-runtime -E 'test(exec_invocation_metadata_carries_writable_roots) | test(writable_roots_are_part_of_the_backtick_exec_l1_key) | binary(observe_on_strands) | binary(exec_on_strands) | binary(exec_output_tree)' --no-fail-fast`:
+  15/15 passed.
 - `cargo nextest list -p vx-runner` selected
   `sandbox::tests::seatbelt_confines_writes_to_the_output_root` and
   `tests::strand_observe_reaches_runner_backed_service`.
 - `cargo nextest run -p vx-runner --no-fail-fast`: 2/2 passed.
 - `cargo nextest run -p vx-runtime-graph -p vx-runtime-core -p vx-runtime-driver -p vx-runtime -p vx-runner --no-fail-fast`:
-  174/174 passed.
+  176/176 passed.
 - `cargo check -p vx-daemon -p vx-runner -p vx-runtime` passed after adding the
   daemon `"Observe"` route and removing a stale `Value::Closure` display arm.
 - `cargo nextest list -p vx-daemon` selected two service tests.

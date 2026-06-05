@@ -37,6 +37,7 @@ pub struct ExecCommand {
 pub struct ObserveRequest {
     pub observer: Option<Bundle>,
     pub command: ExecCommand,
+    pub outputs: Vec<String>,
 }
 
 /// A runtime value crossing back from the executor to the orchestrator over vox —
@@ -331,6 +332,7 @@ mod tests {
             .observe(ObserveRequest {
                 observer: Some(bundle.clone()),
                 command: cmd("true"),
+                outputs: Vec::new(),
             })
             .await
             .expect("observe over vox");
@@ -348,6 +350,7 @@ mod tests {
             .observe(ObserveRequest {
                 observer: Some(bundle),
                 command: cmd("false"),
+                outputs: Vec::new(),
             })
             .await
             .expect("observe over vox");
@@ -382,6 +385,7 @@ mod tests {
             .observe(ObserveRequest {
                 observer: Some(bundle),
                 command: cmd("true"),
+                outputs: Vec::new(),
             })
             .await
             .expect("observe over vox");
@@ -425,6 +429,7 @@ mod tests {
                     program: "sh".to_string(),
                     args: vec!["-c".to_string(), "printf CONTENT > out.txt".to_string()],
                 },
+                outputs: Vec::new(),
             })
             .await
             .expect("observe over vox");

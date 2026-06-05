@@ -167,6 +167,7 @@ struct ExecInvocationCacheKey {
     program_fingerprint: String,
     declared_tool_fingerprint: Option<String>,
     args: Vec<String>,
+    output_roots: Vec<String>,
     observer: ObserverCacheIdentity,
 }
 
@@ -592,9 +593,26 @@ fn materialize_exec_invocation(
             arg,
         )?);
     }
+    let mut output_roots = Vec::with_capacity(invocation.writable_roots.len());
+    for root in &invocation.writable_roots {
+        let output = demand_payload(
+            Rc::clone(&driver),
+            Rc::clone(&externals),
+            runtime.clone(),
+            boundary,
+            *root,
+        )?;
+        output_roots.push(expect_string(output, "exec writable root")?);
+    }
 
     let program_fingerprint = crate::host::fingerprint_executable(&tool.binary)?;
-    let cache_key = exec_invocation_cache_key(&tool, program_fingerprint, args.clone(), invocation);
+    let cache_key = exec_invocation_cache_key(
+        &tool,
+        program_fingerprint,
+        args.clone(),
+        output_roots.clone(),
+        invocation,
+    );
     let cached = {
         runtime
             .exec_invocation_cache
@@ -628,6 +646,7 @@ fn materialize_exec_invocation(
                 program: tool.binary,
                 args: args.clone(),
             },
+            outputs: output_roots,
         },
     );
     let cacheable = cacheable_from_observed(&observed)?;
@@ -802,6 +821,7 @@ fn exec_invocation_cache_key(
     tool: &ToolRequest,
     program_fingerprint: String,
     args: Vec<String>,
+    output_roots: Vec<String>,
     invocation: &ExecInvocationMeta,
 ) -> ExecInvocationCacheKey {
     let observer = match &invocation.observer {
@@ -815,6 +835,7 @@ fn exec_invocation_cache_key(
         program_fingerprint,
         declared_tool_fingerprint: tool.declared_fingerprint.clone(),
         args,
+        output_roots,
         observer,
     }
 }

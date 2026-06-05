@@ -137,6 +137,10 @@ Expected latest structural checkpoint:
   observe on miss, seeds cached graph output on an exact in-process L1 or opt-in
   disk L2 hit keyed by the materialized request plus the pre-run executable
   content fingerprint, and memoizes the graph output.
+- Invocation `writable: [...]` roots lower into exec boundary metadata as graph
+  node refs, are demanded only during boundary materialization, cross in
+  `ObserveRequest.outputs`, are included in the exec cache key, and are consumed
+  by `vx-runner` as `ExecRequest.outputs`.
 - Observer execution uses graph body execution and graph/native wire crossing.
 - `vx-runner` now implements the runtime `Observe` service and routes `"Observe"`
   through `RunnerAcceptor`; `vx-daemon` also advertises and routes `"Observe"` to
@@ -201,12 +205,18 @@ Latest verified red/green shape:
 - `cargo nextest run -p vx-runtime --no-fail-fast`: 154 run, 154 passed,
   0 failed, 0 skipped.
 - `cargo nextest run -p vx-runtime-graph -p vx-runtime-core -p vx-runtime-driver -p vx-runtime -p vx-runner --no-fail-fast`:
-  174 run, 174 passed, 0 skipped.
+  176 run, 176 passed, 0 skipped.
 - `vx-runner::tests::strand_observe_reaches_runner_backed_service` drives
   `vx-runtime` strands against a runner-backed `Observe` client and reaches the
   explicit no-CAS-VFS poison. This proves the strand/Observe seam can target the
   runner service without a runtime-to-runner dependency; it does not prove live
   CAS-VFS execution or output tree serving.
+- `vx-runtime::analyze::tests::exec_invocation_metadata_carries_writable_roots`
+  proves `writable: ["out"]` is recorded as exec metadata rather than being
+  accepted only by the front-end.
+- `vx-runtime::exec_on_strands::writable_roots_are_part_of_the_backtick_exec_l1_key`
+  proves two otherwise-identical backtick execs with different writable roots do
+  not alias in the in-process exec L1.
 - The forbidden-symbol scan over `crates/vx-runtime-core` and
   `crates/vx-runtime-driver` returns no matches.
 - The deleted tree-walker affordance scan over `crates/vx-runtime/src` returns

@@ -34,6 +34,7 @@ fn request(program: &str) -> ObserveRequest {
             program: program.to_string(),
             args: vec![],
         },
+        outputs: Vec::new(),
     }
 }
 
