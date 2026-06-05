@@ -353,6 +353,15 @@ Current checkpoint:
 - `vx-runtime::graph_exec` still computes pre-run boundary cache keys while
   materializing demanded boundary nodes, but it no longer directly owns L1 maps,
   `LocalCacheIndex`, cache namespace strings, or file-index layout.
+- `vx-services::CasNode::CacheRecord` now stores portable cache-record bodies in
+  `vx-store`; `vx-store` validates and accepts those nodes.
+- `vx-services::CacheIndex` is the control-plane index service surface mapping
+  `(namespace, pre-run input-key digest)` to candidate cache-record `NodeHash`
+  values. `vx-daemon` hosts an in-process `CacheIndex` service when the
+  orchestrator slot is configured.
+- `RuntimeCache` is not yet wired through `CacheIndex`; the new service/store
+  seam exists so the next cut can replace the local owner without inventing a
+  runtime-local fallback.
 - `RuntimeBoundaries::default()` is cacheless. The old ambient
   `VX_RUNTIME_L2_DIR` lookup no longer participates in default graph execution.
 - `eval_body_with_cache_dir`, `eval_body_with_exec_and_cache_dir`, and internal
@@ -378,7 +387,7 @@ Current checkpoint:
 
 ## Latest verification for this checkpoint
 
-- `cargo check -p vx-cache-index -p vx-exec-protocol -p vx-services -p vx-runtime-graph -p vx-runtime-core -p vx-runtime-driver -p vx-runtime -p vx-runner -p vx-daemon`
+- `cargo check -p vx-cache-index -p vx-exec-protocol -p vx-services -p vx-store -p vx-runtime-graph -p vx-runtime-core -p vx-runtime-driver -p vx-runtime -p vx-runner -p vx-daemon`
   passed.
 - `cargo nextest list -p vx-runtime -E 'test(observer_evaluation_accepts) | test(observe_runs_a_real_command) | test(observe_crosses_the_output_tree) | test(the_executor_serves_run_outputs)'`
   selected only `observer_evaluation_accepts_a_completed_process_without_spawning`;
@@ -400,6 +409,12 @@ Current checkpoint:
 - The raw direct graph-exec cache-index scan
   `rg -n 'LocalCacheIndex|vx_cache_index|host_exec_cache|exec_invocation_cache|host-exec-v1|exec-value-v1|function-output-v1' crates/vx-runtime/src/graph_exec.rs`
   returned no matches.
+- `cargo nextest list -p vx-daemon -p vx-store -E 'test(cache_index) | test(cache_record)'`
+  selected `cache_index_rejects_empty_namespaces`,
+  `cache_index_returns_records_for_the_pre_run_key`, and
+  `cache_record_nodes_round_trip_through_store`.
+- `cargo nextest run -p vx-daemon -p vx-store -E 'test(cache_index) | test(cache_record)' --no-fail-fast`:
+  3/3 passed.
 - `cargo nextest run -p vx-runtime --no-fail-fast`: 140/140 passed.
 - `cargo nextest list -p vx-runner --run-ignored all` selected
   `output_tree::tests::reads_declared_output_root_from_cas`,
@@ -456,9 +471,9 @@ Current checkpoint:
   fallback could run.
 - `cargo nextest run -p vx-runner --no-fail-fast`: 6/6 passed, 12 skipped
   (the live-VFS proof targets).
-- `cargo nextest run -p vx-cache-index -p vx-exec-protocol -p vx-services -p vx-runtime-graph -p vx-runtime-core -p vx-runtime-driver -p vx-runtime -p vx-runner --no-fail-fast`:
-  174/174 passed, 12 skipped.
-- `cargo nextest run -p vx-daemon --no-fail-fast`: 2/2 passed.
+- `cargo nextest run -p vx-cache-index -p vx-exec-protocol -p vx-services -p vx-store -p vx-runtime-graph -p vx-runtime-core -p vx-runtime-driver -p vx-runtime -p vx-runner -p vx-daemon --no-fail-fast`:
+  179/179 passed, 12 skipped.
+- `cargo nextest run -p vx-daemon --no-fail-fast`: 4/4 passed.
 - The forbidden-symbol scans over `vx-runtime-core`, `vx-runtime-driver`, the
   deleted tree-walker affordance scan over `vx-runtime/src`, and the
   runtime-owned exec/observe protocol and cache file-index scans over
@@ -479,6 +494,7 @@ Finish M6:
    the result. If the host cannot supply CAS-VFS, the proof should fail at the
    explicit VFS boot/runner-backed boundary, never by switching to scratch
    execution.
-2. Replace the temporary `RuntimeCache` local owner with daemon/orchestrator
-   cache-index state backed by `vx-store` cache-record bodies. `vx-cache-index`
-   is still only the temporary local compatibility substrate.
+2. Wire `RuntimeCache` through a `CacheIndex` client and `Store` client so
+   persistent lookup/write goes through daemon/orchestrator cache-index state and
+   `vx-store` `CacheRecord` bodies. `vx-cache-index` is still only the temporary
+   local compatibility substrate.

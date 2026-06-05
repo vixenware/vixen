@@ -154,6 +154,12 @@ Expected latest structural checkpoint:
   materializing demanded boundaries, but it no longer owns the L1 maps,
   `LocalCacheIndex`, file path layout, cache namespace strings, or ambient
   `VX_RUNTIME_L2_DIR` lookup.
+- `vx-services::CasNode` now has a `CacheRecord` variant for portable
+  cache-record bodies in `vx-store`, and `vx-services::CacheIndex` is the
+  control-plane index surface mapping pre-run key digests to candidate cache
+  record `NodeHash` values. `vx-daemon` hosts an in-process `CacheIndex` service
+  whenever the orchestrator slot is configured. Runtime cache lookup is not yet
+  wired through this service.
 - `vx-runner` now implements the runtime `Observe` service and routes `"Observe"`
   through `RunnerAcceptor`; `vx-daemon` also advertises and routes `"Observe"` to
   its hosted `RunnerService` when a runner is configured. The implementation
@@ -193,7 +199,7 @@ Expected latest structural checkpoint:
 
 Latest verified red/green shape:
 
-- `cargo check -p vx-cache-index -p vx-exec-protocol -p vx-services -p vx-runtime-graph -p vx-runtime-core -p vx-runtime-driver -p vx-runtime -p vx-runner -p vx-daemon`
+- `cargo check -p vx-cache-index -p vx-exec-protocol -p vx-services -p vx-store -p vx-runtime-graph -p vx-runtime-core -p vx-runtime-driver -p vx-runtime -p vx-runner -p vx-daemon`
   passes with no old-evaluator dead-code warnings.
 - `cargo nextest run -p vx-runtime -E 'binary(source_blind_guardrails) | binary(exec_on_strands)' --no-fail-fast`:
   6/6 passed, including `undemanded_exec_in_tuple_does_not_dispatch`,
@@ -260,9 +266,16 @@ Latest verified red/green shape:
 - `cargo nextest run -p vx-runner --run-ignored only -E 'test(=tests::backtick_exec_l2_cache_survives_fresh_runner_backed_graph_eval)' --no-fail-fast`:
   failed at the same live CAS-VFS boot boundary on this host, before any scratch
   fallback could run.
-- `cargo nextest run -p vx-cache-index -p vx-exec-protocol -p vx-services -p vx-runtime-graph -p vx-runtime-core -p vx-runtime-driver -p vx-runtime -p vx-runner --no-fail-fast`:
-  174 run, 174 passed, 12 skipped.
-- `cargo nextest run -p vx-daemon --no-fail-fast`: 2/2 passed.
+- `cargo nextest list -p vx-daemon -p vx-store -E 'test(cache_index) | test(cache_record)'`
+  selected the three cache seam proofs:
+  `cache_index_rejects_empty_namespaces`,
+  `cache_index_returns_records_for_the_pre_run_key`, and
+  `cache_record_nodes_round_trip_through_store`.
+- `cargo nextest run -p vx-daemon -p vx-store -E 'test(cache_index) | test(cache_record)' --no-fail-fast`:
+  3/3 passed.
+- `cargo nextest run -p vx-cache-index -p vx-exec-protocol -p vx-services -p vx-store -p vx-runtime-graph -p vx-runtime-core -p vx-runtime-driver -p vx-runtime -p vx-runner -p vx-daemon --no-fail-fast`:
+  179 run, 179 passed, 12 skipped.
+- `cargo nextest run -p vx-daemon --no-fail-fast`: 4/4 passed.
 - The raw forbidden-symbol scans over `vx-runtime-core`, `vx-runtime-driver`,
   the deleted tree-walker affordance scan over `vx-runtime/src`, and the
   runtime-owned exec/observe protocol, cache file-index, and direct

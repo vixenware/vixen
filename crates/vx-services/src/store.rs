@@ -245,6 +245,7 @@ impl std::fmt::Display for ContentHash {
 pub enum CasNode {
     Blob(BlobNode),
     Directory(DirectoryNode),
+    CacheRecord(CacheRecordNode),
 }
 
 impl CasNode {
@@ -302,6 +303,50 @@ impl std::fmt::Display for CasNodeError {
 }
 
 impl std::error::Error for CasNodeError {}
+
+// =============================================================================
+// Cache records
+// =============================================================================
+
+/// Digest of the pre-run cache key. The key material is computed before running;
+/// read witnesses live in the record body and never become the primary key.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Facet)]
+#[repr(transparent)]
+pub struct CacheInputKeyDigest(pub Blake3Hash);
+
+/// A portable cache record stored as a CAS node.
+#[derive(Debug, Clone, PartialEq, Eq, Facet)]
+pub struct CacheRecordNode {
+    pub namespace: String,
+    pub input_key: CacheInputKeyDigest,
+    pub body: CacheRecordBody,
+    /// Future read-set/witness payload. A witness is post-run provenance; it is
+    /// not part of the pre-run key.
+    pub read_witness: Option<NodeHash>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Facet)]
+#[repr(u8)]
+pub enum CacheRecordBody {
+    Value(CacheRecordValue),
+    /// Transitional payload for record bodies whose portable schema is still
+    /// being carved out. The namespace and format string must identify the
+    /// decoder.
+    Opaque {
+        format: String,
+        bytes: Vec<u8>,
+    },
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Facet)]
+#[repr(u8)]
+pub enum CacheRecordValue {
+    U64(u64),
+    Bool(bool),
+    String(String),
+    Unit,
+    Tree(NodeHash),
+}
 
 // =============================================================================
 // BlobNode (multi-chunk files only)

@@ -391,6 +391,13 @@ Current slice:
   in-process L1 maps and optional local file-index adapter. Graph boundary
   materialization still computes the pre-run keys it is allowed to know, but
   `graph_exec` must not own the maps, local-index namespaces, or file layout.
+- `vx-services::CasNode::CacheRecord` is the first real CAS node for cache
+  record bodies. `vx-store` validates and stores these nodes by content hash.
+- `vx-services::CacheIndex` is the control-plane index protocol:
+  `(namespace, pre-run input-key digest) -> candidate cache-record NodeHash(es)`.
+  `vx-daemon` currently hosts an in-process implementation when the orchestrator
+  slot is configured. Runtime cache lookup still uses `RuntimeCache`; wiring it
+  through `CacheIndex` is the next cut.
 - This is not the final CAS-backed L2 and it does not record read-set witnesses.
 
 Final cache/store shape:

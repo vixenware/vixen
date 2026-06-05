@@ -24,6 +24,8 @@ vx-services = { path = "../vx-services" }
 vx-io = { workspace = true }
 
 [dev-dependencies]
+tempfile = { workspace = true }
+tokio = { workspace = true }
 vx-io = { path = "../vx-io" }
 vx-services = { path = "../vx-services" }
 

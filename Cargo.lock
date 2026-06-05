@@ -4153,6 +4153,8 @@ dependencies = [
  "camino",
  "eyre",
  "moire",
+ "tempfile",
+ "tokio",
  "tracing",
  "vx-io",
  "vx-services",

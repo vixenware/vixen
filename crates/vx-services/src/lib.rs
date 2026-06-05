@@ -3,6 +3,9 @@
 mod daemon;
 pub use daemon::*;
 
+mod cache_index;
+pub use cache_index::*;
+
 mod orchestrator;
 pub use orchestrator::*;
 

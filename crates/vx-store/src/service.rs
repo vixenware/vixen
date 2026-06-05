@@ -2,9 +2,9 @@ use crate::types::StoreService;
 use moire::task::FutureExt;
 use vx_services::Store;
 use vx_services::{
-    Blake3Hash, BlobNode, CDC_MAX_CHUNK, CasNode, ChunkHash, DirectoryEntryKind, DirectoryNode,
-    KNOWN_CDC_PARAMS, MAX_CHUNKS_PER_BLOB, MAX_MISSING_CHUNKS_BATCH, MAX_MISSING_NODES_BATCH,
-    MAX_NODE_BYTES, NodeHash,
+    Blake3Hash, BlobNode, CDC_MAX_CHUNK, CacheRecordBody, CacheRecordNode, CasNode, ChunkHash,
+    DirectoryEntryKind, DirectoryNode, KNOWN_CDC_PARAMS, MAX_CHUNKS_PER_BLOB,
+    MAX_MISSING_CHUNKS_BATCH, MAX_MISSING_NODES_BATCH, MAX_NODE_BYTES, NodeHash,
 };
 
 impl StoreService {
@@ -164,6 +164,7 @@ impl StoreService {
         match &node {
             CasNode::Blob(blob) => validate_blob_node(blob)?,
             CasNode::Directory(dir) => validate_directory_node(dir)?,
+            CasNode::CacheRecord(record) => validate_cache_record_node(record)?,
         }
 
         self.storage
@@ -389,4 +390,48 @@ fn validate_directory_node(dir: &DirectoryNode) -> Result<(), String> {
     }
 
     Ok(())
+}
+
+fn validate_cache_record_node(record: &CacheRecordNode) -> Result<(), String> {
+    if record.namespace.is_empty() {
+        return Err("CacheRecord namespace must not be empty".to_string());
+    }
+    if let CacheRecordBody::Opaque { format, .. } = &record.body
+        && format.is_empty()
+    {
+        return Err("CacheRecord opaque body format must not be empty".to_string());
+    }
+    Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use camino::Utf8PathBuf;
+    use vx_services::{
+        Blake3Hash, CacheInputKeyDigest, CacheRecordBody, CacheRecordNode, CacheRecordValue,
+        CasNode, Store,
+    };
+
+    #[tokio::test]
+    async fn cache_record_nodes_round_trip_through_store() {
+        let temp = tempfile::tempdir().expect("temp dir");
+        let root = Utf8PathBuf::from_path_buf(temp.path().join("store")).expect("utf8 store path");
+        let store = crate::open(root).await.expect("open store");
+        let node = CasNode::CacheRecord(CacheRecordNode {
+            namespace: "function-output-v1".to_string(),
+            input_key: CacheInputKeyDigest(Blake3Hash::from_bytes(b"key")),
+            body: CacheRecordBody::Value(CacheRecordValue::String("cached".to_string())),
+            read_witness: None,
+        });
+        let (bytes, hash) = node.to_bytes_and_hash();
+
+        Store::put_node(&store, hash, bytes.clone())
+            .await
+            .expect("cache record enters store");
+        let fetched = Store::get_node(&store, hash)
+            .await
+            .expect("cache record is fetched by node hash");
+
+        assert_eq!(fetched, bytes);
+    }
 }

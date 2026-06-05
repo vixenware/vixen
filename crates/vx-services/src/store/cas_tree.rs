@@ -221,6 +221,9 @@ async fn fetch_directory(cas: &StoreClient, hash: NodeHash) -> Result<DirectoryN
     match CasNode::from_bytes(&data).map_err(|error| format!("invalid CAS node {hash}: {error}"))? {
         CasNode::Directory(directory) => Ok(directory),
         CasNode::Blob(_) => Err(format!("CAS node {hash} is a blob, expected directory")),
+        CasNode::CacheRecord(_) => Err(format!(
+            "CAS node {hash} is a cache record, expected directory"
+        )),
     }
 }
 
@@ -233,6 +236,7 @@ async fn fetch_blob(cas: &StoreClient, hash: NodeHash) -> Result<BlobNode, Strin
     match CasNode::from_bytes(&data).map_err(|error| format!("invalid CAS node {hash}: {error}"))? {
         CasNode::Blob(blob) => Ok(blob),
         CasNode::Directory(_) => Err(format!("CAS node {hash} is a directory, expected blob")),
+        CasNode::CacheRecord(_) => Err(format!("CAS node {hash} is a cache record, expected blob")),
     }
 }
 

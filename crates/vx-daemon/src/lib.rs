@@ -11,13 +11,16 @@ use vox::{ConnectionAcceptor, Metadata, TransportMode};
 use vx_exec_protocol::ObserveDispatcher;
 use vx_runner::RunnerService;
 use vx_services::{
-    DAEMON_SOCK, DaemonDispatcher, RunnerDispatcher, StoreDispatcher, TestRunnerDispatcher,
+    CacheIndexDispatcher, DAEMON_SOCK, DaemonDispatcher, RunnerDispatcher, StoreDispatcher,
+    TestRunnerDispatcher,
 };
 use vx_store::StoreService;
 use vx_vfsd::{VfsdDispatcher, VfsdService};
 
+mod cache_index;
 mod service;
 mod test_runner;
+pub use cache_index::CacheIndexService;
 pub use service::DaemonService;
 pub use test_runner::TestRunnerService;
 
@@ -264,8 +267,12 @@ pub async fn serve(config: DaemonConfig) -> Result<()> {
     // Eval is gone — the eager runtime is deleted. The `orchestrator` config slot
     // now gates only the test surface, which runs on vx-runtime and needs no
     // store/runner/vfsd wiring of its own.
+    let cache_index_service = services.orchestrator.is_some().then(CacheIndexService::new);
     let test_runner_service = services.orchestrator.is_some().then(TestRunnerService::new);
     let mut hosted_services = vec!["Daemon".to_owned()];
+    if cache_index_service.is_some() {
+        hosted_services.push("CacheIndex".to_owned());
+    }
     if test_runner_service.is_some() {
         hosted_services.push("TestRunner".to_owned());
     }
@@ -285,6 +292,7 @@ pub async fn serve(config: DaemonConfig) -> Result<()> {
 
     let acceptor = DaemonAcceptor {
         service,
+        cache_index_service,
         test_runner_service,
         store_service,
         runner_service,
@@ -388,6 +396,7 @@ async fn connect_in_process_store(service: StoreService) -> Result<vx_services::
 #[derive(Clone)]
 struct DaemonAcceptor {
     service: DaemonService,
+    cache_index_service: Option<CacheIndexService>,
     test_runner_service: Option<TestRunnerService>,
     store_service: Option<StoreService>,
     runner_service: Option<RunnerService>,
@@ -403,6 +412,13 @@ impl ConnectionAcceptor for DaemonAcceptor {
         tracing::info!("daemon got request for service: {}", request.service());
         match request.service() {
             "Daemon" => connection.handle_with(DaemonDispatcher::new(self.service.clone())),
+            "CacheIndex" => {
+                let Some(service) = &self.cache_index_service else {
+                    tracing::warn!("cache index service requested but not hosted");
+                    return Err(vec![]);
+                };
+                connection.handle_with(CacheIndexDispatcher::new(service.clone()));
+            }
             "TestRunner" => {
                 let Some(service) = &self.test_runner_service else {
                     tracing::warn!("test runner service requested but not hosted");
