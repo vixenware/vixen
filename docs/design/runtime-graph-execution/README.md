@@ -146,9 +146,13 @@ Expected latest structural checkpoint:
   through `RunnerAcceptor`; `vx-daemon` also advertises and routes `"Observe"` to
   its hosted `RunnerService` when a runner is configured. The implementation
   calls `run_exec`, converts the process result to `CompletedRun`, and invokes
-  the shared observer-evaluation helper. Runtime tests still use
-  `local_observer()` and therefore do not yet prove the runner-backed observe
-  path.
+  the shared observer-evaluation helper.
+- Runner-backed `WireValue::Tree` observe results now install a CAS-backed
+  `Producing` service from flushed `ExecResult.outputs`; both `RunnerAcceptor`
+  and daemon-hosted runner sessions route `"Producing"`, and the service resolves
+  demanded paths by walking `DirectoryNode` trees and fetching file chunks from
+  `vx-store`. Runtime tests still use `local_observer()` and therefore do not
+  yet prove the full runner-backed `.vx` exec path.
 - Top-level producing trees returned by observe cross as remote handles attached
   to graph `OutputTree` nodes. Demanding `tree.file(path)` is a separate graph
   boundary that materializes only that path through strand remote-part demand.
@@ -171,7 +175,7 @@ Expected latest structural checkpoint:
 
 Latest verified red/green shape:
 
-- `cargo check -p vx-runtime-graph -p vx-runtime-core -p vx-runtime-driver -p vx-runtime -p vx-runner`
+- `cargo check -p vx-services -p vx-runtime-graph -p vx-runtime-core -p vx-runtime-driver -p vx-runtime -p vx-runner -p vx-daemon`
   passes with no old-evaluator dead-code warnings.
 - `cargo nextest run -p vx-runtime -E 'binary(source_blind_guardrails)' --no-fail-fast`:
   3/3 passed.
@@ -204,13 +208,19 @@ Latest verified red/green shape:
   unresolved arguments or captures are not demanded to build a call memo key.
 - `cargo nextest run -p vx-runtime --no-fail-fast`: 154 run, 154 passed,
   0 failed, 0 skipped.
-- `cargo nextest run -p vx-runtime-graph -p vx-runtime-core -p vx-runtime-driver -p vx-runtime -p vx-runner --no-fail-fast`:
-  176 run, 176 passed, 0 skipped.
+- `cargo nextest run -p vx-services -p vx-runtime-graph -p vx-runtime-core -p vx-runtime-driver -p vx-runtime -p vx-runner --no-fail-fast`:
+  187 run, 187 passed, 0 skipped.
+- `cargo nextest run -p vx-daemon --no-fail-fast`: 2/2 passed.
 - `vx-runner::tests::strand_observe_reaches_runner_backed_service` drives
   `vx-runtime` strands against a runner-backed `Observe` client and reaches the
   explicit no-CAS-VFS poison. This proves the strand/Observe seam can target the
-  runner service without a runtime-to-runner dependency; it does not prove live
-  CAS-VFS execution or output tree serving.
+  runner service without a runtime-to-runner dependency.
+- `vx-runner::output_tree::tests::reads_declared_output_root_from_cas` proves a
+  flushed CAS output root can serve `out/y.txt` over the runner `Producing`
+  service. `vx-runner::tests::producing_vconn_serves_runner_output_tree_from_cas`
+  proves `RunnerAcceptor` routes the `"Producing"` virtual connection to that
+  CAS-backed service. These do not yet prove live CAS-VFS execution from a
+  demanded `.vx` backtick invocation.
 - `vx-runtime::analyze::tests::exec_invocation_metadata_carries_writable_roots`
   proves `writable: ["out"]` is recorded as exec metadata rather than being
   accepted only by the front-end.
@@ -225,8 +235,9 @@ Latest verified red/green shape:
 Verification commands:
 
 ```bash
-cargo check -p vx-runtime-graph -p vx-runtime-core -p vx-runtime-driver -p vx-runtime -p vx-runner
-cargo nextest run -p vx-runtime-graph -p vx-runtime-core -p vx-runtime-driver -p vx-runtime -p vx-runner
+cargo check -p vx-services -p vx-runtime-graph -p vx-runtime-core -p vx-runtime-driver -p vx-runtime -p vx-runner -p vx-daemon
+cargo nextest run -p vx-services -p vx-runtime-graph -p vx-runtime-core -p vx-runtime-driver -p vx-runtime -p vx-runner
+cargo nextest run -p vx-daemon
 cargo nextest run -p vx-runtime -E 'binary(source_blind_guardrails)'
 rg -n 'vx[_-]ir|ExprKind|StmtKind|PatternKind|VirProgram|BodyId|fn force|\.force\(|eval_inner|eval_expr' crates/vx-runtime-core crates/vx-runtime-driver
 rg -n 'struct Evaluator|impl Evaluator|fn eval_inner|fn force_node|ThunkState::Unforced|ThunkState::Node|enum NodeMemo|struct NodeRef|Value::Closure|pub mod dispatch|crate::dispatch|DispatchPlan|struct Dispatcher|dispatch_scalar|force_frame_binding' crates/vx-runtime/src

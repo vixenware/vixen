@@ -6,6 +6,7 @@ use vx_services::{DiscoverProbeRequest, DiscoverResult, ExecRequest, ExecResult,
 
 use crate::RunnerService;
 use crate::exec::run_exec;
+use crate::output_tree::CasOutputTreeService;
 
 impl RunnerService {
     async fn exec(&self, request: ExecRequest) -> ExecResult {
@@ -27,6 +28,7 @@ impl RunnerService {
     }
 
     async fn observe(&self, request: ObserveRequest) -> Observed {
+        self.install_produced_outputs(None);
         let Some(vfsd) = self.vfsd() else {
             return Observed::Poisoned(
                 "runner-backed observe has no CAS-VFS configured for exec".to_string(),
@@ -43,23 +45,36 @@ impl RunnerService {
             },
         )
         .await;
-        if let Some(error) = result.error {
+        let ExecResult {
+            exit_code,
+            stdout,
+            stderr,
+            outputs,
+            error,
+        } = result;
+        if let Some(error) = error {
             return Observed::Poisoned(error);
         }
         let observed = evaluate_observer(
             CompletedRun::new(ProcOutcome {
-                exit_code: result.exit_code,
-                stdout: result.stdout,
-                stderr: result.stderr,
+                exit_code,
+                stdout,
+                stderr,
             }),
             request.observer,
         );
         match observed {
-            Observed::Value(WireValue::Tree) => Observed::Poisoned(
-                "runner-backed observe returned a tree, but Producing output serving from \
-                 flushed CAS trees is not wired yet"
-                    .to_string(),
-            ),
+            Observed::Value(WireValue::Tree) => match self.store() {
+                Some(store) => {
+                    self.install_produced_outputs(Some(CasOutputTreeService::new(store, outputs)));
+                    Observed::Value(WireValue::Tree)
+                }
+                None => Observed::Poisoned(
+                    "runner-backed observe returned a tree, but the runner has no CAS store \
+                     configured for Producing output serving"
+                        .to_string(),
+                ),
+            },
             other => other,
         }
     }

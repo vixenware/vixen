@@ -3,27 +3,42 @@
 //! Exposes [`RunnerService`] and [`RunnerAcceptor`] for use by the daemon (in-process).
 
 pub(crate) mod exec;
+pub(crate) mod output_tree;
 pub(crate) mod sandbox;
 pub(crate) mod service;
 
-use std::sync::Arc;
+use std::sync::{Arc, Mutex};
 use vx_runtime::observe::ObserveDispatcher;
+use vx_runtime::remote::ProducingDispatcher;
 use vx_services::{RunnerDispatcher, StoreClient};
 use vx_vfsd::VfsdService;
 
+use crate::output_tree::CasOutputTreeService;
+
 /// The runner service implementation.
-#[derive(Clone, Default)]
+#[derive(Clone)]
 pub struct RunnerService {
     store: Option<Arc<StoreClient>>,
     /// The runner's local CAS-VFS — what `exec` mounts actions into and runs against.
     /// `None` disables `exec` (it has no VFS). Held directly (not over RPC): the
     /// runner is the in-process executor, reached over vox but driving its own VFS.
     vfsd: Option<VfsdService>,
+    produced_outputs: Arc<Mutex<Option<CasOutputTreeService>>>,
+}
+
+impl Default for RunnerService {
+    fn default() -> Self {
+        Self::new(None)
+    }
 }
 
 impl RunnerService {
     pub fn new(store: Option<Arc<StoreClient>>) -> Self {
-        Self { store, vfsd: None }
+        Self {
+            store,
+            vfsd: None,
+            produced_outputs: Arc::new(Mutex::new(None)),
+        }
     }
 
     /// Set the local CAS-VFS `exec` mounts actions into.
@@ -38,6 +53,30 @@ impl RunnerService {
 
     pub(crate) fn vfsd(&self) -> Option<&VfsdService> {
         self.vfsd.as_ref()
+    }
+
+    pub(crate) fn install_produced_outputs(&self, outputs: Option<CasOutputTreeService>) {
+        *self.produced_outputs.lock().unwrap() = outputs;
+    }
+
+    pub(crate) fn produced_outputs(&self) -> Option<CasOutputTreeService> {
+        self.produced_outputs.lock().unwrap().clone()
+    }
+
+    pub fn handle_producing_connection(
+        &self,
+        connection: vox::PendingConnection,
+    ) -> std::result::Result<(), vox::Metadata<'static>> {
+        match self.produced_outputs() {
+            Some(outputs) => {
+                connection.handle_with(ProducingDispatcher::new(outputs));
+                Ok(())
+            }
+            None => {
+                tracing::warn!("vx-runner: Producing requested before an output tree exists");
+                Err(vec![])
+            }
+        }
     }
 }
 
@@ -68,6 +107,7 @@ impl vox::ConnectionAcceptor for RunnerAcceptor {
                 connection.handle_with(ObserveDispatcher::new(self.service.clone()));
                 Ok(())
             }
+            "Producing" => self.service.handle_producing_connection(connection),
             other => {
                 tracing::warn!("vx-runner: unknown service requested: {}", other);
                 Err(vec![])
@@ -79,9 +119,14 @@ impl vox::ConnectionAcceptor for RunnerAcceptor {
 #[cfg(test)]
 mod tests {
     use vx_runtime::observe::{ExecCommand, ObserveClient, ObserveRequest};
+    use vx_runtime::remote::{Part, PartKey, ProducingClient};
     use vx_runtime::strand::{ObserveOutcome, Outcome, ResourceId, Scheduler, dispatch_observe};
+    use vx_services::cas_tree::{MerkleTreeFile, build_merkle_tree};
+    use vx_services::chunking::{prepare_blob, store_prepared_blob};
+    use vx_services::{ExecOutput, StoreClient, StoreDispatcher};
 
     use super::{RunnerAcceptor, RunnerService};
+    use crate::output_tree::CasOutputTreeService;
 
     async fn observe_client_for(service: RunnerService) -> ObserveClient {
         let (client_link, server_link) = vox::memory_link_pair(64);
@@ -98,6 +143,56 @@ mod tests {
             .establish::<ObserveClient>()
             .await
             .expect("establish runner-backed Observe client")
+    }
+
+    async fn store_client() -> (tempfile::TempDir, StoreClient) {
+        let temp = tempfile::TempDir::new().expect("temp dir");
+        let store = vx_store::open(temp.path().join("store").to_string_lossy().parse().unwrap())
+            .await
+            .expect("open store");
+        let (client_link, server_link) = vox::memory_link_pair(64);
+        tokio::spawn(async move {
+            let acceptor = vox::acceptor_fn(
+                move |request: &vox::ConnectionRequest, connection: vox::PendingConnection| {
+                    match request.service() {
+                        "Store" => {
+                            connection.handle_with(StoreDispatcher::new(store.clone()));
+                            Ok(())
+                        }
+                        _ => Err(vec![]),
+                    }
+                },
+            );
+            if let Ok(client) = vox::acceptor_on(server_link)
+                .on_connection(acceptor)
+                .establish::<vox::NoopClient>()
+                .await
+            {
+                client.caller.closed().await;
+            }
+        });
+        let client = vox::initiator_on(client_link, vox::TransportMode::Bare)
+            .establish::<StoreClient>()
+            .await
+            .expect("establish store client");
+        (temp, client)
+    }
+
+    async fn output_tree(store: &StoreClient) -> vx_services::Blake3Hash {
+        let blob = prepare_blob(b"vconn-payload");
+        let blob_ref = store_prepared_blob(store, &blob, b"vconn-payload")
+            .await
+            .expect("store blob");
+        let (tree, _) = build_merkle_tree(
+            store,
+            vec![MerkleTreeFile {
+                path: "y.txt".to_string(),
+                kind: blob_ref.to_dir_entry_kind(false),
+            }],
+        )
+        .await
+        .expect("build output tree");
+        tree.0
     }
 
     #[test]
@@ -131,5 +226,40 @@ mod tests {
         scheduler.demand(strand);
         scheduler.run();
         assert_eq!(scheduler.outcome(strand), Some(Outcome::Clean));
+    }
+
+    #[test]
+    fn producing_vconn_serves_runner_output_tree_from_cas() {
+        let scheduler = Scheduler::new(&[1]);
+        let (_temp, store) = scheduler.block_on(store_client());
+        let tree = scheduler.block_on(output_tree(&store));
+        let service = RunnerService::new(Some(std::sync::Arc::new(store)));
+        service.install_produced_outputs(Some(CasOutputTreeService::new(
+            service.store().expect("store"),
+            vec![ExecOutput {
+                path: "out".to_string(),
+                tree,
+            }],
+        )));
+        let producing: ProducingClient = scheduler.block_on(async {
+            let (client_link, server_link) = vox::memory_link_pair(64);
+            tokio::spawn(async move {
+                if let Ok(client) = vox::acceptor_on(server_link)
+                    .on_connection(RunnerAcceptor::new(service))
+                    .establish::<vox::NoopClient>()
+                    .await
+                {
+                    client.caller.closed().await;
+                }
+            });
+            vox::initiator_on(client_link, vox::TransportMode::Bare)
+                .establish::<ProducingClient>()
+                .await
+                .expect("establish runner-backed Producing client")
+        });
+        let got = scheduler
+            .block_on(producing.force(PartKey::TreePath("out/y.txt".to_string())))
+            .expect("force output path");
+        assert_eq!(got, Part::Bytes(b"vconn-payload".to_vec()));
     }
 }

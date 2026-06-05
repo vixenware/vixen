@@ -4041,11 +4041,13 @@ name = "vx-runner"
 version = "0.1.0"
 dependencies = [
  "moire",
+ "tempfile",
  "tokio",
  "tracing",
  "vox",
  "vx-runtime",
  "vx-services",
+ "vx-store",
  "vx-vfsd",
 ]
 

@@ -6,8 +6,8 @@
 use std::collections::BTreeMap;
 
 use crate::{
-    CasNode, DirectoryEntry, DirectoryEntryKind, DirectoryNode, NodeHash, StoreClient,
-    chunking::put_nodes_if_missing,
+    BlobNode, CasNode, ChunkHash, ContentHash, DirectoryEntry, DirectoryEntryKind, DirectoryNode,
+    NodeHash, StoreClient, chunking::put_nodes_if_missing,
 };
 
 /// A file to include in the directory tree.
@@ -140,4 +140,157 @@ pub async fn build_merkle_tree(
         .get("")
         .copied()
         .ok_or_else(|| "no root directory".to_string())
+}
+
+/// Read one regular file out of a CAS-backed Merkle directory tree.
+///
+/// Returns `Ok(None)` when the path is absent or names a non-file entry. Missing or
+/// malformed CAS nodes/chunks are integrity errors and return `Err`.
+pub async fn read_tree_file(
+    cas: &StoreClient,
+    root: NodeHash,
+    path: &str,
+) -> Result<Option<Vec<u8>>, String> {
+    let components = normalize_tree_path(path)?;
+    if components.is_empty() {
+        return Ok(None);
+    }
+
+    let mut dir = fetch_directory(cas, root).await?;
+    for (index, component) in components.iter().enumerate() {
+        let Some(entry) = dir
+            .entries
+            .iter()
+            .find(|entry| entry.name.as_str() == component.as_str())
+        else {
+            return Ok(None);
+        };
+        let is_leaf = index + 1 == components.len();
+        match (&entry.kind, is_leaf) {
+            (
+                DirectoryEntryKind::SmallFile {
+                    content_hash, size, ..
+                },
+                true,
+            ) => return read_small_file(cas, *content_hash, *size).await.map(Some),
+            (
+                DirectoryEntryKind::LargeFile {
+                    content_hash,
+                    blob_node,
+                    size,
+                    ..
+                },
+                true,
+            ) => {
+                return read_large_file(cas, *blob_node, *content_hash, *size)
+                    .await
+                    .map(Some);
+            }
+            (DirectoryEntryKind::Dir { hash }, false) => {
+                dir = fetch_directory(cas, *hash).await?;
+            }
+            _ => return Ok(None),
+        }
+    }
+
+    Ok(None)
+}
+
+fn normalize_tree_path(path: &str) -> Result<Vec<String>, String> {
+    let mut components = Vec::new();
+    for component in path.split('/') {
+        match component {
+            "" => {}
+            "." | ".." => {
+                return Err(format!(
+                    "tree path `{path}` contains illegal component `{component}`"
+                ));
+            }
+            _ => components.push(component.to_string()),
+        }
+    }
+    Ok(components)
+}
+
+async fn fetch_directory(cas: &StoreClient, hash: NodeHash) -> Result<DirectoryNode, String> {
+    let data = cas
+        .get_node(hash)
+        .await
+        .map_err(|error| format!("{error:?}"))?
+        .ok_or_else(|| format!("missing CAS directory node {hash}"))?;
+    match CasNode::from_bytes(&data).map_err(|error| format!("invalid CAS node {hash}: {error}"))? {
+        CasNode::Directory(directory) => Ok(directory),
+        CasNode::Blob(_) => Err(format!("CAS node {hash} is a blob, expected directory")),
+    }
+}
+
+async fn fetch_blob(cas: &StoreClient, hash: NodeHash) -> Result<BlobNode, String> {
+    let data = cas
+        .get_node(hash)
+        .await
+        .map_err(|error| format!("{error:?}"))?
+        .ok_or_else(|| format!("missing CAS blob node {hash}"))?;
+    match CasNode::from_bytes(&data).map_err(|error| format!("invalid CAS node {hash}: {error}"))? {
+        CasNode::Blob(blob) => Ok(blob),
+        CasNode::Directory(_) => Err(format!("CAS node {hash} is a directory, expected blob")),
+    }
+}
+
+async fn read_small_file(
+    cas: &StoreClient,
+    content_hash: ContentHash,
+    size: u64,
+) -> Result<Vec<u8>, String> {
+    let data = cas
+        .get_chunk(ChunkHash(content_hash.0))
+        .await
+        .map_err(|error| format!("{error:?}"))?
+        .ok_or_else(|| format!("missing CAS chunk {}", content_hash.0))?;
+    verify_file_bytes(&data, content_hash, size)?;
+    Ok(data)
+}
+
+async fn read_large_file(
+    cas: &StoreClient,
+    blob_node: NodeHash,
+    content_hash: ContentHash,
+    size: u64,
+) -> Result<Vec<u8>, String> {
+    let blob = fetch_blob(cas, blob_node).await?;
+    let mut data = Vec::with_capacity(blob.total_size as usize);
+    for chunk in blob.chunks {
+        let bytes = cas
+            .get_chunk(chunk.hash)
+            .await
+            .map_err(|error| format!("{error:?}"))?
+            .ok_or_else(|| format!("missing CAS chunk {}", chunk.hash))?;
+        if bytes.len() != chunk.size as usize {
+            return Err(format!(
+                "CAS chunk {} has {} bytes, expected {}",
+                chunk.hash,
+                bytes.len(),
+                chunk.size
+            ));
+        }
+        data.extend_from_slice(&bytes);
+    }
+    verify_file_bytes(&data, content_hash, size)?;
+    Ok(data)
+}
+
+fn verify_file_bytes(data: &[u8], content_hash: ContentHash, size: u64) -> Result<(), String> {
+    if data.len() as u64 != size {
+        return Err(format!(
+            "CAS file has {} bytes, expected {size}",
+            data.len()
+        ));
+    }
+    let actual = crate::Blake3Hash::from_bytes(data);
+    if actual != content_hash.0 {
+        return Err(format!(
+            "CAS file content hash mismatch: expected {}, got {}",
+            content_hash.0, actual
+        ));
+    }
+    Ok(())
 }

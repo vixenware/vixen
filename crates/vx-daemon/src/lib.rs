@@ -275,6 +275,7 @@ pub async fn serve(config: DaemonConfig) -> Result<()> {
     if runner_service.is_some() {
         hosted_services.push("Runner".to_owned());
         hosted_services.push("Observe".to_owned());
+        hosted_services.push("Producing".to_owned());
     }
     if vfsd_service.is_some() {
         hosted_services.push("Vfsd".to_owned());
@@ -429,6 +430,13 @@ impl ConnectionAcceptor for DaemonAcceptor {
                     return Err(vec![]);
                 };
                 connection.handle_with(ObserveDispatcher::new(service.clone()));
+            }
+            "Producing" => {
+                let Some(service) = &self.runner_service else {
+                    tracing::warn!("producing service requested but runner is not hosted");
+                    return Err(vec![]);
+                };
+                service.handle_producing_connection(connection)?;
             }
             "Vfsd" => {
                 let Some(service) = &self.vfsd_service else {

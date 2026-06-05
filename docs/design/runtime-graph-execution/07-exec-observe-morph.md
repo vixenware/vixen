@@ -130,16 +130,20 @@ Current checkpoint:
 - The runner-backed observe implementation calls `run_exec` with the current
   minimal payload, converts the process result to `CompletedRun`, and calls
   `evaluate_observer`.
-- This path currently sends no mounts, env, or output roots because the
 - This path currently sends no mounts or env because the runtime-local observe
   payload cannot represent them yet.
 - `writable: [...]` roots now cross as `ObserveRequest.outputs`. They are
   extracted as graph node refs, demanded only when the exec boundary materializes,
   included in the exec cache key, and forwarded by `vx-runner` as
   `ExecRequest.outputs`.
-- If an observer result is `WireValue::Tree`, the runner-backed path poisons
-  explicitly because `Producing` output serving from flushed CAS trees is not
-  wired yet. It does not fake a tree handle.
+- If an observer result is `WireValue::Tree`, the runner-backed path installs a
+  CAS-backed `Producing` service over the flushed `ExecResult.outputs`; the
+  orchestrator opens the `"Producing"` virtual connection on the same Vox session
+  and demands individual paths from the returned write-set tree.
+- The first CAS-backed producer resolves paths from the declared output-root
+  namespace (`out/foo.o` for `writable: ["out"]`) by walking the flushed
+  `DirectoryNode` tree and fetching small/large file chunks from `vx-store`.
+- `RunnerAcceptor` and daemon-hosted runner sessions both route `"Producing"`.
 - Runtime exec tests still use `local_observer()` and therefore still exercise
   the quarantined scratch service. That is the next thing to cut.
 
@@ -166,8 +170,14 @@ Current checkpoint:
   no-CAS-VFS poison from `RunnerService`.
 - This proves the strand/Observe seam can target runner code without adding a
   `vx-runtime -> vx-runner` dependency.
-- It does not prove live CAS-VFS execution, output-root flushing, or producing
-  tree serving. The production output path is still incomplete.
+- `vx-runner::output_tree::tests::reads_declared_output_root_from_cas` stores a
+  real Merkle output tree in `vx-store`, then serves `out/y.txt` through the
+  runner CAS-backed `Producing` implementation.
+- `vx-runner::tests::producing_vconn_serves_runner_output_tree_from_cas` proves
+  `RunnerAcceptor` routes a `"Producing"` connection to that CAS-backed service.
+- These tests prove the output-tree serving substrate without a live mounted VFS.
+  They do not prove a full demanded `.vx` backtick invocation running through
+  live CAS-VFS yet.
 - The old runtime tests still use `local_observer()` until a live-VFS or
   explicitly-unsupported runner-backed harness replaces them.
 
@@ -238,7 +248,7 @@ Once exec runs through the runner-backed path:
 
 ## Latest verification for this checkpoint
 
-- `cargo check -p vx-runtime-graph -p vx-runtime-core -p vx-runtime-driver -p vx-runtime -p vx-runner`
+- `cargo check -p vx-services -p vx-runtime-graph -p vx-runtime-core -p vx-runtime-driver -p vx-runtime -p vx-runner -p vx-daemon`
   passed.
 - `cargo nextest list -p vx-runtime -E 'test(observer_evaluation_accepts) | test(observe_runs_a_real_command) | test(observe_crosses_the_output_tree) | test(the_executor_serves_run_outputs)'`
   selected the four observer helper/scratch tests.
@@ -251,14 +261,13 @@ Once exec runs through the runner-backed path:
 - `cargo nextest run -p vx-runtime -E 'test(exec_invocation_metadata_carries_writable_roots) | test(writable_roots_are_part_of_the_backtick_exec_l1_key) | binary(observe_on_strands) | binary(exec_on_strands) | binary(exec_output_tree)' --no-fail-fast`:
   15/15 passed.
 - `cargo nextest list -p vx-runner` selected
-  `sandbox::tests::seatbelt_confines_writes_to_the_output_root` and
+  `output_tree::tests::reads_declared_output_root_from_cas`,
+  `sandbox::tests::seatbelt_confines_writes_to_the_output_root`,
+  `tests::producing_vconn_serves_runner_output_tree_from_cas`, and
   `tests::strand_observe_reaches_runner_backed_service`.
-- `cargo nextest run -p vx-runner --no-fail-fast`: 2/2 passed.
-- `cargo nextest run -p vx-runtime-graph -p vx-runtime-core -p vx-runtime-driver -p vx-runtime -p vx-runner --no-fail-fast`:
-  176/176 passed.
-- `cargo check -p vx-daemon -p vx-runner -p vx-runtime` passed after adding the
-  daemon `"Observe"` route and removing a stale `Value::Closure` display arm.
-- `cargo nextest list -p vx-daemon` selected two service tests.
+- `cargo nextest run -p vx-runner --no-fail-fast`: 4/4 passed.
+- `cargo nextest run -p vx-services -p vx-runtime-graph -p vx-runtime-core -p vx-runtime-driver -p vx-runtime -p vx-runner --no-fail-fast`:
+  187/187 passed.
 - `cargo nextest run -p vx-daemon --no-fail-fast`: 2/2 passed.
 - The forbidden-symbol scans over `vx-runtime-core`, `vx-runtime-driver`, and the
   deleted tree-walker affordance scan over `vx-runtime/src` returned no matches.
@@ -274,8 +283,10 @@ Finish M2/M3:
 
 1. Teach the runtime/orchestrator test harness to obtain an observe client from a
    runner-backed service instead of `local_observer()`.
-2. Wire or explicitly quarantine `Producing` output serving for the runner-backed
-   path.
-3. If output-tree serving from CAS is not complete in the slice, document the
-   exact unsupported result and leave tests red rather than rebuilding scratch
-   output walking in `vx-runtime`.
+2. Build or expose a live-VFS runner-backed harness for demanded `.vx` backtick
+   invocations. If the host cannot supply a mounted CAS-VFS, the test should fail
+   through the explicit unsupported/no-VFS state rather than using scratch
+   execution.
+3. Once the production harness exists, move `observe_on_strands`,
+   `exec_on_strands`, `exec_output_tree`, `hello_world`, and the `.vx` exec
+   boundary coverage off `local_observer()`.

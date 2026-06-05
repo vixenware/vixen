@@ -153,7 +153,7 @@ Current partial state:
 
 Latest focused verification:
 
-- `cargo check -p vx-runtime-graph -p vx-runtime-core -p vx-runtime-driver -p vx-runtime -p vx-runner`
+- `cargo check -p vx-services -p vx-runtime-graph -p vx-runtime-core -p vx-runtime-driver -p vx-runtime -p vx-runner -p vx-daemon`
   passes with no old-evaluator dead-code warnings.
 - `cargo nextest run -p vx-runtime -E 'binary(source_blind_guardrails)' --no-fail-fast`:
   3/3 passed.
@@ -185,8 +185,9 @@ Latest focused verification:
   unresolved arguments or captures are not demanded to build a call memo key.
 - `cargo nextest run -p vx-runtime --no-fail-fast`: 154 run, 154 passed,
   0 failed, 0 skipped.
-- `cargo nextest run -p vx-runtime-graph -p vx-runtime-core -p vx-runtime-driver -p vx-runtime -p vx-runner --no-fail-fast`:
-  176 run, 176 passed, 0 skipped.
+- `cargo nextest run -p vx-services -p vx-runtime-graph -p vx-runtime-core -p vx-runtime-driver -p vx-runtime -p vx-runner --no-fail-fast`:
+  187 run, 187 passed, 0 skipped.
+- `cargo nextest run -p vx-daemon --no-fail-fast`: 2/2 passed.
 - `vx-runner::tests::strand_observe_reaches_runner_backed_service` drives a
   `vx-runtime` strand against a runner-backed `Observe` service and reaches the
   explicit no-CAS-VFS poison without importing `vx-runner` into `vx-runtime`.
@@ -201,6 +202,15 @@ Latest focused verification:
   `RunnerService` when a runner is configured. Runtime exec tests still use
   `local_observer()`. Treat those green exec tests as compatibility evidence, not
   as proof that runner-backed observe is the production runtime path.
+- Runner-backed observe now installs a CAS-backed `Producing` service when an
+  observer returns `WireValue::Tree`. `RunnerAcceptor` and daemon-hosted runner
+  sessions route `"Producing"`; the service walks flushed `DirectoryNode` output
+  roots and fetches file chunks from `vx-store` on demand.
+- `vx-runner::output_tree::tests::reads_declared_output_root_from_cas` proves the
+  CAS-backed producer serves a declared output path, and
+  `vx-runner::tests::producing_vconn_serves_runner_output_tree_from_cas` proves
+  the runner acceptor routes the `Producing` virtual connection. These do not yet
+  prove live mounted CAS-VFS execution from a demanded `.vx` backtick invocation.
 - The forbidden-symbol scan over `vx-runtime-core` and `vx-runtime-driver`
   returns no matches.
 - The deleted tree-walker affordance scan over `vx-runtime/src` returns no
