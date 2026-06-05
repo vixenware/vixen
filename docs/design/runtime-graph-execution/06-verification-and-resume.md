@@ -158,11 +158,11 @@ Latest focused verification:
 - `cargo nextest run -p vx-runtime -E 'binary(source_blind_guardrails)' --no-fail-fast`:
   3/3 passed.
 - `cargo nextest run -p vx-runtime -E 'binary(exec_on_strands)' --no-fail-fast`:
-  5/5 passed, including cold exec non-demand, observer-identity non-aliasing,
-  executable-fingerprint non-aliasing, declared-tool-fingerprint non-aliasing,
-  and disk-L2 reuse across fresh graph evaluations. The basic `run.ok`
-  success/failure value-crossing tests, identical-demanded-backtick L1 reuse,
-  and writable-root disambiguation moved to runner-owned live-VFS proof
+  4/4 passed, including cold exec non-demand, executable-fingerprint
+  non-aliasing, declared-tool-fingerprint non-aliasing, and disk-L2 reuse across
+  fresh graph evaluations. The basic `run.ok` success/failure value-crossing
+  tests, identical-demanded-backtick L1 reuse, writable-root disambiguation, and
+  observer-identity disambiguation moved to runner-owned live-VFS proof
   coverage.
 - `cargo nextest run -p vx-runtime -E 'binary(host_probe)' --no-fail-fast`:
   6/6 passed, including the input-keyed `host.exec` L1 cache test, bare
@@ -183,9 +183,9 @@ Latest focused verification:
   call memo reuse, resolved-argument disambiguation, closure capture memo reuse,
   function-entry disambiguation for shared code identities, and proof that
   unresolved arguments or captures are not demanded to build a call memo key.
-- `cargo nextest run -p vx-runtime --no-fail-fast`: 147 run, 147 passed,
+- `cargo nextest run -p vx-runtime --no-fail-fast`: 146 run, 146 passed,
   0 failed, 0 skipped.
-- `cargo nextest run -p vx-runner --no-fail-fast`: 6 run, 6 passed, 8 skipped
+- `cargo nextest run -p vx-runner --no-fail-fast`: 6 run, 6 passed, 9 skipped
   (the ignored live-VFS proof targets).
 - `cargo nextest list -p vx-runner --run-ignored only`: selected
   `tests::bare_invocation_failure_poisons_through_runner_backed_live_vfs`,
@@ -193,6 +193,7 @@ Latest focused verification:
   `tests::explicit_stream_observer_returns_runner_backed_live_output_tree`,
   `tests::hello_world_uses_runner_backed_live_vfs_and_where_injection`,
   `tests::identical_backtick_exec_boundaries_share_runner_backed_l1_entry`,
+  `tests::observer_identity_disambiguates_runner_backed_l1_entry`,
   `tests::run_ok_observer_crosses_runner_backed_live_vfs_for_success_and_failure`,
   `tests::strand_observe_uses_runner_backed_live_vfs_for_success_and_failure`,
   and `tests::writable_roots_disambiguate_runner_backed_l1_entry`.
@@ -204,8 +205,11 @@ Latest focused verification:
 - `cargo nextest run -p vx-runner --run-ignored only -E 'test(=tests::writable_roots_disambiguate_runner_backed_l1_entry)' --no-fail-fast`:
   failed at the same live CAS-VFS boot boundary on this host, before any scratch
   fallback could run.
+- `cargo nextest run -p vx-runner --run-ignored only -E 'test(=tests::observer_identity_disambiguates_runner_backed_l1_entry)' --no-fail-fast`:
+  failed at the same live CAS-VFS boot boundary on this host, before any scratch
+  fallback could run.
 - `cargo nextest run -p vx-services -p vx-runtime-graph -p vx-runtime-core -p vx-runtime-driver -p vx-runtime -p vx-runner --no-fail-fast`:
-  179 run, 179 passed, 8 skipped.
+  178 run, 178 passed, 9 skipped.
 - `cargo nextest run -p vx-daemon --no-fail-fast`: 2/2 passed.
 - `vx-runner::tests::strand_observe_reaches_runner_backed_service` drives a
   `vx-runtime` strand against a runner-backed `Observe` service and reaches the
@@ -269,6 +273,11 @@ Latest focused verification:
   is the ignored live-VFS proof target moved out of `exec_on_strands` for
   writable-root L1 disambiguation. It uses identical command argv and different
   declared `writable` roots; the runner-backed `Observe` boundary must dispatch
+  twice.
+- `vx-runner::tests::observer_identity_disambiguates_runner_backed_l1_entry`
+  is the ignored live-VFS proof target moved out of `exec_on_strands` for
+  observer bundle L1 disambiguation. It uses identical command argv and
+  different observer bundles; the runner-backed `Observe` boundary must dispatch
   twice.
 - `vx-runner::tests::hello_world_uses_runner_backed_live_vfs_and_where_injection`
   is the ignored live-VFS proof target moved out of

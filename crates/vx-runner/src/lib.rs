@@ -612,6 +612,53 @@ mod tests {
 
     #[test]
     #[ignore = "needs the live CAS-VFS mount; run with --ignored on a host with the Vixen VFS"]
+    fn observer_identity_disambiguates_runner_backed_l1_entry() {
+        let fe = compile_source(
+            "fn id(exit: Exit) -> Exit ( exit ) \
+             fn t(cmd: Command, script: String) ( \
+               let direct = `$cmd -c ${script}` with { observer: (run) => run.ok }; \
+               let wrapped = `$cmd -c ${script}` with { observer: (run) => id(run.ok) }; \
+               assert_eq(direct.stdout, wrapped.stdout) )",
+            "t",
+        )
+        .expect("exec observer-cache program compiles");
+        let entry = entry_body(&fe, "t");
+
+        let scheduler = Scheduler::new(&[1]);
+        let (_temp, service) = scheduler.block_on(live_vfs_runner_service());
+        let (client, observes) = scheduler.block_on(counting_observe_client_for(service));
+        let cid = scheduler.register_observe_client(client);
+        let program = fe.program;
+        let env = fe.env;
+        let strand = scheduler.spawn(ResourceId(0), move || {
+            let cmd = tool_value("@vixen/grammar-cc", "cc", "/bin/sh");
+            let script = Value::Str(Rc::from("printf runner-observer"));
+            match eval_body_with_exec(
+                &program,
+                &env,
+                entry,
+                vec![cmd, script],
+                KernelMode::Off,
+                cid,
+            ) {
+                EvalOutcome::Clean(Value::Unit) => Outcome::Clean,
+                other => Outcome::Poisoned(format!(
+                    "expected observer-distinct runner-backed execs to resolve, got {other:?}"
+                )),
+            }
+        });
+        scheduler.demand(strand);
+        scheduler.run();
+        assert_eq!(scheduler.outcome(strand), Some(Outcome::Clean));
+        assert_eq!(
+            observes.load(Ordering::SeqCst),
+            2,
+            "different observer bundles must not alias in the runner-backed L1"
+        );
+    }
+
+    #[test]
+    #[ignore = "needs the live CAS-VFS mount; run with --ignored on a host with the Vixen VFS"]
     fn demanded_vixen_exec_runs_through_runner_backed_live_vfs_and_serves_output_tree() {
         let fe = compile_source(
             "fn t(cmd: Command, script: String) -> Blob ( \
