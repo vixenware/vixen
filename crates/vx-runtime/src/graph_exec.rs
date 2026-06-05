@@ -8,7 +8,8 @@ use vx_ir::ids::{BodyId, PatternId};
 use vx_ir::pattern::PatternKind;
 use vx_runtime_core::{CoreFailureContext, CorePoison, NodeOutput, UnsupportedNode};
 use vx_runtime_driver::{
-    BoundaryDemand, DemandRequest, Driver, DriverError, PublicValueDemand, ResolvedNode,
+    BoundaryDemand, BoundaryPayloadDemand, DemandRequest, Driver, DriverError, PublicValueDemand,
+    ResolvedNode,
 };
 use vx_runtime_graph::{ConstValue, HostMethod, NodeId, NodeKind};
 use vx_types::TypeEnv;
@@ -363,7 +364,7 @@ fn materialize_exec_invocation(
         return Err("empty command invocation".into());
     };
     let tool_node = command_tool_node(lead)?;
-    let tool = demand_payload(
+    let tool = demand_payload_resolved(
         Rc::clone(&driver),
         Rc::clone(&externals),
         runtime.clone(),
@@ -375,7 +376,7 @@ fn materialize_exec_invocation(
         Rc::clone(&externals),
         runtime.clone(),
         boundary,
-        tool,
+        &tool,
     )?;
     let mut args = Vec::with_capacity(rest.len());
     for arg in rest {
@@ -481,15 +482,16 @@ fn tool_request(
     externals: ExternalThunks,
     runtime: RuntimeBoundaries,
     boundary: &BoundaryDemand,
-    tool: NodeOutput,
+    tool: &ResolvedNode,
 ) -> Result<ToolRequest, String> {
     let NodeOutput::Struct {
         field_names,
         fields,
-    } = tool
+    } = tool.output()
     else {
         return Err(format!(
-            "the leading hole of a command invocation must be a tool, got {tool:?}"
+            "the leading hole of a command invocation must be a tool, got {:?}",
+            tool.output()
         ));
     };
     let command = field_names
@@ -506,11 +508,12 @@ fn tool_request(
         .iter()
         .position(|name| name == "fingerprint")
         .and_then(|index| fields.get(index).copied());
-    let command = demand_payload(
+    let command = demand_payload_field_resolved(
         Rc::clone(&driver),
         Rc::clone(&externals),
         runtime.clone(),
         boundary,
+        tool,
         command,
     )?;
     let (command_package, command_name) = command_coordinate(
@@ -518,23 +521,24 @@ fn tool_request(
         Rc::clone(&externals),
         runtime.clone(),
         boundary,
-        command,
+        &command,
     )?;
     let declared_fingerprint = declared_fingerprint
         .map(|fingerprint| {
             expect_string(
-                demand_payload(
+                demand_payload_field(
                     Rc::clone(&driver),
                     Rc::clone(&externals),
                     runtime.clone(),
                     boundary,
+                    tool,
                     fingerprint,
                 )?,
                 "tool `fingerprint`",
             )
         })
         .transpose()?;
-    let binary = demand_payload(driver, externals, runtime, boundary, binary)?;
+    let binary = demand_payload_field(driver, externals, runtime, boundary, tool, binary)?;
     let binary = expect_string(binary, "tool `binary`")?;
     Ok(ToolRequest {
         command_package,
@@ -549,15 +553,16 @@ fn command_coordinate(
     externals: ExternalThunks,
     runtime: RuntimeBoundaries,
     boundary: &BoundaryDemand,
-    command: NodeOutput,
+    command: &ResolvedNode,
 ) -> Result<(String, String), String> {
     let NodeOutput::Struct {
         field_names,
         fields,
-    } = command
+    } = command.output()
     else {
         return Err(format!(
-            "tool `command` must be a grammar coordinate, got {command:?}"
+            "tool `command` must be a grammar coordinate, got {:?}",
+            command.output()
         ));
     };
     let package = field_names
@@ -571,17 +576,18 @@ fn command_coordinate(
         .and_then(|index| fields.get(index).copied())
         .ok_or_else(|| "tool `command` has no `name` field".to_string())?;
     let package = expect_string(
-        demand_payload(
+        demand_payload_field(
             Rc::clone(&driver),
             Rc::clone(&externals),
             runtime.clone(),
             boundary,
+            command,
             package,
         )?,
         "tool `command.package`",
     )?;
     let name = expect_string(
-        demand_payload(driver, externals, runtime, boundary, name)?,
+        demand_payload_field(driver, externals, runtime, boundary, command, name)?,
         "tool `command.name`",
     )?;
     Ok((package, name))
@@ -861,21 +867,22 @@ fn materialize_host_exec(
         boundary,
         *receiver,
     )?)?;
-    let argv = demand_payload(
+    let argv = demand_payload_resolved(
         Rc::clone(&driver),
         Rc::clone(&externals),
         runtime.clone(),
         boundary,
         *argv,
     )?;
-    let fields = expect_array_fields(argv, "host.exec argv")?;
+    let fields = expect_array_fields(argv.output().clone(), "host.exec argv")?;
     let mut args = Vec::with_capacity(fields.len());
     for field in fields {
-        let value = demand_payload(
+        let value = demand_payload_field(
             Rc::clone(&driver),
             Rc::clone(&externals),
             runtime.clone(),
             boundary,
+            &argv,
             field,
         )?;
         args.push(expect_string(value, "host.exec argv element")?);
@@ -919,8 +926,64 @@ fn demand_payload(
     boundary: &BoundaryDemand,
     node: NodeId,
 ) -> Result<NodeOutput, String> {
-    match drive_request(driver, externals, runtime, boundary.payload(node))? {
-        Ok(resolved) => Ok(resolved.into_output()),
+    Ok(demand_payload_resolved(driver, externals, runtime, boundary, node)?.into_output())
+}
+
+fn demand_payload_resolved(
+    driver: SharedDriver,
+    externals: ExternalThunks,
+    runtime: RuntimeBoundaries,
+    boundary: &BoundaryDemand,
+    node: NodeId,
+) -> Result<ResolvedNode, String> {
+    let demand = boundary.payload(node).ok_or_else(|| {
+        format!(
+            "node {node:?} is not a direct payload of {:?}",
+            boundary.node()
+        )
+    })?;
+    demand_payload_demand(driver, externals, runtime, demand)
+}
+
+fn demand_payload_field(
+    driver: SharedDriver,
+    externals: ExternalThunks,
+    runtime: RuntimeBoundaries,
+    boundary: &BoundaryDemand,
+    resolved: &ResolvedNode,
+    node: NodeId,
+) -> Result<NodeOutput, String> {
+    Ok(
+        demand_payload_field_resolved(driver, externals, runtime, boundary, resolved, node)?
+            .into_output(),
+    )
+}
+
+fn demand_payload_field_resolved(
+    driver: SharedDriver,
+    externals: ExternalThunks,
+    runtime: RuntimeBoundaries,
+    boundary: &BoundaryDemand,
+    resolved: &ResolvedNode,
+    node: NodeId,
+) -> Result<ResolvedNode, String> {
+    let demand = boundary.payload_field(resolved, node).ok_or_else(|| {
+        format!(
+            "node {node:?} is not a field payload of {:?}",
+            resolved.node()
+        )
+    })?;
+    demand_payload_demand(driver, externals, runtime, demand)
+}
+
+fn demand_payload_demand(
+    driver: SharedDriver,
+    externals: ExternalThunks,
+    runtime: RuntimeBoundaries,
+    demand: BoundaryPayloadDemand,
+) -> Result<ResolvedNode, String> {
+    match drive_request(driver, externals, runtime, demand.request())? {
+        Ok(resolved) => Ok(resolved),
         Err(error) => Err(driver_error_message(error)),
     }
 }

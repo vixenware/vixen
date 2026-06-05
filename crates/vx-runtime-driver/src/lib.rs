@@ -89,12 +89,14 @@ impl ResolvedNode {
     }
 
     pub fn field_demand(&self, node: NodeId) -> Option<PublicValueDemand> {
-        public_field_nodes(&self.output)
-            .contains(&node)
-            .then_some(PublicValueDemand {
-                node,
-                _sealed: private::Sealed,
-            })
+        self.contains_field(node).then_some(PublicValueDemand {
+            node,
+            _sealed: private::Sealed,
+        })
+    }
+
+    fn contains_field(&self, node: NodeId) -> bool {
+        public_field_nodes(&self.output).contains(&node)
     }
 }
 
@@ -117,13 +119,15 @@ impl PublicValueDemand {
 #[derive(Debug, PartialEq, Eq)]
 pub struct BoundaryDemand {
     node: NodeId,
+    payloads: Vec<NodeId>,
     _sealed: private::Sealed,
 }
 
 impl BoundaryDemand {
-    fn new(node: NodeId) -> Self {
+    fn new(node: NodeId, payloads: Vec<NodeId>) -> Self {
         Self {
             node,
+            payloads,
             _sealed: private::Sealed,
         }
     }
@@ -132,9 +136,43 @@ impl BoundaryDemand {
         self.node
     }
 
-    pub fn payload(&self, node: NodeId) -> DemandRequest {
+    pub fn payload(&self, node: NodeId) -> Option<BoundaryPayloadDemand> {
+        self.payloads
+            .contains(&node)
+            .then_some(BoundaryPayloadDemand {
+                node,
+                _sealed: private::Sealed,
+            })
+    }
+
+    pub fn payload_field(
+        &self,
+        resolved: &ResolvedNode,
+        node: NodeId,
+    ) -> Option<BoundaryPayloadDemand> {
+        resolved
+            .contains_field(node)
+            .then_some(BoundaryPayloadDemand {
+                node,
+                _sealed: private::Sealed,
+            })
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct BoundaryPayloadDemand {
+    node: NodeId,
+    _sealed: private::Sealed,
+}
+
+impl BoundaryPayloadDemand {
+    pub fn node(&self) -> NodeId {
+        self.node
+    }
+
+    pub fn request(self) -> DemandRequest {
         DemandRequest {
-            node,
+            node: self.node,
             origin: DemandOrigin::BoundaryPayload,
             _sealed: private::Sealed,
         }
@@ -336,8 +374,16 @@ impl Driver {
                     }
                 },
                 Step::Boundary(req) => {
+                    let payloads = self
+                        .graph
+                        .nodes
+                        .get(req.node.0 as usize)
+                        .map(|node| node.inputs.clone())
+                        .unwrap_or_default();
                     self.clear_in_progress(node);
-                    return Err(DriverError::Boundary(BoundaryDemand::new(req.node)));
+                    return Err(DriverError::Boundary(BoundaryDemand::new(
+                        req.node, payloads,
+                    )));
                 }
                 Step::Poison(poison) => {
                     self.memo.insert(node, NodeMemo::Poison(poison.clone()));
@@ -526,14 +572,24 @@ mod tests {
     #[test]
     fn boundary_request_does_not_leave_node_in_progress() {
         let graph = DemandGraph {
-            nodes: vec![Node {
-                id: NodeId(0),
-                kind: NodeKind::Boundary,
-                span: None,
-                label: "boundary".to_string(),
-                ty: "?".to_string(),
-                inputs: Vec::new(),
-            }],
+            nodes: vec![
+                Node {
+                    id: NodeId(0),
+                    kind: NodeKind::Boundary,
+                    span: None,
+                    label: "boundary".to_string(),
+                    ty: "?".to_string(),
+                    inputs: vec![NodeId(1)],
+                },
+                Node {
+                    id: NodeId(1),
+                    kind: NodeKind::Const(vx_runtime_graph::ConstValue::U64(1)),
+                    span: None,
+                    label: "payload".to_string(),
+                    ty: "U64".to_string(),
+                    inputs: Vec::new(),
+                },
+            ],
             root: NodeId(0),
         };
         let mut driver = Driver::new(graph);
@@ -544,15 +600,88 @@ mod tests {
             panic!("expected boundary demand, got {boundary:?}");
         };
         assert_eq!(boundary.node(), NodeId(0));
-        assert_eq!(
-            boundary.payload(NodeId(1)).origin(),
-            DemandOrigin::BoundaryPayload
-        );
+        assert!(boundary.payload(NodeId(2)).is_none());
+        let payload = boundary
+            .payload(NodeId(1))
+            .expect("declared boundary input is an authorized payload");
+        assert_eq!(payload.request().origin(), DemandOrigin::BoundaryPayload);
         assert_eq!(driver.memo_state(NodeId(0)), None);
 
         driver.seed(NodeId(0), NodeOutput::Unit);
         assert_eq!(drive_root_output(&mut driver), Ok(NodeOutput::Unit));
         assert_eq!(driver.memo_state(NodeId(0)), Some(MemoState::Ready));
+    }
+
+    #[test]
+    fn boundary_payload_field_is_bound_to_resolved_payload_output() {
+        let graph = DemandGraph {
+            nodes: vec![
+                Node {
+                    id: NodeId(0),
+                    kind: NodeKind::Boundary,
+                    span: None,
+                    label: "boundary".to_string(),
+                    ty: "?".to_string(),
+                    inputs: vec![NodeId(1)],
+                },
+                Node {
+                    id: NodeId(1),
+                    kind: NodeKind::LazyData,
+                    span: None,
+                    label: "payload".to_string(),
+                    ty: "(U64, U64)".to_string(),
+                    inputs: vec![NodeId(2), NodeId(3)],
+                },
+                Node {
+                    id: NodeId(2),
+                    kind: NodeKind::Const(vx_runtime_graph::ConstValue::U64(10)),
+                    span: None,
+                    label: "payload.first".to_string(),
+                    ty: "U64".to_string(),
+                    inputs: Vec::new(),
+                },
+                Node {
+                    id: NodeId(3),
+                    kind: NodeKind::Const(vx_runtime_graph::ConstValue::U64(20)),
+                    span: None,
+                    label: "payload.second".to_string(),
+                    ty: "U64".to_string(),
+                    inputs: Vec::new(),
+                },
+                Node {
+                    id: NodeId(4),
+                    kind: NodeKind::Const(vx_runtime_graph::ConstValue::U64(99)),
+                    span: None,
+                    label: "not a payload field".to_string(),
+                    ty: "U64".to_string(),
+                    inputs: Vec::new(),
+                },
+            ],
+            root: NodeId(0),
+        };
+        let mut driver = Driver::new(graph);
+        let boundary = driver
+            .drive(driver.root_request())
+            .expect_err("root demand reaches the boundary");
+        let DriverError::Boundary(boundary) = boundary else {
+            panic!("expected boundary demand, got {boundary:?}");
+        };
+
+        let payload = boundary
+            .payload(NodeId(1))
+            .expect("declared boundary input is an authorized payload");
+        let resolved = driver
+            .drive(payload.request())
+            .expect("payload lazy data resolves");
+        assert!(boundary.payload_field(&resolved, NodeId(4)).is_none());
+        let first = boundary
+            .payload_field(&resolved, NodeId(2))
+            .expect("resolved payload field is authorized");
+        assert_eq!(first.node(), NodeId(2));
+        assert_eq!(
+            drive_output(&mut driver, first.request()),
+            Ok(NodeOutput::U64(10))
+        );
     }
 
     #[test]

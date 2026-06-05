@@ -170,8 +170,10 @@ Current partial state:
   capability tests exercise graph body paths.
 - Boundary payload demand is authorized by a non-clone `BoundaryDemand` returned
   from the driver on `DriverError::Boundary`; materializers borrow it to create
-  request-shaping payload demands. There is no public free
-  `DemandRequest::root(node)` or `DemandRequest::boundary_payload(node)`
+  direct request-shaping payload demands only for the boundary node's declared
+  graph inputs. Nested request-shaping field demands are authorized from the
+  resolved direct payload handle, not from a bare `NodeId`. There is no public
+  free `DemandRequest::root(node)` or `DemandRequest::boundary_payload(node)`
   constructor. Public value field demand is authorized by a token minted from the
   resolved-node handle returned by the driver, and test-probe demand construction
   is cfg(test)-only.
@@ -183,19 +185,31 @@ Current partial state:
 
 Latest focused verification:
 
+- `cargo check -p vx-runtime-graph -p vx-runtime-core -p vx-runtime-driver -p vx-runtime`:
+  passed after boundary payload demand was restricted to declared boundary
+  inputs and resolved payload fields.
 - `cargo check -p vx-runtime-driver -p vx-runtime`: passed after moving
-  API-edge field demand to `PublicValueDemand` tokens minted from resolved-node
-  handles.
+  boundary payload demand to `BoundaryPayloadDemand` tokens minted only from
+  declared boundary inputs or resolved payload fields, and after moving API-edge
+  field demand to `PublicValueDemand` tokens minted from resolved-node handles.
+- The forbidden-symbol scans from `01-guardrails.md` over
+  `crates/vx-runtime-core`, `crates/vx-runtime-driver`, and
+  `crates/vx-runtime/src` returned no matches after this checkpoint.
 - `cargo nextest list -p vx-runtime -E 'binary(source_blind_guardrails)'`:
   selected the seven source-blind guardrail tests.
-- `cargo nextest run -p vx-runtime-driver --no-fail-fast`: 13/13 passed,
-  including `resolved_public_value_authorizes_only_its_field_nodes`.
+- `cargo nextest run -p vx-runtime-driver --no-fail-fast`: 14/14 passed,
+  including `resolved_public_value_authorizes_only_its_field_nodes`,
+  `boundary_request_does_not_leave_node_in_progress`, and
+  `boundary_payload_field_is_bound_to_resolved_payload_output`.
 - `cargo nextest run -p vx-runtime -E 'binary(source_blind_guardrails)' --no-fail-fast`:
   7/7 passed, including `execution_crates_stay_source_blind` with guardrail
   needles for public free `root`, `boundary_payload`, `public_value_field`, and
   `test_probe` constructors.
 - `cargo nextest run -p vx-runtime --no-fail-fast`: 144/144 passed, including
   `lang_suite`.
+- `cargo nextest run -p vx-runtime-graph -p vx-runtime-core -p vx-runtime-driver -p vx-runtime --no-fail-fast`:
+  163/163 passed, including `boundary_payload_field_is_bound_to_resolved_payload_output`,
+  source-blind guardrails, and `lang_suite`.
 - `cargo check -p vx-cache-index -p vx-exec-protocol -p vx-services -p vx-store -p vx-runtime-graph -p vx-runtime-core -p vx-runtime-driver -p vx-runtime -p vx-runner -p vx-daemon`
   passes with no old-evaluator dead-code warnings.
 - `cargo nextest run -p vx-runtime -E 'binary(source_blind_guardrails) | binary(exec_on_strands)' --no-fail-fast`:

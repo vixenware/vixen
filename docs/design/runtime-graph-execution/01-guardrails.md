@@ -191,10 +191,15 @@ output. Runtime callers do not construct `DemandRequest::public_value_field(node
 from an arbitrary `NodeId`.
 
 Boundary payload demand is not an ambient constructor. When the driver reaches a
-boundary it returns a non-clone `BoundaryDemand` token. Boundary materialization
-may borrow that token to create request-shaping payload demands with
-`boundary.payload(node)`. Runtime code should not be able to mint
-`BoundaryPayload` demands from a bare `NodeId`.
+boundary it returns a non-clone `BoundaryDemand` token carrying the boundary
+node's declared graph inputs. Boundary materialization may borrow that token to
+create direct request-shaping payload demands only for those declared inputs with
+`boundary.payload(node)`. If a direct payload resolves to compound graph output,
+nested request-shaping field demands must be minted from that resolved payload
+handle with `boundary.payload_field(resolved, field_node)`. Runtime code should
+not be able to mint `BoundaryPayload` demands from a bare `NodeId`, from a random
+boundary-adjacent node, or from a field not present in the resolved payload
+output.
 
 Do not make `DemandRequest` fields public. Do not add blanket conversion from
 `NodeId` to `DemandRequest`. Do not expose a free `root(node)` or

@@ -522,6 +522,9 @@ Newly green boundary payloads:
   identity, including a pre-run executable content fingerprint and declared tool
   fingerprint when present.
 - Backtick exec has an opt-in local disk L2 for successful observer data values.
+- Boundary payload demand is minted only through the driver's boundary token:
+  direct payloads must be declared inputs of the reached boundary node, and
+  nested request-shaping fields must be fields of a resolved direct payload.
 
 No memo path demands unresolved arguments or captures to build a key. CAS-backed
 L2 storage, output-tree-handle persistence, graph-local function-output
@@ -536,6 +539,7 @@ Boundary/cross-executor phase is complete when:
 - observer evaluation runs graph payloads, not source callback evaluation.
 - remote tree tests pass through graph driver/strand semantics.
 - host `which`/`exec` are boundary nodes or structured host nodes.
-- boundary payload materialization is explicit in driver.
+- boundary payload materialization is explicit in driver and authorized by the
+  driver-returned boundary token.
 - cache keys are computed before running.
 - read-set is recorded after running and not included in key.
