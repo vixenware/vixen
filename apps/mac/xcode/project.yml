@@ -65,7 +65,6 @@ targets:
     entitlements:
       path: Vixen/Vixen.entitlements
       properties:
-        com.apple.security.app-sandbox: true
         com.apple.security.network.client: true
         com.apple.security.application-groups:
           - B2N6FSRTPV.vixenfs
