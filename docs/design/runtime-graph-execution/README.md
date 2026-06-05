@@ -145,15 +145,18 @@ Expected latest structural checkpoint:
   observe on miss, seeds cached graph output on an exact in-process L1 or opt-in
   disk L2 hit keyed by the materialized request plus the pre-run executable
   content fingerprint, and memoizes the graph output.
-- Invocation `env: %{ ... }`, `writable: [...]`, and `create_dirs: [...]`
+- Invocation `env: %{ ... }`, `mounts: %{ ... }`, `writable: [...]`, and `create_dirs: [...]`
   supplements lower into exec boundary metadata as graph node refs, are demanded
   only during boundary materialization, cross in `ObserveRequest.env`,
-  `ObserveRequest.outputs`, and `ObserveRequest.create_dirs`, are included in
-  the exec cache key, and are consumed by `vx-runner` as `ExecRequest.env`,
+  `ObserveRequest.mounts`, `ObserveRequest.outputs`, and
+  `ObserveRequest.create_dirs`, are included in the exec cache key, and are
+  consumed by `vx-runner` as `ExecRequest.env`, `ExecRequest.mounts`,
   `ExecRequest.outputs`, and `ExecRequest.create_dirs`. The runner rejects
   `create_dirs` outside declared writable roots and creates valid nested dirs
   before launch. Env support currently materializes string key/value pairs; the
-  full `ExecInput` env surface remains future protocol work.
+  full `ExecInput` env surface remains future protocol work. Mount support
+  currently materializes resolved content-addressed Tree hashes; remote
+  producing output-tree handles are not valid exec input mounts.
 - Observer execution uses graph body execution and graph/native wire crossing.
 - `crates/vx-exec-protocol` owns `ExecCommand`, `ObserveRequest`,
   `WireValue`, `Observed`, and the generated Observe Vox client/dispatcher.
@@ -394,27 +397,35 @@ Latest verified red/green shape:
   `tests::strand_observe_uses_runner_backed_live_vfs_for_success_and_failure`,
   and `tests::writable_roots_disambiguate_runner_backed_l1_entry`.
 - `cargo nextest run -p vx-runner --run-ignored only -E 'test(=tests::identical_backtick_exec_boundaries_share_runner_backed_l1_entry)' --no-fail-fast`:
-  failed at live CAS-VFS boot because this host does not have the Vixen
-  Management mount trigger installed (`/Library/Application Support/Vixen/management/queue/mount`
-  was missing). This is the expected environmental boundary for ignored
-  live-VFS proofs; do not replace it with scratch execution.
+  failed in the runner live-test helper before process execution because the
+  helper passed `/tmp/vx/vfs` directly to `boot_with_store`; on macOS the daemon
+  path must use `vx_vfsd::effective_mount_path` so the extension is reused at
+  `/Volumes/Vixen`. This is a test/helper wiring gap, not permission to replace
+  the path with scratch execution.
 - `cargo nextest run -p vx-runner --run-ignored only -E 'test(=tests::writable_roots_disambiguate_runner_backed_l1_entry)' --no-fail-fast`:
-  failed at the same live CAS-VFS boot boundary on this host, before any scratch
-  fallback could run.
+  failed at the same stale runner-helper CAS-VFS boot boundary, before any
+  scratch fallback could run.
 - `cargo nextest run -p vx-runner --run-ignored only -E 'test(=tests::observer_identity_disambiguates_runner_backed_l1_entry)' --no-fail-fast`:
-  failed at the same live CAS-VFS boot boundary on this host, before any scratch
-  fallback could run.
+  failed at the same stale runner-helper CAS-VFS boot boundary, before any
+  scratch fallback could run.
 - `cargo nextest run -p vx-runner --run-ignored only -E 'test(=tests::declared_tool_fingerprint_disambiguates_runner_backed_l1_entry)' --no-fail-fast`:
-  failed at the same live CAS-VFS boot boundary on this host, before any scratch
-  fallback could run.
+  failed at the same stale runner-helper CAS-VFS boot boundary, before any
+  scratch fallback could run.
 - `cargo nextest run -p vx-runner --run-ignored only -E 'test(=tests::executable_fingerprint_disambiguates_runner_backed_l1_entry)' --no-fail-fast`:
-  failed at the same live CAS-VFS boot boundary on this host, before any scratch
-  fallback could run.
+  failed at the same stale runner-helper CAS-VFS boot boundary, before any
+  scratch fallback could run.
 - `cargo nextest list -p vx-daemon --run-ignored only -E 'test(=runtime_cache::tests::backtick_exec_cache_index_store_backend_survives_fresh_runner_backed_graph_eval)'`:
   selected the service-backed exec L2 proof.
 - `cargo nextest run -p vx-daemon --run-ignored only -E 'test(=runtime_cache::tests::backtick_exec_cache_index_store_backend_survives_fresh_runner_backed_graph_eval)' --no-fail-fast`:
-  failed at the same live CAS-VFS boot boundary on this host, before any scratch
+  failed at the same stale live-helper CAS-VFS boot boundary, before any scratch
   fallback or cache-dir fallback could run.
+- `cargo nextest list -p vx -E 'binary(exec_e2e)' --run-ignored all`:
+  selected `vx::exec_e2e exec_runs_against_the_vfs_and_flushes_the_write_set`.
+- `cargo nextest run -p vx -E 'binary(exec_e2e)' --run-ignored ignored-only --no-fail-fast`:
+  1/1 passed on macOS, proving the daemon-hosted path can reuse the live
+  `/Volumes/Vixen` FSKit mount, run through runner exec, flush an output root,
+  mount the flushed tree, and read it back. This proof still does not cover CAS
+  input mounts; the test says input tree mounting is a follow-on.
 - `cargo nextest list -p vx-daemon -p vx-store -E 'test(cache_index) | test(cache_record)'`
   selected the three cache seam proofs:
   `cache_index_rejects_empty_namespaces`,
@@ -449,6 +460,12 @@ Latest verified red/green shape:
 - `cargo nextest run -p vx-runtime -E 'binary(exec_create_dirs) | test(exec_invocation_metadata_carries_env_entries) | test(exec_invocation_metadata_carries_writable_roots_and_create_dirs)' --no-fail-fast`:
   4/4 passed, proving `.vx` exec metadata carries env entries and demanded graph
   exec forwards dynamic env key/value pairs to `ObserveRequest`.
+- `cargo nextest list -p vx-runtime -E 'binary(exec_create_dirs) | test(exec_invocation_metadata_carries_mounts) | test(exec_invocation_metadata_carries_env_entries) | test(exec_invocation_metadata_carries_writable_roots_and_create_dirs)'`:
+  selected the three exec metadata unit tests plus the create-dirs/env/mounts
+  `exec_create_dirs` integration tests.
+- `cargo nextest run -p vx-runtime -E 'binary(exec_create_dirs) | test(exec_invocation_metadata_carries_mounts) | test(exec_invocation_metadata_carries_env_entries) | test(exec_invocation_metadata_carries_writable_roots_and_create_dirs)' --no-fail-fast`:
+  6/6 passed, proving `.vx` exec metadata carries CAS Tree mounts and demanded
+  graph exec forwards them to `ObserveRequest.mounts`.
 - `cargo nextest run -p vx-exec-protocol -p vx-services -p vx-runtime -p vx-runner -p vx-daemon -p vx --no-fail-fast`:
   196 run, 196 passed, 16 skipped.
 - The raw forbidden-symbol scans over `vx-runtime-core`, `vx-runtime-driver`,
@@ -543,11 +560,17 @@ Latest verified red/green shape:
 - `vx-runtime::analyze::tests::exec_invocation_metadata_carries_env_entries`
   proves string env entries are recorded as exec metadata with graph node refs for
   key/value payload.
+- `vx-runtime::analyze::tests::exec_invocation_metadata_carries_mounts` proves
+  `mounts: %{ "src" => tree }` is recorded as exec metadata with graph node refs
+  for the mount path and content-addressed Tree payload.
 - `vx-runtime::exec_create_dirs::demanded_exec_forwards_create_dirs_to_observe_request`
   proves a demanded `.vx` backtick forwards `create_dirs` to `ObserveRequest`.
 - `vx-runtime::exec_create_dirs::demanded_exec_forwards_env_to_observe_request`
   proves a demanded `.vx` backtick forwards dynamic env key/value payload to
   `ObserveRequest.env`.
+- `vx-runtime::exec_create_dirs::demanded_exec_forwards_mounts_to_observe_request`
+  proves a demanded `.vx` backtick forwards a resolved CAS Tree mount to
+  `ObserveRequest.mounts`.
 - The forbidden-symbol scan over `crates/vx-runtime-core` and
   `crates/vx-runtime-driver` returns no matches.
 - The deleted tree-walker affordance scan over `crates/vx-runtime/src` returns

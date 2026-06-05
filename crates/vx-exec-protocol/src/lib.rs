@@ -24,6 +24,29 @@ pub struct ExecEnv {
     pub value: String,
 }
 
+/// A content-addressed tree manifest root, encoded as raw BLAKE3 bytes.
+#[derive(facet::Facet, Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub struct ExecTreeHash {
+    pub bytes: [u8; 32],
+}
+
+impl ExecTreeHash {
+    pub fn to_hex(self) -> String {
+        let mut hex = String::with_capacity(64);
+        for byte in self.bytes {
+            hex.push_str(&format!("{byte:02x}"));
+        }
+        hex
+    }
+}
+
+/// One content-addressed input tree mount for the executed process.
+#[derive(facet::Facet, Debug, Clone, PartialEq, Eq)]
+pub struct ExecMount {
+    pub path: String,
+    pub tree: ExecTreeHash,
+}
+
 /// What the executor needs to observe: the command to run plus the observer to
 /// evaluate against its `Run`. `observer` is `None` for the default observer
 /// `run.ok.out`.
@@ -32,6 +55,7 @@ pub struct ObserveRequest {
     pub observer: Option<Bundle>,
     pub command: ExecCommand,
     pub env: Vec<ExecEnv>,
+    pub mounts: Vec<ExecMount>,
     pub outputs: Vec<String>,
     pub create_dirs: Vec<String>,
 }

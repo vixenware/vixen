@@ -2,7 +2,8 @@ use vx_exec_protocol::{Observe, ObserveRequest, Observed};
 use vx_runtime::observe::{CompletedRun, evaluate_observer};
 use vx_runtime::run_value::ProcOutcome;
 use vx_services::{
-    DiscoverProbeRequest, DiscoverResult, ExecEnv as RunnerExecEnv, ExecRequest, ExecResult, Runner,
+    Blake3Hash, DiscoverProbeRequest, DiscoverResult, ExecEnv as RunnerExecEnv,
+    ExecMount as RunnerExecMount, ExecRequest, ExecResult, Runner,
 };
 
 use crate::RunnerService;
@@ -80,7 +81,14 @@ impl RunnerService {
                         value: env.value,
                     })
                     .collect(),
-                mounts: Vec::new(),
+                mounts: request
+                    .mounts
+                    .into_iter()
+                    .map(|mount| RunnerExecMount {
+                        path: mount.path,
+                        tree: Blake3Hash(mount.tree.bytes),
+                    })
+                    .collect(),
                 outputs: request.outputs,
                 create_dirs: request.create_dirs,
             },

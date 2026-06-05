@@ -2,7 +2,7 @@ use std::cell::RefCell;
 use std::collections::HashMap;
 use std::rc::Rc;
 
-use vx_exec_protocol::{ExecCommand, ExecEnv, ObserveRequest};
+use vx_exec_protocol::{ExecCommand, ExecEnv, ExecMount, ExecTreeHash, ObserveRequest};
 use vx_ir::build::VirProgram;
 use vx_ir::ids::{BodyId, PatternId};
 use vx_ir::pattern::PatternKind;
@@ -17,7 +17,7 @@ use vx_types::TypeEnv;
 use crate::ability::{AttrLit, CmpOp, Constraint, ProviderRegistry};
 use crate::analyze::{
     CapabilityRequestMeta, CliArgPiece, CliArgTemplate, ExecEnvKey, ExecInvocationMeta,
-    GraphRuntimeMeta,
+    ExecMountPath, GraphRuntimeMeta,
 };
 use crate::cache::{
     CachedExecOutcome, ExecInvocationCacheKey, HostExecCacheKey, ObserverCacheIdentity,
@@ -418,6 +418,33 @@ fn materialize_exec_invocation(
             value: expect_string(value, "exec env value")?,
         });
     }
+    let mut mounts = Vec::with_capacity(invocation.mounts.len());
+    for mount in &invocation.mounts {
+        let path = match &mount.path {
+            ExecMountPath::Literal(path) => path.clone(),
+            ExecMountPath::Node(node) => {
+                let output = demand_payload(
+                    Rc::clone(&driver),
+                    Rc::clone(&externals),
+                    runtime.clone(),
+                    boundary,
+                    *node,
+                )?;
+                expect_string(output, "exec mount path")?
+            }
+        };
+        let output = demand_payload(
+            Rc::clone(&driver),
+            Rc::clone(&externals),
+            runtime.clone(),
+            boundary,
+            mount.tree,
+        )?;
+        mounts.push(ExecMount {
+            path,
+            tree: expect_cas_tree(output, "exec mount tree")?,
+        });
+    }
     let mut output_roots = Vec::with_capacity(invocation.writable_roots.len());
     for root in &invocation.writable_roots {
         let output = demand_payload(
@@ -447,6 +474,7 @@ fn materialize_exec_invocation(
         program_fingerprint,
         args.clone(),
         env.clone(),
+        mounts.clone(),
         output_roots.clone(),
         create_dirs.clone(),
         invocation,
@@ -465,6 +493,7 @@ fn materialize_exec_invocation(
                 args: args.clone(),
             },
             env,
+            mounts,
             outputs: output_roots,
             create_dirs,
         },
@@ -652,6 +681,7 @@ fn exec_invocation_key(
     program_fingerprint: String,
     args: Vec<String>,
     env: Vec<ExecEnv>,
+    mounts: Vec<ExecMount>,
     output_roots: Vec<String>,
     create_dirs: Vec<String>,
     invocation: &ExecInvocationMeta,
@@ -668,6 +698,10 @@ fn exec_invocation_key(
         declared_tool_fingerprint: tool.declared_fingerprint.clone(),
         args,
         env: env.into_iter().map(|env| (env.key, env.value)).collect(),
+        mounts: mounts
+            .into_iter()
+            .map(|mount| (mount.path, mount.tree.to_hex()))
+            .collect(),
         output_roots,
         create_dirs,
         observer,
@@ -1061,6 +1095,18 @@ fn expect_string(output: NodeOutput, context: &str) -> Result<String, String> {
     }
 }
 
+fn expect_cas_tree(output: NodeOutput, context: &str) -> Result<ExecTreeHash, String> {
+    match output {
+        NodeOutput::CasTree(bytes) => Ok(ExecTreeHash { bytes }),
+        NodeOutput::OutputTree => Err(format!(
+            "{context} must be a content-addressed Tree, got a producing output Tree handle"
+        )),
+        other => Err(format!(
+            "{context} must be a content-addressed Tree, got {other:?}"
+        )),
+    }
+}
+
 fn expect_array_fields(output: NodeOutput, context: &str) -> Result<Vec<NodeId>, String> {
     match output {
         NodeOutput::LazyData { label, fields } if label.starts_with('[') => Ok(fields),
@@ -1158,6 +1204,7 @@ fn node_output_from_value(
         Value::Bool(b) => Ok(NodeOutput::Bool(b)),
         Value::Str(s) => Ok(NodeOutput::Str(s.to_string())),
         Value::Unit => Ok(NodeOutput::Unit),
+        Value::CasTree(hash) => Ok(NodeOutput::CasTree(hash)),
         Value::Tree(handle) => {
             runtime.remote_trees.borrow_mut().insert(node, handle);
             Ok(NodeOutput::OutputTree)
@@ -1220,6 +1267,7 @@ fn node_output_from_value_in_driver(
         Value::Bool(b) => Ok(NodeOutput::Bool(b)),
         Value::Str(s) => Ok(NodeOutput::Str(s.to_string())),
         Value::Unit => Ok(NodeOutput::Unit),
+        Value::CasTree(hash) => Ok(NodeOutput::CasTree(hash)),
         Value::Tree(handle) => {
             runtime.remote_trees.borrow_mut().insert(node, handle);
             Ok(NodeOutput::OutputTree)
@@ -1321,6 +1369,7 @@ fn value_from_resolved(
         NodeOutput::Bool(b) => Ok(Value::Bool(b)),
         NodeOutput::Str(s) => Ok(Value::Str(Rc::from(s))),
         NodeOutput::Unit => Ok(Value::Unit),
+        NodeOutput::CasTree(hash) => Ok(Value::CasTree(hash)),
         NodeOutput::OutputTree => Ok(output_tree_value(node, &runtime)),
         NodeOutput::LazyData { label, fields } => {
             let fields = fields
@@ -1502,6 +1551,7 @@ fn value_from_scalar_output(
         NodeOutput::Bool(b) => Ok(Value::Bool(b)),
         NodeOutput::Str(s) => Ok(Value::Str(Rc::from(s))),
         NodeOutput::Unit => Ok(Value::Unit),
+        NodeOutput::CasTree(hash) => Ok(Value::CasTree(hash)),
         NodeOutput::OutputTree => Ok(Value::OutputTree(ExecutorOutputTree::new())),
         NodeOutput::FailureContext(context) => Ok(Value::FailureContext(Rc::new(
             failure_context_from_core(context),
@@ -1619,6 +1669,7 @@ fn poison_err_from_output(output: NodeOutput) -> Option<Value> {
         NodeOutput::Bool(b) => Some(Value::Bool(b)),
         NodeOutput::Str(s) => Some(Value::Str(Rc::from(s))),
         NodeOutput::Unit => Some(Value::Unit),
+        NodeOutput::CasTree(hash) => Some(Value::CasTree(hash)),
         NodeOutput::OutputTree => Some(Value::OutputTree(ExecutorOutputTree::new())),
         NodeOutput::Variant {
             tag,

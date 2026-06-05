@@ -147,6 +147,7 @@ fn map_value(value: Value) -> RuntimeValue {
         Value::Array(_) => RuntimeValue::String("[…]".to_string()),
         Value::Struct(_) => RuntimeValue::String("{…}".to_string()),
         Value::Tree(_) => RuntimeValue::String("<tree>".to_string()),
+        Value::CasTree(_) => RuntimeValue::String("<cas-tree>".to_string()),
         Value::OutputTree(_) => RuntimeValue::String("<output-tree>".to_string()),
         Value::FailureContext(_) => RuntimeValue::String("<failure-context>".to_string()),
         Value::Variant { tag, .. } => RuntimeValue::String(format!("{tag}{{…}}")),

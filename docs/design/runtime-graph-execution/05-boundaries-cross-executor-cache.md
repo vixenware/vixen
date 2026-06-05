@@ -134,18 +134,21 @@ Current progress:
 - Successful backtick invocations now have an in-process exact L1 keyed by the
   current materialized request identity: command coordinate, binary string,
   pre-run executable content fingerprint, declared tool fingerprint when present,
-  rendered argv, and observer identity. Bare binary names are resolved through
-  `PATH` for fingerprinting. Cache hits seed the demanded graph node without
-  calling `dispatch_observe`.
+  rendered argv, string env entries, content-addressed input mounts, writable
+  roots, create directories, and observer identity. Bare binary names are
+  resolved through `PATH` for fingerprinting. Cache hits seed the demanded graph
+  node without calling `dispatch_observe`.
 - Observe dispatch happens from graph boundary materialization through
   `dispatch_observe`, then the resulting graph node is seeded and the same demand
   loop resumes.
 - Current graph `exec` dispatch sends the minimal
-  `ObserveRequest { program, args, env, observer, outputs, create_dirs }` from
-  `vx-exec-protocol` to a runner-backed `Observe` service. `vx-runtime` no
-  longer contains the quarantined `ScratchObserveService` and no longer owns the
-  Observe Vox service contract; live mount-run-flush coverage sits in ignored
-  `vx-runner` proof targets because it requires the host CAS-VFS mount.
+  `ObserveRequest { program, args, env, mounts, observer, outputs, create_dirs }`
+  from `vx-exec-protocol` to a runner-backed `Observe` service. Mounts currently
+  carry resolved content-addressed Tree hashes, not remote producing output-tree
+  handles. `vx-runtime` no longer contains the quarantined `ScratchObserveService`
+  and no longer owns the Observe Vox service contract; live mount-run-flush
+  coverage sits in ignored `vx-runner` proof targets because it requires the host
+  CAS-VFS mount.
 - A top-level data observer result becomes graph output structure. A top-level
   producing tree result becomes `NodeOutput::OutputTree` plus a runtime remote
   handle entry keyed by the exec node.
@@ -169,11 +172,12 @@ scratch observe service with the runner-backed exec path.
   materialized request-shaping graph payload. The daemon/orchestrator layer owns
   placement, runner RPC, retries, and cache/index lookup.
 - Grow the minimal `vx-exec-protocol::ObserveRequest { program, args, env,
-  observer, outputs, create_dirs }` into a protocol payload that can carry the
-  projected `Command`, resolved observer bundle/captures, full `ExecInput` env,
-  CAS tree mounts, writable output roots, exemptions, and verification
-  obligations. The protocol type now lives in a boundary crate, not in the graph
-  evaluator, but its shape is still only the first slice.
+  mounts, observer, outputs, create_dirs }` into a protocol payload that can
+  carry the projected `Command`, resolved observer bundle/captures, full
+  `ExecInput` env, richer CAS tree mount provenance, writable output roots,
+  exemptions, and verification obligations. The protocol type now lives in a
+  boundary crate, not in the graph evaluator, but its shape is still only the
+  first slice.
 - The selected executor daemon lowers that payload into its local
   sandbox/CAS-VFS mount-run-flush operation. It mounts inputs, runs the process
   under the VFS access path plus sandbox policy, records read/write witnesses,

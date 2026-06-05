@@ -60,6 +60,7 @@ pub(crate) struct ExecInvocationMeta {
     pub(crate) args: Vec<CliArgTemplate>,
     pub(crate) observer: Option<vx_ir::Bundle>,
     pub(crate) env: Vec<ExecEnvMeta>,
+    pub(crate) mounts: Vec<ExecMountMeta>,
     pub(crate) writable_roots: Vec<NodeId>,
     pub(crate) create_dirs: Vec<NodeId>,
 }
@@ -83,6 +84,18 @@ pub(crate) struct ExecEnvMeta {
 
 #[derive(Debug, Clone)]
 pub(crate) enum ExecEnvKey {
+    Literal(String),
+    Node(NodeId),
+}
+
+#[derive(Debug, Clone)]
+pub(crate) struct ExecMountMeta {
+    pub(crate) path: ExecMountPath,
+    pub(crate) tree: NodeId,
+}
+
+#[derive(Debug, Clone)]
+pub(crate) enum ExecMountPath {
     Literal(String),
     Node(NodeId),
 }
@@ -252,6 +265,7 @@ struct CallableTemplate {
 struct ExecKeywords {
     observer: Option<BodyId>,
     env: Vec<ExecEnvMeta>,
+    mounts: Vec<ExecMountMeta>,
     writable_roots: Vec<NodeId>,
     create_dirs: Vec<NodeId>,
 }
@@ -406,6 +420,12 @@ impl Builder<'_> {
             }
             inputs.push(env.value);
         }
+        for mount in &meta.mounts {
+            if let ExecMountPath::Node(node) = mount.path {
+                inputs.push(node);
+            }
+            inputs.push(mount.tree);
+        }
         let node = self.emit(NodeKind::Boundary, "`…`".into(), span, inputs);
         let observer = meta
             .observer
@@ -416,6 +436,7 @@ impl Builder<'_> {
                 args,
                 observer,
                 env: meta.env,
+                mounts: meta.mounts,
                 writable_roots: meta.writable_roots,
                 create_dirs: meta.create_dirs,
             },
@@ -451,11 +472,13 @@ impl Builder<'_> {
             None => None,
         };
         let env = self.keyword_env_map(record)?;
+        let mounts = self.keyword_mounts_map(record)?;
         let writable_roots = self.keyword_path_array(record, "writable")?;
         let create_dirs = self.keyword_path_array(record, "create_dirs")?;
         Ok(ExecKeywords {
             observer,
             env,
+            mounts,
             writable_roots,
             create_dirs,
         })
@@ -494,6 +517,43 @@ impl Builder<'_> {
             }
         }
         Ok(env)
+    }
+
+    fn keyword_mounts_map(
+        &mut self,
+        record: &vx_ir::expr::RecordExpr,
+    ) -> Result<Vec<ExecMountMeta>, String> {
+        let Some(field) = record.fields.iter().find(|field| field.name == "mounts") else {
+            return Ok(Vec::new());
+        };
+        let ExprKind::Map(map) = &self.program.arena[field.value].kind else {
+            return Err(
+                "an invocation's `mounts` keyword must be a map literal in graph exec".into(),
+            );
+        };
+        let entries = map.entries.clone();
+        let mut mounts = Vec::with_capacity(entries.len());
+        for element in entries {
+            match element {
+                MapElement::Entry(entry) => {
+                    let path = match entry.key {
+                        MapKey::Name { name, .. } => ExecMountPath::Literal(name),
+                        MapKey::Expr(expr) => ExecMountPath::Node(self.walk(expr)),
+                    };
+                    mounts.push(ExecMountMeta {
+                        path,
+                        tree: self.walk(entry.value),
+                    });
+                }
+                MapElement::Spread(_) => {
+                    return Err(
+                        "an invocation's `mounts` keyword does not support spreads in graph exec yet"
+                            .into(),
+                    );
+                }
+            }
+        }
+        Ok(mounts)
     }
 
     fn keyword_path_array(
@@ -2864,6 +2924,50 @@ mod tests {
         assert!(
             matches!(&node.kind, NodeKind::Const(ConstValue::Str(value)) if value == "yes"),
             "env value node should be the literal value, got {node:?}"
+        );
+    }
+
+    #[test]
+    fn exec_invocation_metadata_carries_mounts() {
+        let src = "fn t(cmd: Command, tree: Tree) -> Tree ( \
+                   `$cmd` with { \
+                     mounts: %{ \"src\" => tree }, \
+                     observer: (run) => run.ok.out \
+                   } )";
+        let fe = crate::compile::compile_source(src, "t").expect("program compiles");
+        let entry = fe
+            .program
+            .arena
+            .items
+            .iter()
+            .find_map(|item| match &item.kind {
+                ItemKind::Function(function) if function.name == "t" => Some(function.body),
+                _ => None,
+            })
+            .expect("entry body");
+        let (graph, _, _, _, meta) = build_graph_indexed_with_meta(&fe.program, &fe.env, entry);
+        let exec = meta
+            .execs
+            .values()
+            .next()
+            .expect("one exec boundary is recorded");
+        assert_eq!(
+            exec.mounts.len(),
+            1,
+            "mounts are part of exec runtime metadata"
+        );
+        let ExecMountPath::Node(path) = &exec.mounts[0].path else {
+            panic!("string-literal mount path should lower as a graph node");
+        };
+        let node = &graph.nodes[path.0 as usize];
+        assert!(
+            matches!(&node.kind, NodeKind::Const(ConstValue::Str(value)) if value == "src"),
+            "mount path node should be the literal path, got {node:?}"
+        );
+        let node = &graph.nodes[exec.mounts[0].tree.0 as usize];
+        assert!(
+            matches!(&node.kind, NodeKind::Param),
+            "mount tree should be the Tree parameter node, got {node:?}"
         );
     }
 

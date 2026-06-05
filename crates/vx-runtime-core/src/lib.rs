@@ -16,6 +16,7 @@ pub enum NodeOutput {
     Bool(bool),
     Str(String),
     Unit,
+    CasTree([u8; 32]),
     OutputTree,
     LazyData {
         label: String,
@@ -480,6 +481,13 @@ fn output_reason(output: &NodeOutput) -> String {
         NodeOutput::U64(n) => n.to_string(),
         NodeOutput::Bool(b) => b.to_string(),
         NodeOutput::Unit => "()".to_string(),
+        NodeOutput::CasTree(hash) => {
+            let mut hex = String::with_capacity(64);
+            for byte in hash {
+                hex.push_str(&format!("{byte:02x}"));
+            }
+            hex
+        }
         NodeOutput::OutputTree => "output tree".to_string(),
         NodeOutput::LazyData { label, .. } => label.clone(),
         NodeOutput::Struct { .. } => "struct".to_string(),

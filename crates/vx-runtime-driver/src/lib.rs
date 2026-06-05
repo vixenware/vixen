@@ -478,6 +478,7 @@ fn public_field_nodes(output: &NodeOutput) -> &[NodeId] {
         | NodeOutput::Bool(_)
         | NodeOutput::Str(_)
         | NodeOutput::Unit
+        | NodeOutput::CasTree(_)
         | NodeOutput::OutputTree
         | NodeOutput::Failure { .. }
         | NodeOutput::FailureContext(_) => &[],

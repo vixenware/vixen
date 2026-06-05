@@ -164,3 +164,54 @@ fn demanded_exec_forwards_env_to_observe_request() {
     assert_eq!(request.env[0].key, "VX_ENV_PROOF");
     assert_eq!(request.env[0].value, "yes");
 }
+
+#[test]
+fn demanded_exec_forwards_mounts_to_observe_request() {
+    let fe = compile_source(
+        "fn t(cmd: Command, tree: Tree) -> () ( \
+           `$cmd` with { \
+             mounts: %{ \"src\" => tree }, \
+             observer: (run) => () \
+           } \
+         )",
+        "t",
+    )
+    .expect("exec mounts program compiles");
+    let entry = entry_body(&fe, "t");
+
+    let scheduler = Scheduler::new(&[1]);
+    let (client, request) = scheduler.block_on(recording_observe_client());
+    let cid = scheduler.register_observe_client(client);
+    let program = fe.program;
+    let env = fe.env;
+    let tree_hash = [0x42; 32];
+    let strand = scheduler.spawn(ResourceId(0), move || {
+        let cmd = tool_value("@vixen/grammar-cc", "cc", "true");
+        let tree = Value::CasTree(tree_hash);
+        match eval_body_with_exec(
+            &program,
+            &env,
+            entry,
+            vec![cmd, tree],
+            KernelMode::GraphOnly,
+            cid,
+        ) {
+            EvalOutcome::Clean(Value::Unit) => Outcome::Clean,
+            EvalOutcome::Clean(other) => {
+                Outcome::Poisoned(format!("expected unit observe value, got {other:?}"))
+            }
+            EvalOutcome::Poisoned { reason, .. } => Outcome::Poisoned(reason),
+        }
+    });
+    scheduler.demand(strand);
+    scheduler.run();
+    assert_eq!(scheduler.outcome(strand), Some(Outcome::Clean));
+    let request = request
+        .lock()
+        .unwrap()
+        .clone()
+        .expect("observe request was dispatched");
+    assert_eq!(request.mounts.len(), 1);
+    assert_eq!(request.mounts[0].path, "src");
+    assert_eq!(request.mounts[0].tree.bytes, tree_hash);
+}

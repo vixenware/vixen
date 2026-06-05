@@ -202,6 +202,11 @@ pub enum Value {
     /// the producer yields it. The consumer half of `remote.rs`, reached from the
     /// language — the genuinely-remote leaf of an exec's outputs.
     Tree(HandleId),
+    /// A resolved content-addressed Tree: the BLAKE3 root hash of a CAS
+    /// `DirectoryNode`. This is the input-mount shape; unlike [`Value::Tree`], it is
+    /// not a remote producing handle and can be mounted by an executor that has the
+    /// corresponding CAS nodes.
+    CasTree([u8; 32]),
     /// The **executor-side** output tree of the running exec — what `run.ok.out` /
     /// `run.stream.out` evaluate to *on the executor*, before crossing. It is local
     /// there (the executor produced it); `to_wire` marks it [`WireValue::Tree`] so it
@@ -435,6 +440,11 @@ fn wire_graph_value(value: &Value) -> Result<WireValue, Poison> {
             fields: wire_graph_fields(fields)?,
         },
         Value::OutputTree(_) => WireValue::Tree,
+        Value::CasTree(_) => {
+            return Err(poison(
+                "a content-addressed Tree cannot cross the observer wire yet".into(),
+            ));
+        }
         other => {
             return Err(poison(format!(
                 "`exec` observer returned a value that cannot cross back: {other:?}"
