@@ -12,7 +12,6 @@
 //! dark.
 
 use std::cell::RefCell;
-use std::path::Path;
 use std::rc::Rc;
 
 use vx_exec_protocol::WireValue;
@@ -273,29 +272,6 @@ pub fn eval_body(
 ) -> Outcome {
     let _ = mode;
     graph_body_outcome(program, env, body, args, None)
-}
-
-/// As [`eval_body`], but with an explicit temporary cache-index directory for
-/// graph results that are safe to persist.
-pub fn eval_body_with_cache_dir(
-    program: &VirProgram,
-    env: &TypeEnv,
-    body: BodyId,
-    args: Vec<Value>,
-    mode: KernelMode,
-    cache_dir: impl AsRef<Path>,
-) -> Outcome {
-    let _ = mode;
-    match crate::graph_exec::run_body_with_cache_dir(
-        program,
-        env,
-        body,
-        args,
-        cache_dir.as_ref().to_path_buf(),
-    ) {
-        Ok((outcome, _)) => outcome,
-        Err(reason) => Outcome::Poisoned { reason, span: None },
-    }
 }
 
 /// As [`eval_body`], but with a caller-owned persistent cache backend. The
@@ -606,58 +582,6 @@ mod tests {
         assert!(dispatches >= 1, "x*x+1 should dispatch");
     }
 
-    #[test]
-    fn function_output_l2_reuses_scalar_result_across_fresh_graphs() {
-        let src = "fn answer() -> U64 ( 40 + 2 ) fn main() -> U64 ( answer() )";
-        let fe = crate::compile::semantic_front_end_bundled(src).expect("front-end");
-        let body = body_in(&fe.program, "main");
-        let cache_dir = std::env::temp_dir().join(format!(
-            "vx-function-output-l2-{}-{}",
-            std::process::id(),
-            std::time::SystemTime::now()
-                .duration_since(std::time::UNIX_EPOCH)
-                .expect("system time")
-                .as_nanos()
-        ));
-        let _ = std::fs::remove_dir_all(&cache_dir);
-
-        let (first, first_dispatches) = crate::graph_exec::run_body_with_cache_dir(
-            &fe.program,
-            &fe.env,
-            body,
-            vec![],
-            cache_dir.clone(),
-        )
-        .expect("first graph run");
-        assert!(
-            matches!(first, Outcome::Clean(Value::U64(42))),
-            "first run got {first:?}"
-        );
-        assert!(
-            first_dispatches >= 1,
-            "first run should execute the answer body kernel"
-        );
-
-        let (second, second_dispatches) = crate::graph_exec::run_body_with_cache_dir(
-            &fe.program,
-            &fe.env,
-            body,
-            vec![],
-            cache_dir.clone(),
-        )
-        .expect("second graph run");
-        assert!(
-            matches!(second, Outcome::Clean(Value::U64(42))),
-            "second run got {second:?}"
-        );
-        assert_eq!(
-            second_dispatches, 0,
-            "fresh graph should load the scalar call output from L2"
-        );
-
-        let _ = std::fs::remove_dir_all(cache_dir);
-    }
-
     #[derive(Clone, Default)]
     struct RecordingCacheBackend {
         records:
@@ -696,17 +620,21 @@ mod tests {
         let body = body_in(&fe.program, "main");
         let backend = RecordingCacheBackend::default();
 
-        let first = eval_body_with_cache_backend(
+        let (first, first_dispatches) = crate::graph_exec::run_body_with_cache_backend(
             &fe.program,
             &fe.env,
             body,
             vec![],
-            KernelMode::Off,
-            backend.clone(),
-        );
+            Box::new(backend.clone()),
+        )
+        .expect("first graph run");
         assert!(
             matches!(first, Outcome::Clean(Value::U64(42))),
             "first run got {first:?}"
+        );
+        assert!(
+            first_dispatches >= 1,
+            "first run should execute the answer body kernel"
         );
         let puts_after_first = backend.put_count();
         assert!(
@@ -714,17 +642,21 @@ mod tests {
             "first run should write the scalar function output"
         );
 
-        let second = eval_body_with_cache_backend(
+        let (second, second_dispatches) = crate::graph_exec::run_body_with_cache_backend(
             &fe.program,
             &fe.env,
             body,
             vec![],
-            KernelMode::Off,
-            backend.clone(),
-        );
+            Box::new(backend.clone()),
+        )
+        .expect("second graph run");
         assert!(
             matches!(second, Outcome::Clean(Value::U64(42))),
             "second run got {second:?}"
+        );
+        assert_eq!(
+            second_dispatches, 0,
+            "fresh graph should load the scalar call output from the backend"
         );
         assert_eq!(
             backend.put_count(),

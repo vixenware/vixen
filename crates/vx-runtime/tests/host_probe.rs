@@ -5,14 +5,39 @@
 //! `Value::Host` variant, no opaque holder), and a `host.os` field read returns
 //! the compiled-in target OS — proving `Host` is just a struct.
 
+use std::collections::HashMap;
 use std::sync::atomic::{AtomicUsize, Ordering};
+use std::sync::{Arc, Mutex};
 
 use vx_ir::item::ItemKind;
+use vx_runtime::cache::{RuntimeCacheBackend, RuntimeCacheRecordKey};
 use vx_runtime::compile::compile_source;
-use vx_runtime::eval::{KernelMode, Outcome, Value, eval_body, eval_body_with_cache_dir};
+use vx_runtime::eval::{KernelMode, Outcome, Value, eval_body, eval_body_with_cache_backend};
 use vx_runtime::host::local_host_value;
 
 static NEXT_MARKER: AtomicUsize = AtomicUsize::new(0);
+
+#[derive(Clone, Default)]
+struct RecordingCacheBackend {
+    records: Arc<Mutex<HashMap<(String, String), String>>>,
+}
+
+impl RuntimeCacheBackend for RecordingCacheBackend {
+    fn get_record(&self, key: &RuntimeCacheRecordKey) -> Option<String> {
+        self.records
+            .lock()
+            .unwrap()
+            .get(&(key.namespace().to_string(), key.input_digest().to_string()))
+            .cloned()
+    }
+
+    fn put_record(&self, key: &RuntimeCacheRecordKey, record: &str) {
+        self.records.lock().unwrap().insert(
+            (key.namespace().to_string(), key.input_digest().to_string()),
+            record.to_string(),
+        );
+    }
+}
 
 /// Find the body of the single fn named `name` in a compiled program.
 fn fn_body(fe: &vx_runtime::compile::FrontEnd, name: &str) -> vx_ir::ids::BodyId {
@@ -147,18 +172,12 @@ fn host_exec_resolves_bare_program_names_for_fingerprinting() {
 
 #[test]
 fn host_exec_l2_cache_survives_fresh_graph_eval() {
-    let cache_dir = std::env::temp_dir().join(format!(
-        "vixen-host-exec-l2-{}-{}",
-        std::process::id(),
-        NEXT_MARKER.fetch_add(1, Ordering::Relaxed)
-    ));
     let marker = std::env::temp_dir().join(format!(
         "vixen-host-exec-l2-marker-{}-{}",
         std::process::id(),
         NEXT_MARKER.fetch_add(1, Ordering::Relaxed)
     ));
     let marker = marker.to_string_lossy().into_owned();
-    let _ = std::fs::remove_dir_all(&cache_dir);
     let _ = std::fs::remove_file(&marker);
     let script = format!("printf x >> {marker}; cat {marker}");
     let fe = compile_source(
@@ -171,15 +190,16 @@ fn host_exec_l2_cache_survives_fresh_graph_eval() {
     )
     .expect("host exec l2 program compiles");
     let body = fn_body(&fe, "probe");
+    let backend = RecordingCacheBackend::default();
 
     let run_once = || {
-        eval_body_with_cache_dir(
+        eval_body_with_cache_backend(
             &fe.program,
             &fe.env,
             body,
             vec![local_host_value()],
             KernelMode::Off,
-            &cache_dir,
+            backend.clone(),
         )
     };
 
@@ -194,10 +214,9 @@ fn host_exec_l2_cache_survives_fresh_graph_eval() {
 
     let count = std::fs::read_to_string(&marker).expect("host.exec l2 marker file");
     let _ = std::fs::remove_file(&marker);
-    let _ = std::fs::remove_dir_all(&cache_dir);
     assert_eq!(
         count, "x",
-        "a fresh graph evaluation with the same L2 dir must not spawn again"
+        "a fresh graph evaluation with the same backend must not spawn again"
     );
 }
 

@@ -1,11 +1,9 @@
 use std::cell::RefCell;
 use std::collections::HashMap;
 use std::future::Future;
-use std::path::PathBuf;
 use std::pin::Pin;
 use std::rc::Rc;
 
-use vx_cache_index::LocalCacheIndex;
 use vx_exec_protocol::WireValue;
 use vx_runtime_core::NodeOutput;
 use vx_runtime_driver::{CallCache, CallCacheKey};
@@ -163,29 +161,6 @@ impl RuntimeCacheBackend for StrandCacheBackend {
     }
 }
 
-struct LocalIndexCacheLayer {
-    index: LocalCacheIndex,
-}
-
-impl LocalIndexCacheLayer {
-    fn new(cache_dir: PathBuf) -> Self {
-        Self {
-            index: LocalCacheIndex::new(cache_dir),
-        }
-    }
-}
-
-impl RuntimeCacheBackend for LocalIndexCacheLayer {
-    fn get_record(&self, key: &RuntimeCacheRecordKey) -> Option<String> {
-        self.index.read_record(key.namespace, &key.input_digest)
-    }
-
-    fn put_record(&self, key: &RuntimeCacheRecordKey, record: &str) {
-        self.index
-            .write_record(key.namespace, &key.input_digest, record);
-    }
-}
-
 pub(crate) struct RuntimeCache {
     host_exec_l1: RefCell<HashMap<HostExecCacheKey, crate::host::HostExec>>,
     exec_invocation_l1: RefCell<HashMap<ExecInvocationCacheKey, CachedExecOutcome>>,
@@ -198,13 +173,6 @@ impl RuntimeCache {
             host_exec_l1: RefCell::new(HashMap::new()),
             exec_invocation_l1: RefCell::new(HashMap::new()),
             persistent: None,
-        }
-    }
-
-    pub(crate) fn with_local_index_dir(cache_dir: PathBuf) -> Self {
-        Self {
-            persistent: Some(Box::new(LocalIndexCacheLayer::new(cache_dir))),
-            ..Self::new()
         }
     }
 

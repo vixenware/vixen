@@ -4087,7 +4087,6 @@ dependencies = [
  "futures-util",
  "tokio",
  "vox",
- "vx-cache-index",
  "vx-exec-protocol",
  "vx-ir",
  "vx-package",

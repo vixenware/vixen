@@ -384,13 +384,14 @@ Current slice:
   in the same local disk L2 when the call key is available without demanding
   unresolved arguments or captures. Product/variant/tree outputs are deliberately
   skipped because they contain graph-local node refs or per-run handles.
-- The temporary file index lives in `vx-cache-index::LocalCacheIndex`, encodes
-  records with `facet-json`, and derives file paths from a blake3 hash of the
-  Facet JSON cache key.
-- `vx-runtime::cache::RuntimeCache` is the current temporary owner seam for the
-  in-process L1 maps and optional local file-index adapter. Graph boundary
-  materialization still computes the pre-run keys it is allowed to know, but
-  `graph_exec` must not own the maps, local-index namespaces, or file layout.
+- The temporary file index still exists as the separate `vx-cache-index` crate,
+  but `vx-runtime` no longer depends on it. Runtime tests now prove L2 reuse
+  through an injected `RuntimeCacheBackend` rather than an explicit cache
+  directory.
+- `vx-runtime::cache::RuntimeCache` is the current owner seam for the in-process
+  L1 maps and the backend hook. Graph boundary materialization still computes
+  the pre-run keys it is allowed to know, but `graph_exec` must not own the
+  maps, local-index namespaces, or file layout.
 - `vx-services::CasNode::CacheRecord` is the first real CAS node for cache
   record bodies. `vx-store` validates and stores these nodes by content hash.
 - `vx-services::CacheIndex` is the control-plane index protocol:
@@ -398,15 +399,12 @@ Current slice:
   `vx-daemon` currently hosts an in-process implementation when the orchestrator
   slot is configured.
 - `RuntimeCache` now talks to a `RuntimeCacheBackend` adapter instead of owning
-  an `Option<LocalCacheIndex>` directly. The explicit local file index and
+  an `Option<LocalCacheIndex>` directly. Caller-owned test backends and the
   strand-backed service path are both adapters; `graph_exec` does not know which
   one is installed.
 - `RuntimeCache` derives the pre-run input-key digest and encodes/decodes the
   runtime record body before touching the persistent layer. The layer sees only
-  `(namespace, input_key_digest)` plus an opaque record string. The temporary
-  `LocalCacheIndex` now has digest-addressed raw-record methods, so the local
-  adapter is shaped like the daemon index instead of like per-kind runtime
-  cache-key methods.
+  `(namespace, input_key_digest)` plus an opaque record string.
 - `vx-runtime::cache::RuntimeCacheBackend` is the public backend hook:
   `eval_body_with_cache_backend` and `eval_body_with_exec_and_cache_backend`
   let a caller install a backend without importing daemon service clients into
@@ -439,13 +437,13 @@ Final cache/store shape:
   embedding bytes. The runtime seeds graph outputs from records only after the
   record and any referenced content are available.
 - The current `vx-cache-index` local JSON files are a temporary compatibility
-  layer for proving input-key semantics. Replacing that storage with `vx-store`
-  and a daemon/control-plane index must not change cache-key law, demand
-  origins, or read-set semantics. `vx-runtime::graph_exec` no longer owns the
-  file-index layout, cache namespace strings, L1 maps, or the ambient
-  `VX_RUNTIME_L2_DIR` hook. The non-exec `eval_body_with_cache_dir` entry is the
-  remaining cache-dir compatibility path; exec cache proofs must go through
-  `eval_body_with_exec_and_cache_backend`.
+  crate, not an evaluator dependency. Replacing local/testing storage with
+  `vx-store` and a daemon/control-plane index must not change cache-key law,
+  demand origins, or read-set semantics. `vx-runtime::graph_exec` no longer owns
+  the file-index layout, cache namespace strings, L1 maps, or the ambient
+  `VX_RUNTIME_L2_DIR` hook. Runtime cache proofs must go through
+  `eval_body_with_cache_backend`, `eval_body_with_exec_and_cache_backend`, or
+  the strand-backed service path.
 
 ### 5. Read-set provenance
 

@@ -1,6 +1,5 @@
 use std::cell::RefCell;
 use std::collections::HashMap;
-use std::path::PathBuf;
 use std::rc::Rc;
 
 use vx_exec_protocol::{ExecCommand, ObserveRequest};
@@ -49,13 +48,6 @@ impl Default for RuntimeBoundaries {
 }
 
 impl RuntimeBoundaries {
-    fn with_cache_dir(cache_dir: PathBuf) -> Self {
-        Self {
-            cache: Rc::new(RuntimeCache::with_local_index_dir(cache_dir)),
-            ..Self::default()
-        }
-    }
-
     fn with_cache_backend(backend: Box<dyn RuntimeCacheBackend>) -> Self {
         Self {
             cache: Rc::new(RuntimeCache::with_backend(backend)),
@@ -89,22 +81,6 @@ pub(crate) fn run_body(
     args: Vec<Value>,
 ) -> Result<(Outcome, u64), String> {
     run_body_with_boundaries(program, env, body, args, RuntimeBoundaries::default())
-}
-
-pub(crate) fn run_body_with_cache_dir(
-    program: &VirProgram,
-    env: &TypeEnv,
-    body: BodyId,
-    args: Vec<Value>,
-    cache_dir: PathBuf,
-) -> Result<(Outcome, u64), String> {
-    run_body_with_boundaries(
-        program,
-        env,
-        body,
-        args,
-        RuntimeBoundaries::with_cache_dir(cache_dir),
-    )
 }
 
 pub(crate) fn run_body_with_cache_backend(

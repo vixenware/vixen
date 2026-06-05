@@ -340,18 +340,18 @@ Once exec runs through the runner-backed path:
 - cache records and output trees live in `vx-store`.
 - read/write witnesses are recorded by the executor/VFS layer.
 - `BoundaryL2Cache` has been removed from `vx-runtime::graph_exec`; the
-  temporary local file-index implementation lives in `vx-cache-index` and is
-  used only when an explicit cache directory is supplied.
+  temporary local file-index implementation lives in the separate
+  `vx-cache-index` crate and is no longer a `vx-runtime` dependency.
 
 Current checkpoint:
 
 - `crates/vx-cache-index` owns the temporary local Facet-JSON file index and
-  key-digest-to-path layout.
+  key-digest-to-path layout, but `vx-runtime` no longer depends on it.
 - `vx-runtime::cache::RuntimeCache` owns the temporary per-run boundary L1 maps
-  and optional `vx-cache-index::LocalCacheIndex` adapter used by the non-exec
-  `eval_body_with_cache_dir` compatibility entry. Exec cache proofs use
-  `eval_body_with_exec_and_cache_backend` instead. This is a transitional
-  cache-owner seam, not the final daemon/vx-store cache index.
+  and the persistent backend slot. Runtime cache proofs install
+  `RuntimeCacheBackend` or `StrandCacheBackend`; no runtime entry accepts a cache
+  directory. This is a transitional cache-owner seam, not the final daemon/vx-store
+  cache index.
 - `vx-runtime::graph_exec` still computes pre-run boundary cache keys while
   materializing demanded boundary nodes, but it no longer directly owns L1 maps,
   `LocalCacheIndex`, cache namespace strings, or file-index layout.
@@ -362,12 +362,11 @@ Current checkpoint:
   values. `vx-daemon` hosts an in-process `CacheIndex` service when the
   orchestrator slot is configured.
 - `RuntimeCache` now owns a `RuntimeCacheBackend` adapter slot rather than a
-  direct `Option<LocalCacheIndex>` field. The temporary local file index and
-  strand-backed service path are both adapters.
+  direct `Option<LocalCacheIndex>` field or any `vx-cache-index` dependency.
+  Caller-owned backends and the strand-backed service path are both adapters.
 - `RuntimeCache` now derives the pre-run input-key digest and serializes the
   cache record before calling that adapter. The adapter is addressed by
-  `(namespace, input_key_digest)` and stores opaque record text; the temporary
-  `LocalCacheIndex` supports that same digest-addressed local-record shape.
+  `(namespace, input_key_digest)` and stores opaque record text.
 - `RuntimeCacheBackend` is the public caller-owned backend hook. The public
   `eval_body_with_cache_backend` and `eval_body_with_exec_and_cache_backend`
   entry points install it while keeping `graph_exec` service-blind.
@@ -385,13 +384,11 @@ Current checkpoint:
   park path, not in `graph_exec`.
 - `RuntimeBoundaries::default()` is cacheless. The old ambient
   `VX_RUNTIME_L2_DIR` lookup no longer participates in default graph execution.
-- `eval_body_with_cache_dir` and internal `run_body_with_cache_dir` remain
-  explicit non-exec compatibility entry points for cache-behavior proofs while
-  daemon/control-plane cache lookup is introduced. The exec-specific cache-dir
-  entry point is deleted.
-- The deleted exec cache-dir names, `eval_body_with_exec_and_cache_dir` and
-  internal `run_body_with_exec_and_cache_dir`, are now guardrail needles. They
-  should not reappear as callable runtime APIs.
+- `eval_body_with_cache_dir`, `eval_body_with_exec_and_cache_dir`, internal
+  `run_body_with_cache_dir`, internal `run_body_with_exec_and_cache_dir`,
+  `RuntimeCache::with_local_index_dir`, and `LocalIndexCacheLayer` are deleted.
+  Those names now live only as guardrail needles and should not reappear as
+  callable runtime APIs.
 - `source_blind_guardrails` scans `vx-runtime/src` for `BoundaryL2Cache`,
   `VX_RUNTIME_L2_DIR`, the runtime write counter, and the deleted file-index
   helper methods. It also scans `vx-runtime/src/graph_exec.rs` for direct
@@ -510,9 +507,11 @@ Current checkpoint:
 - `cargo nextest run -p vx-runner --no-fail-fast`: 6/6 passed, 11 skipped
   (the live-VFS proof targets).
 - `cargo nextest run -p vx-cache-index -p vx-exec-protocol -p vx-services -p vx-store -p vx-runtime-graph -p vx-runtime-core -p vx-runtime-driver -p vx-runtime -p vx-runner -p vx-daemon --no-fail-fast`:
-  185/185 passed, 12 skipped.
+  184/184 passed (1 leaky:
+  `vx-runtime analyze::tests::a_demanded_bomb_is_reached`), 12 skipped.
 - `cargo nextest run -p vx-runtime -p vx-daemon -p vx-runner --no-fail-fast`:
-  156/156 passed, 12 skipped after deleting the exec cache-dir API.
+  155/155 passed, 12 skipped after deleting the remaining cache-dir API and
+  `vx-runtime`'s `vx-cache-index` dependency.
 - `cargo nextest run -p vx-daemon --no-fail-fast`: 5/5 passed, 1 skipped.
 - The forbidden-symbol scans over `vx-runtime-core`, `vx-runtime-driver`, the
   deleted tree-walker affordance scan over `vx-runtime/src`, and the
@@ -538,5 +537,5 @@ Finish M6:
    proof with `cargo nextest run -p vx-daemon --run-ignored only -E 'test(=runtime_cache::tests::backtick_exec_cache_index_store_backend_survives_fresh_runner_backed_graph_eval)' --no-fail-fast`.
    It should pass on a mounted host and should keep proving
    `eval_body_with_exec_and_cache_backend` plus `StrandCacheBackend` plus
-   `CacheIndexRuntimeCacheService`; `vx-cache-index` remains only the temporary
-   local compatibility substrate.
+   `CacheIndexRuntimeCacheService`; `vx-cache-index` remains only a temporary
+   local compatibility crate, not a `vx-runtime` dependency.

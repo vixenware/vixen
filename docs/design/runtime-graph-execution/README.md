@@ -147,31 +147,29 @@ Expected latest structural checkpoint:
 - `crates/vx-exec-protocol` owns `ExecCommand`, `ObserveRequest`,
   `WireValue`, `Observed`, and the generated Observe Vox client/dispatcher.
   `vx-runtime::observe` owns only `CompletedRun` and `evaluate_observer`.
-- `crates/vx-cache-index` owns the temporary local Facet-JSON file index used by
-  the non-exec `eval_body_with_cache_dir` compatibility entry. Exec cache proofs
-  use `eval_body_with_exec_and_cache_backend` instead. `vx-runtime::cache::RuntimeCache`
-  owns the temporary per-run boundary L1 maps and optional `LocalCacheIndex`
-  adapter. `vx-runtime::graph_exec` computes pre-run boundary cache keys while
-  materializing demanded boundaries, but it no longer owns the L1 maps,
-  `LocalCacheIndex`, file path layout, cache namespace strings, or ambient
+- `vx-runtime` no longer depends on `vx-cache-index` and exposes no cache-dir
+  runtime entry point. Cache proofs install a caller-owned
+  `RuntimeCacheBackend`; daemon/service-backed proofs install
+  `StrandCacheBackend`. `vx-runtime::graph_exec` computes pre-run boundary cache
+  keys while materializing demanded boundaries, but it no longer owns the L1
+  maps, `LocalCacheIndex`, file path layout, cache namespace strings, or ambient
   `VX_RUNTIME_L2_DIR` lookup.
-- The exec-specific cache-dir API has been deleted:
-  `eval_body_with_exec_and_cache_dir` and internal
-  `run_body_with_exec_and_cache_dir` now appear only as guardrail needles. Exec
-  L2 behavior must cross the backend/service path.
+- The cache-dir APIs have been deleted: `eval_body_with_cache_dir`,
+  `eval_body_with_exec_and_cache_dir`, internal `run_body_with_cache_dir`, and
+  internal `run_body_with_exec_and_cache_dir` now appear only as guardrail
+  needles. L2 behavior must cross the backend/service path.
 - `vx-services::CasNode` now has a `CacheRecord` variant for portable
   cache-record bodies in `vx-store`, and `vx-services::CacheIndex` is the
   control-plane index surface mapping pre-run key digests to candidate cache
   record `NodeHash` values. `vx-daemon` hosts an in-process `CacheIndex` service
   whenever the orchestrator slot is configured.
 - `vx-runtime::cache::RuntimeCache` no longer owns an
-  `Option<LocalCacheIndex>` field. It talks to a narrow persistent-layer adapter;
-  the explicit local file index and strand-backed service path are both adapters
-  behind that slot.
+  `Option<LocalCacheIndex>` field and no longer imports `vx-cache-index`. It
+  talks to a narrow persistent-layer adapter; caller-owned backends and the
+  strand-backed service path live behind that slot.
 - That persistent-layer adapter is now addressed by `(namespace,
   pre_run_input_key_digest)`. `RuntimeCache` owns the Facet JSON key digest and
-  record encoding/decoding; `vx-cache-index::LocalCacheIndex` exposes temporary
-  digest-addressed raw records for the explicit local cache path.
+  record encoding/decoding; adapters see only opaque record text.
 - `vx-runtime::cache::RuntimeCacheBackend` is the public hook for a
   caller-owned persistent backend. `eval_body_with_cache_backend` and
   `eval_body_with_exec_and_cache_backend` install that backend without exposing
@@ -315,9 +313,11 @@ Latest verified red/green shape:
 - `cargo nextest run -p vx-cache-index --no-fail-fast`: 2/2 passed, covering
   typed-key and digest-addressed local records.
 - `cargo nextest run -p vx-cache-index -p vx-exec-protocol -p vx-services -p vx-store -p vx-runtime-graph -p vx-runtime-core -p vx-runtime-driver -p vx-runtime -p vx-runner -p vx-daemon --no-fail-fast`:
-  185 run, 185 passed, 12 skipped.
+  184 run, 184 passed (1 leaky:
+  `vx-runtime analyze::tests::a_demanded_bomb_is_reached`), 12 skipped.
 - `cargo nextest run -p vx-runtime -p vx-daemon -p vx-runner --no-fail-fast`:
-  156 run, 156 passed, 12 skipped after deleting the exec cache-dir API.
+  155 run, 155 passed, 12 skipped after deleting all cache-dir runtime APIs
+  and `vx-runtime`'s `vx-cache-index` dependency.
 - `cargo nextest run -p vx-daemon --no-fail-fast`: 5/5 passed, 1 skipped.
 - The raw forbidden-symbol scans over `vx-runtime-core`, `vx-runtime-driver`,
   the deleted tree-walker affordance scan over `vx-runtime/src`, and the

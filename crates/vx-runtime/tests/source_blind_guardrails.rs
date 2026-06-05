@@ -64,8 +64,14 @@ const RUNTIME_CACHE_OWNERSHIP_NEEDLES: &[&str] = &[
     "impl BoundaryL2Cache",
     "VX_RUNTIME_L2_DIR",
     "L2_WRITE_COUNTER",
+    "eval_body_with_cache_dir",
     "eval_body_with_exec_and_cache_dir",
+    "run_body_with_cache_dir",
     "run_body_with_exec_and_cache_dir",
+    "with_local_index_dir",
+    "LocalIndexCacheLayer",
+    "vx_cache_index",
+    "vx-cache-index",
     "fn cache_path",
     "fn read_json",
     "fn write_json",
@@ -164,7 +170,7 @@ fn runtime_exec_spawning_stays_quarantined() {
 #[test]
 fn runtime_cache_file_index_stays_out_of_graph_exec() {
     let root = workspace_root();
-    let mut files = Vec::new();
+    let mut files = vec![root.join("crates/vx-runtime/Cargo.toml")];
     collect_rs_files(&root.join("crates/vx-runtime/src"), &mut files);
 
     assert_no_forbidden_needles(
