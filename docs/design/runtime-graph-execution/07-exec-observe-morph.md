@@ -510,7 +510,8 @@ Current checkpoint:
   `tests::run_ok_observer_crosses_runner_backed_live_vfs_for_success_and_failure`,
   `tests::strand_observe_uses_runner_backed_live_vfs_for_success_and_failure`,
   and `tests::writable_roots_disambiguate_runner_backed_l1_entry`.
-- `cargo nextest run -p vx-runner --run-ignored only -E 'test(=tests::identical_backtick_exec_boundaries_share_runner_backed_l1_entry)' --no-fail-fast`:
+- Before the live-test helper used `vx_vfsd::effective_mount_path`,
+  `cargo nextest run -p vx-runner --run-ignored only -E 'test(=tests::identical_backtick_exec_boundaries_share_runner_backed_l1_entry)' --no-fail-fast`:
   failed in the runner live-test helper before process execution because the
   helper passed `/tmp/vx/vfs` directly to `boot_with_store`; on macOS the daemon
   path must use `vx_vfsd::effective_mount_path` so the extension is reused at
@@ -540,6 +541,33 @@ Current checkpoint:
   `/Volumes/Vixen` FSKit mount, run through runner exec, flush an output root,
   mount the flushed tree, and read it back. This proof still does not cover CAS
   input mounts; the test says input tree mounting is a follow-on.
+- After remapping the runner and daemon live-test helpers through
+  `vx_vfsd::effective_mount_path`, `cargo check -p vx-runner -p vx-daemon -p vx`
+  passed.
+- `cargo nextest run -p vx-runner -E 'test(strand_observe_uses_runner_backed_live_vfs_for_success_and_failure) | test(run_ok_observer_crosses_runner_backed_live_vfs_for_success_and_failure) | test(hello_world_uses_runner_backed_live_vfs_and_where_injection)' --run-ignored ignored-only --no-fail-fast`:
+  0/3 passed. The failure moved to `/Volumes/Vixen` smoke canaries
+  (`failed to read /Volumes/Vixen/.vfs-smoke-...: No such file or directory`),
+  proving the stale `/tmp/vx/vfs` path was fixed but the live runner proof is
+  still not green.
+- `cargo nextest run -p vx-runner -E 'test(=tests::strand_observe_uses_runner_backed_live_vfs_for_success_and_failure)' --run-ignored ignored-only --no-fail-fast`:
+  got past the old missing-management-trigger failure but hung for more than
+  two minutes and was interrupted. Do not run the whole ignored live runner
+  suite without a timeout/trace plan.
+- Wedge inspection after the interrupted live proof showed `/sbin/mount` still
+  reports `/Volumes/Vixen` as `vixenfs`, `pluginkit` returns
+  `match: Connection invalid`, and a direct `status.json` read can hang hard
+  enough that `gtimeout` does not unwind. `ps`/`pgrep`/`pkill`/`killall` are not
+  reliable recovery tools in this state.
+- `launchctl print system/com.apple.filesystems.fskitd` remained responsive and
+  reported the fixed system job running, while non-root `launchctl kill SIGTERM
+  system/com.apple.filesystems.fskitd` failed with `Not privileged to signal
+  service.` `vx-management`'s kill-switch now targets that fixed launchd service
+  directly instead of resolving a PID with `pgrep`.
+- `cargo check -p vx-management`: passed after replacing the kill-switch's
+  process-name lookup with launchd service-target signaling.
+- `cargo nextest list -p vx-management -E 'all()'`: selected the five management
+  tests, including the new launchd-output parser checks.
+- `cargo nextest run -p vx-management -E 'all()' --no-fail-fast`: 5/5 passed.
 - `cargo nextest run -p vx-runner --no-fail-fast`: 6/6 passed, 11 skipped
   (the live-VFS proof targets).
 - `cargo nextest run -p vx-cache-index -p vx-exec-protocol -p vx-services -p vx-store -p vx-runtime-graph -p vx-runtime-core -p vx-runtime-driver -p vx-runtime -p vx-runner -p vx-daemon --no-fail-fast`:
@@ -575,19 +603,22 @@ Current checkpoint:
 Important caveat: the green default suite still skips live CAS-VFS proofs. The
 scratch-backed `exec_output_tree`, `hello_world`, demanded `exec_on_strands`,
 and runtime-local observe process-runner shapes now live as runner-owned proof
-targets. On this host the ignored live proofs fail at VFS boot before any
-fallback could run.
+targets. On this host the daemon e2e VFS proof passes, but the runner-owned live
+proofs still fail or hang after switching to the correct `/Volumes/Vixen` mount.
+That is a live VFS/runner observability problem, not permission to rebuild a
+scratch execution path.
 
 ## Current next step
 
 Finish M6:
 
-1. On a host with the Vixen CAS-VFS mount, run the ignored live runner proofs
-   with `cargo nextest run -p vx-runner --run-ignored only --no-fail-fast` and
-   record the result. If the host cannot supply CAS-VFS, the proof should fail
-   at the explicit VFS boot/runner-backed boundary, never by switching to
-   scratch execution.
-2. On that same live-CAS-VFS host, run the daemon-owned service-backed exec L2
+1. Add observability/timeout discipline around the runner-owned live VFS proofs
+   before running the whole ignored suite. Start with one exact proof, trace
+   `boot_with_store` smoke, the FSKit Vox connection, and the first `run_exec`
+   dispatch. The current post-remap symptom on this host is either missing
+   `/Volumes/Vixen/.vfs-smoke-*` canaries or a hang after the old boot failure
+   is gone.
+2. On a live-CAS-VFS host, run the daemon-owned service-backed exec L2
    proof with `cargo nextest run -p vx-daemon --run-ignored only -E 'test(=runtime_cache::tests::backtick_exec_cache_index_store_backend_survives_fresh_runner_backed_graph_eval)' --no-fail-fast`.
    It should pass on a mounted host and should keep proving
    `eval_body_with_exec_and_cache_backend` plus `StrandCacheBackend` plus

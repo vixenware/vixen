@@ -187,7 +187,10 @@ In rough order of frequency:
 >
 > The target is resolved **by the daemon itself** — the running launchd job
 > `com.apple.filesystems.fskitd` (`/usr/libexec/fskitd`) — never from caller
-> input. The client cannot redirect the kill at another process.
+> input. The client cannot redirect the kill at another process. The implementation
+> targets the fixed launchd service (`launchctl kill ... system/com.apple.filesystems.fskitd`);
+> it must not use caller-provided PIDs or name-enumerating tools such as `pgrep`
+> or `killall`, because the process table may itself be wedged.
 
 > r[fskit.killswitch.terminate]
 >
@@ -336,15 +339,17 @@ immediately) is reported as such with the diagnostics attached — never swallow
 
 - The doctor ladder in `vx-vfsd`'s macOS platform module, plus a `vx` subcommand
   to invoke it (§7.1).
-- The kill-switch daemon: a **tiny Rust binary** (no XPC, no Vox — just `libc`
-  `kill` + draining the queue dir) plus its launchd plist (`QueueDirectories` +
+- The kill-switch daemon: a **tiny Rust binary** (no XPC, no Vox — just a
+  fixed launchd service-target signal + draining the queue dir) plus its
+  launchd plist (`QueueDirectories` +
   `RunAtLoad`, no `KeepAlive`), both bundled in
   [`apps/mac/xcode/Vixen`](apps/mac/xcode/Vixen) per §5's concrete names. The
   `SMAppService.daemon(…).register()` call and the helper's signing live in the
   app (`VixenApp.swift`, `Vixen.entitlements`, the xcodeproj build phase copying
-  the binary into `Contents/MacOS`). The daemon resolves and kills `fskitd`
-  (`r[fskit.killswitch.target]` / `.terminate`); the doctor fires it by writing a
-  file (`r[fskit.killswitch.transport]`) and acks by drain
+  the binary into `Contents/MacOS`). The daemon resolves and signals the fixed
+  `com.apple.filesystems.fskitd` launchd job
+  (`r[fskit.killswitch.target]` / `.terminate`); the doctor fires it by writing
+  a file (`r[fskit.killswitch.transport]`) and acks by drain
   (`r[fskit.killswitch.ack-by-drain]`).
 
 The one empirical check to run first on a throwaway mount: confirm that killing
