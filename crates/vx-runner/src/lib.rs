@@ -405,6 +405,55 @@ mod tests {
 
     #[test]
     #[ignore = "needs the live CAS-VFS mount; run with --ignored on a host with the Vixen VFS"]
+    fn run_ok_observer_crosses_runner_backed_live_vfs_for_success_and_failure() {
+        let fe = compile_source(
+            "fn t(cmd: Command) -> Exit ( `$cmd` with { observer: (run) => run.ok } )",
+            "t",
+        )
+        .expect("exec run.ok program compiles");
+        let entry = entry_body(&fe, "t");
+
+        let scheduler = Scheduler::new(&[1]);
+        let (_temp, service) = scheduler.block_on(live_vfs_runner_service());
+        let client = scheduler.block_on(observe_client_for(service));
+        let cid = scheduler.register_observe_client(client);
+        let program = fe.program;
+        let env = fe.env;
+        let strand = scheduler.spawn(ResourceId(0), move || {
+            let ok = tool_value("@vixen/grammar-cc", "cc", "/bin/true");
+            match eval_body_with_exec(&program, &env, entry, vec![ok], KernelMode::Off, cid) {
+                EvalOutcome::Clean(Value::Struct(fields)) => {
+                    let names: Vec<&str> = fields.iter().map(|(name, _)| name.as_str()).collect();
+                    if names != ["stdout", "stderr"] {
+                        return Outcome::Poisoned(format!(
+                            "run.ok returned struct fields {names:?}, expected stdout/stderr"
+                        ));
+                    }
+                }
+                other => {
+                    return Outcome::Poisoned(format!(
+                        "expected /bin/true run.ok to return Exit over runner-backed live CAS-VFS, \
+                         got {other:?}"
+                    ));
+                }
+            }
+
+            let failed = tool_value("@vixen/grammar-cc", "cc", "/bin/false");
+            match eval_body_with_exec(&program, &env, entry, vec![failed], KernelMode::Off, cid) {
+                EvalOutcome::Poisoned { reason, .. } if !reason.is_empty() => Outcome::Clean,
+                other => Outcome::Poisoned(format!(
+                    "expected /bin/false run.ok to poison over runner-backed live CAS-VFS, \
+                     got {other:?}"
+                )),
+            }
+        });
+        scheduler.demand(strand);
+        scheduler.run();
+        assert_eq!(scheduler.outcome(strand), Some(Outcome::Clean));
+    }
+
+    #[test]
+    #[ignore = "needs the live CAS-VFS mount; run with --ignored on a host with the Vixen VFS"]
     fn demanded_vixen_exec_runs_through_runner_backed_live_vfs_and_serves_output_tree() {
         let fe = compile_source(
             "fn t(cmd: Command, script: String) -> Blob ( \

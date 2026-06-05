@@ -1,16 +1,9 @@
-//! `exec(command) with { observer }` end-to-end — the language surface of the exec
-//! spine, returning the observer's **real value**. A real `.vx` program is compiled
-//! through the bundled front-end, then evaluated on a strand: eval hits the
-//! `with`-decorated `exec`, projects the command to its argv, bundles the observer
-//! closure's static reachable closure, and dispatches the `observe` RPC to an
-//! executor **over vox** (`local_observer`). The strand parks; the boss drives the
-//! call (the executor runs the real process, builds a `Run`, evaluates the observer
-//! against it, and **deep-forces the result into a value**); the strand resumes, and
-//! `exec(…)` evaluates to that value — reconstructed from the wire.
+//! Scratch-backed exec cache and cold-demand compatibility coverage.
 //!
-//! So `` `$cmd` with { observer: (run) => run.ok } `` returns the actual
-//! `Exit` struct that crossed back, not a placeholder. (`observe_on_strands` drives
-//! `dispatch_observe` directly; `observe`'s own test asserts the crossed `WireValue`.)
+//! These tests still use `local_observer()`, so they exercise the quarantined
+//! scratch observe service. Production-path value crossing now lives in
+//! `vx-runner` runner-backed proofs; this file remains only until the cache-key
+//! cases have runner-backed replacements or explicit unsupported states.
 
 use std::path::{Path, PathBuf};
 use std::rc::Rc;
@@ -24,65 +17,6 @@ use vx_runtime::eval::{
 };
 use vx_runtime::observe::local_observer;
 use vx_runtime::strand::{Outcome, ResourceId, Scheduler};
-
-/// Compile `` `$cmd` with { observer: (run) => run.ok } ``, run it on a
-/// strand against a local executor running `binary`, and return the strand outcome.
-/// On success the observer's value is the `Exit` struct — verified worker-side (a
-/// `Value` can't cross the strand boundary), so a regression to `Unit` fails here.
-fn exec_outcome(binary: &str) -> Option<Outcome> {
-    let fe = compile_source(
-        "fn t(cmd: Command) -> Exit ( `$cmd` with { observer: (run) => run.ok } )",
-        "t",
-    )
-    .expect("exec program compiles");
-    let entry = fe
-        .program
-        .arena
-        .items
-        .iter()
-        .find_map(|it| match &it.kind {
-            ItemKind::Function(f) if f.name == "t" => Some(f.body),
-            _ => None,
-        })
-        .expect("fn t");
-
-    let s = Scheduler::new(&[4]);
-    // Establish the observe client on the scheduler's runtime so the boss drives it.
-    let client = s.block_on(local_observer());
-    let cid = s.register_observe_client(client);
-
-    // Move the owned (Send) program + env into the strand body; the Rc-bearing
-    // command/eval state is built worker-side and never crosses a thread.
-    let program = fe.program;
-    let env = fe.env;
-    let binary = binary.to_string();
-    let strand = s.spawn(ResourceId(0), move || {
-        // A `cc`-grammar command whose binary is the real `true`/`false`. The
-        // `` `$cmd` `` literal carries the grammar coordinate forward and applies no
-        // args, so `exec` runs the bare `binary`.
-        let cmd = tool_value("@vixen/grammar-cc", "cc", &binary);
-        match eval_body_with_exec(&program, &env, entry, vec![cmd], KernelMode::Off, cid) {
-            // `run.ok` is the `Exit` struct; it crossed back over vox and `exec`
-            // evaluates to it. Confirm the shape here — `Value` is `!Send` and can't
-            // leave the strand, and a regression to `Value::Unit` trips this.
-            EvalOutcome::Clean(Value::Struct(fields)) => {
-                let names: Vec<&str> = fields.iter().map(|(n, _)| n.as_str()).collect();
-                if names == ["stdout", "stderr"] {
-                    Outcome::Clean
-                } else {
-                    Outcome::Poisoned(format!("exec returned a struct with fields {names:?}"))
-                }
-            }
-            EvalOutcome::Clean(other) => {
-                Outcome::Poisoned(format!("exec returned {other:?}, not the Exit struct"))
-            }
-            EvalOutcome::Poisoned { reason, .. } => Outcome::Poisoned(reason),
-        }
-    });
-    s.demand(strand);
-    s.run();
-    s.outcome(strand)
-}
 
 fn cold_exec_outcome(binary: &str) -> Option<Outcome> {
     let fe = compile_source(
@@ -165,34 +99,6 @@ fn tool_value_with_fingerprint(
             Thunk::done(Value::Str(Rc::from(fingerprint))),
         ),
     ])
-}
-
-/// `true` exits 0 → the observer's `run.ok` forces to an `Exit` → that whole struct
-/// crosses back and `exec(…)` evaluates to it (verified worker-side). The whole path
-/// — `with`-hook, command projection, observer bundling, observe + value crossing
-/// over vox on a strand — ran end to end.
-#[test]
-fn exec_over_vox_returns_the_observers_exit_value() {
-    assert_eq!(
-        exec_outcome("true"),
-        Some(Outcome::Clean),
-        "exit 0 → exec returns the Exit struct the observer produced"
-    );
-}
-
-/// `false` exits 1 → the observer's `run.ok` poisons → that poison crosses back from
-/// the executor (`Observed::Poisoned`) and detonates the strand (I6 across vox).
-#[test]
-fn exec_over_vox_carries_a_failed_process_back_as_a_poison() {
-    match exec_outcome("false") {
-        Some(Outcome::Poisoned(reason)) => {
-            assert!(
-                !reason.is_empty(),
-                "the failure reason crosses back: {reason:?}"
-            )
-        }
-        other => panic!("exit 1 → run.ok poisons → exec poisons, got {other:?}"),
-    }
 }
 
 /// The cold tuple field is a real backtick exec whose observer would poison for
