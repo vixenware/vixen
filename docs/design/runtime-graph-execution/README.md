@@ -72,8 +72,8 @@ Expected latest structural checkpoint:
 - Commit `4c55d433` exists: `Fence graph execution away from VIR`.
 - Commit `bfcc1493` exists: `Document graph runtime demolition roadmap`.
 - `Cargo.toml` includes `crates/vx-runtime-graph`,
-  `crates/vx-runtime-core`, `crates/vx-runtime-driver`, and
-  `crates/vx-exec-protocol`.
+  `crates/vx-runtime-core`, `crates/vx-runtime-driver`,
+  `crates/vx-exec-protocol`, and `crates/vx-cache-index`.
 - `crates/vx-runtime-core/Cargo.toml` has no `vx-ir` dependency.
 - `crates/vx-runtime-driver/Cargo.toml` has no `vx-ir` dependency.
 - `crates/vx-runtime/src/graph.rs` only re-exports `vx_runtime_graph`.
@@ -117,10 +117,11 @@ Expected latest structural checkpoint:
   referenced function items. Mutually recursive functions share one SCC
   fingerprint; the `Call` node's `function` field disambiguates the entry point
   for memo keys.
-- The runtime L2 can persist self-contained function call outputs (`U64`, `Bool`,
-  `String`, `Unit`) under that same call key when an explicit cache directory or
-  `VX_RUNTIME_L2_DIR` is configured. Outputs containing graph-local node refs
-  remain per-run only.
+- The temporary cache-index L2 can persist self-contained function call outputs
+  (`U64`, `Bool`, `String`, `Unit`) under that same call key when an explicit
+  cache directory is configured. Outputs containing graph-local node refs remain
+  per-run only. The ambient `VX_RUNTIME_L2_DIR` hook has been removed from
+  default graph execution.
 - `vx-runtime-driver` reports graph kernel executions for the transitional
   public dispatch counter.
 - `graph_exec` can expose graph-root lazy arrays/tuples/variants and caught
@@ -146,6 +147,10 @@ Expected latest structural checkpoint:
 - `crates/vx-exec-protocol` owns `ExecCommand`, `ObserveRequest`,
   `WireValue`, `Observed`, and the generated Observe Vox client/dispatcher.
   `vx-runtime::observe` owns only `CompletedRun` and `evaluate_observer`.
+- `crates/vx-cache-index` owns the temporary local Facet-JSON file index used by
+  explicit `*_with_cache_dir` entry points. `vx-runtime::graph_exec` no longer
+  defines `BoundaryL2Cache`, the file path layout, or ambient
+  `VX_RUNTIME_L2_DIR` lookup.
 - `vx-runner` now implements the runtime `Observe` service and routes `"Observe"`
   through `RunnerAcceptor`; `vx-daemon` also advertises and routes `"Observe"` to
   its hosted `RunnerService` when a runner is configured. The implementation
@@ -185,12 +190,13 @@ Expected latest structural checkpoint:
 
 Latest verified red/green shape:
 
-- `cargo check -p vx-exec-protocol -p vx-services -p vx-runtime-graph -p vx-runtime-core -p vx-runtime-driver -p vx-runtime -p vx-runner -p vx-daemon`
+- `cargo check -p vx-cache-index -p vx-exec-protocol -p vx-services -p vx-runtime-graph -p vx-runtime-core -p vx-runtime-driver -p vx-runtime -p vx-runner -p vx-daemon`
   passes with no old-evaluator dead-code warnings.
 - `cargo nextest run -p vx-runtime -E 'binary(source_blind_guardrails) | binary(exec_on_strands)' --no-fail-fast`:
-  4/4 passed, including `undemanded_exec_in_tuple_does_not_dispatch`. The basic
-  `run.ok` success/failure value-crossing tests, identical-demanded-backtick L1
-  reuse, writable-root disambiguation, observer-identity disambiguation,
+  5/5 passed, including `undemanded_exec_in_tuple_does_not_dispatch` and
+  `runtime_cache_file_index_stays_out_of_graph_exec`. The basic `run.ok`
+  success/failure value-crossing tests, identical-demanded-backtick L1 reuse,
+  writable-root disambiguation, observer-identity disambiguation,
   declared-tool-fingerprint disambiguation, executable-fingerprint
   disambiguation, and exec disk-L2 reuse moved to runner-owned live-VFS proof
   coverage.
@@ -250,13 +256,15 @@ Latest verified red/green shape:
 - `cargo nextest run -p vx-runner --run-ignored only -E 'test(=tests::backtick_exec_l2_cache_survives_fresh_runner_backed_graph_eval)' --no-fail-fast`:
   failed at the same live CAS-VFS boot boundary on this host, before any scratch
   fallback could run.
-- `cargo nextest run -p vx-exec-protocol -p vx-services -p vx-runtime-graph -p vx-runtime-core -p vx-runtime-driver -p vx-runtime -p vx-runner --no-fail-fast`:
-  172 run, 172 passed, 12 skipped.
+- `cargo nextest run -p vx-cache-index -p vx-exec-protocol -p vx-services -p vx-runtime-graph -p vx-runtime-core -p vx-runtime-driver -p vx-runtime -p vx-runner --no-fail-fast`:
+  173 run, 173 passed, 12 skipped. Nextest reported
+  `analyze::tests::direct_function_call_identity_ignores_formatting` as leaky,
+  but not failed.
 - `cargo nextest run -p vx-daemon --no-fail-fast`: 2/2 passed.
 - The raw forbidden-symbol scans over `vx-runtime-core`, `vx-runtime-driver`,
   the deleted tree-walker affordance scan over `vx-runtime/src`, and the
-  runtime-owned exec/observe protocol scan over `vx-runtime/src` returned no
-  matches.
+  runtime-owned exec/observe protocol and cache file-index scans over
+  `vx-runtime/src` returned no matches.
 - `vx-runner::tests::strand_observe_reaches_runner_backed_service` drives
   `vx-runtime` strands against a runner-backed `Observe` client and reaches the
   explicit no-CAS-VFS poison. This proves the strand/Observe seam can target the
@@ -308,8 +316,9 @@ Latest verified red/green shape:
 - `vx-runner::tests::backtick_exec_l2_cache_survives_fresh_runner_backed_graph_eval`
   is the ignored live-VFS proof moved out of `exec_on_strands` for exec disk-L2
   reuse across fresh graph evaluations. It counts runner-backed `Observe` RPCs
-  while sharing an explicit runtime L2 cache directory; the second fresh graph
-  eval must reuse the persisted observer value instead of dispatching again.
+  while sharing an explicit temporary cache-index directory; the second fresh
+  graph eval must reuse the persisted observer value instead of dispatching
+  again.
 - `vx-runner::tests::writable_roots_disambiguate_runner_backed_l1_entry`
   is the ignored live-VFS proof moved out of `exec_on_strands` for writable-root
   L1 disambiguation. It uses identical command argv and different declared
@@ -346,8 +355,8 @@ Latest verified red/green shape:
 Verification commands:
 
 ```bash
-cargo check -p vx-exec-protocol -p vx-services -p vx-runtime-graph -p vx-runtime-core -p vx-runtime-driver -p vx-runtime -p vx-runner -p vx-daemon
-cargo nextest run -p vx-exec-protocol -p vx-services -p vx-runtime-graph -p vx-runtime-core -p vx-runtime-driver -p vx-runtime -p vx-runner
+cargo check -p vx-cache-index -p vx-exec-protocol -p vx-services -p vx-runtime-graph -p vx-runtime-core -p vx-runtime-driver -p vx-runtime -p vx-runner -p vx-daemon
+cargo nextest run -p vx-cache-index -p vx-exec-protocol -p vx-services -p vx-runtime-graph -p vx-runtime-core -p vx-runtime-driver -p vx-runtime -p vx-runner
 cargo nextest run -p vx-daemon
 cargo nextest run -p vx-runtime -E 'binary(source_blind_guardrails)'
 rg -n 'vx[_-]ir|ExprKind|StmtKind|PatternKind|VirProgram|BodyId|fn force|\.force\(|eval_inner|eval_expr' crates/vx-runtime-core crates/vx-runtime-driver

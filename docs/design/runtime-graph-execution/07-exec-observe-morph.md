@@ -229,9 +229,9 @@ Current checkpoint:
 - `vx-runner::tests::backtick_exec_l2_cache_survives_fresh_runner_backed_graph_eval`
   is the ignored live-VFS proof formerly covered by the scratch-backed
   `exec_on_strands` disk-L2 test. It counts actual `Observe` RPCs at the Vox
-  service boundary while sharing an explicit runtime L2 cache directory; the
-  second fresh graph eval must reuse the persisted observer value and avoid a
-  second dispatch.
+  service boundary while sharing an explicit temporary cache-index directory;
+  the second fresh graph eval must reuse the persisted observer value and avoid
+  a second dispatch.
 - `vx-runner::tests::writable_roots_disambiguate_runner_backed_l1_entry`
   is the ignored live-VFS proof formerly covered by the scratch-backed
   `exec_on_strands` writable-root L1 test. It counts actual `Observe` RPCs at
@@ -338,8 +338,22 @@ Once exec runs through the runner-backed path:
 - input-key lookup belongs to the daemon/orchestrator cache/index layer.
 - cache records and output trees live in `vx-store`.
 - read/write witnesses are recorded by the executor/VFS layer.
-- `BoundaryL2Cache` in `vx-runtime` must be removed or reduced to a test-only
-  compatibility shim while the daemon cache/index is introduced.
+- `BoundaryL2Cache` has been removed from `vx-runtime::graph_exec`; the
+  temporary local file-index implementation lives in `vx-cache-index` and is
+  used only when an explicit cache directory is supplied.
+
+Current checkpoint:
+
+- `crates/vx-cache-index` owns the temporary local Facet-JSON file index and
+  key-digest-to-path layout.
+- `RuntimeBoundaries::default()` is cacheless. The old ambient
+  `VX_RUNTIME_L2_DIR` lookup no longer participates in default graph execution.
+- `eval_body_with_cache_dir`, `eval_body_with_exec_and_cache_dir`, and internal
+  `run_body_with_cache_dir` remain explicit compatibility entry points for
+  cache-behavior proofs while daemon/control-plane cache lookup is introduced.
+- `source_blind_guardrails` scans `vx-runtime/src` for `BoundaryL2Cache`,
+  `VX_RUNTIME_L2_DIR`, the runtime write counter, and the deleted file-index
+  helper methods.
 
 ## Resilience rules
 
@@ -355,7 +369,7 @@ Once exec runs through the runner-backed path:
 
 ## Latest verification for this checkpoint
 
-- `cargo check -p vx-exec-protocol -p vx-services -p vx-runtime-graph -p vx-runtime-core -p vx-runtime-driver -p vx-runtime -p vx-runner -p vx-daemon`
+- `cargo check -p vx-cache-index -p vx-exec-protocol -p vx-services -p vx-runtime-graph -p vx-runtime-core -p vx-runtime-driver -p vx-runtime -p vx-runner -p vx-daemon`
   passed.
 - `cargo nextest list -p vx-runtime -E 'test(observer_evaluation_accepts) | test(observe_runs_a_real_command) | test(observe_crosses_the_output_tree) | test(the_executor_serves_run_outputs)'`
   selected only `observer_evaluation_accepts_a_completed_process_without_spawning`;
@@ -363,11 +377,15 @@ Once exec runs through the runner-backed path:
 - `cargo nextest run -p vx-runtime -E 'test(observer_evaluation_accepts) | test(observe_runs_a_real_command) | test(observe_crosses_the_output_tree) | test(the_executor_serves_run_outputs)' --no-fail-fast`:
   1/1 passed.
 - `cargo nextest list -p vx-runtime -E 'binary(source_blind_guardrails) | binary(exec_on_strands)'`
-  selected 4 tests.
+  selected 5 tests.
 - `cargo nextest run -p vx-runtime -E 'binary(source_blind_guardrails) | binary(exec_on_strands)' --no-fail-fast`:
-  4/4 passed.
+  5/5 passed, including
+  `runtime_cache_file_index_stays_out_of_graph_exec`.
 - The raw protocol-ownership scan
   `rg -n 'pub struct ExecCommand|pub struct ObserveRequest|pub enum WireValue|pub enum Observed|pub trait Observe|ScratchObserveService|local_observer|fn scratch_dir|fn capture_outputs|tokio::process::Command|pub struct ObserveService|struct ObserveService' crates/vx-runtime/src`
+  returned no matches.
+- The raw cache-index ownership scan
+  `rg -n 'struct BoundaryL2Cache|impl BoundaryL2Cache|VX_RUNTIME_L2_DIR|L2_WRITE_COUNTER|fn cache_path|fn read_json|fn write_json' crates/vx-runtime/src`
   returned no matches.
 - `cargo nextest run -p vx-runtime --no-fail-fast`: 140/140 passed.
 - `cargo nextest list -p vx-runner --run-ignored all` selected
@@ -425,13 +443,15 @@ Once exec runs through the runner-backed path:
   fallback could run.
 - `cargo nextest run -p vx-runner --no-fail-fast`: 6/6 passed, 12 skipped
   (the live-VFS proof targets).
-- `cargo nextest run -p vx-exec-protocol -p vx-services -p vx-runtime-graph -p vx-runtime-core -p vx-runtime-driver -p vx-runtime -p vx-runner --no-fail-fast`:
-  172/172 passed, 12 skipped.
+- `cargo nextest run -p vx-cache-index -p vx-exec-protocol -p vx-services -p vx-runtime-graph -p vx-runtime-core -p vx-runtime-driver -p vx-runtime -p vx-runner --no-fail-fast`:
+  173/173 passed, 12 skipped. Nextest reported
+  `analyze::tests::direct_function_call_identity_ignores_formatting` as leaky,
+  but not failed.
 - `cargo nextest run -p vx-daemon --no-fail-fast`: 2/2 passed.
 - The forbidden-symbol scans over `vx-runtime-core`, `vx-runtime-driver`, the
   deleted tree-walker affordance scan over `vx-runtime/src`, and the
-  runtime-owned exec/observe protocol scan over `vx-runtime/src` returned no
-  matches.
+  runtime-owned exec/observe protocol and cache file-index scans over
+  `vx-runtime/src` returned no matches.
 
 Important caveat: the green default suite still skips live CAS-VFS proofs. The
 scratch-backed `exec_output_tree`, `hello_world`, demanded `exec_on_strands`,
@@ -448,6 +468,7 @@ Finish M6:
    the result. If the host cannot supply CAS-VFS, the proof should fail at the
    explicit VFS boot/runner-backed boundary, never by switching to scratch
    execution.
-2. Move `BoundaryL2Cache`/input-key lookup toward the daemon/orchestrator
-   cache/index and `vx-store`, instead of letting `vx-runtime` remain the cache
-   owner.
+2. Move the remaining input-key lookup calls out of graph boundary
+   materialization and into daemon/orchestrator cache-index state backed by
+   `vx-store` cache-record bodies. `vx-cache-index` is still only the temporary
+   local compatibility substrate.

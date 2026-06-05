@@ -40,8 +40,10 @@ source-expression tree-walker plus `dispatch.rs` scalar planner are deleted.
 6. Continue the earliest incomplete phase. If the work is exec/observer related,
    the active phase is `07-exec-observe-morph.md`: keep exec on the
    runner-backed path, then move cache/index ownership out of `vx-runtime`.
-   The minimal exec/observe Vox protocol now lives in `vx-exec-protocol`; do
-   not reintroduce those protocol declarations in `vx-runtime::observe`.
+   The minimal exec/observe Vox protocol now lives in `vx-exec-protocol`, and
+   the temporary local cache file-index lives in `vx-cache-index`; do not
+   reintroduce those protocol declarations or file-index affordances in
+   `vx-runtime`.
 7. Commit the known state before switching tasks.
 
 ## Verification layers
@@ -155,10 +157,11 @@ Current partial state:
 
 Latest focused verification:
 
-- `cargo check -p vx-exec-protocol -p vx-services -p vx-runtime-graph -p vx-runtime-core -p vx-runtime-driver -p vx-runtime -p vx-runner -p vx-daemon`
+- `cargo check -p vx-cache-index -p vx-exec-protocol -p vx-services -p vx-runtime-graph -p vx-runtime-core -p vx-runtime-driver -p vx-runtime -p vx-runner -p vx-daemon`
   passes with no old-evaluator dead-code warnings.
 - `cargo nextest run -p vx-runtime -E 'binary(source_blind_guardrails) | binary(exec_on_strands)' --no-fail-fast`:
-  4/4 passed, including cold exec non-demand. The basic `run.ok`
+  5/5 passed, including cold exec non-demand and
+  `runtime_cache_file_index_stays_out_of_graph_exec`. The basic `run.ok`
   success/failure value-crossing tests, identical-demanded-backtick L1 reuse,
   writable-root disambiguation, observer-identity disambiguation,
   declared-tool-fingerprint disambiguation, executable-fingerprint
@@ -220,8 +223,10 @@ Latest focused verification:
 - `cargo nextest run -p vx-runner --run-ignored only -E 'test(=tests::backtick_exec_l2_cache_survives_fresh_runner_backed_graph_eval)' --no-fail-fast`:
   failed at the same live CAS-VFS boot boundary on this host, before any scratch
   fallback could run.
-- `cargo nextest run -p vx-exec-protocol -p vx-services -p vx-runtime-graph -p vx-runtime-core -p vx-runtime-driver -p vx-runtime -p vx-runner --no-fail-fast`:
-  172 run, 172 passed, 12 skipped.
+- `cargo nextest run -p vx-cache-index -p vx-exec-protocol -p vx-services -p vx-runtime-graph -p vx-runtime-core -p vx-runtime-driver -p vx-runtime -p vx-runner --no-fail-fast`:
+  173 run, 173 passed, 12 skipped. Nextest reported
+  `analyze::tests::direct_function_call_identity_ignores_formatting` as leaky,
+  but not failed.
 - `cargo nextest run -p vx-daemon --no-fail-fast`: 2/2 passed.
 - `vx-runner::tests::strand_observe_reaches_runner_backed_service` drives a
   `vx-runtime` strand against a runner-backed `Observe` service and reaches the
@@ -286,7 +291,7 @@ Latest focused verification:
 - `vx-runner::tests::backtick_exec_l2_cache_survives_fresh_runner_backed_graph_eval`
   is the ignored live-VFS proof target moved out of `exec_on_strands` for exec
   disk-L2 reuse across fresh graph evaluations. It counts runner-backed
-  `Observe` RPCs while sharing an explicit runtime L2 cache directory; the
+  `Observe` RPCs while sharing an explicit temporary cache-index directory; the
   second fresh graph eval must reuse the persisted observer value instead of
   dispatching again.
 - `vx-runner::tests::writable_roots_disambiguate_runner_backed_l1_entry`

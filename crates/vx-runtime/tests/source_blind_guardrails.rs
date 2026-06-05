@@ -59,6 +59,16 @@ const RUNTIME_EXEC_OWNERSHIP_NEEDLES: &[&str] = &[
     "tokio::process::Command",
 ];
 
+const RUNTIME_CACHE_OWNERSHIP_NEEDLES: &[&str] = &[
+    "struct BoundaryL2Cache",
+    "impl BoundaryL2Cache",
+    "VX_RUNTIME_L2_DIR",
+    "L2_WRITE_COUNTER",
+    "fn cache_path",
+    "fn read_json",
+    "fn write_json",
+];
+
 #[test]
 fn execution_crates_stay_source_blind() {
     let root = workspace_root();
@@ -116,6 +126,21 @@ fn runtime_exec_spawning_stays_quarantined() {
         RUNTIME_EXEC_OWNERSHIP_NEEDLES,
         "runtime exec process spawning must stay deleted",
         "runtime-local observe/process affordance",
+    );
+}
+
+#[test]
+fn runtime_cache_file_index_stays_out_of_graph_exec() {
+    let root = workspace_root();
+    let mut files = Vec::new();
+    collect_rs_files(&root.join("crates/vx-runtime/src"), &mut files);
+
+    assert_no_forbidden_needles(
+        &root,
+        files,
+        RUNTIME_CACHE_OWNERSHIP_NEEDLES,
+        "runtime graph execution must not own the L2 file index",
+        "runtime-owned cache-index affordance",
     );
 }
 

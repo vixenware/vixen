@@ -348,9 +348,9 @@ Current progress:
 - `host.exec` has a local in-process L1 keyed by argv plus the executable
   fingerprint. `host_exec_uses_input_keyed_l1_cache` proves two identical graph
   host boundaries demand both outputs but spawn only once.
-- `host.exec` also has an opt-in local disk L2 rooted at `VX_RUNTIME_L2_DIR` or
-  an explicit runtime cache directory. Successful `HostExec` records persist by
-  the same input key and can be reused by a fresh graph evaluation.
+- `host.exec` also has an opt-in local disk L2 rooted at an explicit temporary
+  cache-index directory supplied by the caller. Successful `HostExec` records
+  persist by the same input key and can be reused by a fresh graph evaluation.
 - Observer bundles now have a content identity suitable for the observer-code
   part of a backtick exec key.
 - Function calls now leave a source-blind graph `Call` node around the expanded
@@ -363,9 +363,10 @@ Current progress:
   string, pre-run executable content fingerprint, declared tool fingerprint when
   present, rendered argv, and observer identity for the materialized request.
   Successful observer data values can persist to the opt-in local disk L2 by
-  that key. Output-tree handles remain L1-only because scheduler handle ids are
-  per run. Full env/mount identities, richer capability/toolchain identities,
-  CAS-backed L2, graph-local function outputs, and read-set provenance are still
+  that key when the caller supplies an explicit temporary cache-index directory.
+  Output-tree handles remain L1-only because scheduler handle ids are per run.
+  Full env/mount identities, richer capability/toolchain identities, CAS-backed
+  L2, graph-local function outputs, and read-set provenance are still
   unimplemented.
 
 ### 4. L2 content-addressed storage
@@ -375,16 +376,17 @@ not a reason to change cache key semantics.
 
 Current slice:
 
-- `host.exec` persists successful `HostExec` records in a local disk L2 when a
-  runtime cache directory is provided or `VX_RUNTIME_L2_DIR` is set.
-- Backtick exec persists successful observer data values in the same local disk
-  L2. It deliberately does not persist output-tree handles yet.
+- `host.exec` persists successful `HostExec` records in a local disk L2 when an
+  explicit temporary cache-index directory is provided.
+- Backtick exec persists successful observer data values in the same explicit
+  local disk L2. It deliberately does not persist output-tree handles yet.
 - Function calls persist self-contained outputs (`U64`, `Bool`, `String`, `Unit`)
   in the same local disk L2 when the call key is available without demanding
   unresolved arguments or captures. Product/variant/tree outputs are deliberately
   skipped because they contain graph-local node refs or per-run handles.
-- Cache records are encoded with `facet-json`, and file paths are derived from a
-  blake3 hash of the Facet JSON cache key.
+- The temporary file index lives in `vx-cache-index::LocalCacheIndex`, encodes
+  records with `facet-json`, and derives file paths from a blake3 hash of the
+  Facet JSON cache key.
 - This is not the final CAS-backed L2 and it does not record read-set witnesses.
 
 Final cache/store shape:
@@ -401,9 +403,12 @@ Final cache/store shape:
   Records can point at CAS `Tree`/`Blob` identities for large outputs instead of
   embedding bytes. The runtime seeds graph outputs from records only after the
   record and any referenced content are available.
-- The current `BoundaryL2Cache` local JSON files are a temporary compatibility
+- The current `vx-cache-index` local JSON files are a temporary compatibility
   layer for proving input-key semantics. Replacing that storage with `vx-store`
-  must not change cache-key law, demand origins, or read-set semantics.
+  and a daemon/control-plane index must not change cache-key law, demand
+  origins, or read-set semantics. `vx-runtime::graph_exec` no longer owns the
+  file-index layout or the ambient `VX_RUNTIME_L2_DIR` hook; explicit
+  `*_with_cache_dir` entry points are the remaining compatibility path.
 
 ### 5. Read-set provenance
 

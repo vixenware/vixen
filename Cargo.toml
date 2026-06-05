@@ -21,6 +21,7 @@ members = [
   "crates/vx-runtime",
 
   ## runtime support
+  "crates/vx-cache-index",
   "crates/vx-http",
   "crates/vx-tarball",
   "crates/landlock-exec",
@@ -56,6 +57,7 @@ repository = "https://github.com/bearcove/vx"
 moire = "1.0.1"
 vx-services = { path = "crates/vx-services" }
 vx-exec-protocol = { path = "crates/vx-exec-protocol" }
+vx-cache-index = { path = "crates/vx-cache-index" }
 vx-diagnostics = { path = "crates/vx-diagnostics" }
 margin = { path = "crates-plus/margin" }
 margin-term = { path = "crates-plus/margin-term" }

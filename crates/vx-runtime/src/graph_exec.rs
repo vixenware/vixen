@@ -2,8 +2,8 @@ use std::cell::RefCell;
 use std::collections::HashMap;
 use std::path::PathBuf;
 use std::rc::Rc;
-use std::sync::atomic::{AtomicU64, Ordering};
 
+use vx_cache_index::LocalCacheIndex;
 use vx_exec_protocol::{ExecCommand, ObserveRequest, WireValue};
 use vx_ir::build::VirProgram;
 use vx_ir::ids::{BodyId, PatternId};
@@ -25,7 +25,6 @@ use crate::strand::{HandleId, ObserveClientId, ObserveOutcome, dispatch_observe,
 
 type SharedDriver = Rc<RefCell<Driver>>;
 type ExternalThunks = Rc<RefCell<HashMap<NodeId, Thunk>>>;
-static L2_WRITE_COUNTER: AtomicU64 = AtomicU64::new(0);
 
 #[derive(Clone)]
 struct RuntimeBoundaries {
@@ -35,7 +34,7 @@ struct RuntimeBoundaries {
     remote_trees: Rc<RefCell<HashMap<NodeId, HandleId>>>,
     host_exec_cache: Rc<RefCell<HashMap<HostExecCacheKey, crate::host::HostExec>>>,
     exec_invocation_cache: Rc<RefCell<HashMap<ExecInvocationCacheKey, CachedExecOutcome>>>,
-    l2_cache: Option<Rc<BoundaryL2Cache>>,
+    l2_cache: Option<Rc<LocalCacheIndex>>,
 }
 
 impl Default for RuntimeBoundaries {
@@ -47,7 +46,7 @@ impl Default for RuntimeBoundaries {
             remote_trees: Rc::new(RefCell::new(HashMap::new())),
             host_exec_cache: Rc::new(RefCell::new(HashMap::new())),
             exec_invocation_cache: Rc::new(RefCell::new(HashMap::new())),
-            l2_cache: BoundaryL2Cache::from_env().map(Rc::new),
+            l2_cache: None,
         }
     }
 }
@@ -55,101 +54,9 @@ impl Default for RuntimeBoundaries {
 impl RuntimeBoundaries {
     fn with_l2_cache_dir(cache_dir: PathBuf) -> Self {
         Self {
-            l2_cache: Some(Rc::new(BoundaryL2Cache::new(cache_dir))),
+            l2_cache: Some(Rc::new(LocalCacheIndex::new(cache_dir))),
             ..Self::default()
         }
-    }
-}
-
-#[derive(Debug)]
-struct BoundaryL2Cache {
-    root: PathBuf,
-}
-
-impl BoundaryL2Cache {
-    fn from_env() -> Option<Self> {
-        std::env::var_os("VX_RUNTIME_L2_DIR").map(|path| Self::new(PathBuf::from(path)))
-    }
-
-    fn new(root: PathBuf) -> Self {
-        Self { root }
-    }
-
-    fn host_exec(&self, key: &HostExecCacheKey) -> Option<crate::host::HostExec> {
-        self.read_json("host-exec-v1", key)
-    }
-
-    fn put_host_exec(&self, key: &HostExecCacheKey, value: &crate::host::HostExec) {
-        self.write_json("host-exec-v1", key, value);
-    }
-
-    fn exec_value(&self, key: &ExecInvocationCacheKey) -> Option<WireValue> {
-        self.read_json("exec-value-v1", key)
-    }
-
-    fn put_exec_value(&self, key: &ExecInvocationCacheKey, value: &WireValue) {
-        self.write_json("exec-value-v1", key, value);
-    }
-
-    fn function_output(&self, key: &FunctionOutputCacheKey) -> Option<CacheableNodeOutput> {
-        self.read_json("function-output-v1", key)
-    }
-
-    fn put_function_output(&self, key: &FunctionOutputCacheKey, value: &CacheableNodeOutput) {
-        self.write_json("function-output-v1", key, value);
-    }
-
-    fn read_json<K: for<'a> facet::Facet<'a>, V: for<'a> facet::Facet<'a>>(
-        &self,
-        namespace: &str,
-        key: &K,
-    ) -> Option<V> {
-        let path = self.cache_path(namespace, key)?;
-        let json = std::fs::read_to_string(path).ok()?;
-        facet_json::from_str(&json).ok()
-    }
-
-    fn write_json<K: for<'a> facet::Facet<'a>, V: for<'a> facet::Facet<'a>>(
-        &self,
-        namespace: &str,
-        key: &K,
-        value: &V,
-    ) {
-        let Some(path) = self.cache_path(namespace, key) else {
-            return;
-        };
-        let Ok(json) = facet_json::to_string(value) else {
-            return;
-        };
-        let Some(parent) = path.parent() else {
-            return;
-        };
-        if std::fs::create_dir_all(parent).is_err() {
-            return;
-        }
-        let mut tmp = path.clone();
-        tmp.set_extension(format!(
-            "tmp-{}-{}",
-            std::process::id(),
-            L2_WRITE_COUNTER.fetch_add(1, Ordering::Relaxed)
-        ));
-        if std::fs::write(&tmp, json.as_bytes()).is_err() {
-            return;
-        }
-        if std::fs::rename(&tmp, &path).is_err() {
-            let _ = std::fs::remove_file(tmp);
-        }
-    }
-
-    fn cache_path<K: for<'a> facet::Facet<'a>>(&self, namespace: &str, key: &K) -> Option<PathBuf> {
-        let key_json = facet_json::to_string(key).ok()?;
-        let digest = blake3::hash(key_json.as_bytes()).to_hex().to_string();
-        Some(
-            self.root
-                .join(namespace)
-                .join(&digest[..2])
-                .join(format!("{digest}.json")),
-        )
     }
 }
 
@@ -229,14 +136,14 @@ impl FunctionOutputCacheKey {
 }
 
 struct FunctionOutputL2Cache {
-    cache: Rc<BoundaryL2Cache>,
+    cache: Rc<LocalCacheIndex>,
 }
 
 impl CallCache for FunctionOutputL2Cache {
     fn get(&mut self, key: &CallCacheKey) -> Option<NodeOutput> {
         let key = FunctionOutputCacheKey::from_call_key(key)?;
         self.cache
-            .function_output(&key)
+            .read::<FunctionOutputCacheKey, CacheableNodeOutput>("function-output-v1", &key)
             .map(|value| value.into_output())
     }
 
@@ -247,7 +154,7 @@ impl CallCache for FunctionOutputL2Cache {
         let Some(value) = CacheableNodeOutput::from_output(output) else {
             return;
         };
-        self.cache.put_function_output(&key, &value);
+        self.cache.write("function-output-v1", &key, &value);
     }
 }
 
@@ -624,11 +531,9 @@ fn materialize_exec_invocation(
         seed_exec_outcome(driver, externals, runtime, node, cached)?;
         return Ok(());
     }
-    if let Some(wire) = runtime
-        .l2_cache
-        .as_ref()
-        .and_then(|cache| cache.exec_value(&cache_key))
-    {
+    if let Some(wire) = runtime.l2_cache.as_ref().and_then(|cache| {
+        cache.read::<ExecInvocationCacheKey, WireValue>("exec-value-v1", &cache_key)
+    }) {
         let cached = CachedExecOutcome::Value(wire);
         runtime
             .exec_invocation_cache
@@ -651,7 +556,7 @@ fn materialize_exec_invocation(
     );
     let cacheable = cacheable_from_observed(&observed)?;
     if let (Some(cache), CachedExecOutcome::Value(wire)) = (&runtime.l2_cache, &cacheable) {
-        cache.put_exec_value(&cache_key, wire);
+        cache.write("exec-value-v1", &cache_key, wire);
     }
     runtime
         .exec_invocation_cache
@@ -1120,11 +1025,9 @@ fn materialize_host_exec(
         driver.borrow_mut().seed(node, output);
         return Ok(());
     }
-    if let Some(cached) = runtime
-        .l2_cache
-        .as_ref()
-        .and_then(|cache| cache.host_exec(&cache_key))
-    {
+    if let Some(cached) = runtime.l2_cache.as_ref().and_then(|cache| {
+        cache.read::<HostExecCacheKey, crate::host::HostExec>("host-exec-v1", &cache_key)
+    }) {
         runtime
             .host_exec_cache
             .borrow_mut()
@@ -1140,7 +1043,7 @@ fn materialize_host_exec(
     let observed = crate::host::exec_with_fingerprint(&args, cache_key.program_fingerprint.clone())
         .map_err(|e| format!("host.exec: {e}"))?;
     if let Some(cache) = &runtime.l2_cache {
-        cache.put_host_exec(&cache_key, &observed);
+        cache.write("host-exec-v1", &cache_key, &observed);
     }
     runtime
         .host_exec_cache

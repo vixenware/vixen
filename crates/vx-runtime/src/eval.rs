@@ -274,8 +274,8 @@ pub fn eval_body(
     graph_body_outcome(program, env, body, args, None)
 }
 
-/// As [`eval_body`], but with an explicit runtime L2 cache directory for boundary
-/// results that are safe to persist.
+/// As [`eval_body`], but with an explicit temporary cache-index directory for
+/// graph results that are safe to persist.
 pub fn eval_body_with_cache_dir(
     program: &VirProgram,
     env: &TypeEnv,
@@ -314,8 +314,8 @@ pub fn eval_body_with_exec(
     graph_body_outcome(program, env, body, args, Some(exec_client))
 }
 
-/// As [`eval_body_with_exec`], but with an explicit runtime L2 cache directory for
-/// cacheable boundary results.
+/// As [`eval_body_with_exec`], but with an explicit temporary cache-index
+/// directory for cacheable boundary results.
 pub fn eval_body_with_exec_and_cache_dir(
     program: &VirProgram,
     env: &TypeEnv,
