@@ -123,9 +123,11 @@ mod tests {
 
     use vx_ir::item::ItemKind;
     use vx_ir::reachable;
+    use vx_runtime::ability::ProviderRegistry;
     use vx_runtime::compile::{FrontEnd, compile_source};
     use vx_runtime::eval::{
-        KernelMode, Outcome as EvalOutcome, Value, eval_body_with_exec, tool_value,
+        KernelMode, Outcome as EvalOutcome, Thunk, Value, eval_body_with_exec,
+        eval_body_with_exec_and_providers, grammar_coord_value, tool_value,
     };
     use vx_runtime::observe::{ExecCommand, ObserveClient, ObserveRequest};
     use vx_runtime::remote::{Part, PartKey, ProducingClient};
@@ -231,6 +233,26 @@ mod tests {
             .expect("front-end compiles");
         let entry = entry_body(&fe, "observe");
         reachable(&fe.program.arena, &fe.env, entry)
+    }
+
+    fn find_cc() -> Option<String> {
+        ["cc", "clang", "gcc"]
+            .into_iter()
+            .find_map(vx_runtime::host::which)
+    }
+
+    fn cc_provider(binary: &str, version: u64) -> Value {
+        Value::Struct(vec![
+            (
+                "command".to_string(),
+                Thunk::done(grammar_coord_value("@vixen/grammar-cc", "cc")),
+            ),
+            (
+                "binary".to_string(),
+                Thunk::done(Value::Str(Rc::from(binary))),
+            ),
+            ("version".to_string(), Thunk::done(Value::U64(version))),
+        ])
     }
 
     #[test]
@@ -504,6 +526,57 @@ mod tests {
                     "expected bare invocation run.ok.out gate to poison through runner-backed \
                      live CAS-VFS, got {other:?}"
                 )),
+            }
+        });
+        scheduler.demand(strand);
+        scheduler.run();
+        assert_eq!(scheduler.outcome(strand), Some(Outcome::Clean));
+    }
+
+    #[test]
+    #[ignore = "needs the live CAS-VFS mount and a host C compiler"]
+    fn hello_world_uses_runner_backed_live_vfs_and_where_injection() {
+        let cc = find_cc().expect("live VFS hello-world proof needs a host C compiler");
+        let dir = tempfile::TempDir::new().expect("hello source temp dir");
+        let hello = dir.path().join("hello.c");
+        std::fs::write(&hello, "int main(void) { return 0; }\n").expect("write hello.c");
+        let hello_path = hello.to_str().expect("utf-8 path").to_string();
+
+        let fe = compile_source(
+            "struct Cc { version: U64 }\n\
+             fn t(hello: String) -> Blob ( \
+               let cc = Cc where (version >= 1); \
+               let obj = `$cc -c ${hello} -o out/hello.o` with { writable: [\"out\"] }; \
+               obj.file(\"out/hello.o\") )",
+            "t",
+        )
+        .expect("hello-world program compiles");
+        let entry = entry_body(&fe, "t");
+
+        let scheduler = Scheduler::new(&[1]);
+        let (_temp, service) = scheduler.block_on(live_vfs_runner_service());
+        let client = scheduler.block_on(observe_client_for(service));
+        let cid = scheduler.register_observe_client(client);
+        let program = fe.program;
+        let env = fe.env;
+        let strand = scheduler.spawn(ResourceId(0), move || {
+            let mut providers = ProviderRegistry::new();
+            providers.advertise("Cc", cc_provider(&cc, 1));
+            let hello = Value::Str(Rc::from(hello_path.as_str()));
+            match eval_body_with_exec_and_providers(
+                &program,
+                &env,
+                entry,
+                vec![hello],
+                KernelMode::Off,
+                cid,
+                providers,
+            ) {
+                EvalOutcome::Clean(Value::Str(bytes)) if !bytes.is_empty() => Outcome::Clean,
+                EvalOutcome::Clean(other) => {
+                    Outcome::Poisoned(format!("expected non-empty object bytes, got {other:?}"))
+                }
+                EvalOutcome::Poisoned { reason, .. } => Outcome::Poisoned(reason),
             }
         });
         scheduler.demand(strand);

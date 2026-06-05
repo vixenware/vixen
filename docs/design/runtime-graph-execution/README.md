@@ -199,25 +199,26 @@ Latest verified red/green shape:
 - `cargo nextest run -p vx-runtime -E 'binary(lang_suite)' --no-fail-fast`:
   1/1 passed; the `.vx` cases include `exec_boundaries.vx`, where an undemanded
   backtick exec in a lazy tuple slot stays cold with no observe client.
-- `cargo nextest run -p vx-runtime -E 'binary(cc_probe) | binary(hello_world)' --no-fail-fast`:
-  2/2 passed.
+- `cargo nextest run -p vx-runtime -E 'binary(cc_probe)' --no-fail-fast`:
+  1/1 passed.
 - `cargo nextest run -p vx-runtime-driver --no-fail-fast`: 12/12 passed,
   including poison memoization, boundary in-progress cleanup, call-node
   non-strict argument edges, zero-arg direct call memo reuse, resolved-argument
   call memo reuse, resolved-argument disambiguation, closure capture memo reuse,
   function-entry disambiguation for shared code identities, and proof that
   unresolved arguments or captures are not demanded to build a call memo key.
-- `cargo nextest run -p vx-runtime --no-fail-fast`: 152 run, 152 passed,
+- `cargo nextest run -p vx-runtime --no-fail-fast`: 151 run, 151 passed,
   0 failed, 0 skipped.
-- `cargo nextest run -p vx-runner --no-fail-fast`: 6 run, 6 passed, 4 skipped
+- `cargo nextest run -p vx-runner --no-fail-fast`: 6 run, 6 passed, 5 skipped
   (the ignored live-VFS proof targets).
 - `cargo nextest list -p vx-runner --run-ignored only`: selected
-  `tests::demanded_vixen_exec_runs_through_runner_backed_live_vfs_and_serves_output_tree`
-  `tests::explicit_stream_observer_returns_runner_backed_live_output_tree`,
   `tests::bare_invocation_failure_poisons_through_runner_backed_live_vfs`,
+  `tests::demanded_vixen_exec_runs_through_runner_backed_live_vfs_and_serves_output_tree`,
+  `tests::explicit_stream_observer_returns_runner_backed_live_output_tree`,
+  `tests::hello_world_uses_runner_backed_live_vfs_and_where_injection`,
   and `tests::strand_observe_uses_runner_backed_live_vfs_for_success_and_failure`.
 - `cargo nextest run -p vx-services -p vx-runtime-graph -p vx-runtime-core -p vx-runtime-driver -p vx-runtime -p vx-runner --no-fail-fast`:
-  184 run, 184 passed, 4 skipped.
+  183 run, 183 passed, 5 skipped.
 - `cargo nextest run -p vx-daemon --no-fail-fast`: 2/2 passed.
 - `vx-runner::tests::strand_observe_reaches_runner_backed_service` drives
   `vx-runtime` strands against a runner-backed `Observe` client and reaches the
@@ -257,6 +258,13 @@ Latest verified red/green shape:
   is the ignored live-VFS proof for the default `run.ok.out` failure gate moved
   out of `crates/vx-runtime/tests/exec_output_tree.rs`; `/bin/sh -c "exit 7"`
   must poison through the runner-backed path.
+- `vx-runner::tests::hello_world_uses_runner_backed_live_vfs_and_where_injection`
+  is the ignored live-VFS proof moved out of
+  `crates/vx-runtime/tests/hello_world.rs`. It exercises `where` provider
+  injection, a demanded backtick using the injected C compiler, declared
+  `writable: ["out"]`, and `out.file("out/hello.o")` through the runner-backed
+  CAS-VFS path. The old scratch-backed runtime integration file has been
+  deleted.
 - `vx-runtime::analyze::tests::exec_invocation_metadata_carries_writable_roots`
   proves `writable: ["out"]` is recorded as exec metadata rather than being
   accepted only by the front-end.
