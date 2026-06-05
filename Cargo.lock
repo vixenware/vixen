@@ -4035,6 +4035,7 @@ dependencies = [
  "eyre",
  "libc",
  "tracing",
+ "tracing-appender",
  "tracing-subscriber",
  "vx-vfs-types",
 ]

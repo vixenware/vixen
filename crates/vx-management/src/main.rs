@@ -9,14 +9,22 @@
 //!   capability immediately — e.g. `sudo vixen-management mount` to bring up
 //!   the VixenFS volume before the launchd plumbing is installed.
 
-use eyre::{Result, bail};
+use eyre::{Result, WrapErr, bail};
+use tracing_subscriber::EnvFilter;
+use tracing_subscriber::layer::SubscriberExt;
+use tracing_subscriber::util::SubscriberInitExt;
 use vx_management::{Button, queue};
 
+const LOG_DIR: &str = "/Library/Application Support/Vixen/management/logs";
+const LOG_FILE_NAME: &str = "vixen-management.log";
+
 fn main() -> Result<()> {
-    tracing_subscriber::fmt()
-        .with_writer(std::io::stderr)
-        .with_target(false)
-        .init();
+    init_tracing();
+    tracing::info!(
+        pid = std::process::id(),
+        uid = unsafe { libc::geteuid() },
+        "vixen-management starting"
+    );
 
     match std::env::args().nth(1) {
         // Direct CLI: run one button now (manual / sudo testing).
@@ -34,6 +42,26 @@ fn main() -> Result<()> {
     }
 }
 
+fn init_tracing() {
+    let filter = EnvFilter::new(
+        std::env::var("VIXEN_MANAGEMENT_LOG")
+            .unwrap_or_else(|_| "info,vx_management=debug,vixen_management=debug".to_string()),
+    );
+    let _ = std::fs::create_dir_all(LOG_DIR);
+    let file_appender = tracing_appender::rolling::never(LOG_DIR, LOG_FILE_NAME);
+    let fmt_layer = tracing_subscriber::fmt::layer()
+        .with_ansi(false)
+        .with_writer(file_appender)
+        .with_target(true)
+        .with_file(true)
+        .with_line_number(true);
+
+    tracing_subscriber::registry()
+        .with(filter)
+        .with(fmt_layer)
+        .init();
+}
+
 /// launchd-invoked: repair the queue perms, then for each fired button run it once and
 /// drain. Draining happens **after** the action (even on failure) so the trigger's
 /// removal acks completion to the firing doctor, while still guaranteeing launchd won't
@@ -41,6 +69,7 @@ fn main() -> Result<()> {
 fn run_launchd() -> Result<()> {
     queue::ensure_queues()?;
     let mut fired_any = false;
+    let mut failure = None;
     for button in Button::ALL {
         if !queue::is_fired(button) {
             continue;
@@ -51,11 +80,19 @@ fn run_launchd() -> Result<()> {
         queue::drain(button)?;
         match outcome {
             Ok(()) => tracing::info!(button = ?button, "done"),
-            Err(e) => tracing::error!(button = ?button, "failed: {e:#}"),
+            Err(e) => {
+                tracing::error!(button = ?button, "failed: {e:#}");
+                if failure.is_none() {
+                    failure = Some(e);
+                }
+            }
         }
     }
     if !fired_any {
         tracing::info!("launched with no fired queue (RunAtLoad perm-repair only)");
+    }
+    if let Some(err) = failure {
+        return Err(err).wrap_err("one or more management actions failed");
     }
     Ok(())
 }

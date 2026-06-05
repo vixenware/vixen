@@ -18,6 +18,7 @@ workspace = true
 libc.workspace = true
 eyre.workspace = true
 tracing.workspace = true
+tracing-appender = "0.2.3"
 tracing-subscriber.workspace = true
 vx-vfs-types.workspace = true
 
