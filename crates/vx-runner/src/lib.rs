@@ -122,6 +122,7 @@ mod tests {
     use std::sync::Arc;
 
     use vx_ir::item::ItemKind;
+    use vx_ir::reachable;
     use vx_runtime::compile::{FrontEnd, compile_source};
     use vx_runtime::eval::{
         KernelMode, Outcome as EvalOutcome, Value, eval_body_with_exec, tool_value,
@@ -198,6 +199,16 @@ mod tests {
         (temp, client)
     }
 
+    async fn live_vfs_runner_service() -> (tempfile::TempDir, RunnerService) {
+        let (temp, store) = store_client().await;
+        let store = Arc::new(store);
+        let mount = "/tmp/vx/vfs".parse().expect("utf8 VFS mount path");
+        let vfsd = vx_vfsd::boot_with_store(Arc::clone(&store), &mount)
+            .await
+            .expect("boot live CAS-VFS");
+        (temp, RunnerService::new(Some(store)).with_vfsd(vfsd))
+    }
+
     async fn output_tree(store: &StoreClient) -> vx_services::Blake3Hash {
         let blob = prepare_blob(b"vconn-payload");
         let blob_ref = store_prepared_blob(store, &blob, b"vconn-payload")
@@ -213,6 +224,13 @@ mod tests {
         .await
         .expect("build output tree");
         tree.0
+    }
+
+    fn observer_bundle() -> vx_ir::Bundle {
+        let fe = compile_source("fn observe(run: Run) -> Exit ( run.ok )", "observe")
+            .expect("front-end compiles");
+        let entry = entry_body(&fe, "observe");
+        reachable(&fe.program.arena, &fe.env, entry)
     }
 
     #[test]
@@ -246,6 +264,59 @@ mod tests {
         scheduler.demand(strand);
         scheduler.run();
         assert_eq!(scheduler.outcome(strand), Some(Outcome::Clean));
+    }
+
+    #[test]
+    #[ignore = "needs the live CAS-VFS mount; run with --ignored on a host with the Vixen VFS"]
+    fn strand_observe_uses_runner_backed_live_vfs_for_success_and_failure() {
+        let scheduler = Scheduler::new(&[1]);
+        let (_temp, service) = scheduler.block_on(live_vfs_runner_service());
+        let client = scheduler.block_on(observe_client_for(service));
+        let cid = scheduler.register_observe_client(client);
+
+        let ok = scheduler.spawn(ResourceId(0), move || {
+            let observed = dispatch_observe(
+                cid,
+                ObserveRequest {
+                    observer: Some(observer_bundle()),
+                    command: ExecCommand {
+                        program: "/bin/true".to_string(),
+                        args: Vec::new(),
+                    },
+                    outputs: Vec::new(),
+                },
+            );
+            match observed.as_ref() {
+                ObserveOutcome::Value(_) => Outcome::Clean,
+                other => Outcome::Poisoned(format!(
+                    "expected /bin/true observe to cross a clean run.ok value, got {other:?}"
+                )),
+            }
+        });
+        let failed = scheduler.spawn(ResourceId(0), move || {
+            let observed = dispatch_observe(
+                cid,
+                ObserveRequest {
+                    observer: Some(observer_bundle()),
+                    command: ExecCommand {
+                        program: "/bin/false".to_string(),
+                        args: Vec::new(),
+                    },
+                    outputs: Vec::new(),
+                },
+            );
+            match observed.as_ref() {
+                ObserveOutcome::Poisoned(reason) if !reason.is_empty() => Outcome::Clean,
+                other => Outcome::Poisoned(format!(
+                    "expected /bin/false observe to cross run.ok poison, got {other:?}"
+                )),
+            }
+        });
+        scheduler.demand(ok);
+        scheduler.demand(failed);
+        scheduler.run();
+        assert_eq!(scheduler.outcome(ok), Some(Outcome::Clean));
+        assert_eq!(scheduler.outcome(failed), Some(Outcome::Clean));
     }
 
     #[test]
@@ -323,15 +394,8 @@ mod tests {
         let entry = entry_body(&fe, "t");
 
         let scheduler = Scheduler::new(&[1]);
-        let (_temp, store) = scheduler.block_on(store_client());
-        let store = Arc::new(store);
-        let mount = "/tmp/vx/vfs".parse().expect("utf8 VFS mount path");
-        let vfsd = scheduler
-            .block_on(vx_vfsd::boot_with_store(Arc::clone(&store), &mount))
-            .expect("boot live CAS-VFS");
-        let client = scheduler.block_on(observe_client_for(
-            RunnerService::new(Some(Arc::clone(&store))).with_vfsd(vfsd),
-        ));
+        let (_temp, service) = scheduler.block_on(live_vfs_runner_service());
+        let client = scheduler.block_on(observe_client_for(service));
         let cid = scheduler.register_observe_client(client);
         let program = fe.program;
         let env = fe.env;

@@ -183,14 +183,16 @@ Latest focused verification:
   call memo reuse, resolved-argument disambiguation, closure capture memo reuse,
   function-entry disambiguation for shared code identities, and proof that
   unresolved arguments or captures are not demanded to build a call memo key.
-- `cargo nextest run -p vx-runtime --no-fail-fast`: 154 run, 154 passed,
+- `cargo nextest run -p vx-runtime --no-fail-fast`: 155 run, 155 passed,
   0 failed, 0 skipped.
-- `cargo nextest run -p vx-runner --no-fail-fast`: 6 run, 6 passed, 1 skipped
-  (the ignored live-VFS proof target).
+- `cargo nextest run -p vx-runner --no-fail-fast`: 6 run, 6 passed, 2 skipped
+  (the ignored live-VFS proof targets).
 - `cargo nextest list -p vx-runner --run-ignored only`: selected
-  `tests::demanded_vixen_exec_runs_through_runner_backed_live_vfs_and_serves_output_tree`.
+  `tests::demanded_vixen_exec_runs_through_runner_backed_live_vfs_and_serves_output_tree`
+  and
+  `tests::strand_observe_uses_runner_backed_live_vfs_for_success_and_failure`.
 - `cargo nextest run -p vx-services -p vx-runtime-graph -p vx-runtime-core -p vx-runtime-driver -p vx-runtime -p vx-runner --no-fail-fast`:
-  189 run, 189 passed, 1 skipped.
+  187 run, 187 passed, 2 skipped.
 - `cargo nextest run -p vx-daemon --no-fail-fast`: 2/2 passed.
 - `vx-runner::tests::strand_observe_reaches_runner_backed_service` drives a
   `vx-runtime` strand against a runner-backed `Observe` service and reaches the
@@ -203,8 +205,9 @@ Latest focused verification:
   proves writable roots disambiguate the in-process exec L1.
 - `vx-runner` implements the runtime `Observe` service and routes it through
   `RunnerAcceptor`; `vx-daemon` advertises and routes `"Observe"` to its hosted
-  `RunnerService` when a runner is configured. Runtime exec tests still use
-  `local_observer()`. Treat those green exec tests as compatibility evidence, not
+  `RunnerService` when a runner is configured. Direct observe-on-strands coverage
+  has moved to runner-owned tests. Runtime exec/output tests still use
+  `local_observer()`; treat those green exec tests as compatibility evidence, not
   as proof that runner-backed observe is the production runtime path.
 - Runner-backed observe now installs a CAS-backed `Producing` service when an
   observer returns `WireValue::Tree`. `RunnerAcceptor` and daemon-hosted runner
@@ -220,6 +223,13 @@ Latest focused verification:
   client. The demanded case reaches the explicit no-CAS-VFS runner poison; the
   undemanded tuple-slot case stays cold. These do not yet prove live mounted
   CAS-VFS execution from a demanded `.vx` backtick invocation.
+- `vx-runner::tests::strand_observe_uses_runner_backed_live_vfs_for_success_and_failure`
+  is an ignored live-VFS proof target for direct Observe. It boots
+  `vx_vfsd::boot_with_store`, runs `/bin/true` and `/bin/false` through
+  `RunnerService::observe`, evaluates `(run) => run.ok`, and proves both the
+  clean value and gate poison cross back through the strand boss. The old
+  `crates/vx-runtime/tests/observe_on_strands.rs` scratch-backed integration
+  file has been deleted.
 - `vx-runner::tests::demanded_vixen_exec_runs_through_runner_backed_live_vfs_and_serves_output_tree`
   is an ignored live-VFS proof target. It compiles a real `.vx` backtick
   invocation, boots `vx_vfsd::boot_with_store`, builds a runner-backed observe

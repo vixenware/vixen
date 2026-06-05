@@ -151,9 +151,10 @@ Expected latest structural checkpoint:
   `Producing` service from flushed `ExecResult.outputs`; both `RunnerAcceptor`
   and daemon-hosted runner sessions route `"Producing"`, and the service resolves
   demanded paths by walking `DirectoryNode` trees and fetching file chunks from
-  `vx-store`. Default runtime tests still use `local_observer()` and therefore
-  do not prove the full runner-backed `.vx` exec path; the live-VFS `.vx` proof
-  currently exists as an ignored runner-owned test.
+  `vx-store`. Default runtime exec/output tests still use `local_observer()` and
+  therefore do not prove the full runner-backed `.vx` exec path; direct
+  observe-on-strands coverage has moved to runner-owned tests, and live-VFS
+  proofs currently exist as ignored runner-owned tests.
 - Top-level producing trees returned by observe cross as remote handles attached
   to graph `OutputTree` nodes. Demanding `tree.file(path)` is a separate graph
   boundary that materializes only that path through strand remote-part demand.
@@ -207,19 +208,28 @@ Latest verified red/green shape:
   call memo reuse, resolved-argument disambiguation, closure capture memo reuse,
   function-entry disambiguation for shared code identities, and proof that
   unresolved arguments or captures are not demanded to build a call memo key.
-- `cargo nextest run -p vx-runtime --no-fail-fast`: 154 run, 154 passed,
+- `cargo nextest run -p vx-runtime --no-fail-fast`: 155 run, 155 passed,
   0 failed, 0 skipped.
-- `cargo nextest run -p vx-runner --no-fail-fast`: 6 run, 6 passed, 1 skipped
-  (the ignored live-VFS proof target).
+- `cargo nextest run -p vx-runner --no-fail-fast`: 6 run, 6 passed, 2 skipped
+  (the ignored live-VFS proof targets).
 - `cargo nextest list -p vx-runner --run-ignored only`: selected
-  `tests::demanded_vixen_exec_runs_through_runner_backed_live_vfs_and_serves_output_tree`.
+  `tests::demanded_vixen_exec_runs_through_runner_backed_live_vfs_and_serves_output_tree`
+  and
+  `tests::strand_observe_uses_runner_backed_live_vfs_for_success_and_failure`.
 - `cargo nextest run -p vx-services -p vx-runtime-graph -p vx-runtime-core -p vx-runtime-driver -p vx-runtime -p vx-runner --no-fail-fast`:
-  189 run, 189 passed, 1 skipped.
+  187 run, 187 passed, 2 skipped.
 - `cargo nextest run -p vx-daemon --no-fail-fast`: 2/2 passed.
 - `vx-runner::tests::strand_observe_reaches_runner_backed_service` drives
   `vx-runtime` strands against a runner-backed `Observe` client and reaches the
   explicit no-CAS-VFS poison. This proves the strand/Observe seam can target the
   runner service without a runtime-to-runner dependency.
+- `vx-runner::tests::strand_observe_uses_runner_backed_live_vfs_for_success_and_failure`
+  is an ignored live-VFS proof target for direct Observe. It boots
+  `vx_vfsd::boot_with_store`, runs `/bin/true` and `/bin/false` through
+  `RunnerService::observe`, evaluates `(run) => run.ok`, and proves both the
+  clean value and gate poison cross back through the strand boss. The old
+  `crates/vx-runtime/tests/observe_on_strands.rs` scratch-backed integration
+  file has been deleted.
 - `vx-runner::output_tree::tests::reads_declared_output_root_from_cas` proves a
   flushed CAS output root can serve `out/y.txt` over the runner `Producing`
   service. `vx-runner::tests::producing_vconn_serves_runner_output_tree_from_cas`
