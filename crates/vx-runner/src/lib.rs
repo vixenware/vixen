@@ -118,6 +118,9 @@ impl vox::ConnectionAcceptor for RunnerAcceptor {
 
 #[cfg(test)]
 mod tests {
+    use std::rc::Rc;
+    use std::sync::Arc;
+
     use vx_ir::item::ItemKind;
     use vx_runtime::compile::{FrontEnd, compile_source};
     use vx_runtime::eval::{
@@ -308,11 +311,61 @@ mod tests {
     }
 
     #[test]
+    #[ignore = "needs the live CAS-VFS mount; run with --ignored on a host with the Vixen VFS"]
+    fn demanded_vixen_exec_runs_through_runner_backed_live_vfs_and_serves_output_tree() {
+        let fe = compile_source(
+            "fn t(cmd: Command, script: String) -> Blob ( \
+               let out = `$cmd -c ${script}` with { writable: [\"out\"] }; \
+               out.file(\"out/y.txt\") )",
+            "t",
+        )
+        .expect("exec output-tree program compiles");
+        let entry = entry_body(&fe, "t");
+
+        let scheduler = Scheduler::new(&[1]);
+        let (_temp, store) = scheduler.block_on(store_client());
+        let store = Arc::new(store);
+        let mount = "/tmp/vx/vfs".parse().expect("utf8 VFS mount path");
+        let vfsd = scheduler
+            .block_on(vx_vfsd::boot_with_store(Arc::clone(&store), &mount))
+            .expect("boot live CAS-VFS");
+        let client = scheduler.block_on(observe_client_for(
+            RunnerService::new(Some(Arc::clone(&store))).with_vfsd(vfsd),
+        ));
+        let cid = scheduler.register_observe_client(client);
+        let program = fe.program;
+        let env = fe.env;
+        let strand = scheduler.spawn(ResourceId(0), move || {
+            let cmd = tool_value("@vixen/grammar-cc", "cc", "/bin/sh");
+            let script = Value::Str(Rc::from("printf runner-vfs-payload > out/y.txt"));
+            match eval_body_with_exec(
+                &program,
+                &env,
+                entry,
+                vec![cmd, script],
+                KernelMode::Off,
+                cid,
+            ) {
+                EvalOutcome::Clean(Value::Str(bytes)) if bytes.as_ref() == "runner-vfs-payload" => {
+                    Outcome::Clean
+                }
+                other => Outcome::Poisoned(format!(
+                    "expected demanded .vx exec to run through runner-backed live CAS-VFS \
+                     and serve out/y.txt, got {other:?}"
+                )),
+            }
+        });
+        scheduler.demand(strand);
+        scheduler.run();
+        assert_eq!(scheduler.outcome(strand), Some(Outcome::Clean));
+    }
+
+    #[test]
     fn producing_vconn_serves_runner_output_tree_from_cas() {
         let scheduler = Scheduler::new(&[1]);
         let (_temp, store) = scheduler.block_on(store_client());
         let tree = scheduler.block_on(output_tree(&store));
-        let service = RunnerService::new(Some(std::sync::Arc::new(store)));
+        let service = RunnerService::new(Some(Arc::new(store)));
         service.install_produced_outputs(Some(CasOutputTreeService::new(
             service.store().expect("store"),
             vec![ExecOutput {

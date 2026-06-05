@@ -185,8 +185,12 @@ Latest focused verification:
   unresolved arguments or captures are not demanded to build a call memo key.
 - `cargo nextest run -p vx-runtime --no-fail-fast`: 154 run, 154 passed,
   0 failed, 0 skipped.
+- `cargo nextest run -p vx-runner --no-fail-fast`: 6 run, 6 passed, 1 skipped
+  (the ignored live-VFS proof target).
+- `cargo nextest list -p vx-runner --run-ignored only`: selected
+  `tests::demanded_vixen_exec_runs_through_runner_backed_live_vfs_and_serves_output_tree`.
 - `cargo nextest run -p vx-services -p vx-runtime-graph -p vx-runtime-core -p vx-runtime-driver -p vx-runtime -p vx-runner --no-fail-fast`:
-  189 run, 189 passed, 0 skipped.
+  189 run, 189 passed, 1 skipped.
 - `cargo nextest run -p vx-daemon --no-fail-fast`: 2/2 passed.
 - `vx-runner::tests::strand_observe_reaches_runner_backed_service` drives a
   `vx-runtime` strand against a runner-backed `Observe` service and reaches the
@@ -216,6 +220,13 @@ Latest focused verification:
   client. The demanded case reaches the explicit no-CAS-VFS runner poison; the
   undemanded tuple-slot case stays cold. These do not yet prove live mounted
   CAS-VFS execution from a demanded `.vx` backtick invocation.
+- `vx-runner::tests::demanded_vixen_exec_runs_through_runner_backed_live_vfs_and_serves_output_tree`
+  is an ignored live-VFS proof target. It compiles a real `.vx` backtick
+  invocation, boots `vx_vfsd::boot_with_store`, builds a runner-backed observe
+  client from `RunnerService::with_vfsd`, runs the demanded exec with
+  `writable: ["out"]`, and demands `out.file("out/y.txt")` through the returned
+  producing tree. It requires the host CAS-VFS mount and is skipped by default;
+  do not replace it with scratch execution to make default CI greener.
 - The forbidden-symbol scan over `vx-runtime-core` and `vx-runtime-driver`
   returns no matches.
 - The deleted tree-walker affordance scan over `vx-runtime/src` returns no

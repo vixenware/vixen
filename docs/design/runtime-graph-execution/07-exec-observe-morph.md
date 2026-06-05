@@ -184,6 +184,14 @@ Current checkpoint:
 - These tests prove the runner-backed Observe seam and output-tree serving
   substrate without a live mounted VFS. They do not prove a demanded `.vx`
   backtick invocation running through live CAS-VFS yet.
+- `vx-runner::tests::demanded_vixen_exec_runs_through_runner_backed_live_vfs_and_serves_output_tree`
+  is an ignored live-VFS proof target. It compiles a real `.vx` backtick
+  invocation, boots `vx_vfsd::boot_with_store`, builds a `RunnerService` with
+  `with_vfsd`, runs `/bin/sh -c ...` with `writable: ["out"]`, uses the default
+  `run.ok.out` observer, and demands `out.file("out/y.txt")` through the
+  runner-backed `Producing` virtual connection. It is not run by default because
+  it requires the host CAS-VFS mount; the default suite should show it as
+  skipped, not silently replace it with scratch execution.
 - The old runtime tests still use `local_observer()` until a live-VFS or
   explicitly-unsupported runner-backed harness replaces them.
 
@@ -266,16 +274,21 @@ Once exec runs through the runner-backed path:
   14/14 passed.
 - `cargo nextest run -p vx-runtime -E 'test(exec_invocation_metadata_carries_writable_roots) | test(writable_roots_are_part_of_the_backtick_exec_l1_key) | binary(observe_on_strands) | binary(exec_on_strands) | binary(exec_output_tree)' --no-fail-fast`:
   15/15 passed.
-- `cargo nextest list -p vx-runner` selected
+- `cargo nextest list -p vx-runner --run-ignored all` selected
   `output_tree::tests::reads_declared_output_root_from_cas`,
   `sandbox::tests::seatbelt_confines_writes_to_the_output_root`,
   `tests::demanded_vixen_exec_reaches_runner_backed_observe`,
+  `tests::demanded_vixen_exec_runs_through_runner_backed_live_vfs_and_serves_output_tree`,
   `tests::producing_vconn_serves_runner_output_tree_from_cas`, and
   `tests::strand_observe_reaches_runner_backed_service`, and
   `tests::undemanded_vixen_exec_with_runner_backed_client_stays_cold`.
-- `cargo nextest run -p vx-runner --no-fail-fast`: 6/6 passed.
+- `cargo nextest list -p vx-runner --run-ignored only` selected the ignored
+  live-VFS proof target:
+  `tests::demanded_vixen_exec_runs_through_runner_backed_live_vfs_and_serves_output_tree`.
+- `cargo nextest run -p vx-runner --no-fail-fast`: 6/6 passed, 1 skipped
+  (the live-VFS proof target).
 - `cargo nextest run -p vx-services -p vx-runtime-graph -p vx-runtime-core -p vx-runtime-driver -p vx-runtime -p vx-runner --no-fail-fast`:
-  189/189 passed.
+  189/189 passed, 1 skipped.
 - `cargo nextest run -p vx-daemon --no-fail-fast`: 2/2 passed.
 - The forbidden-symbol scans over `vx-runtime-core`, `vx-runtime-driver`, and the
   deleted tree-walker affordance scan over `vx-runtime/src` returned no matches.
@@ -291,10 +304,11 @@ Finish M2/M3:
 
 1. Teach the runtime/orchestrator test harness to obtain an observe client from a
    runner-backed service instead of `local_observer()`.
-2. Build or expose a live-VFS runner-backed harness for demanded `.vx` backtick
-   invocations. If the host cannot supply a mounted CAS-VFS, the test should fail
-   through the explicit unsupported/no-VFS state rather than using scratch
+2. On a host with the Vixen CAS-VFS mount, run the ignored live proof with
+   `cargo nextest run -p vx-runner --run-ignored only --no-fail-fast` and record
+   the result. If the host cannot supply CAS-VFS, the proof should fail at the
+   explicit VFS boot/runner-backed boundary, never by switching to scratch
    execution.
-3. Once the production harness exists, move `observe_on_strands`,
+3. Move `observe_on_strands`,
    `exec_on_strands`, `exec_output_tree`, `hello_world`, and the `.vx` exec
    boundary coverage off `local_observer()`.

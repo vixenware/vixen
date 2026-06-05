@@ -151,8 +151,9 @@ Expected latest structural checkpoint:
   `Producing` service from flushed `ExecResult.outputs`; both `RunnerAcceptor`
   and daemon-hosted runner sessions route `"Producing"`, and the service resolves
   demanded paths by walking `DirectoryNode` trees and fetching file chunks from
-  `vx-store`. Runtime tests still use `local_observer()` and therefore do not
-  yet prove the full runner-backed `.vx` exec path.
+  `vx-store`. Default runtime tests still use `local_observer()` and therefore
+  do not prove the full runner-backed `.vx` exec path; the live-VFS `.vx` proof
+  currently exists as an ignored runner-owned test.
 - Top-level producing trees returned by observe cross as remote handles attached
   to graph `OutputTree` nodes. Demanding `tree.file(path)` is a separate graph
   boundary that materializes only that path through strand remote-part demand.
@@ -208,8 +209,12 @@ Latest verified red/green shape:
   unresolved arguments or captures are not demanded to build a call memo key.
 - `cargo nextest run -p vx-runtime --no-fail-fast`: 154 run, 154 passed,
   0 failed, 0 skipped.
+- `cargo nextest run -p vx-runner --no-fail-fast`: 6 run, 6 passed, 1 skipped
+  (the ignored live-VFS proof target).
+- `cargo nextest list -p vx-runner --run-ignored only`: selected
+  `tests::demanded_vixen_exec_runs_through_runner_backed_live_vfs_and_serves_output_tree`.
 - `cargo nextest run -p vx-services -p vx-runtime-graph -p vx-runtime-core -p vx-runtime-driver -p vx-runtime -p vx-runner --no-fail-fast`:
-  189 run, 189 passed, 0 skipped.
+  189 run, 189 passed, 1 skipped.
 - `cargo nextest run -p vx-daemon --no-fail-fast`: 2/2 passed.
 - `vx-runner::tests::strand_observe_reaches_runner_backed_service` drives
   `vx-runtime` strands against a runner-backed `Observe` client and reaches the
@@ -226,6 +231,13 @@ Latest verified red/green shape:
   client. The demanded case reaches the explicit no-CAS-VFS runner poison; the
   undemanded tuple-slot case stays cold. These do not yet prove live CAS-VFS
   execution from a demanded `.vx` backtick invocation.
+- `vx-runner::tests::demanded_vixen_exec_runs_through_runner_backed_live_vfs_and_serves_output_tree`
+  is an ignored live-VFS proof target. It compiles a real `.vx` backtick
+  invocation, boots `vx_vfsd::boot_with_store`, registers a runner-backed
+  `ObserveClient` from `RunnerService::with_vfsd`, runs `/bin/sh -c ...` with
+  `writable: ["out"]`, and demands `out.file("out/y.txt")` through the
+  runner-backed `Producing` virtual connection. It is skipped by default because
+  it requires the host CAS-VFS mount.
 - `vx-runtime::analyze::tests::exec_invocation_metadata_carries_writable_roots`
   proves `writable: ["out"]` is recorded as exec metadata rather than being
   accepted only by the front-end.
