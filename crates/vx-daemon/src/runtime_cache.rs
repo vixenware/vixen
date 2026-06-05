@@ -342,7 +342,7 @@ mod tests {
                 &env,
                 body,
                 vec![],
-                KernelMode::Off,
+                KernelMode::GraphOnly,
                 backend,
             );
             if !matches!(first, EvalOutcome::Clean(Value::U64(42))) {
@@ -360,7 +360,7 @@ mod tests {
                 &env,
                 body,
                 vec![],
-                KernelMode::Off,
+                KernelMode::GraphOnly,
                 StrandCacheBackend::new(cache_client),
             );
             if !matches!(second, EvalOutcome::Clean(Value::U64(42))) {
@@ -414,7 +414,7 @@ mod tests {
                 &env,
                 entry,
                 vec![cmd.clone(), script.clone()],
-                KernelMode::Off,
+                KernelMode::GraphOnly,
                 observe_client,
                 StrandCacheBackend::new(cache_client),
             );
@@ -435,7 +435,7 @@ mod tests {
                 &env,
                 entry,
                 vec![cmd, script],
-                KernelMode::Off,
+                KernelMode::GraphOnly,
                 observe_client,
                 StrandCacheBackend::new(cache_client),
             ) {

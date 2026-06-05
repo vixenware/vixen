@@ -5,7 +5,7 @@
 //! tests are `.vx`, the runner is the only Rust.
 //!
 //! Each test is run in every available [`KernelMode`] while the runtime is being
-//! cut over. The modes are retained as public API shape during the rebuild; they
+//! cut over. The modes are graph-kernel policy labels during the rebuild; they
 //! are not a license to run a source tree-walker as the truth engine.
 //!
 //! Annotations (read by the harness; inert metadata to the language):
@@ -13,7 +13,7 @@
 //! - `#[test(poisons)]` — must **poison** in every mode (the error-path form: a
 //!   `fail`, a forced `💣`, a failed `assert`).
 //! - `#[test(kernel)]` — additionally, the body must execute at least one graph
-//!   kernel node (observed in `Interp` mode).
+//!   kernel node (observed in `GraphKernelInterp` mode).
 //!
 //! `assert`/`assert_eq` come from the stdlib prelude; `💣` is the over-forcing
 //! tripwire. The detonation site or explicit graph unsupported error is the
@@ -50,12 +50,12 @@ fn lang_dir() -> PathBuf {
 }
 
 /// The modes to run each test in. During the rebuild, source entries are
-/// graph-driven in every mode; `Interp`/`Jit` remain public mode labels while the
-/// kernel backend is being rewired.
+/// graph-driven in every mode; these labels select graph-kernel policy while the
+/// backend is being rewired.
 fn modes() -> Vec<KernelMode> {
-    let mut m = vec![KernelMode::Off, KernelMode::Interp];
+    let mut m = vec![KernelMode::GraphOnly, KernelMode::GraphKernelInterp];
     #[cfg(all(target_os = "macos", target_arch = "aarch64"))]
-    m.push(KernelMode::Jit);
+    m.push(KernelMode::GraphKernelJit);
     m
 }
 
@@ -221,11 +221,11 @@ fn lang_suite() {
         }
 
         // `#[test(kernel)]`: the body must have executed a graph kernel node
-        // (observed through the Interp public mode).
+        // (observed through the graph-kernel interpreter public mode).
         if t.expect.kernel {
             let interp_dispatches = outs
                 .iter()
-                .find(|(m, _, _)| *m == KernelMode::Interp)
+                .find(|(m, _, _)| *m == KernelMode::GraphKernelInterp)
                 .map(|(_, _, d)| *d)
                 .unwrap_or(0);
             if interp_dispatches == 0 {

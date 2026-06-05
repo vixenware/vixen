@@ -52,7 +52,7 @@ fn eval_fn(name: &str) -> Outcome {
         &fe.env,
         body,
         vec![local_host_value()],
-        KernelMode::Off,
+        KernelMode::GraphOnly,
     )
 }
 

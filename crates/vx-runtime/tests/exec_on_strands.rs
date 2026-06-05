@@ -38,7 +38,7 @@ fn cold_exec_outcome(binary: &str) -> Option<Outcome> {
     let binary = binary.to_string();
     let strand = s.spawn(ResourceId(0), move || {
         let cmd = tool_value("@vixen/grammar-cc", "cc", &binary);
-        match eval_body_with_exec(&program, &env, entry, vec![cmd], KernelMode::Off, cid) {
+        match eval_body_with_exec(&program, &env, entry, vec![cmd], KernelMode::GraphOnly, cid) {
             EvalOutcome::Clean(Value::U64(42)) => Outcome::Clean,
             EvalOutcome::Clean(other) => {
                 Outcome::Poisoned(format!("expected the demanded sibling 42, got {other:?}"))

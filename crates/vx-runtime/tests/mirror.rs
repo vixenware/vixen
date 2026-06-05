@@ -27,12 +27,12 @@ fn mirror_installs_and_evaluates_a_body() {
         .expect("answer fn");
 
     // Oracle: evaluate the body in the original program.
-    let local = eval_body(&fe.program, &fe.env, entry, vec![], KernelMode::Off);
+    let local = eval_body(&fe.program, &fe.env, entry, vec![], KernelMode::GraphOnly);
 
     // Mirror: bundle the body → install into a fresh program → evaluate there.
     let bundle = reachable(&fe.program.arena, &fe.env, entry);
     let (mprog, menv) = bundle.install();
-    let mirror = eval_body(&mprog, &menv, entry, vec![], KernelMode::Off);
+    let mirror = eval_body(&mprog, &menv, entry, vec![], KernelMode::GraphOnly);
 
     assert!(
         matches!(local, Outcome::Clean(Value::U64(42))),
@@ -66,7 +66,13 @@ fn mirror_evaluates_a_body_with_an_argument() {
     let bundle = reachable(&fe.program.arena, &fe.env, entry);
     let (mprog, menv) = bundle.install();
 
-    let mirror = eval_body(&mprog, &menv, entry, vec![Value::U64(21)], KernelMode::Off);
+    let mirror = eval_body(
+        &mprog,
+        &menv,
+        entry,
+        vec![Value::U64(21)],
+        KernelMode::GraphOnly,
+    );
     assert!(
         matches!(mirror, Outcome::Clean(Value::U64(42))),
         "mirror double(21) = {mirror:?}"

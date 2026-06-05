@@ -181,12 +181,19 @@ Current partial state:
   is cfg(test)-only.
 - The `.vx` harness uses `run_in_mode`, so source-language tests now exercise the
   graph driver and fail explicitly where graph payloads are unsupported.
+- `KernelMode` no longer exposes `Off`, `Interp`, or `Jit` as old
+  tree-walker-oracle labels. The public variants are graph-native policy labels:
+  `GraphOnly`, `GraphKernelInterp`, and `GraphKernelJit`. The source-blind
+  guardrail binary scans runtime, runner, and daemon Rust code to keep the old
+  labels from returning.
 - The old `Evaluator`, `eval_inner`, `force_node`, expression-capturing
   `ThunkState::Unforced`, `Value::Closure`, and `dispatch.rs` scalar planner are
   deleted from compiled runtime code.
 
 Latest focused verification:
 
+- `cargo check -p vx-runtime -p vx-runner -p vx-daemon`: passed after renaming
+  `KernelMode` variants to graph-native policy labels.
 - `cargo check -p vx-runtime-graph -p vx-runtime-core -p vx-runtime-driver -p vx-runtime`:
   passed after boundary payload demand was restricted to declared boundary
   inputs and `ResolvedBoundaryPayload` fields.
@@ -199,20 +206,26 @@ Latest focused verification:
   `crates/vx-runtime-core`, `crates/vx-runtime-driver`, and
   `crates/vx-runtime/src` returned no matches after this checkpoint.
 - `cargo nextest list -p vx-runtime -E 'binary(source_blind_guardrails)'`:
-  selected the seven source-blind guardrail tests.
+  selected eight source-blind guardrail tests, including
+  `kernel_mode_oracle_labels_stay_deleted`.
 - `cargo nextest run -p vx-runtime-driver --no-fail-fast`: 14/14 passed,
   including `resolved_public_value_authorizes_only_its_field_nodes`,
   `boundary_request_does_not_leave_node_in_progress`, and
   `boundary_payload_field_is_bound_to_resolved_payload_output`.
 - `cargo nextest run -p vx-runtime -E 'binary(source_blind_guardrails)' --no-fail-fast`:
-  7/7 passed, including `execution_crates_stay_source_blind` with guardrail
+  8/8 passed, including `execution_crates_stay_source_blind` with guardrail
   needles for public free `root`, `boundary_payload`, `public_value_field`, and
-  `test_probe` constructors.
+  `test_probe` constructors, plus `kernel_mode_oracle_labels_stay_deleted`.
 - `cargo nextest run -p vx-runtime --no-fail-fast`: 144/144 passed, including
   `lang_suite`.
+- `cargo nextest run -p vx-runtime -E 'binary(lang_suite)' --no-fail-fast`:
+  1/1 passed after the language suite switched to `GraphOnly`,
+  `GraphKernelInterp`, and `GraphKernelJit`.
 - `cargo nextest run -p vx-runtime-graph -p vx-runtime-core -p vx-runtime-driver -p vx-runtime --no-fail-fast`:
   163/163 passed, including `boundary_payload_field_is_bound_to_resolved_payload_output`,
   source-blind guardrails, and `lang_suite`.
+- `cargo nextest run -p vx-runtime -p vx-runner -p vx-daemon --no-fail-fast`:
+  156/156 passed, 12 skipped, after the public mode-label cleanup.
 - `cargo check -p vx-cache-index -p vx-exec-protocol -p vx-services -p vx-store -p vx-runtime-graph -p vx-runtime-core -p vx-runtime-driver -p vx-runtime -p vx-runner -p vx-daemon`
   passes with no old-evaluator dead-code warnings.
 - `cargo nextest run -p vx-runtime -E 'binary(source_blind_guardrails) | binary(exec_on_strands)' --no-fail-fast`:
@@ -456,7 +469,8 @@ The runtime graph rebuild is done when:
 - Pure language tests pass through graph driver.
 - Boundary/exec/remote tests pass through graph driver.
 - Cache keys are input-keyed and computed before running.
-- `KernelMode` no longer names a tree-walker oracle.
+- `KernelMode` no longer names a tree-walker oracle; the current public labels
+  are graph-native policy labels.
 - Old expression-walker-only helpers are deleted.
 
 Final scan targets:

@@ -110,6 +110,15 @@ const RUNTIME_CACHE_SERVICE_CLIENT_NEEDLES: &[&str] = &[
     ".get_node(",
 ];
 
+const KERNEL_MODE_ORACLE_NEEDLES: &[&str] = &[
+    "KernelMode::Off",
+    "KernelMode::Interp",
+    "KernelMode::Jit",
+    "\n    Off,",
+    "\n    Interp,",
+    "\n    Jit,",
+];
+
 #[test]
 fn execution_crates_stay_source_blind() {
     let root = workspace_root();
@@ -225,6 +234,27 @@ fn runtime_cache_does_not_import_service_clients() {
         RUNTIME_CACHE_SERVICE_CLIENT_NEEDLES,
         "vx-runtime must not own daemon CacheIndex/Store RPC clients",
         "runtime-owned cache service affordance",
+    );
+}
+
+#[test]
+fn kernel_mode_oracle_labels_stay_deleted() {
+    let root = workspace_root();
+    let mut files = Vec::new();
+    collect_rs_files(&root.join("crates/vx-runtime/src"), &mut files);
+    collect_rs_files(&root.join("crates/vx-runtime/tests"), &mut files);
+    collect_rs_files(&root.join("crates/vx-runner/src"), &mut files);
+    collect_rs_files(&root.join("crates/vx-daemon/src"), &mut files);
+    files.retain(|path| {
+        path.file_name().and_then(|name| name.to_str()) != Some("source_blind_guardrails.rs")
+    });
+
+    assert_no_forbidden_needles(
+        &root,
+        files,
+        KERNEL_MODE_ORACLE_NEEDLES,
+        "KernelMode must not regain old tree-walker-oracle labels",
+        "old KernelMode oracle label",
     );
 }
 

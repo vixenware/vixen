@@ -42,7 +42,7 @@ fn force_out(s: &Scheduler, hid: HandleId, want: &'static str) -> StrandId {
             &env,
             entry,
             vec![Value::Tree(hid)],
-            KernelMode::Off,
+            KernelMode::GraphOnly,
         ) {
             EvalOutcome::Clean(Value::Str(s)) if &*s == want => Outcome::Clean,
             EvalOutcome::Clean(v) => Outcome::Poisoned(format!("wrong value: {v:?}")),

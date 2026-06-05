@@ -224,29 +224,30 @@ pub enum Outcome {
     Poisoned { reason: String, span: Option<Span> },
 }
 
-/// Transitional execution-mode knob retained by public callers while the graph
-/// runtime absorbs the old mode surface. All variants enter the graph driver.
+/// Transitional graph execution-mode knob retained by public callers while
+/// kernel backend selection is rebuilt. Every variant enters the graph driver;
+/// none names a source tree-walker or an oracle path.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum KernelMode {
     /// Graph execution without selecting an additional native-kernel preference.
-    Off,
-    /// Graph execution with interpreter kernels preferred where the graph lowers.
-    Interp,
+    GraphOnly,
+    /// Graph execution with graph kernel interpretation preferred.
+    GraphKernelInterp,
     /// Graph execution with native JIT kernels preferred where available.
-    Jit,
+    GraphKernelJit,
 }
 
 /// Evaluate function `entry` in `source` through the demand-driven engine, with
 /// the assert prelude prepended. `Err` is a setup failure (parse / not found);
 /// `Ok(Outcome)` is the evaluation result (clean or poisoned).
 pub fn run(source: &str, entry: &str) -> Result<Outcome, String> {
-    run_in_mode(source, entry, KernelMode::Jit).map(|(outcome, _)| outcome)
+    run_in_mode(source, entry, KernelMode::GraphKernelJit).map(|(outcome, _)| outcome)
 }
 
 /// As [`run`], but also reports how many graph kernels executed on the public
-/// evaluation run. Uses the default [`KernelMode::Jit`].
+/// evaluation run. Uses the default [`KernelMode::GraphKernelJit`].
 pub fn run_with_dispatches(source: &str, entry: &str) -> Result<(Outcome, u64), String> {
-    run_in_mode(source, entry, KernelMode::Jit)
+    run_in_mode(source, entry, KernelMode::GraphKernelJit)
 }
 
 /// Evaluate `entry` in `source` under an explicit [`KernelMode`], reporting the
@@ -830,7 +831,7 @@ mod tests {
             &fe.env,
             body,
             vec![],
-            KernelMode::Off,
+            KernelMode::GraphOnly,
         ));
         assert!(matches!(name, Value::Str(s) if s.as_ref() == "cc"));
     }
@@ -858,7 +859,7 @@ mod tests {
             &fe.env,
             body,
             vec![],
-            KernelMode::Off,
+            KernelMode::GraphOnly,
         ));
         assert!(matches!(command_name, Value::Str(s) if s.as_ref() == "cc"));
 
@@ -917,7 +918,7 @@ mod tests {
             &tenv,
             body,
             vec![],
-            KernelMode::Off,
+            KernelMode::GraphOnly,
             0,
             providers,
         ) {

@@ -26,7 +26,13 @@ fn observe_ok(exit_code: i32) -> Outcome {
         stdout: b"hi".to_vec(),
         stderr: Vec::new(),
     });
-    eval_body(&fe.program, &fe.env, entry, vec![run], KernelMode::Off)
+    eval_body(
+        &fe.program,
+        &fe.env,
+        entry,
+        vec![run],
+        KernelMode::GraphOnly,
+    )
 }
 
 #[test]

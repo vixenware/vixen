@@ -68,7 +68,7 @@ fn host_which_resolves_a_tool() {
         &fe.env,
         body,
         vec![local_host_value()],
-        KernelMode::Off,
+        KernelMode::GraphOnly,
     );
 
     match outcome {
@@ -96,7 +96,7 @@ fn host_os_field_reads() {
         &fe.env,
         body,
         vec![local_host_value()],
-        KernelMode::Off,
+        KernelMode::GraphOnly,
     );
 
     match outcome {
@@ -123,7 +123,7 @@ fn host_exec_runs_a_tool_and_fingerprints_the_binary() {
             &fe.env,
             body,
             vec![local_host_value()],
-            KernelMode::Off,
+            KernelMode::GraphOnly,
         )
     };
 
@@ -161,7 +161,7 @@ fn host_exec_resolves_bare_program_names_for_fingerprinting() {
         &fe.env,
         body,
         vec![local_host_value()],
-        KernelMode::Off,
+        KernelMode::GraphOnly,
     );
 
     match outcome {
@@ -198,7 +198,7 @@ fn host_exec_l2_cache_survives_fresh_graph_eval() {
             &fe.env,
             body,
             vec![local_host_value()],
-            KernelMode::Off,
+            KernelMode::GraphOnly,
             backend.clone(),
         )
     };
@@ -249,7 +249,7 @@ fn host_exec_uses_input_keyed_l1_cache() {
         &fe.env,
         body,
         vec![local_host_value()],
-        KernelMode::Off,
+        KernelMode::GraphOnly,
     );
 
     match outcome {

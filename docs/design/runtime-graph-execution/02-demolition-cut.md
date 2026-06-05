@@ -97,9 +97,10 @@ from an expression interpreter.
    paths are off it. If deletion is too large for the first demolition commit,
    add a tripwire that fails if any public path calls it.
 
-8. Remove `KernelMode::Off` as "tree-walker disabled dispatch." Temporary modes
-   can be:
-   - graph interpreter
+8. Remove the old `KernelMode::Off` / `Interp` / `Jit` vocabulary as
+   tree-walker-or-oracle labels. Temporary modes can be graph-native policy
+   labels:
+   - graph only
    - graph plus kernel interpreter
    - graph plus JIT
 

@@ -516,7 +516,8 @@ mod tests {
         let env = fe.env;
         let strand = scheduler.spawn(ResourceId(0), move || {
             let cmd = tool_value("@vixen/grammar-cc", "cc", "true");
-            match eval_body_with_exec(&program, &env, entry, vec![cmd], KernelMode::Off, cid) {
+            match eval_body_with_exec(&program, &env, entry, vec![cmd], KernelMode::GraphOnly, cid)
+            {
                 EvalOutcome::Poisoned { reason, .. }
                     if reason.contains("runner-backed observe has no CAS-VFS configured") =>
                 {
@@ -550,7 +551,8 @@ mod tests {
         let env = fe.env;
         let strand = scheduler.spawn(ResourceId(0), move || {
             let cmd = tool_value("@vixen/grammar-cc", "cc", "false");
-            match eval_body_with_exec(&program, &env, entry, vec![cmd], KernelMode::Off, cid) {
+            match eval_body_with_exec(&program, &env, entry, vec![cmd], KernelMode::GraphOnly, cid)
+            {
                 EvalOutcome::Clean(Value::U64(42)) => Outcome::Clean,
                 other => Outcome::Poisoned(format!(
                     "undemanded exec should stay cold and return 42, got {other:?}"
@@ -580,7 +582,7 @@ mod tests {
         let env = fe.env;
         let strand = scheduler.spawn(ResourceId(0), move || {
             let ok = tool_value("@vixen/grammar-cc", "cc", "/bin/true");
-            match eval_body_with_exec(&program, &env, entry, vec![ok], KernelMode::Off, cid) {
+            match eval_body_with_exec(&program, &env, entry, vec![ok], KernelMode::GraphOnly, cid) {
                 EvalOutcome::Clean(Value::Struct(fields)) => {
                     let names: Vec<&str> = fields.iter().map(|(name, _)| name.as_str()).collect();
                     if names != ["stdout", "stderr"] {
@@ -598,7 +600,14 @@ mod tests {
             }
 
             let failed = tool_value("@vixen/grammar-cc", "cc", "/bin/false");
-            match eval_body_with_exec(&program, &env, entry, vec![failed], KernelMode::Off, cid) {
+            match eval_body_with_exec(
+                &program,
+                &env,
+                entry,
+                vec![failed],
+                KernelMode::GraphOnly,
+                cid,
+            ) {
                 EvalOutcome::Poisoned { reason, .. } if !reason.is_empty() => Outcome::Clean,
                 other => Outcome::Poisoned(format!(
                     "expected /bin/false run.ok to poison over runner-backed live CAS-VFS, \
@@ -638,7 +647,7 @@ mod tests {
                 &env,
                 entry,
                 vec![cmd, script],
-                KernelMode::Off,
+                KernelMode::GraphOnly,
                 cid,
             ) {
                 EvalOutcome::Clean(Value::Unit) => Outcome::Clean,
@@ -687,7 +696,7 @@ mod tests {
                 &env,
                 entry,
                 vec![cmd, script],
-                KernelMode::Off,
+                KernelMode::GraphOnly,
                 cid,
             ) {
                 EvalOutcome::Clean(Value::Unit) => Outcome::Clean,
@@ -734,7 +743,7 @@ mod tests {
                 &env,
                 entry,
                 vec![cmd, script],
-                KernelMode::Off,
+                KernelMode::GraphOnly,
                 cid,
             ) {
                 EvalOutcome::Clean(Value::Unit) => Outcome::Clean,
@@ -787,7 +796,7 @@ mod tests {
                 &env,
                 entry,
                 vec![first, second, script],
-                KernelMode::Off,
+                KernelMode::GraphOnly,
                 cid,
             ) {
                 EvalOutcome::Clean(Value::Unit) => Outcome::Clean,
@@ -855,7 +864,7 @@ mod tests {
         let binary = link.to_string_lossy().into_owned();
         let strand = scheduler.spawn(ResourceId(0), move || {
             let cmd = tool_value("@vixen/grammar-cc", "cc", &binary);
-            match eval_body_with_exec(&program, &env, entry, vec![cmd], KernelMode::Off, cid) {
+            match eval_body_with_exec(&program, &env, entry, vec![cmd], KernelMode::GraphOnly, cid) {
                 EvalOutcome::Clean(Value::Unit) => Outcome::Clean,
                 other => Outcome::Poisoned(format!(
                     "expected executable-fingerprint-distinct runner-backed execs to resolve, got {other:?}"
@@ -898,7 +907,7 @@ mod tests {
                 &env,
                 entry,
                 vec![cmd, script],
-                KernelMode::Off,
+                KernelMode::GraphOnly,
                 cid,
             ) {
                 EvalOutcome::Clean(Value::Str(bytes)) if bytes.as_ref() == "runner-vfs-payload" => {
@@ -944,7 +953,7 @@ mod tests {
                 &env,
                 entry,
                 vec![cmd, script],
-                KernelMode::Off,
+                KernelMode::GraphOnly,
                 cid,
             ) {
                 EvalOutcome::Clean(Value::Str(bytes)) if bytes.as_ref() == "stream-vfs-payload" => {
@@ -987,7 +996,7 @@ mod tests {
                 &env,
                 entry,
                 vec![cmd, script],
-                KernelMode::Off,
+                KernelMode::GraphOnly,
                 cid,
             ) {
                 EvalOutcome::Poisoned { reason, .. } if !reason.is_empty() => Outcome::Clean,
@@ -1037,7 +1046,7 @@ mod tests {
                 &env,
                 entry,
                 vec![hello],
-                KernelMode::Off,
+                KernelMode::GraphOnly,
                 cid,
                 providers,
             ) {

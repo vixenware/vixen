@@ -38,7 +38,13 @@ fn a_native_backed_struct_field_forces_its_intrinsic() {
         Thunk::native(|| Ok(Value::U64(42))),
     )]);
 
-    let outcome = eval_body(&fe.program, &fe.env, entry, vec![boxed], KernelMode::Off);
+    let outcome = eval_body(
+        &fe.program,
+        &fe.env,
+        entry,
+        vec![boxed],
+        KernelMode::GraphOnly,
+    );
     assert!(
         matches!(outcome, Outcome::Clean(Value::U64(42))),
         "field access forces the intrinsic → 42, got {outcome:?}"
@@ -76,7 +82,7 @@ fn a_native_field_is_lazy_then_memoised() {
         &fe.env,
         pick,
         vec![counted(c0.clone()), Value::Bool(false)],
-        KernelMode::Off,
+        KernelMode::GraphOnly,
     );
     assert!(matches!(o0, Outcome::Clean(Value::U64(0))));
     assert_eq!(
@@ -93,7 +99,7 @@ fn a_native_field_is_lazy_then_memoised() {
         &fe.env,
         twice,
         vec![counted(c1.clone())],
-        KernelMode::Off,
+        KernelMode::GraphOnly,
     );
     assert!(
         matches!(o1, Outcome::Clean(Value::U64(14))),

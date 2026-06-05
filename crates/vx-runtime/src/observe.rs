@@ -34,7 +34,13 @@ pub fn evaluate_observer(run: CompletedRun, observer: Option<Bundle>) -> Observe
         Some(bundle) => {
             let run = run_value::build(run.proc);
             let (program, env) = bundle.install();
-            match eval_body_wire(&program, &env, bundle.entry, vec![run], KernelMode::Off) {
+            match eval_body_wire(
+                &program,
+                &env,
+                bundle.entry,
+                vec![run],
+                KernelMode::GraphOnly,
+            ) {
                 Ok(value) => Observed::Value(value),
                 Err(reason) => Observed::Poisoned(reason),
             }
