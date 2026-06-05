@@ -59,6 +59,7 @@ pub(crate) struct GraphRuntimeMeta {
 pub(crate) struct ExecInvocationMeta {
     pub(crate) args: Vec<CliArgTemplate>,
     pub(crate) observer: Option<vx_ir::Bundle>,
+    pub(crate) env: Vec<ExecEnvMeta>,
     pub(crate) writable_roots: Vec<NodeId>,
     pub(crate) create_dirs: Vec<NodeId>,
 }
@@ -71,6 +72,18 @@ pub(crate) struct CliArgTemplate {
 #[derive(Debug, Clone)]
 pub(crate) enum CliArgPiece {
     Text(String),
+    Node(NodeId),
+}
+
+#[derive(Debug, Clone)]
+pub(crate) struct ExecEnvMeta {
+    pub(crate) key: ExecEnvKey,
+    pub(crate) value: NodeId,
+}
+
+#[derive(Debug, Clone)]
+pub(crate) enum ExecEnvKey {
+    Literal(String),
     Node(NodeId),
 }
 
@@ -238,6 +251,7 @@ struct CallableTemplate {
 #[derive(Default)]
 struct ExecKeywords {
     observer: Option<BodyId>,
+    env: Vec<ExecEnvMeta>,
     writable_roots: Vec<NodeId>,
     create_dirs: Vec<NodeId>,
 }
@@ -386,6 +400,12 @@ impl Builder<'_> {
             .collect();
         inputs.extend(meta.writable_roots.iter().copied());
         inputs.extend(meta.create_dirs.iter().copied());
+        for env in &meta.env {
+            if let ExecEnvKey::Node(node) = env.key {
+                inputs.push(node);
+            }
+            inputs.push(env.value);
+        }
         let node = self.emit(NodeKind::Boundary, "`…`".into(), span, inputs);
         let observer = meta
             .observer
@@ -395,6 +415,7 @@ impl Builder<'_> {
             ExecInvocationMeta {
                 args,
                 observer,
+                env: meta.env,
                 writable_roots: meta.writable_roots,
                 create_dirs: meta.create_dirs,
             },
@@ -429,13 +450,50 @@ impl Builder<'_> {
             },
             None => None,
         };
+        let env = self.keyword_env_map(record)?;
         let writable_roots = self.keyword_path_array(record, "writable")?;
         let create_dirs = self.keyword_path_array(record, "create_dirs")?;
         Ok(ExecKeywords {
             observer,
+            env,
             writable_roots,
             create_dirs,
         })
+    }
+
+    fn keyword_env_map(
+        &mut self,
+        record: &vx_ir::expr::RecordExpr,
+    ) -> Result<Vec<ExecEnvMeta>, String> {
+        let Some(field) = record.fields.iter().find(|field| field.name == "env") else {
+            return Ok(Vec::new());
+        };
+        let ExprKind::Map(map) = &self.program.arena[field.value].kind else {
+            return Err("an invocation's `env` keyword must be a map literal in graph exec".into());
+        };
+        let entries = map.entries.clone();
+        let mut env = Vec::with_capacity(entries.len());
+        for element in entries {
+            match element {
+                MapElement::Entry(entry) => {
+                    let key = match entry.key {
+                        MapKey::Name { name, .. } => ExecEnvKey::Literal(name),
+                        MapKey::Expr(expr) => ExecEnvKey::Node(self.walk(expr)),
+                    };
+                    env.push(ExecEnvMeta {
+                        key,
+                        value: self.walk(entry.value),
+                    });
+                }
+                MapElement::Spread(_) => {
+                    return Err(
+                        "an invocation's `env` keyword does not support spreads in graph exec yet"
+                            .into(),
+                    );
+                }
+            }
+        }
+        Ok(env)
     }
 
     fn keyword_path_array(
@@ -2765,6 +2823,47 @@ mod tests {
         assert!(
             matches!(&node.kind, NodeKind::Const(ConstValue::Str(value)) if value == "out/obj"),
             "create dir node should be the literal path, got {node:?}"
+        );
+    }
+
+    #[test]
+    fn exec_invocation_metadata_carries_env_entries() {
+        let src = "fn t(cmd: Command) -> Tree ( \
+                   `$cmd` with { \
+                     env: %{ \"VX_ENV_PROOF\" => \"yes\" }, \
+                     observer: (run) => run.ok.out \
+                   } )";
+        let fe = crate::compile::compile_source(src, "t").expect("program compiles");
+        let entry = fe
+            .program
+            .arena
+            .items
+            .iter()
+            .find_map(|item| match &item.kind {
+                ItemKind::Function(function) if function.name == "t" => Some(function.body),
+                _ => None,
+            })
+            .expect("entry body");
+        let (graph, _, _, _, meta) = build_graph_indexed_with_meta(&fe.program, &fe.env, entry);
+        let exec = meta
+            .execs
+            .values()
+            .next()
+            .expect("one exec boundary is recorded");
+        assert_eq!(exec.env.len(), 1, "env is part of exec runtime metadata");
+        let ExecEnvKey::Node(key) = &exec.env[0].key else {
+            panic!("string-literal env key should lower as a graph node");
+        };
+        let node = &graph.nodes[key.0 as usize];
+        assert!(
+            matches!(&node.kind, NodeKind::Const(ConstValue::Str(value)) if value == "VX_ENV_PROOF"),
+            "env key node should be the literal key, got {node:?}"
+        );
+        let value = exec.env[0].value;
+        let node = &graph.nodes[value.0 as usize];
+        assert!(
+            matches!(&node.kind, NodeKind::Const(ConstValue::Str(value)) if value == "yes"),
+            "env value node should be the literal value, got {node:?}"
         );
     }
 

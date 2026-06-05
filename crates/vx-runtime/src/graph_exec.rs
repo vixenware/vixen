@@ -2,7 +2,7 @@ use std::cell::RefCell;
 use std::collections::HashMap;
 use std::rc::Rc;
 
-use vx_exec_protocol::{ExecCommand, ObserveRequest};
+use vx_exec_protocol::{ExecCommand, ExecEnv, ObserveRequest};
 use vx_ir::build::VirProgram;
 use vx_ir::ids::{BodyId, PatternId};
 use vx_ir::pattern::PatternKind;
@@ -16,7 +16,8 @@ use vx_types::TypeEnv;
 
 use crate::ability::{AttrLit, CmpOp, Constraint, ProviderRegistry};
 use crate::analyze::{
-    CapabilityRequestMeta, CliArgPiece, CliArgTemplate, ExecInvocationMeta, GraphRuntimeMeta,
+    CapabilityRequestMeta, CliArgPiece, CliArgTemplate, ExecEnvKey, ExecInvocationMeta,
+    GraphRuntimeMeta,
 };
 use crate::cache::{
     CachedExecOutcome, ExecInvocationCacheKey, HostExecCacheKey, ObserverCacheIdentity,
@@ -390,6 +391,33 @@ fn materialize_exec_invocation(
             arg,
         )?);
     }
+    let mut env = Vec::with_capacity(invocation.env.len());
+    for entry in &invocation.env {
+        let key = match &entry.key {
+            ExecEnvKey::Literal(key) => key.clone(),
+            ExecEnvKey::Node(node) => {
+                let output = demand_payload(
+                    Rc::clone(&driver),
+                    Rc::clone(&externals),
+                    runtime.clone(),
+                    boundary,
+                    *node,
+                )?;
+                expect_string(output, "exec env key")?
+            }
+        };
+        let value = demand_payload(
+            Rc::clone(&driver),
+            Rc::clone(&externals),
+            runtime.clone(),
+            boundary,
+            entry.value,
+        )?;
+        env.push(ExecEnv {
+            key,
+            value: expect_string(value, "exec env value")?,
+        });
+    }
     let mut output_roots = Vec::with_capacity(invocation.writable_roots.len());
     for root in &invocation.writable_roots {
         let output = demand_payload(
@@ -418,6 +446,7 @@ fn materialize_exec_invocation(
         &tool,
         program_fingerprint,
         args.clone(),
+        env.clone(),
         output_roots.clone(),
         create_dirs.clone(),
         invocation,
@@ -435,6 +464,7 @@ fn materialize_exec_invocation(
                 program: tool.binary,
                 args: args.clone(),
             },
+            env,
             outputs: output_roots,
             create_dirs,
         },
@@ -621,6 +651,7 @@ fn exec_invocation_key(
     tool: &ToolRequest,
     program_fingerprint: String,
     args: Vec<String>,
+    env: Vec<ExecEnv>,
     output_roots: Vec<String>,
     create_dirs: Vec<String>,
     invocation: &ExecInvocationMeta,
@@ -636,6 +667,7 @@ fn exec_invocation_key(
         program_fingerprint,
         declared_tool_fingerprint: tool.declared_fingerprint.clone(),
         args,
+        env: env.into_iter().map(|env| (env.key, env.value)).collect(),
         output_roots,
         create_dirs,
         observer,

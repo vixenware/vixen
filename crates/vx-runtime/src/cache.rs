@@ -28,6 +28,7 @@ pub(crate) struct ExecInvocationCacheKey {
     pub(crate) program_fingerprint: String,
     pub(crate) declared_tool_fingerprint: Option<String>,
     pub(crate) args: Vec<String>,
+    pub(crate) env: Vec<(String, String)>,
     pub(crate) output_roots: Vec<String>,
     pub(crate) create_dirs: Vec<String>,
     pub(crate) observer: ObserverCacheIdentity,

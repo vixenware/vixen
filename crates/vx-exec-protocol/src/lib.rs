@@ -17,6 +17,13 @@ pub struct ExecCommand {
     pub args: Vec<String>,
 }
 
+/// One environment variable for the executed process.
+#[derive(facet::Facet, Debug, Clone, PartialEq, Eq)]
+pub struct ExecEnv {
+    pub key: String,
+    pub value: String,
+}
+
 /// What the executor needs to observe: the command to run plus the observer to
 /// evaluate against its `Run`. `observer` is `None` for the default observer
 /// `run.ok.out`.
@@ -24,6 +31,7 @@ pub struct ExecCommand {
 pub struct ObserveRequest {
     pub observer: Option<Bundle>,
     pub command: ExecCommand,
+    pub env: Vec<ExecEnv>,
     pub outputs: Vec<String>,
     pub create_dirs: Vec<String>,
 }

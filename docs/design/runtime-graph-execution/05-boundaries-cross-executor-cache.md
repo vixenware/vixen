@@ -141,7 +141,7 @@ Current progress:
   `dispatch_observe`, then the resulting graph node is seeded and the same demand
   loop resumes.
 - Current graph `exec` dispatch sends the minimal
-  `ObserveRequest { program, args, observer, outputs, create_dirs }` from
+  `ObserveRequest { program, args, env, observer, outputs, create_dirs }` from
   `vx-exec-protocol` to a runner-backed `Observe` service. `vx-runtime` no
   longer contains the quarantined `ScratchObserveService` and no longer owns the
   Observe Vox service contract; live mount-run-flush coverage sits in ignored
@@ -152,8 +152,8 @@ Current progress:
 - `exec_on_strands` now only keeps the cold-field tripwire where a failing exec
   in tuple slot 0 stays undemanded while slot 1 is selected. Demanded exec
   value-crossing, L1 keying, fingerprint disambiguation, writable-root
-  disambiguation, `create_dirs` request shaping, and disk-L2 reuse have moved to
-  runner-owned or runner-backed proof targets.
+  disambiguation, `create_dirs` and string-env request shaping, and disk-L2 reuse
+  have moved to runner-owned or runner-backed proof targets.
 - `exec_boundaries.vx` passes through `lang_suite`: a real backtick exec in an
   undemanded tuple slot stays cold even though the source entry has no observe
   client available.
@@ -168,12 +168,12 @@ scratch observe service with the runner-backed exec path.
   directly. `vx-runtime` should surface an exec boundary need plus the
   materialized request-shaping graph payload. The daemon/orchestrator layer owns
   placement, runner RPC, retries, and cache/index lookup.
-- Grow the minimal `vx-exec-protocol::ObserveRequest { program, args, observer,
-  outputs, create_dirs }` into a protocol payload that can carry the projected
-  `Command`, resolved observer bundle/captures, env, CAS tree mounts, writable
-  output roots, exemptions, and verification obligations. The protocol type now
-  lives in a boundary crate, not in the graph evaluator, but its shape is still
-  only the first slice.
+- Grow the minimal `vx-exec-protocol::ObserveRequest { program, args, env,
+  observer, outputs, create_dirs }` into a protocol payload that can carry the
+  projected `Command`, resolved observer bundle/captures, full `ExecInput` env,
+  CAS tree mounts, writable output roots, exemptions, and verification
+  obligations. The protocol type now lives in a boundary crate, not in the graph
+  evaluator, but its shape is still only the first slice.
 - The selected executor daemon lowers that payload into its local
   sandbox/CAS-VFS mount-run-flush operation. It mounts inputs, runs the process
   under the VFS access path plus sandbox policy, records read/write witnesses,

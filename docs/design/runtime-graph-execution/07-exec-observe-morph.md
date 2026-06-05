@@ -23,7 +23,7 @@ exec/observe drift is the protocol/control-plane shape, not a process-spawning
 service in `vx-runtime`:
 
 - `vx-runtime::graph_exec` materializes a graph exec boundary and dispatches a
-  minimal `ObserveRequest { program, args, observer, outputs, create_dirs }`.
+  minimal `ObserveRequest { program, args, env, observer, outputs, create_dirs }`.
 - `vx-exec-protocol` owns that minimal protocol and the generated Vox
   Observe client/dispatcher. `vx-runtime::observe` now keeps only the
   executor-side observer-evaluation helper.
@@ -138,8 +138,9 @@ Current checkpoint:
 - The runner-backed observe implementation calls `run_exec` with the current
   minimal payload, converts the process result to `CompletedRun`, and calls
   `evaluate_observer`.
-- This path currently sends no mounts or env because the runtime-local observe
-  payload cannot represent them yet.
+- This path currently sends no mounts because the runtime-local observe payload
+  cannot represent CAS mount identities yet. It can carry string environment
+  entries; full `ExecInput` env channels remain future protocol work.
 - `writable: [...]` roots now cross as `ObserveRequest.outputs`, and
   `create_dirs: [...]` supplements now cross as `ObserveRequest.create_dirs`.
   Both are extracted as graph node refs, demanded only when the exec boundary
@@ -147,6 +148,11 @@ Current checkpoint:
   `ExecRequest.outputs` / `ExecRequest.create_dirs`. The runner creates valid
   `create_dirs` before launch only when they are equal to or nested under a
   declared writable root.
+- `env: %{ ... }` entries now cross as `ObserveRequest.env`. Env keys and values
+  are extracted as graph node refs where authored dynamically, demanded only when
+  the exec boundary materializes, included in the exec cache key, and forwarded by
+  `vx-runner` as `ExecRequest.env`. This is string key/value env only, not the
+  full `ExecInput` env surface.
 - If an observer result is `Observed::Tree` or `Observed::ValueWithTree`, the
   runner-backed path installs a CAS-backed `Producing` service over the flushed
   `ExecResult.outputs`; the orchestrator opens the `"Producing"` virtual
@@ -536,6 +542,15 @@ Current checkpoint:
   2/2 passed.
 - `cargo nextest run -p vx-exec-protocol -p vx-services -p vx-runtime -p vx-runner -p vx-daemon -p vx --no-fail-fast`:
   194/194 passed, 16 skipped.
+- `cargo check -p vx-exec-protocol -p vx-runtime -p vx-runner -p vx-daemon -p vx`:
+  passed after adding string env entries to the observe payload.
+- `cargo nextest list -p vx-runtime -E 'binary(exec_create_dirs) | test(exec_invocation_metadata_carries_env_entries) | test(exec_invocation_metadata_carries_writable_roots_and_create_dirs)'`:
+  selected the two exec metadata unit tests plus the create-dirs/env
+  `exec_create_dirs` integration tests.
+- `cargo nextest run -p vx-runtime -E 'binary(exec_create_dirs) | test(exec_invocation_metadata_carries_env_entries) | test(exec_invocation_metadata_carries_writable_roots_and_create_dirs)' --no-fail-fast`:
+  4/4 passed.
+- `cargo nextest run -p vx-exec-protocol -p vx-services -p vx-runtime -p vx-runner -p vx-daemon -p vx --no-fail-fast`:
+  196/196 passed, 16 skipped.
 - The forbidden-symbol scans over `vx-runtime-core`, `vx-runtime-driver`, the
   deleted tree-walker affordance scan over `vx-runtime/src`, and the
   runtime-owned exec/observe protocol and cache file-index scans over

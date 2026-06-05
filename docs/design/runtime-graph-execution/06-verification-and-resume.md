@@ -381,6 +381,15 @@ Latest focused verification:
   2/2 passed.
 - `cargo nextest run -p vx-exec-protocol -p vx-services -p vx-runtime -p vx-runner -p vx-daemon -p vx --no-fail-fast`:
   194/194 passed, 16 skipped.
+- `cargo check -p vx-exec-protocol -p vx-runtime -p vx-runner -p vx-daemon -p vx`:
+  passed after adding string env entries to the observe payload.
+- `cargo nextest list -p vx-runtime -E 'binary(exec_create_dirs) | test(exec_invocation_metadata_carries_env_entries) | test(exec_invocation_metadata_carries_writable_roots_and_create_dirs)'`:
+  selected the two exec metadata unit tests plus the create-dirs/env
+  `exec_create_dirs` integration tests.
+- `cargo nextest run -p vx-runtime -E 'binary(exec_create_dirs) | test(exec_invocation_metadata_carries_env_entries) | test(exec_invocation_metadata_carries_writable_roots_and_create_dirs)' --no-fail-fast`:
+  4/4 passed.
+- `cargo nextest run -p vx-exec-protocol -p vx-services -p vx-runtime -p vx-runner -p vx-daemon -p vx --no-fail-fast`:
+  196/196 passed, 16 skipped.
 - `vx-runner::tests::strand_observe_reaches_runner_backed_service` drives a
   `vx-runtime` strand against a runner-backed `Observe` service and reaches the
   explicit no-CAS-VFS poison without importing `vx-runner` into `vx-runtime`.
@@ -393,6 +402,11 @@ Latest focused verification:
 - `vx-runtime::exec_create_dirs::demanded_exec_forwards_create_dirs_to_observe_request`
   compiles a real `.vx` backtick invocation with `create_dirs` and proves the
   demanded graph exec boundary forwards it to the registered Observe client.
+- `vx-runtime::analyze::tests::exec_invocation_metadata_carries_env_entries` and
+  `vx-runtime::exec_create_dirs::demanded_exec_forwards_env_to_observe_request`
+  prove string env entries are graph exec metadata, included in the exec cache
+  key, and forwarded to `ObserveRequest.env` only when the exec boundary is
+  demanded.
 - `vx-runner` implements the runtime `Observe` service and routes it through
   `RunnerAcceptor`; `vx-daemon` advertises and routes `"Observe"` to its hosted
   `RunnerService` when a runner is configured. Direct observe-on-strands coverage
