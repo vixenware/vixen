@@ -204,7 +204,6 @@ fn drive_graph(
     externals: HashMap<NodeId, Thunk>,
     runtime: RuntimeBoundaries,
 ) -> Result<(Outcome, u64), String> {
-    let root = graph.root;
     let mut driver = Driver::new(graph);
     if runtime.cache.has_persistent_layer() {
         driver = driver.with_call_cache(Rc::clone(&runtime.cache).function_output_call_cache());
@@ -214,11 +213,12 @@ fn drive_graph(
     }
     let driver = Rc::new(RefCell::new(driver));
     let externals = Rc::new(RefCell::new(externals));
+    let request = driver.borrow().root_request();
     let result = drive_request(
         Rc::clone(&driver),
         Rc::clone(&externals),
         runtime.clone(),
-        DemandRequest::root(root),
+        request,
     )?;
     let kernel_executions = driver.borrow().kernel_executions();
     let outcome = match result {

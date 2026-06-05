@@ -23,6 +23,7 @@ const FORBIDDEN_NEEDLES: &[&str] = &[
     "legacy_eval",
     "fn force",
     ".force(",
+    "pub fn root(",
     "pub fn boundary_payload",
     "pub fn test_probe",
 ];

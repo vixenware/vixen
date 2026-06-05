@@ -75,7 +75,7 @@ from an expression interpreter.
    - runs the existing front-end,
    - builds a graph,
    - constructs `vx_runtime_driver::Driver`,
-   - drives `DemandRequest::root(graph.root)`,
+   - drives `Driver::root_request()`,
    - converts `NodeOutput` to the public `Outcome` shape temporarily.
 
 2. Point `run_in_mode` at the graph-engine public entry.
@@ -164,13 +164,13 @@ Public source and body entries now enter graph execution:
 run / run_with_dispatches / run_in_mode
   -> graph_exec::run_source
   -> analyze_source
-  -> Driver::drive(DemandRequest::root(graph.root))
+  -> Driver::drive(driver.root_request())
 
 eval_body / eval_body_with_exec / eval_body_with_exec_and_providers
   -> graph_exec::run_body / graph_exec::run_body_with_exec
      / graph_exec::run_body_with_exec_and_providers
   -> build_graph_indexed_with_meta
-  -> Driver::drive(DemandRequest::root(graph.root))
+  -> Driver::drive(driver.root_request())
 
 eval_body_wire / observer execution
   -> graph_exec::run_body

@@ -26,7 +26,7 @@ pub struct DemandRequest {
 }
 
 impl DemandRequest {
-    pub fn root(node: NodeId) -> Self {
+    fn root(node: NodeId) -> Self {
         Self {
             node,
             origin: DemandOrigin::RootResult,
@@ -153,6 +153,10 @@ impl Driver {
     pub fn with_seed(mut self, node: NodeId, output: NodeOutput) -> Self {
         self.seed(node, output);
         self
+    }
+
+    pub fn root_request(&self) -> DemandRequest {
+        DemandRequest::root(self.graph.root)
     }
 
     pub fn seed(&mut self, node: NodeId, output: NodeOutput) {
@@ -345,9 +349,7 @@ mod tests {
     fn root_projection_skips_dead_field() {
         let graph = vx_runtime_graph::example_bomb_pair();
         let mut driver = Driver::new(graph);
-        let output = driver
-            .drive(DemandRequest::root(NodeId(3)))
-            .expect("root demand");
+        let output = driver.drive(driver.root_request()).expect("root demand");
         assert_eq!(output, NodeOutput::U64(42));
         assert!(driver.memoized(NodeId(0)), "selected field memoized");
         assert!(!driver.memoized(NodeId(1)), "dead field not memoized");
@@ -396,7 +398,7 @@ mod tests {
         };
         let mut driver = Driver::new(graph);
         let boundary = driver
-            .drive(DemandRequest::root(NodeId(0)))
+            .drive(driver.root_request())
             .expect_err("root demand reaches the boundary");
         let DriverError::Boundary(boundary) = boundary else {
             panic!("expected boundary demand, got {boundary:?}");
@@ -409,10 +411,7 @@ mod tests {
         assert_eq!(driver.memo_state(NodeId(0)), None);
 
         driver.seed(NodeId(0), NodeOutput::Unit);
-        assert_eq!(
-            driver.drive(DemandRequest::root(NodeId(0))),
-            Ok(NodeOutput::Unit)
-        );
+        assert_eq!(driver.drive(driver.root_request()), Ok(NodeOutput::Unit));
         assert_eq!(driver.memo_state(NodeId(0)), Some(MemoState::Ready));
     }
 
@@ -453,10 +452,7 @@ mod tests {
             root: NodeId(2),
         };
         let mut driver = Driver::new(graph);
-        assert_eq!(
-            driver.drive(DemandRequest::root(NodeId(2))),
-            Ok(NodeOutput::U64(42))
-        );
+        assert_eq!(driver.drive(driver.root_request()), Ok(NodeOutput::U64(42)));
         assert_eq!(driver.memo_state(NodeId(0)), Some(MemoState::Ready));
         assert_eq!(driver.memo_state(NodeId(1)), None);
         assert_eq!(driver.memo_state(NodeId(2)), Some(MemoState::Ready));
@@ -512,12 +508,9 @@ mod tests {
             root: NodeId(1),
         };
         let mut driver = Driver::new(graph);
+        assert_eq!(driver.drive(driver.root_request()), Ok(NodeOutput::U64(42)));
         assert_eq!(
-            driver.drive(DemandRequest::root(NodeId(1))),
-            Ok(NodeOutput::U64(42))
-        );
-        assert_eq!(
-            driver.drive(DemandRequest::root(NodeId(3))),
+            driver.drive(DemandRequest::test_probe(NodeId(3))),
             Ok(NodeOutput::U64(42))
         );
         assert_eq!(driver.memo_state(NodeId(2)), None);
@@ -586,12 +579,9 @@ mod tests {
             driver.drive(DemandRequest::test_probe(NodeId(0))),
             Ok(NodeOutput::U64(9))
         );
+        assert_eq!(driver.drive(driver.root_request()), Ok(NodeOutput::U64(42)));
         assert_eq!(
-            driver.drive(DemandRequest::root(NodeId(2))),
-            Ok(NodeOutput::U64(42))
-        );
-        assert_eq!(
-            driver.drive(DemandRequest::root(NodeId(4))),
+            driver.drive(DemandRequest::test_probe(NodeId(4))),
             Ok(NodeOutput::U64(42))
         );
         assert_eq!(driver.memo_state(NodeId(3)), None);
@@ -672,12 +662,9 @@ mod tests {
             driver.drive(DemandRequest::test_probe(NodeId(3))),
             Ok(NodeOutput::U64(10))
         );
+        assert_eq!(driver.drive(driver.root_request()), Ok(NodeOutput::U64(42)));
         assert_eq!(
-            driver.drive(DemandRequest::root(NodeId(2))),
-            Ok(NodeOutput::U64(42))
-        );
-        assert_eq!(
-            driver.drive(DemandRequest::root(NodeId(5))),
+            driver.drive(DemandRequest::test_probe(NodeId(5))),
             Ok(NodeOutput::U64(7))
         );
         assert_eq!(driver.memo_state(NodeId(4)), Some(MemoState::Ready));
@@ -746,12 +733,9 @@ mod tests {
             driver.drive(DemandRequest::test_probe(NodeId(0))),
             Ok(NodeOutput::U64(9))
         );
+        assert_eq!(driver.drive(driver.root_request()), Ok(NodeOutput::U64(42)));
         assert_eq!(
-            driver.drive(DemandRequest::root(NodeId(2))),
-            Ok(NodeOutput::U64(42))
-        );
-        assert_eq!(
-            driver.drive(DemandRequest::root(NodeId(4))),
+            driver.drive(DemandRequest::test_probe(NodeId(4))),
             Ok(NodeOutput::U64(7))
         );
         assert_eq!(driver.memo_state(NodeId(3)), Some(MemoState::Ready));
@@ -832,12 +816,9 @@ mod tests {
             driver.drive(DemandRequest::test_probe(NodeId(1))),
             Ok(NodeOutput::U64(9))
         );
+        assert_eq!(driver.drive(driver.root_request()), Ok(NodeOutput::U64(42)));
         assert_eq!(
-            driver.drive(DemandRequest::root(NodeId(3))),
-            Ok(NodeOutput::U64(42))
-        );
-        assert_eq!(
-            driver.drive(DemandRequest::root(NodeId(5))),
+            driver.drive(DemandRequest::test_probe(NodeId(5))),
             Ok(NodeOutput::U64(42))
         );
         assert_eq!(driver.memo_state(NodeId(4)), None);
@@ -914,12 +895,9 @@ mod tests {
             driver.drive(DemandRequest::test_probe(NodeId(1))),
             Ok(NodeOutput::U64(9))
         );
+        assert_eq!(driver.drive(driver.root_request()), Ok(NodeOutput::U64(42)));
         assert_eq!(
-            driver.drive(DemandRequest::root(NodeId(3))),
-            Ok(NodeOutput::U64(42))
-        );
-        assert_eq!(
-            driver.drive(DemandRequest::root(NodeId(5))),
+            driver.drive(DemandRequest::test_probe(NodeId(5))),
             Ok(NodeOutput::U64(7))
         );
         assert_eq!(driver.memo_state(NodeId(0)), None);
@@ -992,12 +970,9 @@ mod tests {
             root: NodeId(2),
         };
         let mut driver = Driver::new(graph);
+        assert_eq!(driver.drive(driver.root_request()), Ok(NodeOutput::U64(42)));
         assert_eq!(
-            driver.drive(DemandRequest::root(NodeId(2))),
-            Ok(NodeOutput::U64(42))
-        );
-        assert_eq!(
-            driver.drive(DemandRequest::root(NodeId(5))),
+            driver.drive(DemandRequest::test_probe(NodeId(5))),
             Ok(NodeOutput::U64(7))
         );
         assert_eq!(driver.memo_state(NodeId(1)), None);

@@ -124,6 +124,9 @@ Expected latest structural checkpoint:
   default graph execution.
 - `vx-runtime-driver` reports graph kernel executions for the transitional
   public dispatch counter.
+- Graph root demand is constructed from the driver's graph root via
+  `Driver::root_request()`, not from a public `DemandRequest::root(node)`
+  constructor.
 - `graph_exec` can expose graph-root lazy arrays/tuples/variants and caught
   failures as old public `Value` thunks whose fields demand graph nodes through
   `PublicValueField`.
@@ -216,8 +219,9 @@ Expected latest structural checkpoint:
 - Boundary payload demand is tokenized: the driver returns a non-clone
   `BoundaryDemand` when a boundary is reached, and runtime boundary
   materializers must borrow that token to create request-shaping payload demands.
-  There is no public free `DemandRequest::boundary_payload(node)` constructor,
-  and test-probe demand construction is cfg(test)-only.
+  There is no public free `DemandRequest::root(node)` or
+  `DemandRequest::boundary_payload(node)` constructor, and test-probe demand
+  construction is cfg(test)-only.
 - The old `vx-runtime::eval` source tree-walker and `dispatch.rs` scalar planner
   are deleted. The remaining `Thunk` type is an API-edge graph/native boundary
   wrapper with only `Done`, `Native`, and `Forcing` states; it cannot capture
@@ -226,12 +230,15 @@ Expected latest structural checkpoint:
 Latest verified red/green shape:
 
 - `cargo check -p vx-runtime-driver -p vx-runtime`: passed after making
-  `DemandRequest::test_probe` cfg(test)-only.
+  `DemandRequest::test_probe` cfg(test)-only and moving root-demand construction
+  to `Driver::root_request()`.
 - `cargo nextest list -p vx-runtime -E 'binary(source_blind_guardrails)'`:
   selected the seven source-blind guardrail tests.
 - `cargo nextest run -p vx-runtime-driver --no-fail-fast`: 12/12 passed.
 - `cargo nextest run -p vx-runtime -E 'binary(source_blind_guardrails)' --no-fail-fast`:
-  7/7 passed, including `execution_crates_stay_source_blind`.
+  7/7 passed, including `execution_crates_stay_source_blind` with guardrail
+  needles for public free `root`, `boundary_payload`, and `test_probe`
+  constructors.
 - `cargo check -p vx-cache-index -p vx-exec-protocol -p vx-services -p vx-store -p vx-runtime-graph -p vx-runtime-core -p vx-runtime-driver -p vx-runtime -p vx-runner -p vx-daemon`
   passes with no old-evaluator dead-code warnings.
 - `cargo nextest run -p vx-runtime -E 'binary(source_blind_guardrails) | binary(exec_on_strands)' --no-fail-fast`:
