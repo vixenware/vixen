@@ -106,4 +106,22 @@ mod tests {
         ));
         assert!(!launchctl_print_reports_running(""));
     }
+
+    #[test]
+    fn kill_switch_stays_launchd_targeted() {
+        let source = include_str!("killswitch.rs");
+        assert!(source.contains("system/com.apple.filesystems.fskitd"));
+        let forbidden = [
+            concat!("pg", "rep").to_string(),
+            concat!("kill", "all").to_string(),
+            ["/bin/", "ps"].concat(),
+            ["/usr/bin/", "ps"].concat(),
+        ];
+        for forbidden in forbidden {
+            assert!(
+                !source.contains(&forbidden),
+                "kill-switch must not use process-name lookup tool `{forbidden}`"
+            );
+        }
+    }
 }

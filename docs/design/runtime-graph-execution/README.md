@@ -451,9 +451,10 @@ Latest verified red/green shape:
   directly instead of resolving a PID with `pgrep`.
 - `cargo check -p vx-management`: passed after replacing the kill-switch's
   process-name lookup with launchd service-target signaling.
-- `cargo nextest list -p vx-management -E 'all()'`: selected the five management
-  tests, including the new launchd-output parser checks.
-- `cargo nextest run -p vx-management -E 'all()' --no-fail-fast`: 5/5 passed.
+- `cargo nextest list -p vx-management -E 'all()'`: selected the six management
+  tests, including the launchd-output parser checks and the process-lookup
+  guardrail.
+- `cargo nextest run -p vx-management -E 'all()' --no-fail-fast`: 6/6 passed.
 - `cargo nextest list -p vx-daemon -p vx-store -E 'test(cache_index) | test(cache_record)'`
   selected the three cache seam proofs:
   `cache_index_rejects_empty_namespaces`,

@@ -565,9 +565,10 @@ Current checkpoint:
   directly instead of resolving a PID with `pgrep`.
 - `cargo check -p vx-management`: passed after replacing the kill-switch's
   process-name lookup with launchd service-target signaling.
-- `cargo nextest list -p vx-management -E 'all()'`: selected the five management
-  tests, including the new launchd-output parser checks.
-- `cargo nextest run -p vx-management -E 'all()' --no-fail-fast`: 5/5 passed.
+- `cargo nextest list -p vx-management -E 'all()'`: selected the six management
+  tests, including the launchd-output parser checks and the process-lookup
+  guardrail.
+- `cargo nextest run -p vx-management -E 'all()' --no-fail-fast`: 6/6 passed.
 - `cargo nextest run -p vx-runner --no-fail-fast`: 6/6 passed, 11 skipped
   (the live-VFS proof targets).
 - `cargo nextest run -p vx-cache-index -p vx-exec-protocol -p vx-services -p vx-store -p vx-runtime-graph -p vx-runtime-core -p vx-runtime-driver -p vx-runtime -p vx-runner -p vx-daemon --no-fail-fast`:
