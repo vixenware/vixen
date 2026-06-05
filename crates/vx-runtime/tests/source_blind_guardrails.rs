@@ -119,6 +119,8 @@ const KERNEL_MODE_ORACLE_NEEDLES: &[&str] = &[
     "\n    Jit,",
 ];
 
+const PUBLIC_NATIVE_THUNK_NEEDLES: &[&str] = &["pub fn native("];
+
 #[test]
 fn execution_crates_stay_source_blind() {
     let root = workspace_root();
@@ -255,6 +257,20 @@ fn kernel_mode_oracle_labels_stay_deleted() {
         KERNEL_MODE_ORACLE_NEEDLES,
         "KernelMode must not regain old tree-walker-oracle labels",
         "old KernelMode oracle label",
+    );
+}
+
+#[test]
+fn native_thunk_constructor_stays_crate_private() {
+    let root = workspace_root();
+    let eval_rs = root.join("crates/vx-runtime/src/eval.rs");
+
+    assert_no_forbidden_needles(
+        &root,
+        vec![eval_rs],
+        PUBLIC_NATIVE_THUNK_NEEDLES,
+        "external callers must not manufacture native graph-boundary thunks",
+        "public native thunk constructor",
     );
 }
 

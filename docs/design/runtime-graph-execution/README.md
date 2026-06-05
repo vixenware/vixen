@@ -238,10 +238,15 @@ Expected latest structural checkpoint:
 - The old `vx-runtime::eval` source tree-walker and `dispatch.rs` scalar planner
   are deleted. The remaining `Thunk` type is an API-edge graph/native boundary
   wrapper with only `Done`, `Native`, and `Forcing` states; it cannot capture
-  source expressions.
+  source expressions. Its native-callback constructor is crate-private, and the
+  source-blind guardrail binary scans `eval.rs` to keep that constructor from
+  becoming public again.
 
 Latest verified red/green shape:
 
+- `cargo check -p vx-runtime -p vx-runner -p vx-daemon`: passed after making
+  `Thunk::native` crate-private and moving native-boundary laziness coverage
+  into `eval` unit tests.
 - `cargo check -p vx-runtime -p vx-runner -p vx-daemon`: passed after renaming
   `KernelMode` variants to graph-native policy labels.
 - `cargo check -p vx-runtime-graph -p vx-runtime-core -p vx-runtime-driver -p vx-runtime`:
@@ -256,16 +261,18 @@ Latest verified red/green shape:
   `crates/vx-runtime-core`, `crates/vx-runtime-driver`, and
   `crates/vx-runtime/src` returned no matches after this checkpoint.
 - `cargo nextest list -p vx-runtime -E 'binary(source_blind_guardrails)'`:
-  selected eight source-blind guardrail tests, including
-  `kernel_mode_oracle_labels_stay_deleted`.
+  selected nine source-blind guardrail tests, including
+  `kernel_mode_oracle_labels_stay_deleted` and
+  `native_thunk_constructor_stays_crate_private`.
 - `cargo nextest run -p vx-runtime-driver --no-fail-fast`: 14/14 passed,
   including `resolved_public_value_authorizes_only_its_field_nodes`,
   `boundary_request_does_not_leave_node_in_progress`, and
   `boundary_payload_field_is_bound_to_resolved_payload_output`.
 - `cargo nextest run -p vx-runtime -E 'binary(source_blind_guardrails)' --no-fail-fast`:
-  8/8 passed, including `execution_crates_stay_source_blind` with guardrail
+  9/9 passed, including `execution_crates_stay_source_blind` with guardrail
   needles for public free `root`, `boundary_payload`, `public_value_field`, and
-  `test_probe` constructors, plus `kernel_mode_oracle_labels_stay_deleted`.
+  `test_probe` constructors, plus `kernel_mode_oracle_labels_stay_deleted` and
+  `native_thunk_constructor_stays_crate_private`.
 - `cargo nextest run -p vx-runtime --no-fail-fast`: 144/144 passed, including
   `lang_suite`.
 - `cargo nextest run -p vx-runtime -E 'binary(lang_suite)' --no-fail-fast`:
@@ -275,7 +282,8 @@ Latest verified red/green shape:
   163/163 passed, including `boundary_payload_field_is_bound_to_resolved_payload_output`,
   source-blind guardrails, and `lang_suite`.
 - `cargo nextest run -p vx-runtime -p vx-runner -p vx-daemon --no-fail-fast`:
-  156/156 passed, 12 skipped, after the public mode-label cleanup.
+  157/157 passed, 12 skipped, after making `Thunk::native` crate-private and
+  moving the old public `intrinsic` integration coverage into `eval` unit tests.
 - `cargo check -p vx-cache-index -p vx-exec-protocol -p vx-services -p vx-store -p vx-runtime-graph -p vx-runtime-core -p vx-runtime-driver -p vx-runtime -p vx-runner -p vx-daemon`
   passes with no old-evaluator dead-code warnings.
 - `cargo nextest run -p vx-runtime -E 'binary(source_blind_guardrails) | binary(exec_on_strands)' --no-fail-fast`:

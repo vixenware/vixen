@@ -369,6 +369,11 @@ Current API-edge adapter:
   Forcing one issues `DemandRequest::PublicValueField` through an authorized
   `PublicValueDemand` token minted only from node IDs present in that resolved
   output.
+- Native graph-boundary thunks are no longer publicly constructible:
+  `Thunk::native` is crate-private, and the guardrail suite rejects a public
+  native thunk constructor. Runtime-owned adapters can still build native fields
+  for executor-local `Run` and graph boundary crossing, but external callers
+  cannot smuggle arbitrary Rust callbacks into public values.
 - Executor-local output trees use a graph `OutputTree` marker and cross to
   `WireValue::Tree` during observer wire crossing.
 

@@ -122,6 +122,10 @@ source-expression tree-walker affordances that must not return after demolition:
 - `Value::Closure`
 - `dispatch.rs`, `pub mod dispatch`, `crate::dispatch`, `DispatchPlan`, or
   scalar dispatch helpers
+- public `Thunk::native` construction. Native graph-boundary thunks are an
+  internal adapter for executor-local `Run`, graph-produced API fields, and
+  other runtime-owned boundaries; outside callers may not manufacture arbitrary
+  native callbacks.
 
 The check should be mechanically boring and hard to miss. A simple Rust test or
 xtask command is acceptable. It is not a substitute for type boundaries, but it

@@ -130,7 +130,7 @@ pub fn tool_value(package: &str, command: &str, binary: &str) -> Value {
 pub struct Thunk(Rc<RefCell<ThunkState>>);
 
 impl Thunk {
-    pub fn native(f: impl Fn() -> Result<Value, Poison> + 'static) -> Thunk {
+    pub(crate) fn native(f: impl Fn() -> Result<Value, Poison> + 'static) -> Thunk {
         Thunk(Rc::new(RefCell::new(ThunkState::Native(Intrinsic(
             Rc::new(f),
         )))))
@@ -723,6 +723,87 @@ mod tests {
                 other => panic!("{src}: expected poisoned-with-span, got {other:?}"),
             }
         }
+    }
+
+    #[test]
+    fn native_backed_struct_field_forces_at_graph_boundary() {
+        let fe = crate::compile::compile_source(
+            "struct Box { answer: U64 }\nfn read(b: Box) -> U64 ( b.answer )",
+            "read",
+        )
+        .expect("front-end compiles");
+        let entry = body_in(&fe.program, "read");
+        let boxed = Value::Struct(vec![(
+            "answer".to_string(),
+            Thunk::native(|| Ok(Value::U64(42))),
+        )]);
+
+        let outcome = eval_body(
+            &fe.program,
+            &fe.env,
+            entry,
+            vec![boxed],
+            KernelMode::GraphOnly,
+        );
+        assert!(
+            matches!(outcome, Outcome::Clean(Value::U64(42))),
+            "field access should materialize the native boundary field, got {outcome:?}"
+        );
+    }
+
+    #[test]
+    fn native_boundary_field_is_lazy_then_memoized() {
+        let fe = crate::compile::compile_source(
+            "struct Box { answer: U64 }\n\
+             fn pick(b: Box, which: Bool) -> U64 ( if which ( b.answer ) else ( 0 ) )\n\
+             fn twice(b: Box) -> U64 ( b.answer + b.answer )",
+            "pick",
+        )
+        .expect("front-end compiles");
+        let counted = |calls: Rc<std::cell::Cell<u32>>| {
+            Value::Struct(vec![(
+                "answer".to_string(),
+                Thunk::native(move || {
+                    calls.set(calls.get() + 1);
+                    Ok(Value::U64(7))
+                }),
+            )])
+        };
+
+        let pick = body_in(&fe.program, "pick");
+        let cold_calls = Rc::new(std::cell::Cell::new(0));
+        let cold = eval_body(
+            &fe.program,
+            &fe.env,
+            pick,
+            vec![counted(Rc::clone(&cold_calls)), Value::Bool(false)],
+            KernelMode::GraphOnly,
+        );
+        assert!(matches!(cold, Outcome::Clean(Value::U64(0))));
+        assert_eq!(
+            cold_calls.get(),
+            0,
+            "native boundary field must stay cold until selected"
+        );
+
+        let twice = body_in(&fe.program, "twice");
+        let hot_calls = Rc::new(std::cell::Cell::new(0));
+        let hot = eval_body(
+            &fe.program,
+            &fe.env,
+            twice,
+            vec![counted(Rc::clone(&hot_calls))],
+            KernelMode::GraphOnly,
+        );
+        assert!(
+            matches!(hot, Outcome::Clean(Value::U64(14))),
+            "7 + 7 = 14, got {hot:?}"
+        );
+        assert_eq!(
+            hot_calls.get(),
+            1,
+            "native boundary field must memoize after first materialization"
+        );
     }
 
     fn body_in(program: &VirProgram, entry: &str) -> BodyId {
