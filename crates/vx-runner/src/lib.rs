@@ -318,6 +318,28 @@ mod tests {
         ])
     }
 
+    fn tool_value_with_fingerprint(
+        package: &str,
+        command: &str,
+        binary: &str,
+        fingerprint: &str,
+    ) -> Value {
+        Value::Struct(vec![
+            (
+                "command".to_string(),
+                Thunk::done(grammar_coord_value(package, command)),
+            ),
+            (
+                "binary".to_string(),
+                Thunk::done(Value::Str(Rc::from(binary))),
+            ),
+            (
+                "fingerprint".to_string(),
+                Thunk::done(Value::Str(Rc::from(fingerprint))),
+            ),
+        ])
+    }
+
     #[test]
     fn strand_observe_reaches_runner_backed_service() {
         let scheduler = Scheduler::new(&[1]);
@@ -654,6 +676,59 @@ mod tests {
             observes.load(Ordering::SeqCst),
             2,
             "different observer bundles must not alias in the runner-backed L1"
+        );
+    }
+
+    #[test]
+    #[ignore = "needs the live CAS-VFS mount; run with --ignored on a host with the Vixen VFS"]
+    fn declared_tool_fingerprint_disambiguates_runner_backed_l1_entry() {
+        let fe = compile_source(
+            "fn t(first_cmd: Command, second_cmd: Command, script: String) ( \
+               let first = `$first_cmd -c ${script}` with { observer: (run) => run.ok }; \
+               let second = `$second_cmd -c ${script}` with { observer: (run) => run.ok }; \
+               assert_eq(first.stdout, second.stdout) )",
+            "t",
+        )
+        .expect("exec declared-fingerprint program compiles");
+        let entry = entry_body(&fe, "t");
+
+        let scheduler = Scheduler::new(&[1]);
+        let (_temp, service) = scheduler.block_on(live_vfs_runner_service());
+        let (client, observes) = scheduler.block_on(counting_observe_client_for(service));
+        let cid = scheduler.register_observe_client(client);
+        let program = fe.program;
+        let env = fe.env;
+        let strand = scheduler.spawn(ResourceId(0), move || {
+            let first =
+                tool_value_with_fingerprint("@vixen/grammar-cc", "cc", "/bin/sh", "declared:first");
+            let second = tool_value_with_fingerprint(
+                "@vixen/grammar-cc",
+                "cc",
+                "/bin/sh",
+                "declared:second",
+            );
+            let script = Value::Str(Rc::from("printf runner-declared"));
+            match eval_body_with_exec(
+                &program,
+                &env,
+                entry,
+                vec![first, second, script],
+                KernelMode::Off,
+                cid,
+            ) {
+                EvalOutcome::Clean(Value::Unit) => Outcome::Clean,
+                other => Outcome::Poisoned(format!(
+                    "expected declared-fingerprint-distinct runner-backed execs to resolve, got {other:?}"
+                )),
+            }
+        });
+        scheduler.demand(strand);
+        scheduler.run();
+        assert_eq!(scheduler.outcome(strand), Some(Outcome::Clean));
+        assert_eq!(
+            observes.load(Ordering::SeqCst),
+            2,
+            "different declared tool fingerprints must not alias in the runner-backed L1"
         );
     }
 

@@ -6,14 +6,13 @@
 //! cases have runner-backed replacements or explicit unsupported states.
 
 use std::path::{Path, PathBuf};
-use std::rc::Rc;
 use std::sync::atomic::{AtomicU64, Ordering};
 
 use vx_ir::item::ItemKind;
 use vx_runtime::compile::compile_source;
 use vx_runtime::eval::{
-    KernelMode, Outcome as EvalOutcome, Thunk, Value, eval_body_with_exec,
-    eval_body_with_exec_and_cache_dir, grammar_coord_value, tool_value,
+    KernelMode, Outcome as EvalOutcome, Value, eval_body_with_exec,
+    eval_body_with_exec_and_cache_dir, tool_value,
 };
 use vx_runtime::observe::local_observer;
 use vx_runtime::strand::{Outcome, ResourceId, Scheduler};
@@ -77,28 +76,6 @@ fn exec_cache_dir(name: &str) -> PathBuf {
         std::process::id(),
         NEXT_DIR.fetch_add(1, Ordering::Relaxed)
     ))
-}
-
-fn tool_value_with_fingerprint(
-    package: &str,
-    command: &str,
-    binary: &str,
-    fingerprint: &str,
-) -> Value {
-    Value::Struct(vec![
-        (
-            "command".to_string(),
-            Thunk::done(grammar_coord_value(package, command)),
-        ),
-        (
-            "binary".to_string(),
-            Thunk::done(Value::Str(Rc::from(binary))),
-        ),
-        (
-            "fingerprint".to_string(),
-            Thunk::done(Value::Str(Rc::from(fingerprint))),
-        ),
-    ])
 }
 
 /// The cold tuple field is a real backtick exec whose observer would poison for
@@ -202,95 +179,6 @@ fn backtick_exec_l2_cache_survives_fresh_graph_eval() {
     assert_eq!(
         count, "x",
         "a fresh graph evaluation with the same L2 dir must not dispatch observe again"
-    );
-}
-
-#[cfg(unix)]
-#[test]
-fn declared_tool_fingerprint_is_part_of_the_backtick_exec_key() {
-    use std::os::unix::fs::PermissionsExt;
-
-    let binary = exec_cache_marker("declared-fingerprint-binary");
-    let marker = exec_cache_marker("declared-fingerprint-marker");
-    let _ = std::fs::remove_file(&binary);
-    let _ = std::fs::remove_file(&marker);
-    std::fs::write(
-        &binary,
-        format!("#!/bin/sh\nprintf x >> {marker}\nprintf same\n"),
-    )
-    .expect("write declared-fingerprint executable");
-    let mut perms = std::fs::metadata(&binary)
-        .expect("declared-fingerprint executable metadata")
-        .permissions();
-    perms.set_mode(0o755);
-    std::fs::set_permissions(&binary, perms)
-        .expect("make declared-fingerprint executable runnable");
-
-    let fe = compile_source(
-        "fn t(first_cmd: Command, second_cmd: Command) ( \
-           let first = `$first_cmd` with { observer: (run) => run.ok }; \
-           let second = `$second_cmd` with { observer: (run) => run.ok }; \
-           assert_eq(first.stdout, second.stdout) )",
-        "t",
-    )
-    .expect("exec declared fingerprint cache program compiles");
-    let entry = fe
-        .program
-        .arena
-        .items
-        .iter()
-        .find_map(|it| match &it.kind {
-            ItemKind::Function(f) if f.name == "t" => Some(f.body),
-            _ => None,
-        })
-        .expect("fn t");
-
-    let s = Scheduler::new(&[4]);
-    let client = s.block_on(local_observer());
-    let cid = s.register_observe_client(client);
-
-    let program = fe.program;
-    let env = fe.env;
-    let first_binary = binary.clone();
-    let second_binary = binary.clone();
-    let strand = s.spawn(ResourceId(0), move || {
-        let first =
-            tool_value_with_fingerprint("@vixen/grammar-cc", "cc", &first_binary, "declared:first");
-        let second = tool_value_with_fingerprint(
-            "@vixen/grammar-cc",
-            "cc",
-            &second_binary,
-            "declared:second",
-        );
-        match eval_body_with_exec(
-            &program,
-            &env,
-            entry,
-            vec![first, second],
-            KernelMode::Off,
-            cid,
-        ) {
-            EvalOutcome::Clean(Value::Unit) => Outcome::Clean,
-            EvalOutcome::Clean(other) => Outcome::Poisoned(format!(
-                "expected both declared-fingerprint exec results, got {other:?}"
-            )),
-            EvalOutcome::Poisoned { reason, .. } => Outcome::Poisoned(reason),
-        }
-    });
-    s.demand(strand);
-    s.run();
-    assert_eq!(
-        s.outcome(strand),
-        Some(Outcome::Clean),
-        "both declared-fingerprint invocation nodes resolve"
-    );
-
-    let count = std::fs::read_to_string(&marker).expect("exec declared fingerprint marker file");
-    let _ = std::fs::remove_file(&binary);
-    let _ = std::fs::remove_file(&marker);
-    assert_eq!(
-        count, "xx",
-        "different declared tool fingerprints must not share the backtick exec cache entry"
     );
 }
 
