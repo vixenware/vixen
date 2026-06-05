@@ -47,12 +47,12 @@ Required environment variables:
 
 - `VX_MAC_NOTARY_PROFILE`: `notarytool` keychain profile name.
 - `VX_MAC_SPARKLE_PUBLIC_ED_KEY`: Sparkle Ed25519 public key (embedded in app).
-- `VX_MAC_PUBLIC_BASE_URL`: public HTTPS root serving the mac app R2 bucket.
 - `ACCESS_KEY_ID` / `SECRET_ACCESS_KEY`: Cloudflare R2 token credentials.
 
 Optional environment variables:
 
 - `VX_MAC_SIGNING_IDENTITY` (default: `Developer ID Application`)
+- `VX_MAC_PUBLIC_BASE_URL` (default: `https://mac.app.vixen.rs`)
 - `VX_MAC_R2_BUCKET_URL` (default: `https://4051116950f6ef4b78cb96847a2221f9.r2.cloudflarestorage.com/vixen-mac-app`)
 - `VX_MAC_R2_RELEASE_PREFIX` (default: `releases/v<version>`)
 - `VX_MAC_R2_APPCAST_KEY` (default: `appcast.xml`)
