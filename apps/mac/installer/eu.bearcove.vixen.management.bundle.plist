@@ -6,6 +6,9 @@
   <key>Label</key>
   <string>eu.bearcove.vixen.management</string>
 
+  <key>AssociatedBundleIdentifiers</key>
+  <string>eu.bearcove.vixen</string>
+
   <key>BundleProgram</key>
   <string>Contents/MacOS/vixen-management</string>
 

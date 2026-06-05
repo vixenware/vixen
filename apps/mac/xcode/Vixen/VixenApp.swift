@@ -127,7 +127,9 @@ private enum ManagementService {
     static func register() throws {
         let daemon = service
         switch daemon.status {
-        case .enabled, .requiresApproval:
+        case .enabled:
+            try daemon.unregister()
+        case .requiresApproval:
             return
         default:
             break
@@ -608,7 +610,7 @@ struct ContentView: View {
         } else if managementSnapshot.serviceStatus == .requiresApproval {
             openLoginItemsSettings()
         } else if managementSnapshot.serviceStatus == .enabled {
-            requestManagementRecovery()
+            configureManagementDaemon()
         } else {
             configureManagementDaemon()
         }
