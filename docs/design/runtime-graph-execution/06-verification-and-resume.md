@@ -39,7 +39,9 @@ source-expression tree-walker plus `dispatch.rs` scalar planner are deleted.
    cleanup remains.
 6. Continue the earliest incomplete phase. If the work is exec/observer related,
    the active phase is `07-exec-observe-morph.md`: keep exec on the
-   runner-backed path, then move protocol/cache ownership out of `vx-runtime`.
+   runner-backed path, then move cache/index ownership out of `vx-runtime`.
+   The minimal exec/observe Vox protocol now lives in `vx-exec-protocol`; do
+   not reintroduce those protocol declarations in `vx-runtime::observe`.
 7. Commit the known state before switching tasks.
 
 ## Verification layers
@@ -153,7 +155,7 @@ Current partial state:
 
 Latest focused verification:
 
-- `cargo check -p vx-services -p vx-runtime-graph -p vx-runtime-core -p vx-runtime-driver -p vx-runtime -p vx-runner -p vx-daemon`
+- `cargo check -p vx-exec-protocol -p vx-services -p vx-runtime-graph -p vx-runtime-core -p vx-runtime-driver -p vx-runtime -p vx-runner -p vx-daemon`
   passes with no old-evaluator dead-code warnings.
 - `cargo nextest run -p vx-runtime -E 'binary(source_blind_guardrails) | binary(exec_on_strands)' --no-fail-fast`:
   4/4 passed, including cold exec non-demand. The basic `run.ok`
@@ -218,7 +220,7 @@ Latest focused verification:
 - `cargo nextest run -p vx-runner --run-ignored only -E 'test(=tests::backtick_exec_l2_cache_survives_fresh_runner_backed_graph_eval)' --no-fail-fast`:
   failed at the same live CAS-VFS boot boundary on this host, before any scratch
   fallback could run.
-- `cargo nextest run -p vx-services -p vx-runtime-graph -p vx-runtime-core -p vx-runtime-driver -p vx-runtime -p vx-runner --no-fail-fast`:
+- `cargo nextest run -p vx-exec-protocol -p vx-services -p vx-runtime-graph -p vx-runtime-core -p vx-runtime-driver -p vx-runtime -p vx-runner --no-fail-fast`:
   172 run, 172 passed, 12 skipped.
 - `cargo nextest run -p vx-daemon --no-fail-fast`: 2/2 passed.
 - `vx-runner::tests::strand_observe_reaches_runner_backed_service` drives a

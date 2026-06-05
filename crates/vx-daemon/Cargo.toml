@@ -25,6 +25,7 @@ facet-styx = { workspace = true }
 thiserror = { workspace = true }
 blake3 = { workspace = true }
 
+vx-exec-protocol.workspace = true
 vx-services.workspace = true
 vx-ir.workspace = true
 vx-diagnostics = { workspace = true }

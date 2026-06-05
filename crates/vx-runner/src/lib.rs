@@ -8,7 +8,7 @@ pub(crate) mod sandbox;
 pub(crate) mod service;
 
 use std::sync::{Arc, Mutex};
-use vx_runtime::observe::ObserveDispatcher;
+use vx_exec_protocol::ObserveDispatcher;
 use vx_runtime::remote::ProducingDispatcher;
 use vx_services::{RunnerDispatcher, StoreClient};
 use vx_vfsd::VfsdService;
@@ -122,6 +122,9 @@ mod tests {
     use std::sync::atomic::{AtomicUsize, Ordering};
     use std::sync::{Arc, Mutex};
 
+    use vx_exec_protocol::{
+        ExecCommand, Observe, ObserveClient, ObserveDispatcher, ObserveRequest, Observed,
+    };
     use vx_ir::item::ItemKind;
     use vx_ir::reachable;
     use vx_runtime::ability::ProviderRegistry;
@@ -130,9 +133,6 @@ mod tests {
         KernelMode, Outcome as EvalOutcome, Thunk, Value, eval_body_with_exec,
         eval_body_with_exec_and_cache_dir, eval_body_with_exec_and_providers, grammar_coord_value,
         tool_value,
-    };
-    use vx_runtime::observe::{
-        ExecCommand, Observe, ObserveClient, ObserveDispatcher, ObserveRequest, Observed,
     };
     use vx_runtime::remote::{Part, PartKey, ProducingClient};
     use vx_runtime::strand::{ObserveOutcome, Outcome, ResourceId, Scheduler, dispatch_observe};

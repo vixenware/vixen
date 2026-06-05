@@ -72,7 +72,8 @@ Expected latest structural checkpoint:
 - Commit `4c55d433` exists: `Fence graph execution away from VIR`.
 - Commit `bfcc1493` exists: `Document graph runtime demolition roadmap`.
 - `Cargo.toml` includes `crates/vx-runtime-graph`,
-  `crates/vx-runtime-core`, and `crates/vx-runtime-driver`.
+  `crates/vx-runtime-core`, `crates/vx-runtime-driver`, and
+  `crates/vx-exec-protocol`.
 - `crates/vx-runtime-core/Cargo.toml` has no `vx-ir` dependency.
 - `crates/vx-runtime-driver/Cargo.toml` has no `vx-ir` dependency.
 - `crates/vx-runtime/src/graph.rs` only re-exports `vx_runtime_graph`.
@@ -80,9 +81,10 @@ Expected latest structural checkpoint:
   `vx-runtime-core` and `vx-runtime-driver` source/manifests for forbidden
   source-evaluator affordances, scans `vx-runtime/src` for the deleted runtime
   tree-walker affordances, and guards against reintroducing runtime-local
-  process-spawning observe code.
+  process-spawning observe code or runtime-owned exec/observe protocol
+  declarations.
 - `docs/design/runtime-graph-execution/07-exec-observe-morph.md` records the
-  active plan for the runner-backed exec path and the remaining protocol/cache
+  active plan for the runner-backed exec path and the remaining cache/index
   ownership work.
 - `vx-runtime::eval::{run, run_with_dispatches, run_in_mode}` enter through
   `graph_exec::run_source` and `vx-runtime-driver`.
@@ -141,6 +143,9 @@ Expected latest structural checkpoint:
   `ObserveRequest.outputs`, are included in the exec cache key, and are consumed
   by `vx-runner` as `ExecRequest.outputs`.
 - Observer execution uses graph body execution and graph/native wire crossing.
+- `crates/vx-exec-protocol` owns `ExecCommand`, `ObserveRequest`,
+  `WireValue`, `Observed`, and the generated Observe Vox client/dispatcher.
+  `vx-runtime::observe` owns only `CompletedRun` and `evaluate_observer`.
 - `vx-runner` now implements the runtime `Observe` service and routes `"Observe"`
   through `RunnerAcceptor`; `vx-daemon` also advertises and routes `"Observe"` to
   its hosted `RunnerService` when a runner is configured. The implementation
@@ -180,7 +185,7 @@ Expected latest structural checkpoint:
 
 Latest verified red/green shape:
 
-- `cargo check -p vx-services -p vx-runtime-graph -p vx-runtime-core -p vx-runtime-driver -p vx-runtime -p vx-runner -p vx-daemon`
+- `cargo check -p vx-exec-protocol -p vx-services -p vx-runtime-graph -p vx-runtime-core -p vx-runtime-driver -p vx-runtime -p vx-runner -p vx-daemon`
   passes with no old-evaluator dead-code warnings.
 - `cargo nextest run -p vx-runtime -E 'binary(source_blind_guardrails) | binary(exec_on_strands)' --no-fail-fast`:
   4/4 passed, including `undemanded_exec_in_tuple_does_not_dispatch`. The basic
@@ -245,9 +250,13 @@ Latest verified red/green shape:
 - `cargo nextest run -p vx-runner --run-ignored only -E 'test(=tests::backtick_exec_l2_cache_survives_fresh_runner_backed_graph_eval)' --no-fail-fast`:
   failed at the same live CAS-VFS boot boundary on this host, before any scratch
   fallback could run.
-- `cargo nextest run -p vx-services -p vx-runtime-graph -p vx-runtime-core -p vx-runtime-driver -p vx-runtime -p vx-runner --no-fail-fast`:
+- `cargo nextest run -p vx-exec-protocol -p vx-services -p vx-runtime-graph -p vx-runtime-core -p vx-runtime-driver -p vx-runtime -p vx-runner --no-fail-fast`:
   172 run, 172 passed, 12 skipped.
 - `cargo nextest run -p vx-daemon --no-fail-fast`: 2/2 passed.
+- The raw forbidden-symbol scans over `vx-runtime-core`, `vx-runtime-driver`,
+  the deleted tree-walker affordance scan over `vx-runtime/src`, and the
+  runtime-owned exec/observe protocol scan over `vx-runtime/src` returned no
+  matches.
 - `vx-runner::tests::strand_observe_reaches_runner_backed_service` drives
   `vx-runtime` strands against a runner-backed `Observe` client and reaches the
   explicit no-CAS-VFS poison. This proves the strand/Observe seam can target the
@@ -337,8 +346,8 @@ Latest verified red/green shape:
 Verification commands:
 
 ```bash
-cargo check -p vx-services -p vx-runtime-graph -p vx-runtime-core -p vx-runtime-driver -p vx-runtime -p vx-runner -p vx-daemon
-cargo nextest run -p vx-services -p vx-runtime-graph -p vx-runtime-core -p vx-runtime-driver -p vx-runtime -p vx-runner
+cargo check -p vx-exec-protocol -p vx-services -p vx-runtime-graph -p vx-runtime-core -p vx-runtime-driver -p vx-runtime -p vx-runner -p vx-daemon
+cargo nextest run -p vx-exec-protocol -p vx-services -p vx-runtime-graph -p vx-runtime-core -p vx-runtime-driver -p vx-runtime -p vx-runner
 cargo nextest run -p vx-daemon
 cargo nextest run -p vx-runtime -E 'binary(source_blind_guardrails)'
 rg -n 'vx[_-]ir|ExprKind|StmtKind|PatternKind|VirProgram|BodyId|fn force|\.force\(|eval_inner|eval_expr' crates/vx-runtime-core crates/vx-runtime-driver

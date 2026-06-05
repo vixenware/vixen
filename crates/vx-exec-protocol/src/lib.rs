@@ -1,0 +1,64 @@
+//! Exec/observe Vox protocol shared by the orchestrator, runtime boundary
+//! materializer, and runner.
+//!
+//! This crate is only the wire contract. The graph evaluator may construct an
+//! `ObserveRequest` after demand reaches an exec boundary, and the runner may
+//! answer it, but process execution, sandbox policy, CAS-VFS mounts, and observer
+//! evaluation live in their owning crates.
+
+use vx_ir::Bundle;
+
+/// A command to run — minimal for now (program + args). The production payload
+/// grows from here toward structured `Command`, env, mounts, sandbox obligations,
+/// and declared output roots.
+#[derive(facet::Facet, Debug, Clone)]
+pub struct ExecCommand {
+    pub program: String,
+    pub args: Vec<String>,
+}
+
+/// What the executor needs to observe: the command to run plus the observer to
+/// evaluate against its `Run`. `observer` is `None` for the default observer
+/// `run.ok.out`.
+#[derive(facet::Facet, Debug, Clone)]
+pub struct ObserveRequest {
+    pub observer: Option<Bundle>,
+    pub command: ExecCommand,
+    pub outputs: Vec<String>,
+}
+
+/// A runtime value crossing back from the executor to the orchestrator over Vox.
+/// It is the observer result, fully forced into data before crossing.
+#[derive(facet::Facet, Debug, Clone, PartialEq, Eq)]
+#[repr(u8)]
+pub enum WireValue {
+    U64(u64),
+    Bool(bool),
+    Str(String),
+    Unit,
+    Tuple(Vec<WireValue>),
+    Array(Vec<WireValue>),
+    /// A producing tree returned by the observer. It crosses as a handle; paths
+    /// are demanded later through the Producing virtual connection.
+    Tree,
+    Struct(Vec<(String, WireValue)>),
+    Variant {
+        tag: String,
+        fields: Vec<(String, WireValue)>,
+    },
+}
+
+/// The result of observing: a crossed value or a poison message.
+#[derive(facet::Facet, Debug, Clone, PartialEq, Eq)]
+#[repr(u8)]
+pub enum Observed {
+    Value(WireValue),
+    Poisoned(String),
+}
+
+/// The runner-side observe service: ship a bundle plus command, get the
+/// observer's result.
+#[vox::service]
+pub trait Observe {
+    async fn observe(&self, request: ObserveRequest) -> Observed;
+}

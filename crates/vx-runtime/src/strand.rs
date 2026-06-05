@@ -42,8 +42,8 @@ use std::thread::JoinHandle;
 use corosensei::{Coroutine, CoroutineResult, Yielder};
 use futures_util::stream::{FuturesUnordered, StreamExt};
 use tokio::sync::mpsc::{UnboundedReceiver, UnboundedSender};
+use vx_exec_protocol::{ObserveClient, ObserveRequest, Observed, WireValue};
 
-use crate::observe::{ObserveClient, ObserveRequest, Observed, WireValue};
 use crate::remote::{Part, PartKey, ProducingClient, RemoteHandle};
 
 /// What a strand yields when it parks: the typed reason **plus** a backtrace

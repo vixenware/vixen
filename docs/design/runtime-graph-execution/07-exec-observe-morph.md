@@ -24,8 +24,9 @@ service in `vx-runtime`:
 
 - `vx-runtime::graph_exec` materializes a graph exec boundary and dispatches a
   minimal `ObserveRequest { program, args, observer }`.
-- `vx-runtime::observe` defines that minimal protocol and still carries the
-  shared wire value/result types.
+- `vx-exec-protocol` owns that minimal protocol and the generated Vox
+  Observe client/dispatcher. `vx-runtime::observe` now keeps only the
+  executor-side observer-evaluation helper.
 - `vx-runner` implements the runtime `Observe` service and owns process
   execution through `run_exec`; live CAS-VFS proofs are ignored by default
   because this host lacks the Vixen Management mount trigger.
@@ -43,9 +44,12 @@ path tests use, then make the cheat impossible to reintroduce quietly.
   used by both orchestrator and executor. It may evaluate an observer bundle
   against a supplied `Run` value. It must not spawn commands, create scratch
   exec directories, own sandbox policy, own CAS-VFS mounts, or flush outputs.
+- `vx-exec-protocol`: Vox protocol surface for exec/observe request and result
+  payloads. It is intentionally narrower than `vx-services` so `vx-runtime` can
+  construct demanded boundary requests without depending on all service
+  contracts.
 - `vx-services`: stable Vox protocol surface for daemon/runner/store/vfsd
-  boundaries. Exec/observe request and result types should move here or into a
-  narrower protocol crate once the shape stabilizes.
+  boundaries.
 - `vx-runner`: executor daemon implementation. It owns mount-run-flush, sandbox
   launch, output tree serving, and executor-side observer evaluation.
 - daemon/orchestrator layer: placement, runner RPC, retries, cache/index lookup,
@@ -314,6 +318,19 @@ That protocol belongs in `vx-services` or a narrower boundary crate. The graph
 evaluator should consume only the result of a boundary materialization, not own
 the service contract.
 
+Current checkpoint:
+
+- `crates/vx-exec-protocol` exists as the narrower boundary crate for the
+  exec/observe wire surface.
+- `ExecCommand`, `ObserveRequest`, `WireValue`, `Observed`, and the generated
+  `ObserveClient`/`ObserveDispatcher` now come from `vx-exec-protocol`.
+- `vx-runtime::observe` no longer declares the Vox service contract or wire
+  value/result enums. It owns only `CompletedRun` and `evaluate_observer`.
+- `vx-runner`, `vx-daemon`, and the strand scheduler use the protocol crate for
+  Observe service/client/dispatcher types.
+- `source_blind_guardrails` now scans `vx-runtime/src` for the deleted protocol
+  declarations as runtime exec ownership affordances.
+
 ### Phase M6 - Cache/index and read/write witnesses
 
 Once exec runs through the runner-backed path:
@@ -338,7 +355,7 @@ Once exec runs through the runner-backed path:
 
 ## Latest verification for this checkpoint
 
-- `cargo check -p vx-services -p vx-runtime-graph -p vx-runtime-core -p vx-runtime-driver -p vx-runtime -p vx-runner -p vx-daemon`
+- `cargo check -p vx-exec-protocol -p vx-services -p vx-runtime-graph -p vx-runtime-core -p vx-runtime-driver -p vx-runtime -p vx-runner -p vx-daemon`
   passed.
 - `cargo nextest list -p vx-runtime -E 'test(observer_evaluation_accepts) | test(observe_runs_a_real_command) | test(observe_crosses_the_output_tree) | test(the_executor_serves_run_outputs)'`
   selected only `observer_evaluation_accepts_a_completed_process_without_spawning`;
@@ -349,6 +366,9 @@ Once exec runs through the runner-backed path:
   selected 4 tests.
 - `cargo nextest run -p vx-runtime -E 'binary(source_blind_guardrails) | binary(exec_on_strands)' --no-fail-fast`:
   4/4 passed.
+- The raw protocol-ownership scan
+  `rg -n 'pub struct ExecCommand|pub struct ObserveRequest|pub enum WireValue|pub enum Observed|pub trait Observe|ScratchObserveService|local_observer|fn scratch_dir|fn capture_outputs|tokio::process::Command|pub struct ObserveService|struct ObserveService' crates/vx-runtime/src`
+  returned no matches.
 - `cargo nextest run -p vx-runtime --no-fail-fast`: 140/140 passed.
 - `cargo nextest list -p vx-runner --run-ignored all` selected
   `output_tree::tests::reads_declared_output_root_from_cas`,
@@ -405,11 +425,13 @@ Once exec runs through the runner-backed path:
   fallback could run.
 - `cargo nextest run -p vx-runner --no-fail-fast`: 6/6 passed, 12 skipped
   (the live-VFS proof targets).
-- `cargo nextest run -p vx-services -p vx-runtime-graph -p vx-runtime-core -p vx-runtime-driver -p vx-runtime -p vx-runner --no-fail-fast`:
+- `cargo nextest run -p vx-exec-protocol -p vx-services -p vx-runtime-graph -p vx-runtime-core -p vx-runtime-driver -p vx-runtime -p vx-runner --no-fail-fast`:
   172/172 passed, 12 skipped.
 - `cargo nextest run -p vx-daemon --no-fail-fast`: 2/2 passed.
-- The forbidden-symbol scans over `vx-runtime-core`, `vx-runtime-driver`, and the
-  deleted tree-walker affordance scan over `vx-runtime/src` returned no matches.
+- The forbidden-symbol scans over `vx-runtime-core`, `vx-runtime-driver`, the
+  deleted tree-walker affordance scan over `vx-runtime/src`, and the
+  runtime-owned exec/observe protocol scan over `vx-runtime/src` returned no
+  matches.
 
 Important caveat: the green default suite still skips live CAS-VFS proofs. The
 scratch-backed `exec_output_tree`, `hello_world`, demanded `exec_on_strands`,
@@ -419,15 +441,13 @@ fallback could run.
 
 ## Current next step
 
-Finish M5/M6:
+Finish M6:
 
-1. Move the minimal exec/observe protocol shape out of `vx-runtime` into the
-   runner/control-plane boundary where it belongs.
-2. On a host with the Vixen CAS-VFS mount, run the ignored live proof with
+1. On a host with the Vixen CAS-VFS mount, run the ignored live proof with
    `cargo nextest run -p vx-runner --run-ignored only --no-fail-fast` and record
    the result. If the host cannot supply CAS-VFS, the proof should fail at the
    explicit VFS boot/runner-backed boundary, never by switching to scratch
    execution.
-3. Move `BoundaryL2Cache`/input-key lookup toward the daemon/orchestrator
+2. Move `BoundaryL2Cache`/input-key lookup toward the daemon/orchestrator
    cache/index and `vx-store`, instead of letting `vx-runtime` remain the cache
    owner.

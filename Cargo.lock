@@ -3891,6 +3891,7 @@ dependencies = [
  "tracing",
  "vox",
  "vx-diagnostics",
+ "vx-exec-protocol",
  "vx-ir",
  "vx-parser",
  "vx-runner",
@@ -3919,6 +3920,15 @@ dependencies = [
  "vx-runtime",
  "vx-stdlib",
  "vx-types",
+]
+
+[[package]]
+name = "vx-exec-protocol"
+version = "0.1.0"
+dependencies = [
+ "facet",
+ "vox",
+ "vx-ir",
 ]
 
 [[package]]
@@ -4045,6 +4055,7 @@ dependencies = [
  "tokio",
  "tracing",
  "vox",
+ "vx-exec-protocol",
  "vx-ir",
  "vx-runtime",
  "vx-services",
@@ -4066,6 +4077,7 @@ dependencies = [
  "futures-util",
  "tokio",
  "vox",
+ "vx-exec-protocol",
  "vx-ir",
  "vx-package",
  "vx-parser",

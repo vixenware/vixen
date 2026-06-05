@@ -1,86 +1,15 @@
-//! The `observe` RPC — the orchestrator ships an observer bundle **and a command**
-//! to an executor (a fresh **mirror** runtime) over **vox**; the executor runs the
-//! command, builds a `Run` from the result, evaluates the observer against it, and
-//! returns the result. A local runner may use a transport-local memory link; a
-//! remote executor is a different transport, the *same* service. Vox owns the
-//! serialization — this code never names a codec.
+//! Executor-side observer evaluation.
 //!
 //! The `Run` is built and consumed *here*, on the executor: `run.ok` is a co-located
 //! force, not a remote one. The genuinely remote values are the **outputs** the
 //! observer returns (streams, the producing tree) — those cross back as handles, and
 //! that join (`force_remote`) lands with the streaming work.
 
+use vx_exec_protocol::{Observed, WireValue};
 use vx_ir::Bundle;
 
 use crate::eval::{KernelMode, eval_body_wire};
 use crate::run_value::{self, ProcOutcome};
-
-/// A command to run — minimal for now (program + args). The full `Command` value
-/// with its grammar-classified inputs/outputs, and running it under the VFS sandbox
-/// via `run_exec`, land as the input/output handling grows.
-#[derive(facet::Facet, Debug, Clone)]
-pub struct ExecCommand {
-    pub program: String,
-    pub args: Vec<String>,
-}
-
-/// What the executor needs to observe: the command to run plus the observer to
-/// evaluate against its `Run`. `observer` is `None` for the default observer
-/// `run.ok.out` (`r[exec.observer.simple]`) — applied natively on the executor
-/// (gate on success, yield the output tree) so a bare invocation ships no closure.
-#[derive(facet::Facet, Debug, Clone)]
-pub struct ObserveRequest {
-    pub observer: Option<Bundle>,
-    pub command: ExecCommand,
-    pub outputs: Vec<String>,
-}
-
-/// A runtime value crossing back from the executor to the orchestrator over vox —
-/// the observer's result, fully forced into data. This is the wire form of
-/// `eval::Value`'s data subset: scalars and the compound shapes (tuple/array/struct/
-/// variant), with every field already forced (no thunks cross). Code values
-/// (closures), capability values (commands/grammars/host), and the opaque failure
-/// envelope are not data and never cross here; the genuinely-remote leaves
-/// (`Stream`/`Tree`) cross as handles, not inline — both are their own pieces.
-///
-/// Facet-derived: it *is* the vox contract for the `observe` result. Vox owns the
-/// serialization; this code never names a codec.
-#[derive(facet::Facet, Debug, Clone, PartialEq, Eq)]
-#[repr(u8)]
-pub enum WireValue {
-    U64(u64),
-    Bool(bool),
-    Str(String),
-    Unit,
-    Tuple(Vec<WireValue>),
-    Array(Vec<WireValue>),
-    /// A **producing tree** the observer returned (`run.ok.out`/`run.stream.out`) —
-    /// a genuinely-remote leaf, *not* inline data. It crosses as a handle: the
-    /// orchestrator opens a `Producing` virtual connection to the executor and forces
-    /// its paths on demand (`force_remote`). Parameterless for now (one output tree
-    /// per run); it carries a tree id once a run exposes several.
-    Tree,
-    /// A struct's named fields, in construction order.
-    Struct(Vec<(String, WireValue)>),
-    /// An enum variant: its `tag` plus its (named or positional-`"0"`/`"1"`/…) fields.
-    Variant {
-        tag: String,
-        fields: Vec<(String, WireValue)>,
-    },
-}
-
-/// The result of observing: the observer's value crossed back as data, or a poison
-/// (a failed `run.ok`, or a run that couldn't start). The poison still crosses as a
-/// bare message — the *structured* failure crossing (the domain error value + the
-/// failure context) is its own piece.
-#[derive(facet::Facet, Debug, Clone, PartialEq, Eq)]
-#[repr(u8)]
-pub enum Observed {
-    /// The observer returned cleanly; here is its value.
-    Value(WireValue),
-    /// The observer poisoned (e.g. `run.ok` on a failed process), or the run couldn't start.
-    Poisoned(String),
-}
 
 /// A completed process result supplied by an executor.
 ///
@@ -115,12 +44,6 @@ pub fn evaluate_observer(run: CompletedRun, observer: Option<Bundle>) -> Observe
             Err(reason) => Observed::Poisoned(reason),
         },
     }
-}
-
-/// The runner-side service: ship a bundle + command, get the observer's result.
-#[vox::service]
-pub trait Observe {
-    async fn observe(&self, request: ObserveRequest) -> Observed;
 }
 
 #[cfg(test)]

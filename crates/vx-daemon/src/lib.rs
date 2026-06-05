@@ -8,8 +8,8 @@ use eyre::{Result, bail};
 use facet::Facet;
 use tokio::sync::watch;
 use vox::{ConnectionAcceptor, Metadata, TransportMode};
+use vx_exec_protocol::ObserveDispatcher;
 use vx_runner::RunnerService;
-use vx_runtime::observe::ObserveDispatcher;
 use vx_services::{
     DAEMON_SOCK, DaemonDispatcher, RunnerDispatcher, StoreDispatcher, TestRunnerDispatcher,
 };

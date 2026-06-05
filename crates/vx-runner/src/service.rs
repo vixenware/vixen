@@ -1,6 +1,5 @@
-use vx_runtime::observe::{
-    CompletedRun, Observe, ObserveRequest, Observed, WireValue, evaluate_observer,
-};
+use vx_exec_protocol::{Observe, ObserveRequest, Observed, WireValue};
+use vx_runtime::observe::{CompletedRun, evaluate_observer};
 use vx_runtime::run_value::ProcOutcome;
 use vx_services::{DiscoverProbeRequest, DiscoverResult, ExecRequest, ExecResult, Runner};
 

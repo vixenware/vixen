@@ -17,6 +17,7 @@ members = [
   "crates/vx-runtime-graph",
   "crates/vx-runtime-core",
   "crates/vx-runtime-driver",
+  "crates/vx-exec-protocol",
   "crates/vx-runtime",
 
   ## runtime support
@@ -54,6 +55,7 @@ repository = "https://github.com/bearcove/vx"
 # instrumentation
 moire = "1.0.1"
 vx-services = { path = "crates/vx-services" }
+vx-exec-protocol = { path = "crates/vx-exec-protocol" }
 vx-diagnostics = { path = "crates/vx-diagnostics" }
 margin = { path = "crates-plus/margin" }
 margin-term = { path = "crates-plus/margin-term" }

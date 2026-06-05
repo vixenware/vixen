@@ -4,6 +4,7 @@ use std::path::PathBuf;
 use std::rc::Rc;
 use std::sync::atomic::{AtomicU64, Ordering};
 
+use vx_exec_protocol::{ExecCommand, ObserveRequest, WireValue};
 use vx_ir::build::VirProgram;
 use vx_ir::ids::{BodyId, PatternId};
 use vx_ir::pattern::PatternKind;
@@ -19,7 +20,6 @@ use crate::analyze::{
     CapabilityRequestMeta, CliArgPiece, CliArgTemplate, ExecInvocationMeta, GraphRuntimeMeta,
 };
 use crate::eval::{FailureContext, Outcome, Poison, Thunk, Value, from_wire};
-use crate::observe::{ExecCommand, ObserveRequest};
 use crate::remote::{Part, PartKey};
 use crate::strand::{HandleId, ObserveClientId, ObserveOutcome, dispatch_observe, force_remote};
 
@@ -83,11 +83,11 @@ impl BoundaryL2Cache {
         self.write_json("host-exec-v1", key, value);
     }
 
-    fn exec_value(&self, key: &ExecInvocationCacheKey) -> Option<crate::observe::WireValue> {
+    fn exec_value(&self, key: &ExecInvocationCacheKey) -> Option<WireValue> {
         self.read_json("exec-value-v1", key)
     }
 
-    fn put_exec_value(&self, key: &ExecInvocationCacheKey, value: &crate::observe::WireValue) {
+    fn put_exec_value(&self, key: &ExecInvocationCacheKey, value: &WireValue) {
         self.write_json("exec-value-v1", key, value);
     }
 
@@ -260,7 +260,7 @@ enum ObserverCacheIdentity {
 
 #[derive(Debug, Clone)]
 enum CachedExecOutcome {
-    Value(crate::observe::WireValue),
+    Value(WireValue),
     Tree(HandleId),
 }
 

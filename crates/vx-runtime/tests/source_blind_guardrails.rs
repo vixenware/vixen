@@ -45,6 +45,11 @@ const RUNTIME_TREE_WALKER_NEEDLES: &[&str] = &[
 ];
 
 const RUNTIME_EXEC_OWNERSHIP_NEEDLES: &[&str] = &[
+    "pub struct ExecCommand",
+    "pub struct ObserveRequest",
+    "pub enum WireValue",
+    "pub enum Observed",
+    "pub trait Observe",
     "pub struct ObserveService",
     "struct ObserveService",
     "ScratchObserveService",

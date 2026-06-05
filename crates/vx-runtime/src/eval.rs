@@ -15,13 +15,13 @@ use std::cell::RefCell;
 use std::path::Path;
 use std::rc::Rc;
 
+use vx_exec_protocol::WireValue;
 use vx_ir::build::VirProgram;
 use vx_ir::ids::BodyId;
 use vx_types::TypeEnv;
 
 use crate::ability::ProviderRegistry;
 use crate::graph::Span;
-use crate::observe::WireValue;
 use crate::strand::{HandleId, ObserveClientId};
 
 /// The uniform runtime envelope of a failure (the failure model's `context`) —

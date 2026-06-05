@@ -141,9 +141,10 @@ Current progress:
   `dispatch_observe`, then the resulting graph node is seeded and the same demand
   loop resumes.
 - Current graph `exec` dispatch sends the minimal
-  `ObserveRequest { program, args, observer, outputs }` to a runner-backed
-  `Observe` service. `vx-runtime` no longer contains the quarantined
-  `ScratchObserveService`; live mount-run-flush coverage sits in ignored
+  `ObserveRequest { program, args, observer, outputs }` from
+  `vx-exec-protocol` to a runner-backed `Observe` service. `vx-runtime` no
+  longer contains the quarantined `ScratchObserveService` and no longer owns the
+  Observe Vox service contract; live mount-run-flush coverage sits in ignored
   `vx-runner` proof targets because it requires the host CAS-VFS mount.
 - A top-level data observer result becomes graph output structure. A top-level
   producing tree result becomes `NodeOutput::OutputTree` plus a runtime remote
@@ -167,12 +168,12 @@ scratch observe service with the runner-backed exec path.
   directly. `vx-runtime` should surface an exec boundary need plus the
   materialized request-shaping graph payload. The daemon/orchestrator layer owns
   placement, runner RPC, retries, and cache/index lookup.
-- Replace the minimal runtime-local `ObserveRequest { program, args, observer }`
-  with a protocol payload that can carry the projected `Command`, resolved
-  observer bundle/captures, env, CAS tree mounts, writable output roots,
-  exemptions, and verification obligations. The stable protocol type belongs in
-  a boundary/protocol crate (`vx-services` or a narrower crate), not in the
-  graph evaluator.
+- Grow the minimal `vx-exec-protocol::ObserveRequest { program, args, observer,
+  outputs }` into a protocol payload that can carry the projected `Command`,
+  resolved observer bundle/captures, env, CAS tree mounts, writable output
+  roots, exemptions, and verification obligations. The protocol type now lives
+  in a boundary crate, not in the graph evaluator, but its shape is still only
+  the first slice.
 - The selected executor daemon lowers that payload into its local
   sandbox/CAS-VFS mount-run-flush operation. It mounts inputs, runs the process
   under the VFS access path plus sandbox policy, records read/write witnesses,
