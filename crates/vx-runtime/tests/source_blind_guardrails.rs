@@ -121,6 +121,11 @@ const KERNEL_MODE_ORACLE_NEEDLES: &[&str] = &[
 
 const PUBLIC_NATIVE_THUNK_NEEDLES: &[&str] = &["pub fn native("];
 
+const PUBLIC_OUTPUT_TREE_MARKER_NEEDLES: &[&str] = &[
+    "impl ExecutorOutputTree {\n    pub fn new",
+    "impl Default for ExecutorOutputTree",
+];
+
 #[test]
 fn execution_crates_stay_source_blind() {
     let root = workspace_root();
@@ -271,6 +276,20 @@ fn native_thunk_constructor_stays_crate_private() {
         PUBLIC_NATIVE_THUNK_NEEDLES,
         "external callers must not manufacture native graph-boundary thunks",
         "public native thunk constructor",
+    );
+}
+
+#[test]
+fn executor_output_tree_marker_stays_sealed() {
+    let root = workspace_root();
+    let eval_rs = root.join("crates/vx-runtime/src/eval.rs");
+
+    assert_no_forbidden_needles(
+        &root,
+        vec![eval_rs],
+        PUBLIC_OUTPUT_TREE_MARKER_NEEDLES,
+        "external callers must not manufacture executor-local output tree markers",
+        "public executor output tree marker constructor",
     );
 }
 

@@ -12,7 +12,7 @@
 
 use std::rc::Rc;
 
-use crate::eval::{Poison, Thunk, Value};
+use crate::eval::{ExecutorOutputTree, Poison, Thunk, Value};
 
 /// A finished process — the raw result the executor's `run_exec` produces.
 #[derive(Debug, Clone)]
@@ -87,7 +87,7 @@ fn proc_error_value(o: &ProcOutcome) -> Value {
 
 fn live_face() -> Value {
     // The live face: `stdout`/`stderr` streams are the streaming work (still absent);
-    // `out` is the producing write-set tree — a remote handle leaf (`Value::OutputTree`),
+    // `out` is the producing write-set tree — an executor-local output marker,
     // which `to_wire` crosses back as a `Producing` handle. So `run.stream.out` resolves
     // to the output tree now; `run.stream.stdout`/`.stderr` land with streams.
     Value::Struct(vec![
@@ -99,7 +99,10 @@ fn live_face() -> Value {
             "stderr".to_string(),
             unsupported_stream_field("run.stream.stderr"),
         ),
-        ("out".to_string(), Thunk::done(Value::OutputTree)),
+        (
+            "out".to_string(),
+            Thunk::done(Value::OutputTree(ExecutorOutputTree::new())),
+        ),
     ])
 }
 

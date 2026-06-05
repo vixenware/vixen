@@ -205,15 +205,27 @@ pub enum Value {
     /// The **executor-side** output tree of the running exec — what `run.ok.out` /
     /// `run.stream.out` evaluate to *on the executor*, before crossing. It is local
     /// there (the executor produced it); `to_wire` marks it [`WireValue::Tree`] so it
-    /// crosses back as a handle (the orchestrator never sees this variant — it gets a
-    /// [`Value::Tree`]). Parameterless for now (one output tree per run).
-    OutputTree,
+    /// crosses back as a handle (the orchestrator gets a [`Value::Tree`] once the
+    /// producing handle is registered). The marker has a private field, so external
+    /// callers cannot forge this executor-local value.
+    OutputTree(ExecutorOutputTree),
     /// The opaque runtime envelope of a caught failure (the failure model's
     /// `FailureContext`). Reified by `?` into the `context` field of a `Failure`
     /// struct value, so a caught error carries the same span + demand-path the
     /// propagating poison did. Authors carry it through but do not inspect it
     /// (compared by identity, never structurally equal across distinct failures).
     FailureContext(Rc<FailureContext>),
+}
+
+#[derive(Debug, Clone, Copy)]
+pub struct ExecutorOutputTree {
+    _private: (),
+}
+
+impl ExecutorOutputTree {
+    pub(crate) fn new() -> Self {
+        Self { _private: () }
+    }
 }
 
 /// The outcome of evaluating a test body: clean, or poisoned (with the source
@@ -422,7 +434,7 @@ fn wire_graph_value(value: &Value) -> Result<WireValue, Poison> {
             tag: tag.clone(),
             fields: wire_graph_fields(fields)?,
         },
-        Value::OutputTree => WireValue::Tree,
+        Value::OutputTree(_) => WireValue::Tree,
         other => {
             return Err(poison(format!(
                 "`exec` observer returned a value that cannot cross back: {other:?}"

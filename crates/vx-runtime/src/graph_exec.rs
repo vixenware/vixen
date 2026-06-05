@@ -22,7 +22,7 @@ use crate::cache::{
     CachedExecOutcome, ExecInvocationCacheKey, HostExecCacheKey, ObserverCacheIdentity,
     RuntimeCache, RuntimeCacheBackend,
 };
-use crate::eval::{FailureContext, Outcome, Poison, Thunk, Value, from_wire};
+use crate::eval::{ExecutorOutputTree, FailureContext, Outcome, Poison, Thunk, Value, from_wire};
 use crate::remote::{Part, PartKey};
 use crate::strand::{HandleId, ObserveClientId, ObserveOutcome, dispatch_observe, force_remote};
 
@@ -1098,7 +1098,7 @@ fn node_output_from_value(
             runtime.remote_trees.borrow_mut().insert(node, handle);
             Ok(NodeOutput::OutputTree)
         }
-        Value::OutputTree => Ok(NodeOutput::OutputTree),
+        Value::OutputTree(_) => Ok(NodeOutput::OutputTree),
         Value::Tuple(fields) => Ok(NodeOutput::LazyData {
             label: "(external)".to_string(),
             fields: external_field_nodes(
@@ -1160,7 +1160,7 @@ fn node_output_from_value_in_driver(
             runtime.remote_trees.borrow_mut().insert(node, handle);
             Ok(NodeOutput::OutputTree)
         }
-        Value::OutputTree => Ok(NodeOutput::OutputTree),
+        Value::OutputTree(_) => Ok(NodeOutput::OutputTree),
         Value::Tuple(fields) => Ok(NodeOutput::LazyData {
             label: "(external)".to_string(),
             fields: external_field_nodes_in_driver(
@@ -1370,7 +1370,7 @@ fn output_tree_value(node: NodeId, runtime: &RuntimeBoundaries) -> Value {
         .get(&node)
         .copied()
         .map(Value::Tree)
-        .unwrap_or(Value::OutputTree)
+        .unwrap_or_else(|| Value::OutputTree(ExecutorOutputTree::new()))
 }
 
 fn value_from_ready_output(
@@ -1398,7 +1398,7 @@ fn value_from_scalar_output(
         NodeOutput::Bool(b) => Ok(Value::Bool(b)),
         NodeOutput::Str(s) => Ok(Value::Str(Rc::from(s))),
         NodeOutput::Unit => Ok(Value::Unit),
-        NodeOutput::OutputTree => Ok(Value::OutputTree),
+        NodeOutput::OutputTree => Ok(Value::OutputTree(ExecutorOutputTree::new())),
         NodeOutput::FailureContext(context) => Ok(Value::FailureContext(Rc::new(
             failure_context_from_core(context),
         ))),
@@ -1515,7 +1515,7 @@ fn poison_err_from_output(output: NodeOutput) -> Option<Value> {
         NodeOutput::Bool(b) => Some(Value::Bool(b)),
         NodeOutput::Str(s) => Some(Value::Str(Rc::from(s))),
         NodeOutput::Unit => Some(Value::Unit),
-        NodeOutput::OutputTree => Some(Value::OutputTree),
+        NodeOutput::OutputTree => Some(Value::OutputTree(ExecutorOutputTree::new())),
         NodeOutput::Variant {
             tag,
             field_names,

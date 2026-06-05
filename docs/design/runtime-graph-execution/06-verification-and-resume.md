@@ -197,9 +197,13 @@ Current partial state:
   `NodeOutput::OutputTree` becomes `Value::Tree(handle)` when the reconstructed
   node has a registered remote/producing handle. `Value::OutputTree` remains the
   executor-local marker before wire crossing or an honest no-handle fallback.
+  That marker is sealed behind a private-field type with a crate-private
+  constructor, so outside callers cannot manufacture executor-local output trees.
 
 Latest focused verification:
 
+- `cargo check -p vx-runtime -p vx-runner -p vx-daemon`: passed after making
+  `Value::OutputTree` carry a sealed executor-local marker.
 - `cargo check -p vx-runtime -p vx-runner -p vx-daemon`: passed after making
   graph public-value reconstruction preserve registered producing-tree handles.
 - `cargo check -p vx-runtime -p vx-runner -p vx-daemon`: passed after making
@@ -219,18 +223,20 @@ Latest focused verification:
   `crates/vx-runtime-core`, `crates/vx-runtime-driver`, and
   `crates/vx-runtime/src` returned no matches after this checkpoint.
 - `cargo nextest list -p vx-runtime -E 'binary(source_blind_guardrails)'`:
-  selected nine source-blind guardrail tests, including
+  selected ten source-blind guardrail tests, including
   `kernel_mode_oracle_labels_stay_deleted` and
-  `native_thunk_constructor_stays_crate_private`.
+  `native_thunk_constructor_stays_crate_private` and
+  `executor_output_tree_marker_stays_sealed`.
 - `cargo nextest run -p vx-runtime-driver --no-fail-fast`: 14/14 passed,
   including `resolved_public_value_authorizes_only_its_field_nodes`,
   `boundary_request_does_not_leave_node_in_progress`, and
   `boundary_payload_field_is_bound_to_resolved_payload_output`.
 - `cargo nextest run -p vx-runtime -E 'binary(source_blind_guardrails)' --no-fail-fast`:
-  9/9 passed, including `execution_crates_stay_source_blind` with guardrail
+  10/10 passed, including `execution_crates_stay_source_blind` with guardrail
   needles for public free `root`, `boundary_payload`, `public_value_field`, and
   `test_probe` constructors, plus `kernel_mode_oracle_labels_stay_deleted` and
-  `native_thunk_constructor_stays_crate_private`.
+  `native_thunk_constructor_stays_crate_private`, plus
+  `executor_output_tree_marker_stays_sealed`.
 - `cargo nextest run -p vx-runtime --no-fail-fast`: 144/144 passed, including
   `lang_suite`.
 - `cargo nextest run -p vx-runtime -E 'binary(lang_suite)' --no-fail-fast`:
@@ -240,8 +246,8 @@ Latest focused verification:
   163/163 passed, including `boundary_payload_field_is_bound_to_resolved_payload_output`,
   source-blind guardrails, and `lang_suite`.
 - `cargo nextest run -p vx-runtime -p vx-runner -p vx-daemon --no-fail-fast`:
-  158/158 passed, 12 skipped, after preserving producing-tree handles during
-  public graph value reconstruction.
+  159/159 passed, 12 skipped, after sealing the executor-local output tree
+  marker.
 - `cargo check -p vx-cache-index -p vx-exec-protocol -p vx-services -p vx-store -p vx-runtime-graph -p vx-runtime-core -p vx-runtime-driver -p vx-runtime -p vx-runner -p vx-daemon`
   passes with no old-evaluator dead-code warnings.
 - `cargo nextest run -p vx-runtime -E 'binary(source_blind_guardrails) | binary(exec_on_strands)' --no-fail-fast`:

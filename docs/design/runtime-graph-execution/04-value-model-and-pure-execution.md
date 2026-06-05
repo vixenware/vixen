@@ -380,6 +380,8 @@ Current API-edge adapter:
   registered producing-tree handle, `NodeOutput::OutputTree` becomes
   `Value::Tree(handle)`. `Value::OutputTree` remains only the executor-local
   marker used before wire crossing, or an honest fallback when no handle exists.
+  Its marker type has a private field and a crate-private constructor, so
+  external callers cannot forge executor-local output trees.
 
 Vixen tests targeted:
 
