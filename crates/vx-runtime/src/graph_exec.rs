@@ -142,26 +142,6 @@ pub(crate) fn run_body_with_exec(
     )
 }
 
-pub(crate) fn run_body_with_exec_and_cache_dir(
-    program: &VirProgram,
-    env: &TypeEnv,
-    body: BodyId,
-    args: Vec<Value>,
-    exec_client: ObserveClientId,
-    cache_dir: PathBuf,
-) -> Result<(Outcome, u64), String> {
-    run_body_with_boundaries(
-        program,
-        env,
-        body,
-        args,
-        RuntimeBoundaries {
-            exec_client: Some(exec_client),
-            ..RuntimeBoundaries::with_cache_dir(cache_dir)
-        },
-    )
-}
-
 pub(crate) fn run_body_with_exec_and_cache_backend(
     program: &VirProgram,
     env: &TypeEnv,

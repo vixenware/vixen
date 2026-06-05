@@ -340,31 +340,6 @@ pub fn eval_body_with_exec(
     graph_body_outcome(program, env, body, args, Some(exec_client))
 }
 
-/// As [`eval_body_with_exec`], but with an explicit temporary cache-index
-/// directory for cacheable boundary results.
-pub fn eval_body_with_exec_and_cache_dir(
-    program: &VirProgram,
-    env: &TypeEnv,
-    body: BodyId,
-    args: Vec<Value>,
-    mode: KernelMode,
-    exec_client: ObserveClientId,
-    cache_dir: impl AsRef<Path>,
-) -> Outcome {
-    let _ = mode;
-    match crate::graph_exec::run_body_with_exec_and_cache_dir(
-        program,
-        env,
-        body,
-        args,
-        exec_client,
-        cache_dir.as_ref().to_path_buf(),
-    ) {
-        Ok((outcome, _)) => outcome,
-        Err(reason) => Outcome::Poisoned { reason, span: None },
-    }
-}
-
 /// As [`eval_body_with_exec`], but with a caller-owned persistent cache backend.
 /// Async cache services must be hidden behind an orchestrator/strand boundary,
 /// not driven directly from runtime evaluation.

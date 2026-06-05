@@ -348,9 +348,10 @@ Current checkpoint:
 - `crates/vx-cache-index` owns the temporary local Facet-JSON file index and
   key-digest-to-path layout.
 - `vx-runtime::cache::RuntimeCache` owns the temporary per-run boundary L1 maps
-  and optional `vx-cache-index::LocalCacheIndex` adapter used by explicit
-  `*_with_cache_dir` entry points. This is a transitional cache-owner seam, not
-  the final daemon/vx-store cache index.
+  and optional `vx-cache-index::LocalCacheIndex` adapter used by the non-exec
+  `eval_body_with_cache_dir` compatibility entry. Exec cache proofs use
+  `eval_body_with_exec_and_cache_backend` instead. This is a transitional
+  cache-owner seam, not the final daemon/vx-store cache index.
 - `vx-runtime::graph_exec` still computes pre-run boundary cache keys while
   materializing demanded boundary nodes, but it no longer directly owns L1 maps,
   `LocalCacheIndex`, cache namespace strings, or file-index layout.
@@ -384,9 +385,13 @@ Current checkpoint:
   park path, not in `graph_exec`.
 - `RuntimeBoundaries::default()` is cacheless. The old ambient
   `VX_RUNTIME_L2_DIR` lookup no longer participates in default graph execution.
-- `eval_body_with_cache_dir`, `eval_body_with_exec_and_cache_dir`, and internal
-  `run_body_with_cache_dir` remain explicit compatibility entry points for
-  cache-behavior proofs while daemon/control-plane cache lookup is introduced.
+- `eval_body_with_cache_dir` and internal `run_body_with_cache_dir` remain
+  explicit non-exec compatibility entry points for cache-behavior proofs while
+  daemon/control-plane cache lookup is introduced. The exec-specific cache-dir
+  entry point is deleted.
+- The deleted exec cache-dir names, `eval_body_with_exec_and_cache_dir` and
+  internal `run_body_with_exec_and_cache_dir`, are now guardrail needles. They
+  should not reappear as callable runtime APIs.
 - `source_blind_guardrails` scans `vx-runtime/src` for `BoundaryL2Cache`,
   `VX_RUNTIME_L2_DIR`, the runtime write counter, and the deleted file-index
   helper methods. It also scans `vx-runtime/src/graph_exec.rs` for direct
@@ -506,6 +511,8 @@ Current checkpoint:
   (the live-VFS proof targets).
 - `cargo nextest run -p vx-cache-index -p vx-exec-protocol -p vx-services -p vx-store -p vx-runtime-graph -p vx-runtime-core -p vx-runtime-driver -p vx-runtime -p vx-runner -p vx-daemon --no-fail-fast`:
   185/185 passed, 12 skipped.
+- `cargo nextest run -p vx-runtime -p vx-daemon -p vx-runner --no-fail-fast`:
+  156/156 passed, 12 skipped after deleting the exec cache-dir API.
 - `cargo nextest run -p vx-daemon --no-fail-fast`: 5/5 passed, 1 skipped.
 - The forbidden-symbol scans over `vx-runtime-core`, `vx-runtime-driver`, the
   deleted tree-walker affordance scan over `vx-runtime/src`, and the

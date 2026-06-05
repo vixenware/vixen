@@ -148,12 +148,17 @@ Expected latest structural checkpoint:
   `WireValue`, `Observed`, and the generated Observe Vox client/dispatcher.
   `vx-runtime::observe` owns only `CompletedRun` and `evaluate_observer`.
 - `crates/vx-cache-index` owns the temporary local Facet-JSON file index used by
-  explicit `*_with_cache_dir` entry points. `vx-runtime::cache::RuntimeCache`
+  the non-exec `eval_body_with_cache_dir` compatibility entry. Exec cache proofs
+  use `eval_body_with_exec_and_cache_backend` instead. `vx-runtime::cache::RuntimeCache`
   owns the temporary per-run boundary L1 maps and optional `LocalCacheIndex`
   adapter. `vx-runtime::graph_exec` computes pre-run boundary cache keys while
   materializing demanded boundaries, but it no longer owns the L1 maps,
   `LocalCacheIndex`, file path layout, cache namespace strings, or ambient
   `VX_RUNTIME_L2_DIR` lookup.
+- The exec-specific cache-dir API has been deleted:
+  `eval_body_with_exec_and_cache_dir` and internal
+  `run_body_with_exec_and_cache_dir` now appear only as guardrail needles. Exec
+  L2 behavior must cross the backend/service path.
 - `vx-services::CasNode` now has a `CacheRecord` variant for portable
   cache-record bodies in `vx-store`, and `vx-services::CacheIndex` is the
   control-plane index surface mapping pre-run key digests to candidate cache
@@ -311,6 +316,8 @@ Latest verified red/green shape:
   typed-key and digest-addressed local records.
 - `cargo nextest run -p vx-cache-index -p vx-exec-protocol -p vx-services -p vx-store -p vx-runtime-graph -p vx-runtime-core -p vx-runtime-driver -p vx-runtime -p vx-runner -p vx-daemon --no-fail-fast`:
   185 run, 185 passed, 12 skipped.
+- `cargo nextest run -p vx-runtime -p vx-daemon -p vx-runner --no-fail-fast`:
+  156 run, 156 passed, 12 skipped after deleting the exec cache-dir API.
 - `cargo nextest run -p vx-daemon --no-fail-fast`: 5/5 passed, 1 skipped.
 - The raw forbidden-symbol scans over `vx-runtime-core`, `vx-runtime-driver`,
   the deleted tree-walker affordance scan over `vx-runtime/src`, and the

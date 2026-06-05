@@ -267,6 +267,8 @@ Latest focused verification:
 - `cargo nextest run -p vx-cache-index --no-fail-fast`: 2/2 passed.
 - `cargo nextest run -p vx-cache-index -p vx-exec-protocol -p vx-services -p vx-store -p vx-runtime-graph -p vx-runtime-core -p vx-runtime-driver -p vx-runtime -p vx-runner -p vx-daemon --no-fail-fast`:
   185 run, 185 passed, 12 skipped.
+- `cargo nextest run -p vx-runtime -p vx-daemon -p vx-runner --no-fail-fast`:
+  156 run, 156 passed, 12 skipped after deleting the exec cache-dir API.
 - `cargo nextest run -p vx-daemon --no-fail-fast`: 5/5 passed, 1 skipped.
 - `vx-runner::tests::strand_observe_reaches_runner_backed_service` drives a
   `vx-runtime` strand against a runner-backed `Observe` service and reaches the
@@ -334,6 +336,9 @@ Latest focused verification:
   sharing a strand-installed `StrandCacheBackend` backed by
   `CacheIndexRuntimeCacheService`; the second fresh graph eval must reuse the
   persisted `vx-store` `CacheRecord` instead of dispatching again.
+- `eval_body_with_exec_and_cache_dir` and internal
+  `run_body_with_exec_and_cache_dir` are deleted. The names now live only in
+  `source_blind_guardrails` as forbidden cache-dir affordances.
 - `vx-runner::tests::writable_roots_disambiguate_runner_backed_l1_entry`
   is the ignored live-VFS proof target moved out of `exec_on_strands` for
   writable-root L1 disambiguation. It uses identical command argv and different

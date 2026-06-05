@@ -443,8 +443,9 @@ Final cache/store shape:
   and a daemon/control-plane index must not change cache-key law, demand
   origins, or read-set semantics. `vx-runtime::graph_exec` no longer owns the
   file-index layout, cache namespace strings, L1 maps, or the ambient
-  `VX_RUNTIME_L2_DIR` hook; explicit `*_with_cache_dir` entry points are the
-  remaining compatibility path.
+  `VX_RUNTIME_L2_DIR` hook. The non-exec `eval_body_with_cache_dir` entry is the
+  remaining cache-dir compatibility path; exec cache proofs must go through
+  `eval_body_with_exec_and_cache_backend`.
 
 ### 5. Read-set provenance
 

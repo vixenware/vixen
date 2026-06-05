@@ -64,6 +64,8 @@ const RUNTIME_CACHE_OWNERSHIP_NEEDLES: &[&str] = &[
     "impl BoundaryL2Cache",
     "VX_RUNTIME_L2_DIR",
     "L2_WRITE_COUNTER",
+    "eval_body_with_exec_and_cache_dir",
+    "run_body_with_exec_and_cache_dir",
     "fn cache_path",
     "fn read_json",
     "fn write_json",
