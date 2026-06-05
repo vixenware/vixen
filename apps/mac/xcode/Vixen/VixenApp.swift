@@ -127,16 +127,18 @@ private enum ManagementService {
     static func register() throws {
         let daemon = service
         switch daemon.status {
-        case .enabled:
-            try daemon.unregister()
-        case .requiresApproval:
+        case .enabled, .requiresApproval:
             return
         default:
             break
         }
 
+        try registerService()
+    }
+
+    private static func registerService() throws {
         do {
-            try daemon.register()
+            try service.register()
         } catch {
             switch service.status {
             case .enabled, .requiresApproval:
@@ -145,6 +147,20 @@ private enum ManagementService {
                 throw error
             }
         }
+    }
+
+    static func refreshRegistration() throws {
+        let daemon = service
+        switch daemon.status {
+        case .enabled:
+            try daemon.unregister()
+        case .requiresApproval:
+            return
+        default:
+            break
+        }
+
+        try registerService()
     }
 
     static func unregister() throws {
@@ -261,6 +277,9 @@ private enum ManagementCommand {
             case "register":
                 try ManagementService.register()
                 ManagementService.printSnapshot()
+            case "refresh":
+                try ManagementService.refreshRegistration()
+                ManagementService.printSnapshot()
             case "unregister":
                 try ManagementService.unregister()
                 ManagementService.printSnapshot()
@@ -286,7 +305,7 @@ private enum ManagementCommand {
     private static func printUsage(to stream: UnsafeMutablePointer<FILE>) {
         fputs(
             """
-            Usage: Vixen management register|status|unregister|mount|unmount|remount|kill-fskitd
+            Usage: Vixen management register|refresh|status|unregister|mount|unmount|remount|kill-fskitd
 
             """,
             stream
@@ -610,7 +629,7 @@ struct ContentView: View {
         } else if managementSnapshot.serviceStatus == .requiresApproval {
             openLoginItemsSettings()
         } else if managementSnapshot.serviceStatus == .enabled {
-            configureManagementDaemon()
+            refreshManagementDaemon()
         } else {
             configureManagementDaemon()
         }
@@ -636,6 +655,30 @@ struct ContentView: View {
 
         do {
             try ManagementService.register()
+            managementError = nil
+            refreshManagementStatus()
+            if managementSnapshot.serviceStatus == .requiresApproval {
+                openLoginItemsSettings()
+            }
+        } catch {
+            refreshManagementStatus()
+            if isManagementConfigured || managementSnapshot.serviceStatus == .requiresApproval {
+                managementError = nil
+            } else {
+                managementError = error.localizedDescription
+            }
+        }
+    }
+
+    private func refreshManagementDaemon() {
+        isConfiguringManagement = true
+        defer {
+            isConfiguringManagement = false
+            refreshManagementStatus()
+        }
+
+        do {
+            try ManagementService.refreshRegistration()
             managementError = nil
             refreshManagementStatus()
             if managementSnapshot.serviceStatus == .requiresApproval {

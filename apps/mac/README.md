@@ -102,14 +102,19 @@ and machine-readable update metadata.
 
 The installer does not install a competing plist in `/Library/LaunchDaemons`.
 Its postinstall script removes the old `/Library/LaunchDaemons` registration if
-present, runs the helper's `ensure-queues` command, and invokes the installed app:
+present, runs the helper's `ensure-queues` command, and best-effort invokes the
+installed app:
 
 - `/Applications/Vixen.app/Contents/MacOS/Vixen management register`
+
+Registration failures do not fail the package install. The app onboarding UI can
+still prompt for approval or repair the daemon after installation.
 
 Useful installed-app commands:
 
 - `/Applications/Vixen.app/Contents/MacOS/Vixen management status`
 - `/Applications/Vixen.app/Contents/MacOS/Vixen management register`
+- `/Applications/Vixen.app/Contents/MacOS/Vixen management refresh`
 - `/Applications/Vixen.app/Contents/MacOS/Vixen management unregister`
 - `/Applications/Vixen.app/Contents/MacOS/Vixen management remount`
 

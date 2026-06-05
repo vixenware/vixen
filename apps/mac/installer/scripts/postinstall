@@ -31,9 +31,8 @@ fi
 }
 
 "$app" management register || {
-  echo "postinstall: failed to register Vixen Management" >&2
-  exit 1
+  echo "postinstall: could not register Vixen Management; the app will prompt for setup" >&2
 }
 
-echo "postinstall: registered Vixen Management"
+echo "postinstall: Vixen Management setup requested"
 exit 0
