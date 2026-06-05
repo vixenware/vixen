@@ -34,7 +34,7 @@ impl DemandRequest {
         }
     }
 
-    pub fn public_value_field(node: NodeId) -> Self {
+    fn public_value_field(node: NodeId) -> Self {
         Self {
             node,
             origin: DemandOrigin::PublicValueField,
@@ -57,6 +57,60 @@ impl DemandRequest {
 
     pub fn origin(self) -> DemandOrigin {
         self.origin
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ResolvedNode {
+    node: NodeId,
+    output: NodeOutput,
+    _sealed: private::Sealed,
+}
+
+impl ResolvedNode {
+    fn new(node: NodeId, output: NodeOutput) -> Self {
+        Self {
+            node,
+            output,
+            _sealed: private::Sealed,
+        }
+    }
+
+    pub fn node(&self) -> NodeId {
+        self.node
+    }
+
+    pub fn output(&self) -> &NodeOutput {
+        &self.output
+    }
+
+    pub fn into_output(self) -> NodeOutput {
+        self.output
+    }
+
+    pub fn field_demand(&self, node: NodeId) -> Option<PublicValueDemand> {
+        public_field_nodes(&self.output)
+            .contains(&node)
+            .then_some(PublicValueDemand {
+                node,
+                _sealed: private::Sealed,
+            })
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct PublicValueDemand {
+    node: NodeId,
+    _sealed: private::Sealed,
+}
+
+impl PublicValueDemand {
+    pub fn node(&self) -> NodeId {
+        self.node
+    }
+
+    pub fn request(self) -> DemandRequest {
+        DemandRequest::public_value_field(self.node)
     }
 }
 
@@ -187,9 +241,10 @@ impl Driver {
         }
     }
 
-    pub fn drive(&mut self, request: DemandRequest) -> Result<NodeOutput, DriverError> {
-        let _origin = request.origin();
-        self.resolve_node(request.node())
+    pub fn drive(&mut self, request: DemandRequest) -> Result<ResolvedNode, DriverError> {
+        let node = request.node();
+        let output = self.resolve_node(node)?;
+        Ok(ResolvedNode::new(node, output))
     }
 
     pub fn memoized(&self, node: NodeId) -> bool {
@@ -341,18 +396,103 @@ impl Driver {
     }
 }
 
+fn public_field_nodes(output: &NodeOutput) -> &[NodeId] {
+    match output {
+        NodeOutput::LazyData { fields, .. }
+        | NodeOutput::Struct { fields, .. }
+        | NodeOutput::Variant { fields, .. } => fields,
+        NodeOutput::U64(_)
+        | NodeOutput::Bool(_)
+        | NodeOutput::Str(_)
+        | NodeOutput::Unit
+        | NodeOutput::OutputTree
+        | NodeOutput::Failure { .. }
+        | NodeOutput::FailureContext(_) => &[],
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn drive_output(
+        driver: &mut Driver,
+        request: DemandRequest,
+    ) -> Result<NodeOutput, DriverError> {
+        driver.drive(request).map(ResolvedNode::into_output)
+    }
+
+    fn drive_root_output(driver: &mut Driver) -> Result<NodeOutput, DriverError> {
+        let request = driver.root_request();
+        drive_output(driver, request)
+    }
+
+    fn drive_probe_output(driver: &mut Driver, node: NodeId) -> Result<NodeOutput, DriverError> {
+        drive_output(driver, DemandRequest::test_probe(node))
+    }
 
     #[test]
     fn root_projection_skips_dead_field() {
         let graph = vx_runtime_graph::example_bomb_pair();
         let mut driver = Driver::new(graph);
-        let output = driver.drive(driver.root_request()).expect("root demand");
+        let output = drive_root_output(&mut driver).expect("root demand");
         assert_eq!(output, NodeOutput::U64(42));
         assert!(driver.memoized(NodeId(0)), "selected field memoized");
         assert!(!driver.memoized(NodeId(1)), "dead field not memoized");
+    }
+
+    #[test]
+    fn resolved_public_value_authorizes_only_its_field_nodes() {
+        let graph = DemandGraph {
+            nodes: vec![
+                Node {
+                    id: NodeId(0),
+                    kind: NodeKind::Const(vx_runtime_graph::ConstValue::U64(1)),
+                    span: None,
+                    label: "one".to_string(),
+                    ty: "U64".to_string(),
+                    inputs: Vec::new(),
+                },
+                Node {
+                    id: NodeId(1),
+                    kind: NodeKind::Const(vx_runtime_graph::ConstValue::U64(2)),
+                    span: None,
+                    label: "two".to_string(),
+                    ty: "U64".to_string(),
+                    inputs: Vec::new(),
+                },
+                Node {
+                    id: NodeId(2),
+                    kind: NodeKind::LazyData,
+                    span: None,
+                    label: "(one, two)".to_string(),
+                    ty: "(U64, U64)".to_string(),
+                    inputs: vec![NodeId(0), NodeId(1)],
+                },
+                Node {
+                    id: NodeId(3),
+                    kind: NodeKind::Const(vx_runtime_graph::ConstValue::U64(99)),
+                    span: None,
+                    label: "not a field".to_string(),
+                    ty: "U64".to_string(),
+                    inputs: Vec::new(),
+                },
+            ],
+            root: NodeId(2),
+        };
+        let mut driver = Driver::new(graph);
+        let resolved = driver
+            .drive(driver.root_request())
+            .expect("root lazy data resolves");
+        assert!(resolved.field_demand(NodeId(3)).is_none());
+        let first = resolved
+            .field_demand(NodeId(0))
+            .expect("first field demand is authorized");
+        assert_eq!(first.node(), NodeId(0));
+        assert_eq!(
+            drive_output(&mut driver, first.request()),
+            Ok(NodeOutput::U64(1))
+        );
     }
 
     #[test]
@@ -411,7 +551,7 @@ mod tests {
         assert_eq!(driver.memo_state(NodeId(0)), None);
 
         driver.seed(NodeId(0), NodeOutput::Unit);
-        assert_eq!(driver.drive(driver.root_request()), Ok(NodeOutput::Unit));
+        assert_eq!(drive_root_output(&mut driver), Ok(NodeOutput::Unit));
         assert_eq!(driver.memo_state(NodeId(0)), Some(MemoState::Ready));
     }
 
@@ -452,7 +592,7 @@ mod tests {
             root: NodeId(2),
         };
         let mut driver = Driver::new(graph);
-        assert_eq!(driver.drive(driver.root_request()), Ok(NodeOutput::U64(42)));
+        assert_eq!(drive_root_output(&mut driver), Ok(NodeOutput::U64(42)));
         assert_eq!(driver.memo_state(NodeId(0)), Some(MemoState::Ready));
         assert_eq!(driver.memo_state(NodeId(1)), None);
         assert_eq!(driver.memo_state(NodeId(2)), Some(MemoState::Ready));
@@ -508,9 +648,9 @@ mod tests {
             root: NodeId(1),
         };
         let mut driver = Driver::new(graph);
-        assert_eq!(driver.drive(driver.root_request()), Ok(NodeOutput::U64(42)));
+        assert_eq!(drive_root_output(&mut driver), Ok(NodeOutput::U64(42)));
         assert_eq!(
-            driver.drive(DemandRequest::test_probe(NodeId(3))),
+            drive_probe_output(&mut driver, NodeId(3)),
             Ok(NodeOutput::U64(42))
         );
         assert_eq!(driver.memo_state(NodeId(2)), None);
@@ -576,12 +716,12 @@ mod tests {
         };
         let mut driver = Driver::new(graph);
         assert_eq!(
-            driver.drive(DemandRequest::test_probe(NodeId(0))),
+            drive_probe_output(&mut driver, NodeId(0)),
             Ok(NodeOutput::U64(9))
         );
-        assert_eq!(driver.drive(driver.root_request()), Ok(NodeOutput::U64(42)));
+        assert_eq!(drive_root_output(&mut driver), Ok(NodeOutput::U64(42)));
         assert_eq!(
-            driver.drive(DemandRequest::test_probe(NodeId(4))),
+            drive_probe_output(&mut driver, NodeId(4)),
             Ok(NodeOutput::U64(42))
         );
         assert_eq!(driver.memo_state(NodeId(3)), None);
@@ -655,16 +795,16 @@ mod tests {
         };
         let mut driver = Driver::new(graph);
         assert_eq!(
-            driver.drive(DemandRequest::test_probe(NodeId(0))),
+            drive_probe_output(&mut driver, NodeId(0)),
             Ok(NodeOutput::U64(9))
         );
         assert_eq!(
-            driver.drive(DemandRequest::test_probe(NodeId(3))),
+            drive_probe_output(&mut driver, NodeId(3)),
             Ok(NodeOutput::U64(10))
         );
-        assert_eq!(driver.drive(driver.root_request()), Ok(NodeOutput::U64(42)));
+        assert_eq!(drive_root_output(&mut driver), Ok(NodeOutput::U64(42)));
         assert_eq!(
-            driver.drive(DemandRequest::test_probe(NodeId(5))),
+            drive_probe_output(&mut driver, NodeId(5)),
             Ok(NodeOutput::U64(7))
         );
         assert_eq!(driver.memo_state(NodeId(4)), Some(MemoState::Ready));
@@ -730,12 +870,12 @@ mod tests {
         };
         let mut driver = Driver::new(graph);
         assert_eq!(
-            driver.drive(DemandRequest::test_probe(NodeId(0))),
+            drive_probe_output(&mut driver, NodeId(0)),
             Ok(NodeOutput::U64(9))
         );
-        assert_eq!(driver.drive(driver.root_request()), Ok(NodeOutput::U64(42)));
+        assert_eq!(drive_root_output(&mut driver), Ok(NodeOutput::U64(42)));
         assert_eq!(
-            driver.drive(DemandRequest::test_probe(NodeId(4))),
+            drive_probe_output(&mut driver, NodeId(4)),
             Ok(NodeOutput::U64(7))
         );
         assert_eq!(driver.memo_state(NodeId(3)), Some(MemoState::Ready));
@@ -809,16 +949,16 @@ mod tests {
         };
         let mut driver = Driver::new(graph);
         assert_eq!(
-            driver.drive(DemandRequest::test_probe(NodeId(0))),
+            drive_probe_output(&mut driver, NodeId(0)),
             Ok(NodeOutput::U64(5))
         );
         assert_eq!(
-            driver.drive(DemandRequest::test_probe(NodeId(1))),
+            drive_probe_output(&mut driver, NodeId(1)),
             Ok(NodeOutput::U64(9))
         );
-        assert_eq!(driver.drive(driver.root_request()), Ok(NodeOutput::U64(42)));
+        assert_eq!(drive_root_output(&mut driver), Ok(NodeOutput::U64(42)));
         assert_eq!(
-            driver.drive(DemandRequest::test_probe(NodeId(5))),
+            drive_probe_output(&mut driver, NodeId(5)),
             Ok(NodeOutput::U64(42))
         );
         assert_eq!(driver.memo_state(NodeId(4)), None);
@@ -892,12 +1032,12 @@ mod tests {
         };
         let mut driver = Driver::new(graph);
         assert_eq!(
-            driver.drive(DemandRequest::test_probe(NodeId(1))),
+            drive_probe_output(&mut driver, NodeId(1)),
             Ok(NodeOutput::U64(9))
         );
-        assert_eq!(driver.drive(driver.root_request()), Ok(NodeOutput::U64(42)));
+        assert_eq!(drive_root_output(&mut driver), Ok(NodeOutput::U64(42)));
         assert_eq!(
-            driver.drive(DemandRequest::test_probe(NodeId(5))),
+            drive_probe_output(&mut driver, NodeId(5)),
             Ok(NodeOutput::U64(7))
         );
         assert_eq!(driver.memo_state(NodeId(0)), None);
@@ -970,9 +1110,9 @@ mod tests {
             root: NodeId(2),
         };
         let mut driver = Driver::new(graph);
-        assert_eq!(driver.drive(driver.root_request()), Ok(NodeOutput::U64(42)));
+        assert_eq!(drive_root_output(&mut driver), Ok(NodeOutput::U64(42)));
         assert_eq!(
-            driver.drive(DemandRequest::test_probe(NodeId(5))),
+            drive_probe_output(&mut driver, NodeId(5)),
             Ok(NodeOutput::U64(7))
         );
         assert_eq!(driver.memo_state(NodeId(1)), None);

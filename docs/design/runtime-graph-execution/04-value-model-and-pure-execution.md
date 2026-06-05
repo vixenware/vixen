@@ -364,10 +364,11 @@ Current implemented slice:
 Current API-edge adapter:
 
 - `Outcome::Clean(Value)` remains as the public compatibility shape, but it is
-  now constructed from graph `NodeOutput` after root demand.
+  now constructed from a sealed resolved-node handle after root demand.
 - Public tuple/array/struct/variant fields are graph/native boundary thunks.
-  Forcing one issues `DemandRequest::PublicValueField` through the same driver
-  loop that can materialize external and host boundary nodes.
+  Forcing one issues `DemandRequest::PublicValueField` through an authorized
+  `PublicValueDemand` token minted only from node IDs present in that resolved
+  output.
 - Executor-local output trees use a graph `OutputTree` marker and cross to
   `WireValue::Tree` during observer wire crossing.
 

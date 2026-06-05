@@ -7,7 +7,9 @@ use vx_ir::build::VirProgram;
 use vx_ir::ids::{BodyId, PatternId};
 use vx_ir::pattern::PatternKind;
 use vx_runtime_core::{CoreFailureContext, CorePoison, NodeOutput, UnsupportedNode};
-use vx_runtime_driver::{BoundaryDemand, DemandRequest, Driver, DriverError};
+use vx_runtime_driver::{
+    BoundaryDemand, DemandRequest, Driver, DriverError, PublicValueDemand, ResolvedNode,
+};
 use vx_runtime_graph::{ConstValue, HostMethod, NodeId, NodeKind};
 use vx_types::TypeEnv;
 
@@ -222,8 +224,8 @@ fn drive_graph(
     )?;
     let kernel_executions = driver.borrow().kernel_executions();
     let outcome = match result {
-        Ok(output) => Outcome::Clean(value_from_output(
-            output,
+        Ok(resolved) => Outcome::Clean(value_from_resolved(
+            resolved,
             Rc::clone(&driver),
             Rc::clone(&externals),
             runtime.clone(),
@@ -256,7 +258,7 @@ fn drive_request(
     externals: ExternalThunks,
     runtime: RuntimeBoundaries,
     request: DemandRequest,
-) -> Result<Result<NodeOutput, DriverError>, String> {
+) -> Result<Result<ResolvedNode, DriverError>, String> {
     loop {
         let result = {
             let mut driver = driver.borrow_mut();
@@ -918,7 +920,7 @@ fn demand_payload(
     node: NodeId,
 ) -> Result<NodeOutput, String> {
     match drive_request(driver, externals, runtime, boundary.payload(node))? {
-        Ok(output) => Ok(output),
+        Ok(resolved) => Ok(resolved.into_output()),
         Err(error) => Err(driver_error_message(error)),
     }
 }
@@ -1186,12 +1188,13 @@ fn external_field_nodes_in_driver(
         .collect()
 }
 
-fn value_from_output(
-    output: NodeOutput,
+fn value_from_resolved(
+    resolved: ResolvedNode,
     driver: SharedDriver,
     externals: ExternalThunks,
     runtime: RuntimeBoundaries,
 ) -> Result<Value, String> {
+    let output = resolved.output().clone();
     match output {
         NodeOutput::U64(n) => Ok(Value::U64(n)),
         NodeOutput::Bool(b) => Ok(Value::Bool(b)),
@@ -1202,14 +1205,20 @@ fn value_from_output(
             let fields = fields
                 .into_iter()
                 .map(|node| {
-                    graph_field_thunk(
+                    let demand = resolved.field_demand(node).ok_or_else(|| {
+                        format!(
+                            "node {node:?} is not a public field of {:?}",
+                            resolved.node()
+                        )
+                    })?;
+                    Ok(graph_field_thunk(
                         Rc::clone(&driver),
                         Rc::clone(&externals),
                         runtime.clone(),
-                        node,
-                    )
+                        demand,
+                    ))
                 })
-                .collect();
+                .collect::<Result<Vec<_>, String>>()?;
             if label.starts_with('[') {
                 Ok(Value::Array(fields))
             } else {
@@ -1224,17 +1233,23 @@ fn value_from_output(
                 .into_iter()
                 .zip(fields)
                 .map(|(name, node)| {
-                    (
+                    let demand = resolved.field_demand(node).ok_or_else(|| {
+                        format!(
+                            "node {node:?} is not a public field of {:?}",
+                            resolved.node()
+                        )
+                    })?;
+                    Ok((
                         name,
                         graph_field_thunk(
                             Rc::clone(&driver),
                             Rc::clone(&externals),
                             runtime.clone(),
-                            node,
+                            demand,
                         ),
-                    )
+                    ))
                 })
-                .collect();
+                .collect::<Result<Vec<_>, String>>()?;
             Ok(Value::Struct(fields))
         }
         NodeOutput::Variant {
@@ -1246,17 +1261,23 @@ fn value_from_output(
                 .into_iter()
                 .zip(fields)
                 .map(|(name, node)| {
-                    (
+                    let demand = resolved.field_demand(node).ok_or_else(|| {
+                        format!(
+                            "node {node:?} is not a public field of {:?}",
+                            resolved.node()
+                        )
+                    })?;
+                    Ok((
                         name,
                         graph_field_thunk(
                             Rc::clone(&driver),
                             Rc::clone(&externals),
                             runtime.clone(),
-                            node,
+                            demand,
                         ),
-                    )
+                    ))
                 })
-                .collect();
+                .collect::<Result<Vec<_>, String>>()?;
             Ok(Value::Variant { tag, fields })
         }
         NodeOutput::Failure { err, context } => Ok(Value::Struct(vec![
@@ -1285,23 +1306,73 @@ fn value_from_output(
     }
 }
 
+fn value_from_ready_output(
+    output: NodeOutput,
+    driver: SharedDriver,
+    externals: ExternalThunks,
+    runtime: RuntimeBoundaries,
+) -> Result<Value, String> {
+    match output {
+        NodeOutput::LazyData { .. } | NodeOutput::Struct { .. } | NodeOutput::Variant { .. } => {
+            Err("compound ready output has no public field demand authority".to_string())
+        }
+        output => value_from_scalar_output(output, driver, externals, runtime),
+    }
+}
+
+fn value_from_scalar_output(
+    output: NodeOutput,
+    _driver: SharedDriver,
+    _externals: ExternalThunks,
+    _runtime: RuntimeBoundaries,
+) -> Result<Value, String> {
+    match output {
+        NodeOutput::U64(n) => Ok(Value::U64(n)),
+        NodeOutput::Bool(b) => Ok(Value::Bool(b)),
+        NodeOutput::Str(s) => Ok(Value::Str(Rc::from(s))),
+        NodeOutput::Unit => Ok(Value::Unit),
+        NodeOutput::OutputTree => Ok(Value::OutputTree),
+        NodeOutput::FailureContext(context) => Ok(Value::FailureContext(Rc::new(
+            failure_context_from_core(context),
+        ))),
+        NodeOutput::Failure { err, context } => Ok(Value::Struct(vec![
+            (
+                "err".to_string(),
+                ready_output_thunk(*err, _driver.clone(), _externals.clone(), _runtime.clone()),
+            ),
+            (
+                "context".to_string(),
+                ready_output_thunk(
+                    NodeOutput::FailureContext(context),
+                    _driver,
+                    _externals,
+                    _runtime,
+                ),
+            ),
+        ])),
+        NodeOutput::LazyData { .. } | NodeOutput::Struct { .. } | NodeOutput::Variant { .. } => {
+            Err("compound output needs public field demand authority".to_string())
+        }
+    }
+}
+
 fn graph_field_thunk(
     driver: SharedDriver,
     externals: ExternalThunks,
     runtime: RuntimeBoundaries,
-    node: NodeId,
+    demand: PublicValueDemand,
 ) -> Thunk {
     Thunk::native(move || {
         let result = drive_request(
             Rc::clone(&driver),
             Rc::clone(&externals),
             runtime.clone(),
-            DemandRequest::public_value_field(node),
+            demand.request(),
         )
         .map_err(poison_from_string)?;
-        let output = result.map_err(poison_from_driver_error)?;
-        value_from_output(
-            output,
+        let resolved = result.map_err(poison_from_driver_error)?;
+        value_from_resolved(
+            resolved,
             Rc::clone(&driver),
             Rc::clone(&externals),
             runtime.clone(),
@@ -1317,7 +1388,7 @@ fn ready_output_thunk(
     runtime: RuntimeBoundaries,
 ) -> Thunk {
     Thunk::native(move || {
-        value_from_output(
+        value_from_ready_output(
             output.clone(),
             Rc::clone(&driver),
             Rc::clone(&externals),

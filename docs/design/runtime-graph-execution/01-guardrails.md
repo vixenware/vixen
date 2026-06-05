@@ -60,6 +60,8 @@ Forbidden in `vx-runtime-core` and `vx-runtime-driver`:
 - public free root-demand constructors such as `pub fn root`
 - public free boundary-payload demand constructors such as
   `pub fn boundary_payload`
+- public free API-edge field-demand constructors such as
+  `pub fn public_value_field`
 
 Some of those names may be valid in analyzer or lowerer modules. They are not
 valid in source-blind execution crates.
@@ -182,6 +184,12 @@ Root demand is bound to the driver's graph root. Runtime callers ask the driver
 for its `root_request()`; they do not construct `DemandRequest::root(node)` from
 an arbitrary `NodeId`.
 
+Public value field demand is bound to a resolved graph output. A successful
+driver demand returns a sealed resolved-node handle; API-edge value adapters ask
+that handle for field-demand tokens for the node IDs actually present in its
+output. Runtime callers do not construct `DemandRequest::public_value_field(node)`
+from an arbitrary `NodeId`.
+
 Boundary payload demand is not an ambient constructor. When the driver reaches a
 boundary it returns a non-clone `BoundaryDemand` token. Boundary materialization
 may borrow that token to create request-shaping payload demands with
@@ -190,8 +198,9 @@ may borrow that token to create request-shaping payload demands with
 
 Do not make `DemandRequest` fields public. Do not add blanket conversion from
 `NodeId` to `DemandRequest`. Do not expose a free `root(node)` or
-`boundary_payload(node)` constructor. Do not expose a public `test_probe`
-constructor. Do not expose `resolve_node` publicly as a generic force operation.
+`boundary_payload(node)` constructor. Do not expose a public
+`public_value_field(node)` or `test_probe` constructor. Do not expose
+`resolve_node` publicly as a generic force operation.
 
 ## What counts as failure
 
@@ -220,6 +229,6 @@ Run before and after every phase touching runtime execution:
 cargo check -p vx-runtime-graph -p vx-runtime-core -p vx-runtime-driver -p vx-runtime
 cargo nextest run -p vx-runtime-graph -p vx-runtime-core -p vx-runtime-driver -p vx-runtime
 cargo nextest run -p vx-runtime -E 'binary(source_blind_guardrails)'
-rg -n 'vx[_-]ir|ExprKind|ExprId|StmtKind|PatternKind|PatternId|VirProgram|BodyId|node_exprs|exprmap|eval_inner|eval_expr|walk_expr|legacy_eval|fn force|\.force\(|pub fn root\(|pub fn boundary_payload|pub fn test_probe' crates/vx-runtime-core crates/vx-runtime-driver
+rg -n 'vx[_-]ir|ExprKind|ExprId|StmtKind|PatternKind|PatternId|VirProgram|BodyId|node_exprs|exprmap|eval_inner|eval_expr|walk_expr|legacy_eval|fn force|\.force\(|pub fn root\(|pub fn boundary_payload|pub fn public_value_field|pub fn test_probe' crates/vx-runtime-core crates/vx-runtime-driver
 rg -n 'struct Evaluator|impl Evaluator|fn eval_inner|fn force_node|ThunkState::Unforced|ThunkState::Node|enum NodeMemo|struct NodeRef|Value::Closure|pub mod dispatch|crate::dispatch|DispatchPlan|struct Dispatcher|dispatch_scalar|force_frame_binding' crates/vx-runtime/src
 ```

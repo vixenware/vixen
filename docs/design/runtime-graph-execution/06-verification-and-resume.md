@@ -172,7 +172,9 @@ Current partial state:
   from the driver on `DriverError::Boundary`; materializers borrow it to create
   request-shaping payload demands. There is no public free
   `DemandRequest::root(node)` or `DemandRequest::boundary_payload(node)`
-  constructor, and test-probe demand construction is cfg(test)-only.
+  constructor. Public value field demand is authorized by a token minted from the
+  resolved-node handle returned by the driver, and test-probe demand construction
+  is cfg(test)-only.
 - The `.vx` harness uses `run_in_mode`, so source-language tests now exercise the
   graph driver and fail explicitly where graph payloads are unsupported.
 - The old `Evaluator`, `eval_inner`, `force_node`, expression-capturing
@@ -181,16 +183,19 @@ Current partial state:
 
 Latest focused verification:
 
-- `cargo check -p vx-runtime-driver -p vx-runtime`: passed after making
-  `DemandRequest::test_probe` cfg(test)-only and moving root-demand construction
-  to `Driver::root_request()`.
+- `cargo check -p vx-runtime-driver -p vx-runtime`: passed after moving
+  API-edge field demand to `PublicValueDemand` tokens minted from resolved-node
+  handles.
 - `cargo nextest list -p vx-runtime -E 'binary(source_blind_guardrails)'`:
   selected the seven source-blind guardrail tests.
-- `cargo nextest run -p vx-runtime-driver --no-fail-fast`: 12/12 passed.
+- `cargo nextest run -p vx-runtime-driver --no-fail-fast`: 13/13 passed,
+  including `resolved_public_value_authorizes_only_its_field_nodes`.
 - `cargo nextest run -p vx-runtime -E 'binary(source_blind_guardrails)' --no-fail-fast`:
   7/7 passed, including `execution_crates_stay_source_blind` with guardrail
-  needles for public free `root`, `boundary_payload`, and `test_probe`
-  constructors.
+  needles for public free `root`, `boundary_payload`, `public_value_field`, and
+  `test_probe` constructors.
+- `cargo nextest run -p vx-runtime --no-fail-fast`: 144/144 passed, including
+  `lang_suite`.
 - `cargo check -p vx-cache-index -p vx-exec-protocol -p vx-services -p vx-store -p vx-runtime-graph -p vx-runtime-core -p vx-runtime-driver -p vx-runtime -p vx-runner -p vx-daemon`
   passes with no old-evaluator dead-code warnings.
 - `cargo nextest run -p vx-runtime -E 'binary(source_blind_guardrails) | binary(exec_on_strands)' --no-fail-fast`:

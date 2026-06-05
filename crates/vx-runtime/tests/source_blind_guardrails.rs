@@ -25,6 +25,7 @@ const FORBIDDEN_NEEDLES: &[&str] = &[
     ".force(",
     "pub fn root(",
     "pub fn boundary_payload",
+    "pub fn public_value_field",
     "pub fn test_probe",
 ];
 
