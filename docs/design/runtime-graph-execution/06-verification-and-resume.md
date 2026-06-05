@@ -162,8 +162,6 @@ Latest focused verification:
   observer-identity non-aliasing, executable-fingerprint non-aliasing,
   declared-tool-fingerprint non-aliasing, and disk-L2 reuse across fresh graph
   evaluations.
-- `cargo nextest run -p vx-runtime -E 'binary(exec_output_tree)' --no-fail-fast`:
-  3/3 passed.
 - `cargo nextest run -p vx-runtime -E 'binary(host_probe)' --no-fail-fast`:
   6/6 passed, including the input-keyed `host.exec` L1 cache test, bare
   executable-name fingerprint resolution, and disk-L2 reuse across fresh graph
@@ -183,16 +181,17 @@ Latest focused verification:
   call memo reuse, resolved-argument disambiguation, closure capture memo reuse,
   function-entry disambiguation for shared code identities, and proof that
   unresolved arguments or captures are not demanded to build a call memo key.
-- `cargo nextest run -p vx-runtime --no-fail-fast`: 155 run, 155 passed,
+- `cargo nextest run -p vx-runtime --no-fail-fast`: 152 run, 152 passed,
   0 failed, 0 skipped.
-- `cargo nextest run -p vx-runner --no-fail-fast`: 6 run, 6 passed, 2 skipped
+- `cargo nextest run -p vx-runner --no-fail-fast`: 6 run, 6 passed, 4 skipped
   (the ignored live-VFS proof targets).
 - `cargo nextest list -p vx-runner --run-ignored only`: selected
   `tests::demanded_vixen_exec_runs_through_runner_backed_live_vfs_and_serves_output_tree`
-  and
-  `tests::strand_observe_uses_runner_backed_live_vfs_for_success_and_failure`.
+  `tests::explicit_stream_observer_returns_runner_backed_live_output_tree`,
+  `tests::bare_invocation_failure_poisons_through_runner_backed_live_vfs`,
+  and `tests::strand_observe_uses_runner_backed_live_vfs_for_success_and_failure`.
 - `cargo nextest run -p vx-services -p vx-runtime-graph -p vx-runtime-core -p vx-runtime-driver -p vx-runtime -p vx-runner --no-fail-fast`:
-  187 run, 187 passed, 2 skipped.
+  184 run, 184 passed, 4 skipped.
 - `cargo nextest run -p vx-daemon --no-fail-fast`: 2/2 passed.
 - `vx-runner::tests::strand_observe_reaches_runner_backed_service` drives a
   `vx-runtime` strand against a runner-backed `Observe` service and reaches the
@@ -206,9 +205,10 @@ Latest focused verification:
 - `vx-runner` implements the runtime `Observe` service and routes it through
   `RunnerAcceptor`; `vx-daemon` advertises and routes `"Observe"` to its hosted
   `RunnerService` when a runner is configured. Direct observe-on-strands coverage
-  has moved to runner-owned tests. Runtime exec/output tests still use
-  `local_observer()`; treat those green exec tests as compatibility evidence, not
-  as proof that runner-backed observe is the production runtime path.
+  has moved to runner-owned tests. The old scratch-backed
+  `crates/vx-runtime/tests/exec_output_tree.rs` file has been deleted; remaining
+  green runtime exec tests that still use `local_observer()` are compatibility
+  evidence, not proof that runner-backed observe is the production runtime path.
 - Runner-backed observe now installs a CAS-backed `Producing` service when an
   observer returns `WireValue::Tree`. `RunnerAcceptor` and daemon-hosted runner
   sessions route `"Producing"`; the service walks flushed `DirectoryNode` output
@@ -237,6 +237,12 @@ Latest focused verification:
   `writable: ["out"]`, and demands `out.file("out/y.txt")` through the returned
   producing tree. It requires the host CAS-VFS mount and is skipped by default;
   do not replace it with scratch execution to make default CI greener.
+- `vx-runner::tests::explicit_stream_observer_returns_runner_backed_live_output_tree`
+  and
+  `vx-runner::tests::bare_invocation_failure_poisons_through_runner_backed_live_vfs`
+  are ignored live-VFS proof targets for the other two shapes moved out of
+  `exec_output_tree`: explicit `(run) => run.stream.out` output-tree demand, and
+  default `run.ok.out` failure gating.
 - The forbidden-symbol scan over `vx-runtime-core` and `vx-runtime-driver`
   returns no matches.
 - The deleted tree-walker affordance scan over `vx-runtime/src` returns no

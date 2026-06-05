@@ -425,6 +425,93 @@ mod tests {
     }
 
     #[test]
+    #[ignore = "needs the live CAS-VFS mount; run with --ignored on a host with the Vixen VFS"]
+    fn explicit_stream_observer_returns_runner_backed_live_output_tree() {
+        let fe = compile_source(
+            "fn t(cmd: Command, script: String) -> Blob ( \
+               let out = `$cmd -c ${script}` with { \
+                   writable: [\"out\"], \
+                   observer: (run) => run.stream.out \
+               }; \
+               out.file(\"out/y.txt\") )",
+            "t",
+        )
+        .expect("exec stream-output program compiles");
+        let entry = entry_body(&fe, "t");
+
+        let scheduler = Scheduler::new(&[1]);
+        let (_temp, service) = scheduler.block_on(live_vfs_runner_service());
+        let client = scheduler.block_on(observe_client_for(service));
+        let cid = scheduler.register_observe_client(client);
+        let program = fe.program;
+        let env = fe.env;
+        let strand = scheduler.spawn(ResourceId(0), move || {
+            let cmd = tool_value("@vixen/grammar-cc", "cc", "/bin/sh");
+            let script = Value::Str(Rc::from("printf stream-vfs-payload > out/y.txt"));
+            match eval_body_with_exec(
+                &program,
+                &env,
+                entry,
+                vec![cmd, script],
+                KernelMode::Off,
+                cid,
+            ) {
+                EvalOutcome::Clean(Value::Str(bytes)) if bytes.as_ref() == "stream-vfs-payload" => {
+                    Outcome::Clean
+                }
+                other => Outcome::Poisoned(format!(
+                    "expected explicit run.stream.out observer to serve out/y.txt through \
+                     runner-backed live CAS-VFS, got {other:?}"
+                )),
+            }
+        });
+        scheduler.demand(strand);
+        scheduler.run();
+        assert_eq!(scheduler.outcome(strand), Some(Outcome::Clean));
+    }
+
+    #[test]
+    #[ignore = "needs the live CAS-VFS mount; run with --ignored on a host with the Vixen VFS"]
+    fn bare_invocation_failure_poisons_through_runner_backed_live_vfs() {
+        let fe = compile_source(
+            "fn t(cmd: Command, script: String) -> Blob ( \
+               let out = `$cmd -c ${script}` with { writable: [\"out\"] }; \
+               out.file(\"out/y.txt\") )",
+            "t",
+        )
+        .expect("exec failure program compiles");
+        let entry = entry_body(&fe, "t");
+
+        let scheduler = Scheduler::new(&[1]);
+        let (_temp, service) = scheduler.block_on(live_vfs_runner_service());
+        let client = scheduler.block_on(observe_client_for(service));
+        let cid = scheduler.register_observe_client(client);
+        let program = fe.program;
+        let env = fe.env;
+        let strand = scheduler.spawn(ResourceId(0), move || {
+            let cmd = tool_value("@vixen/grammar-cc", "cc", "/bin/sh");
+            let script = Value::Str(Rc::from("exit 7"));
+            match eval_body_with_exec(
+                &program,
+                &env,
+                entry,
+                vec![cmd, script],
+                KernelMode::Off,
+                cid,
+            ) {
+                EvalOutcome::Poisoned { reason, .. } if !reason.is_empty() => Outcome::Clean,
+                other => Outcome::Poisoned(format!(
+                    "expected bare invocation run.ok.out gate to poison through runner-backed \
+                     live CAS-VFS, got {other:?}"
+                )),
+            }
+        });
+        scheduler.demand(strand);
+        scheduler.run();
+        assert_eq!(scheduler.outcome(strand), Some(Outcome::Clean));
+    }
+
+    #[test]
     fn producing_vconn_serves_runner_output_tree_from_cas() {
         let scheduler = Scheduler::new(&[1]);
         let (_temp, store) = scheduler.block_on(store_client());
