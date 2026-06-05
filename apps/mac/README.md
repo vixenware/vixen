@@ -68,7 +68,8 @@ The release flow:
 
 1. Runs preflight (macOS/tools/notary/R2/Sparkle credentials)
 2. Builds `Vixen.app` (Release)
-3. Re-signs with Developer ID identity
+3. Resolves the Developer ID Application certificate to a stable hash, strips
+   development provisioning profiles, and re-signs the app bundle inside-out
 4. Creates `Vixen-<version>.dmg` containing `Vixen.app` + `/Applications` symlink
 5. Creates, signs, and notarizes `Vixen-Installer.pkg` for the privileged
    management daemon install path

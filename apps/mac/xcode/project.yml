@@ -56,8 +56,18 @@ targets:
           install -m 644 "$daemon_plist_src" "$daemon_plist_dst"
           if [[ "${CODE_SIGNING_ALLOWED:-NO}" != "NO" ]]; then
             identity="${EXPANDED_CODE_SIGN_IDENTITY:-}"
+            code_sign_flags=()
+            if [[ "${ENABLE_HARDENED_RUNTIME:-NO}" == "YES" ]]; then
+              code_sign_flags+=(--options runtime)
+            fi
+            if [[ -n "${OTHER_CODE_SIGN_FLAGS:-}" ]]; then
+              read -r -a extra_code_sign_flags <<< "${OTHER_CODE_SIGN_FLAGS}"
+              code_sign_flags+=("${extra_code_sign_flags[@]}")
+            else
+              code_sign_flags+=(--timestamp=none)
+            fi
             if [[ -n "$identity" && "$identity" != "-" ]]; then
-              codesign --force --sign "$identity" --timestamp=none "$helper_dst"
+              codesign --force --sign "$identity" "${code_sign_flags[@]}" "$helper_dst"
             else
               codesign --force --sign - "$helper_dst"
             fi

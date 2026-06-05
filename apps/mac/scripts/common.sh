@@ -2,7 +2,8 @@
 # Shared variables for build and publish scripts.
 # Source this file, don't execute it directly.
 
-SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[1]}")" && pwd)"
+SOURCE_PATH="${BASH_SOURCE[1]:-${BASH_SOURCE[0]}}"
+SCRIPT_DIR="$(cd "$(dirname "$SOURCE_PATH")" && pwd)"
 APP_DIR="$(cd "$SCRIPT_DIR/.." && pwd)"
 REPO_DIR="$(cd "$APP_DIR/../.." && pwd)"
 XCODE_DIR="$APP_DIR/xcode"
@@ -53,3 +54,36 @@ SPARKLE_DIR="$DIST_DIR/sparkle"
 DMG_PATH="$DIST_DIR/Vixen-${RELEASE_VERSION}.dmg"
 APPCAST_PATH="$SPARKLE_DIR/appcast.xml"
 SIGNED_PKG_PATH="$DIST_DIR/Vixen-Installer.pkg"
+
+resolve_codesign_identity() {
+  local requested="$1"
+  local label="$2"
+
+  if [[ "$requested" =~ ^[0-9A-Fa-f]{40}$ ]]; then
+    printf "%s" "$requested"
+    return 0
+  fi
+
+  local matches=()
+  local hash name
+  while IFS=$'\t' read -r hash name; do
+    if [[ "$name" == "$requested" || "$name" == "$requested:"* ]]; then
+      matches+=("$hash"$'\t'"$name")
+    fi
+  done < <(
+    security find-identity -v 2>/dev/null \
+      | sed -nE 's/^[[:space:]]*[0-9]+\) ([0-9A-Fa-f]{40}) "([^"]+)".*/\1\t\2/p'
+  )
+
+  if [[ "${#matches[@]}" -eq 0 ]]; then
+    echo "No $label identity matching '$requested' was found." >&2
+    return 1
+  fi
+
+  if [[ "${#matches[@]}" -gt 1 ]]; then
+    echo "Multiple $label identities match '$requested'; using the first certificate hash." >&2
+  fi
+
+  IFS=$'\t' read -r hash name <<< "${matches[0]}"
+  printf "%s" "$hash"
+}

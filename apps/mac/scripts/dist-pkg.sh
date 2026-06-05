@@ -26,14 +26,8 @@ fail() {
 }
 
 detect_installer_identity() {
-  if [[ -n "${VX_MAC_INSTALLER_IDENTITY:-}" ]]; then
-    printf "%s" "$VX_MAC_INSTALLER_IDENTITY"
-    return 0
-  fi
-  security find-identity -v 2>/dev/null \
-    | grep "Developer ID Installer" \
-    | head -1 \
-    | sed -E 's/^[^"]*"([^"]+)".*/\1/' || true
+  local requested="${VX_MAC_INSTALLER_IDENTITY:-Developer ID Installer}"
+  resolve_codesign_identity "$requested" "Developer ID Installer" || true
 }
 
 resolve_notary_auth() {

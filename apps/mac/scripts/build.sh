@@ -43,63 +43,55 @@ if [[ ! -d "$APP_BUNDLE_PATH" ]]; then
   exit 1
 fi
 
+RESOLVED_SIGNING_IDENTITY="$(resolve_codesign_identity "$SIGNING_IDENTITY" "Developer ID Application")"
+
 echo "Stripping embedded provisioning profiles (not valid for Developer ID)..."
 find "$APP_BUNDLE_PATH" -name "embedded.provisionprofile" -print -delete
 
-echo "Re-signing app bundle with '$SIGNING_IDENTITY' (inside-out)..."
+echo "Re-signing app bundle with '$SIGNING_IDENTITY' ($RESOLVED_SIGNING_IDENTITY) inside-out..."
 
-# Sign nested components first (inside-out), each with hardened runtime + timestamp
-# and proper entitlements (without get-task-allow which Xcode adds for debug builds).
-
-# Privileged management helper
 MANAGEMENT_HELPER="$APP_BUNDLE_PATH/Contents/MacOS/vixen-management"
 if [[ ! -f "$MANAGEMENT_HELPER" ]]; then
   echo "Expected management helper at $MANAGEMENT_HELPER but it was not found." >&2
   exit 1
 fi
-codesign --force --options runtime --timestamp --sign "$SIGNING_IDENTITY" \
+codesign --force --options runtime --timestamp --sign "$RESOLVED_SIGNING_IDENTITY" \
   "$MANAGEMENT_HELPER"
 
 # FSKit extension
 codesign --force --options runtime --timestamp \
   --entitlements "$XCODE_DIR/VixenFS/VixenFS.entitlements" \
-  --sign "$SIGNING_IDENTITY" \
+  --sign "$RESOLVED_SIGNING_IDENTITY" \
   "$APP_BUNDLE_PATH/Contents/Extensions/VixenFS.appex"
 
 # Sparkle framework (sign nested tools/apps first, then XPCs, then framework)
 SPARKLE_FW="$APP_BUNDLE_PATH/Contents/Frameworks/Sparkle.framework"
 SPARKLE_VER="$SPARKLE_FW/Versions/Current"
 
-# 1) Sparkle tools
 if [[ -f "$SPARKLE_VER/Autoupdate" ]]; then
-  codesign --force --options runtime --timestamp --sign "$SIGNING_IDENTITY" \
+  codesign --force --options runtime --timestamp --sign "$RESOLVED_SIGNING_IDENTITY" \
     "$SPARKLE_VER/Autoupdate"
 fi
 
 if [[ -d "$SPARKLE_VER/Updater.app" ]]; then
-  # sign the actual binary first (inside-out)
   if [[ -f "$SPARKLE_VER/Updater.app/Contents/MacOS/Updater" ]]; then
-    codesign --force --options runtime --timestamp --sign "$SIGNING_IDENTITY" \
+    codesign --force --options runtime --timestamp --sign "$RESOLVED_SIGNING_IDENTITY" \
       "$SPARKLE_VER/Updater.app/Contents/MacOS/Updater"
   fi
-  # then the app bundle
-  codesign --force --options runtime --timestamp --sign "$SIGNING_IDENTITY" \
+  codesign --force --options runtime --timestamp --sign "$RESOLVED_SIGNING_IDENTITY" \
     "$SPARKLE_VER/Updater.app"
 fi
 
-# 2) Sparkle XPC services
 for xpc in "$SPARKLE_VER"/XPCServices/*.xpc; do
   [[ -e "$xpc" ]] || continue
-  codesign --force --options runtime --timestamp --sign "$SIGNING_IDENTITY" "$xpc"
+  codesign --force --options runtime --timestamp --sign "$RESOLVED_SIGNING_IDENTITY" "$xpc"
 done
 
-# 3) Finally the framework bundle itself
-codesign --force --options runtime --timestamp --sign "$SIGNING_IDENTITY" "$SPARKLE_FW"
+codesign --force --options runtime --timestamp --sign "$RESOLVED_SIGNING_IDENTITY" "$SPARKLE_FW"
 
-# Finally the outer app
 codesign --force --options runtime --timestamp \
   --entitlements "$XCODE_DIR/Vixen/Vixen.entitlements" \
-  --sign "$SIGNING_IDENTITY" \
+  --sign "$RESOLVED_SIGNING_IDENTITY" \
   "$APP_BUNDLE_PATH"
 
 codesign --verify --deep --strict --verbose=2 "$APP_BUNDLE_PATH"
