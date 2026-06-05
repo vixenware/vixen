@@ -524,7 +524,8 @@ Newly green boundary payloads:
 - Backtick exec has an opt-in local disk L2 for successful observer data values.
 - Boundary payload demand is minted only through the driver's boundary token:
   direct payloads must be declared inputs of the reached boundary node, and
-  nested request-shaping fields must be fields of a resolved direct payload.
+  nested request-shaping fields must come through `ResolvedBoundaryPayload`,
+  produced by joining the direct payload demand with the matching resolved node.
 
 No memo path demands unresolved arguments or captures to build a key. CAS-backed
 L2 storage, output-tree-handle persistence, graph-local function-output

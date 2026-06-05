@@ -195,11 +195,13 @@ boundary it returns a non-clone `BoundaryDemand` token carrying the boundary
 node's declared graph inputs. Boundary materialization may borrow that token to
 create direct request-shaping payload demands only for those declared inputs with
 `boundary.payload(node)`. If a direct payload resolves to compound graph output,
-nested request-shaping field demands must be minted from that resolved payload
-handle with `boundary.payload_field(resolved, field_node)`. Runtime code should
-not be able to mint `BoundaryPayload` demands from a bare `NodeId`, from a random
-boundary-adjacent node, or from a field not present in the resolved payload
-output.
+nested request-shaping field demands must first join the direct
+`BoundaryPayloadDemand` with the matching `ResolvedNode` to produce a
+`ResolvedBoundaryPayload`; fields are then minted from that resolved payload
+handle with `resolved_payload.field_demand(field_node)`. Runtime code should not
+be able to mint `BoundaryPayload` demands from a bare `NodeId`, from a random
+boundary-adjacent node, from an unrelated resolved node, or from a field not
+present in the resolved payload output.
 
 Do not make `DemandRequest` fields public. Do not add blanket conversion from
 `NodeId` to `DemandRequest`. Do not expose a free `root(node)` or

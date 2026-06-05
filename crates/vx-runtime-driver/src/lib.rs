@@ -144,19 +144,6 @@ impl BoundaryDemand {
                 _sealed: private::Sealed,
             })
     }
-
-    pub fn payload_field(
-        &self,
-        resolved: &ResolvedNode,
-        node: NodeId,
-    ) -> Option<BoundaryPayloadDemand> {
-        resolved
-            .contains_field(node)
-            .then_some(BoundaryPayloadDemand {
-                node,
-                _sealed: private::Sealed,
-            })
-    }
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -176,6 +163,46 @@ impl BoundaryPayloadDemand {
             origin: DemandOrigin::BoundaryPayload,
             _sealed: private::Sealed,
         }
+    }
+
+    pub fn resolve(self, resolved: ResolvedNode) -> Result<ResolvedBoundaryPayload, ResolvedNode> {
+        if resolved.node == self.node {
+            Ok(ResolvedBoundaryPayload {
+                resolved,
+                _sealed: private::Sealed,
+            })
+        } else {
+            Err(resolved)
+        }
+    }
+}
+
+#[derive(Debug, PartialEq, Eq)]
+pub struct ResolvedBoundaryPayload {
+    resolved: ResolvedNode,
+    _sealed: private::Sealed,
+}
+
+impl ResolvedBoundaryPayload {
+    pub fn node(&self) -> NodeId {
+        self.resolved.node()
+    }
+
+    pub fn output(&self) -> &NodeOutput {
+        self.resolved.output()
+    }
+
+    pub fn into_output(self) -> NodeOutput {
+        self.resolved.into_output()
+    }
+
+    pub fn field_demand(&self, node: NodeId) -> Option<BoundaryPayloadDemand> {
+        self.resolved
+            .contains_field(node)
+            .then_some(BoundaryPayloadDemand {
+                node,
+                _sealed: private::Sealed,
+            })
     }
 }
 
@@ -670,12 +697,22 @@ mod tests {
         let payload = boundary
             .payload(NodeId(1))
             .expect("declared boundary input is an authorized payload");
+        let unrelated = driver
+            .drive(DemandRequest::test_probe(NodeId(4)))
+            .expect("unrelated node resolves");
+        let unrelated = payload
+            .resolve(unrelated)
+            .expect_err("payload demand rejects an unrelated resolved node");
+        assert_eq!(unrelated.node(), NodeId(4));
         let resolved = driver
             .drive(payload.request())
             .expect("payload lazy data resolves");
-        assert!(boundary.payload_field(&resolved, NodeId(4)).is_none());
-        let first = boundary
-            .payload_field(&resolved, NodeId(2))
+        let resolved = payload
+            .resolve(resolved)
+            .expect("payload demand accepts the node it demanded");
+        assert!(resolved.field_demand(NodeId(4)).is_none());
+        let first = resolved
+            .field_demand(NodeId(2))
             .expect("resolved payload field is authorized");
         assert_eq!(first.node(), NodeId(2));
         assert_eq!(

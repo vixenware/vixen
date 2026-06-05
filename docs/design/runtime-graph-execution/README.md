@@ -223,8 +223,10 @@ Expected latest structural checkpoint:
   a non-clone `BoundaryDemand` when a boundary is reached, and runtime boundary
   materializers may borrow that token to create request-shaping payload demands
   only for the boundary node's declared graph inputs. Nested request-shaping
-  field demands are authorized from the resolved direct payload handle, not from
-  a bare `NodeId`. There is no public free `DemandRequest::root(node)` or
+  field demands are authorized from `ResolvedBoundaryPayload`, produced by
+  joining a direct `BoundaryPayloadDemand` with the matching resolved payload
+  node, not from a bare `NodeId` or unrelated `ResolvedNode`. There is no public
+  free `DemandRequest::root(node)` or
   `DemandRequest::boundary_payload(node)` constructor. Public value field demand
   is tokenized through resolved-node handles, and test-probe demand construction
   is cfg(test)-only.
@@ -237,11 +239,12 @@ Latest verified red/green shape:
 
 - `cargo check -p vx-runtime-graph -p vx-runtime-core -p vx-runtime-driver -p vx-runtime`:
   passed after boundary payload demand was restricted to declared boundary
-  inputs and resolved payload fields.
+  inputs and `ResolvedBoundaryPayload` fields.
 - `cargo check -p vx-runtime-driver -p vx-runtime`: passed after moving
   boundary payload demand to `BoundaryPayloadDemand` tokens minted only from
-  declared boundary inputs or resolved payload fields, and after moving API-edge
-  field demand to `PublicValueDemand` tokens minted from resolved-node handles.
+  declared boundary inputs or `ResolvedBoundaryPayload` fields, and after moving
+  API-edge field demand to `PublicValueDemand` tokens minted from resolved-node
+  handles.
 - The forbidden-symbol scans from `01-guardrails.md` over
   `crates/vx-runtime-core`, `crates/vx-runtime-driver`, and
   `crates/vx-runtime/src` returned no matches after this checkpoint.
