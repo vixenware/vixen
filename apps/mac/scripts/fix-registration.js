@@ -87,26 +87,35 @@ function currentRegisteredPaths() {
 
 // 1. Unregister stale registrations (anything that is NOT the desired path)
 const before = currentRegisteredPaths();
+let changed = false;
 if (before.length > 0) {
   console.log(`${emojis.info} Current VixenFS registrations: ${colorize("cyan", before.join(", "))}`);
 }
 
 for (const stalePath of before) {
-  if (stalePath === desiredPath) {
+  if (resolve(stalePath) === desiredPath) {
     console.log(`${emojis.keep} Keeping: ${colorize("cyan", stalePath)}`);
     continue;
   }
   console.log(`${emojis.warning} Unregistering: ${colorize("cyan", stalePath)}`);
   runTool("/usr/bin/pluginkit", ["-r", stalePath]);
+  changed = true;
 }
 
 // 2. Register the correct extension
-console.log(`${emojis.success} Registering: ${colorize("cyan", desiredPath)}`);
-runTool("/usr/bin/pluginkit", ["-a", desiredPath]);
+if (before.some((path) => resolve(path) === desiredPath)) {
+  console.log(`${emojis.keep} Already registered: ${colorize("cyan", desiredPath)}`);
+} else {
+  console.log(`${emojis.success} Registering: ${colorize("cyan", desiredPath)}`);
+  runTool("/usr/bin/pluginkit", ["-a", desiredPath]);
+  changed = true;
+}
 
 // 3. Run lsregister on the app bundle, same flags as VixenApp.swift
-if (existsSync(lsRegisterPath)) {
+if (changed && existsSync(lsRegisterPath)) {
   runTool(lsRegisterPath, ["-f", "-R", "-trusted", bundleURL]);
+} else if (!changed) {
+  console.log(`${emojis.keep} Registration already clean`);
 } else {
   console.warn(`${emojis.warning} lsregister not found, skipping`);
 }
