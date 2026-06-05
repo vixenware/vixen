@@ -222,10 +222,9 @@ Latest focused verification:
   1/1 passed.
 - `cargo nextest run -p vx-runtime --no-fail-fast`: 145 run, 145 passed,
   0 failed, 0 skipped.
-- `cargo nextest run -p vx-runner --no-fail-fast`: 6 run, 6 passed, 12 skipped
+- `cargo nextest run -p vx-runner --no-fail-fast`: 6 run, 6 passed, 11 skipped
   (the ignored live-VFS proof targets).
 - `cargo nextest list -p vx-runner --run-ignored only`: selected
-  `tests::backtick_exec_l2_cache_survives_fresh_runner_backed_graph_eval`,
   `tests::bare_invocation_failure_poisons_through_runner_backed_live_vfs`,
   `tests::declared_tool_fingerprint_disambiguates_runner_backed_l1_entry`,
   `tests::demanded_vixen_exec_runs_through_runner_backed_live_vfs_and_serves_output_tree`,
@@ -254,9 +253,11 @@ Latest focused verification:
 - `cargo nextest run -p vx-runner --run-ignored only -E 'test(=tests::executable_fingerprint_disambiguates_runner_backed_l1_entry)' --no-fail-fast`:
   failed at the same live CAS-VFS boot boundary on this host, before any scratch
   fallback could run.
-- `cargo nextest run -p vx-runner --run-ignored only -E 'test(=tests::backtick_exec_l2_cache_survives_fresh_runner_backed_graph_eval)' --no-fail-fast`:
+- `cargo nextest list -p vx-daemon --run-ignored only -E 'test(=runtime_cache::tests::backtick_exec_cache_index_store_backend_survives_fresh_runner_backed_graph_eval)'`:
+  selected the service-backed exec L2 proof.
+- `cargo nextest run -p vx-daemon --run-ignored only -E 'test(=runtime_cache::tests::backtick_exec_cache_index_store_backend_survives_fresh_runner_backed_graph_eval)' --no-fail-fast`:
   failed at the same live CAS-VFS boot boundary on this host, before any scratch
-  fallback could run.
+  fallback or cache-dir fallback could run.
 - `cargo nextest list -p vx-daemon -p vx-store -E 'test(cache_index) | test(cache_record)'`
   selected `cache_index_rejects_empty_namespaces`,
   `cache_index_returns_records_for_the_pre_run_key`, and
@@ -266,7 +267,7 @@ Latest focused verification:
 - `cargo nextest run -p vx-cache-index --no-fail-fast`: 2/2 passed.
 - `cargo nextest run -p vx-cache-index -p vx-exec-protocol -p vx-services -p vx-store -p vx-runtime-graph -p vx-runtime-core -p vx-runtime-driver -p vx-runtime -p vx-runner -p vx-daemon --no-fail-fast`:
   185 run, 185 passed, 12 skipped.
-- `cargo nextest run -p vx-daemon --no-fail-fast`: 5/5 passed.
+- `cargo nextest run -p vx-daemon --no-fail-fast`: 5/5 passed, 1 skipped.
 - `vx-runner::tests::strand_observe_reaches_runner_backed_service` drives a
   `vx-runtime` strand against a runner-backed `Observe` service and reaches the
   explicit no-CAS-VFS poison without importing `vx-runner` into `vx-runtime`.
@@ -327,12 +328,12 @@ Latest focused verification:
   identical demanded backtick L1 reuse. It counts runner-backed `Observe` RPCs
   at the Vox service boundary while delegating to `RunnerService::with_vfsd`;
   two identical demanded invocations must dispatch observe once.
-- `vx-runner::tests::backtick_exec_l2_cache_survives_fresh_runner_backed_graph_eval`
-  is the ignored live-VFS proof target moved out of `exec_on_strands` for exec
-  disk-L2 reuse across fresh graph evaluations. It counts runner-backed
-  `Observe` RPCs while sharing an explicit temporary cache-index directory; the
-  second fresh graph eval must reuse the persisted observer value instead of
-  dispatching again.
+- `vx-daemon::runtime_cache::tests::backtick_exec_cache_index_store_backend_survives_fresh_runner_backed_graph_eval`
+  is the ignored live-VFS proof target for exec L2 reuse through the
+  service-backed cache path. It counts runner-backed `Observe` RPCs while
+  sharing a strand-installed `StrandCacheBackend` backed by
+  `CacheIndexRuntimeCacheService`; the second fresh graph eval must reuse the
+  persisted `vx-store` `CacheRecord` instead of dispatching again.
 - `vx-runner::tests::writable_roots_disambiguate_runner_backed_l1_entry`
   is the ignored live-VFS proof target moved out of `exec_on_strands` for
   writable-root L1 disambiguation. It uses identical command argv and different

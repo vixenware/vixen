@@ -131,8 +131,7 @@ mod tests {
     use vx_runtime::compile::{FrontEnd, compile_source};
     use vx_runtime::eval::{
         KernelMode, Outcome as EvalOutcome, Thunk, Value, eval_body_with_exec,
-        eval_body_with_exec_and_cache_dir, eval_body_with_exec_and_providers, grammar_coord_value,
-        tool_value,
+        eval_body_with_exec_and_providers, grammar_coord_value, tool_value,
     };
     use vx_runtime::remote::{Part, PartKey, ProducingClient};
     use vx_runtime::strand::{ObserveOutcome, Outcome, ResourceId, Scheduler, dispatch_observe};
@@ -655,68 +654,6 @@ mod tests {
             observes.load(Ordering::SeqCst),
             1,
             "the second identical backtick exec must reuse the L1 observe result"
-        );
-    }
-
-    #[test]
-    #[ignore = "needs the live CAS-VFS mount; run with --ignored on a host with the Vixen VFS"]
-    fn backtick_exec_l2_cache_survives_fresh_runner_backed_graph_eval() {
-        let fe = compile_source(
-            "fn t(cmd: Command, script: String) ( \
-               let run = `$cmd -c ${script}` with { observer: (run) => run.ok }; \
-               assert_eq(run.stdout, run.stdout) )",
-            "t",
-        )
-        .expect("exec l2 cache program compiles");
-        let entry = entry_body(&fe, "t");
-
-        let scheduler = Scheduler::new(&[1]);
-        let (_vfs_temp, service) = scheduler.block_on(live_vfs_runner_service());
-        let (client, observes) = scheduler.block_on(counting_observe_client_for(service));
-        let cid = scheduler.register_observe_client(client);
-        let cache_temp = tempfile::TempDir::new().expect("exec l2 cache temp dir");
-        let cache_dir = cache_temp.path().join("runtime-l2");
-        let program = fe.program;
-        let env = fe.env;
-        let strand = scheduler.spawn(ResourceId(0), move || {
-            let cmd = tool_value("@vixen/grammar-cc", "cc", "/bin/sh");
-            let script = Value::Str(Rc::from("printf runner-l2"));
-            let first = eval_body_with_exec_and_cache_dir(
-                &program,
-                &env,
-                entry,
-                vec![cmd.clone(), script.clone()],
-                KernelMode::Off,
-                cid,
-                &cache_dir,
-            );
-            if !matches!(first, EvalOutcome::Clean(Value::Unit)) {
-                return Outcome::Poisoned(format!(
-                    "expected first runner-backed L2 eval to return unit, got {first:?}"
-                ));
-            }
-            match eval_body_with_exec_and_cache_dir(
-                &program,
-                &env,
-                entry,
-                vec![cmd, script],
-                KernelMode::Off,
-                cid,
-                &cache_dir,
-            ) {
-                EvalOutcome::Clean(Value::Unit) => Outcome::Clean,
-                other => Outcome::Poisoned(format!(
-                    "expected cached runner-backed L2 eval to return unit, got {other:?}"
-                )),
-            }
-        });
-        scheduler.demand(strand);
-        scheduler.run();
-        assert_eq!(scheduler.outcome(strand), Some(Outcome::Clean));
-        assert_eq!(
-            observes.load(Ordering::SeqCst),
-            1,
-            "fresh graph eval with the same L2 dir must reuse the persisted observe value"
         );
     }
 
