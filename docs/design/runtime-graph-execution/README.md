@@ -152,10 +152,11 @@ Expected latest structural checkpoint:
   and daemon-hosted runner sessions route `"Producing"`, and the service resolves
   demanded paths by walking `DirectoryNode` trees and fetching file chunks from
   `vx-store`. The old scratch-backed `exec_output_tree` runtime integration file
-  has been deleted; the remaining green runtime exec tests that still use
-  `local_observer()` are compatibility evidence, not proof of the runner-backed
-  production path. Direct observe-on-strands and output-tree coverage has moved
-  to runner-owned tests, with live-VFS proofs ignored by default.
+  has been deleted, and `exec_on_strands` no longer runs demanded execs through
+  `local_observer()`: its remaining runtime test is the cold non-demand proof
+  that intentionally never reaches observe. Direct observe-on-strands,
+  output-tree, and exec cache coverage has moved to runner-owned tests, with
+  live-VFS proofs ignored by default.
 - Top-level producing trees returned by observe cross as remote handles attached
   to graph `OutputTree` nodes. Demanding `tree.file(path)` is a separate graph
   boundary that materializes only that path through strand remote-part demand.
@@ -180,15 +181,13 @@ Latest verified red/green shape:
 
 - `cargo check -p vx-services -p vx-runtime-graph -p vx-runtime-core -p vx-runtime-driver -p vx-runtime -p vx-runner -p vx-daemon`
   passes with no old-evaluator dead-code warnings.
-- `cargo nextest run -p vx-runtime -E 'binary(source_blind_guardrails)' --no-fail-fast`:
-  3/3 passed.
-- `cargo nextest run -p vx-runtime -E 'binary(exec_on_strands)' --no-fail-fast`:
-  2/2 passed, including `undemanded_exec_in_tuple_does_not_dispatch` and disk-L2
-  reuse across fresh graph evaluations. The basic `run.ok` success/failure
-  value-crossing tests, identical-demanded-backtick L1 reuse, writable-root
-  disambiguation, observer-identity disambiguation, declared-tool-fingerprint
-  disambiguation, and executable-fingerprint disambiguation moved to
-  runner-owned live-VFS proof coverage.
+- `cargo nextest run -p vx-runtime -E 'binary(source_blind_guardrails) | binary(exec_on_strands)' --no-fail-fast`:
+  4/4 passed, including `undemanded_exec_in_tuple_does_not_dispatch`. The basic
+  `run.ok` success/failure value-crossing tests, identical-demanded-backtick L1
+  reuse, writable-root disambiguation, observer-identity disambiguation,
+  declared-tool-fingerprint disambiguation, executable-fingerprint
+  disambiguation, and exec disk-L2 reuse moved to runner-owned live-VFS proof
+  coverage.
 - `cargo nextest run -p vx-runtime -E 'binary(host_probe)' --no-fail-fast`:
   6/6 passed, including the input-keyed `host.exec` L1 cache test, bare
   executable-name fingerprint resolution, and disk-L2 reuse across fresh graph
@@ -208,11 +207,12 @@ Latest verified red/green shape:
   call memo reuse, resolved-argument disambiguation, closure capture memo reuse,
   function-entry disambiguation for shared code identities, and proof that
   unresolved arguments or captures are not demanded to build a call memo key.
-- `cargo nextest run -p vx-runtime --no-fail-fast`: 144 run, 144 passed,
+- `cargo nextest run -p vx-runtime --no-fail-fast`: 143 run, 143 passed,
   0 failed, 0 skipped.
-- `cargo nextest run -p vx-runner --no-fail-fast`: 6 run, 6 passed, 11 skipped
+- `cargo nextest run -p vx-runner --no-fail-fast`: 6 run, 6 passed, 12 skipped
   (the ignored live-VFS proof targets).
 - `cargo nextest list -p vx-runner --run-ignored only`: selected
+  `tests::backtick_exec_l2_cache_survives_fresh_runner_backed_graph_eval`,
   `tests::bare_invocation_failure_poisons_through_runner_backed_live_vfs`,
   `tests::declared_tool_fingerprint_disambiguates_runner_backed_l1_entry`,
   `tests::demanded_vixen_exec_runs_through_runner_backed_live_vfs_and_serves_output_tree`,
@@ -241,8 +241,11 @@ Latest verified red/green shape:
 - `cargo nextest run -p vx-runner --run-ignored only -E 'test(=tests::executable_fingerprint_disambiguates_runner_backed_l1_entry)' --no-fail-fast`:
   failed at the same live CAS-VFS boot boundary on this host, before any scratch
   fallback could run.
+- `cargo nextest run -p vx-runner --run-ignored only -E 'test(=tests::backtick_exec_l2_cache_survives_fresh_runner_backed_graph_eval)' --no-fail-fast`:
+  failed at the same live CAS-VFS boot boundary on this host, before any scratch
+  fallback could run.
 - `cargo nextest run -p vx-services -p vx-runtime-graph -p vx-runtime-core -p vx-runtime-driver -p vx-runtime -p vx-runner --no-fail-fast`:
-  176 run, 176 passed, 11 skipped.
+  175 run, 175 passed, 12 skipped.
 - `cargo nextest run -p vx-daemon --no-fail-fast`: 2/2 passed.
 - `vx-runner::tests::strand_observe_reaches_runner_backed_service` drives
   `vx-runtime` strands against a runner-backed `Observe` client and reaches the
@@ -292,6 +295,11 @@ Latest verified red/green shape:
   demanded backtick L1 reuse. It counts runner-backed `Observe` RPCs at the Vox
   service boundary while delegating to `RunnerService::with_vfsd`; two identical
   demanded invocations must dispatch observe once.
+- `vx-runner::tests::backtick_exec_l2_cache_survives_fresh_runner_backed_graph_eval`
+  is the ignored live-VFS proof moved out of `exec_on_strands` for exec disk-L2
+  reuse across fresh graph evaluations. It counts runner-backed `Observe` RPCs
+  while sharing an explicit runtime L2 cache directory; the second fresh graph
+  eval must reuse the persisted observer value instead of dispatching again.
 - `vx-runner::tests::writable_roots_disambiguate_runner_backed_l1_entry`
   is the ignored live-VFS proof moved out of `exec_on_strands` for writable-root
   L1 disambiguation. It uses identical command argv and different declared
