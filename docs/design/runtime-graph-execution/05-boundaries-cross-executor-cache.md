@@ -403,6 +403,11 @@ Current slice:
   implementation is the explicit local file index; the adapter shape exists so a
   daemon `CacheIndex` + `Store` implementation can replace it without changing
   `graph_exec`.
+- `vx-runtime` is not the owner of daemon cache service clients. A future
+  service-backed persistent layer must be installed from the daemon/orchestrator
+  side, or mediated by a typed strand park reason if it crosses Vox while graph
+  execution is running. Direct `StoreClient`/`CacheIndexClient` imports in
+  `vx-runtime` are a boundary violation.
 - This is not the final CAS-backed L2 and it does not record read-set witnesses.
 
 Final cache/store shape:

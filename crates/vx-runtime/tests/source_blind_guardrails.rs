@@ -84,6 +84,21 @@ const RUNTIME_CACHE_DIRECT_LOCAL_INDEX_NEEDLES: &[&str] = &[
     "local_index: Some(LocalCacheIndex::new",
 ];
 
+const RUNTIME_CACHE_SERVICE_CLIENT_NEEDLES: &[&str] = &[
+    "vx_services",
+    "vx-services",
+    "StoreClient",
+    "CacheIndexClient",
+    "CacheLookupRequest",
+    "CachePutRequest",
+    "CacheRecordNode",
+    "CacheRecordBody",
+    "CacheInputKeyDigest",
+    "CasNode::CacheRecord",
+    ".put_node(",
+    ".get_node(",
+];
+
 #[test]
 fn execution_crates_stay_source_blind() {
     let root = workspace_root();
@@ -184,6 +199,21 @@ fn runtime_cache_uses_a_persistent_layer_adapter() {
         RUNTIME_CACHE_DIRECT_LOCAL_INDEX_NEEDLES,
         "RuntimeCache must not directly own the temporary LocalCacheIndex",
         "direct local-index field",
+    );
+}
+
+#[test]
+fn runtime_cache_does_not_import_service_clients() {
+    let root = workspace_root();
+    let mut files = vec![root.join("crates/vx-runtime/Cargo.toml")];
+    collect_rs_files(&root.join("crates/vx-runtime/src"), &mut files);
+
+    assert_no_forbidden_needles(
+        &root,
+        files,
+        RUNTIME_CACHE_SERVICE_CLIENT_NEEDLES,
+        "vx-runtime must not own daemon CacheIndex/Store RPC clients",
+        "runtime-owned cache service affordance",
     );
 }
 

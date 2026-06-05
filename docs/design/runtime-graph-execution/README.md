@@ -164,6 +164,9 @@ Expected latest structural checkpoint:
   `Option<LocalCacheIndex>` field. It talks to a narrow persistent-layer adapter;
   the current adapter is still the temporary explicit local file index, and the
   next adapter should target daemon `CacheIndex` plus `Store`.
+- `vx-runtime` must not import daemon cache service clients to make that happen:
+  `CacheIndex`, `Store`, CAS cache-record nodes, and async RPC driving belong to
+  the daemon/orchestrator or to a typed strand park path, not to `graph_exec`.
 - `vx-runner` now implements the runtime `Observe` service and routes `"Observe"`
   through `RunnerAcceptor`; `vx-daemon` also advertises and routes `"Observe"` to
   its hosted `RunnerService` when a runner is configured. The implementation
@@ -206,10 +209,11 @@ Latest verified red/green shape:
 - `cargo check -p vx-cache-index -p vx-exec-protocol -p vx-services -p vx-store -p vx-runtime-graph -p vx-runtime-core -p vx-runtime-driver -p vx-runtime -p vx-runner -p vx-daemon`
   passes with no old-evaluator dead-code warnings.
 - `cargo nextest run -p vx-runtime -E 'binary(source_blind_guardrails) | binary(exec_on_strands)' --no-fail-fast`:
-  7/7 passed, including `undemanded_exec_in_tuple_does_not_dispatch`,
+  8/8 passed, including `undemanded_exec_in_tuple_does_not_dispatch`,
   `runtime_cache_file_index_stays_out_of_graph_exec`, and
   `graph_exec_does_not_own_cache_index_details`, and
-  `runtime_cache_uses_a_persistent_layer_adapter`. The basic `run.ok`
+  `runtime_cache_uses_a_persistent_layer_adapter`, and
+  `runtime_cache_does_not_import_service_clients`. The basic `run.ok`
   success/failure value-crossing tests, identical-demanded-backtick L1 reuse,
   writable-root disambiguation, observer-identity disambiguation,
   declared-tool-fingerprint disambiguation, executable-fingerprint
@@ -279,12 +283,15 @@ Latest verified red/green shape:
 - `cargo nextest run -p vx-daemon -p vx-store -E 'test(cache_index) | test(cache_record)' --no-fail-fast`:
   3/3 passed.
 - `cargo nextest run -p vx-cache-index -p vx-exec-protocol -p vx-services -p vx-store -p vx-runtime-graph -p vx-runtime-core -p vx-runtime-driver -p vx-runtime -p vx-runner -p vx-daemon --no-fail-fast`:
-  180 run, 180 passed, 12 skipped.
+  181 run, 181 passed, 12 skipped.
 - `cargo nextest run -p vx-daemon --no-fail-fast`: 4/4 passed.
 - The raw forbidden-symbol scans over `vx-runtime-core`, `vx-runtime-driver`,
   the deleted tree-walker affordance scan over `vx-runtime/src`, and the
   runtime-owned exec/observe protocol, cache file-index, and direct
-  `graph_exec.rs` cache-index-detail scans returned no matches.
+  `graph_exec.rs` cache-index-detail scans returned no matches. The runtime
+  cache service-client scan
+  `rg -n 'vx_services|vx-services|StoreClient|CacheIndexClient|CacheLookupRequest|CachePutRequest|CacheRecordNode|CacheRecordBody|CacheInputKeyDigest|CasNode::CacheRecord|\.put_node\(|\.get_node\(' crates/vx-runtime/src crates/vx-runtime/Cargo.toml`
+  also returned no matches.
 - `vx-runner::tests::strand_observe_reaches_runner_backed_service` drives
   `vx-runtime` strands against a runner-backed `Observe` client and reaches the
   explicit no-CAS-VFS poison. This proves the strand/Observe seam can target the
