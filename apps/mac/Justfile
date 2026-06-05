@@ -132,7 +132,7 @@ release-build version='':
 release-pkg version='':
     ./scripts/dist-pkg.sh {{ version }}
 
-# Notarize, generate appcast, and publish to GitHub.
+# Notarize, generate appcast, and publish to R2.
 
 # Optional argument: 'just release-publish 1.2.3'
 release-publish version='':
@@ -141,19 +141,14 @@ release-publish version='':
 # Build + publish in one shot (no review step).
 release version='':
     ./scripts/build.sh {{ version }}
+    ./scripts/dist-pkg.sh {{ version }}
     ./scripts/publish.sh {{ version }}
 
-# Create GitHub release with DMG and appcast.
+# Generate appcast and upload release artifacts to R2.
 
-# Optional argument: 'just github-release 1.2.3'
-github-release version='':
-    ./scripts/github-release.sh {{ version }}
-
-# Update Homebrew tap with the release DMG SHA256.
-
-# Optional argument: 'just update-tap 1.2.3'
-update-tap version='':
-    ./scripts/update-tap.sh {{ version }}
+# Optional argument: 'just publish-r2 1.2.3'
+publish-r2 version='':
+    ./scripts/publish-r2.sh {{ version }}
 
 # Validate release prerequisites without building artifacts.
 

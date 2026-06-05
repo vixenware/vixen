@@ -47,25 +47,38 @@ Required environment variables:
 
 - `VX_MAC_NOTARY_PROFILE`: `notarytool` keychain profile name.
 - `VX_MAC_SPARKLE_PUBLIC_ED_KEY`: Sparkle Ed25519 public key (embedded in app).
+- `VX_MAC_PUBLIC_BASE_URL`: public HTTPS root serving the mac app R2 bucket.
+- `ACCESS_KEY_ID` / `SECRET_ACCESS_KEY`: Cloudflare R2 token credentials.
 
 Optional environment variables:
 
-- `VX_MAC_RELEASE_REPO` (default: `bearcove/vixen-mac-app`)
-- `VX_MAC_RELEASE_TARGET` (default: `main`)
 - `VX_MAC_SIGNING_IDENTITY` (default: `Developer ID Application`)
-- `VX_MAC_SPARKLE_FEED_URL` (default: `https://github.com/$VX_MAC_RELEASE_REPO/releases/latest/download/appcast.xml`)
+- `VX_MAC_R2_BUCKET_URL` (default: `https://4051116950f6ef4b78cb96847a2221f9.r2.cloudflarestorage.com/vixen-mac-app`)
+- `VX_MAC_R2_RELEASE_PREFIX` (default: `releases/v<version>`)
+- `VX_MAC_R2_APPCAST_KEY` (default: `appcast.xml`)
+- `VX_MAC_SPARKLE_FEED_URL` (default: `$VX_MAC_PUBLIC_BASE_URL/$VX_MAC_R2_APPCAST_KEY`)
+- `VX_MAC_SPARKLE_PUBLIC_KEY` (legacy alias for `VX_MAC_SPARKLE_PUBLIC_ED_KEY`)
 - `VX_MAC_SPARKLE_KEY_ACCOUNT` (default: `ed25519`)
 - `VX_MAC_SPARKLE_TOOLS_ROOT` (default: `apps/mac/xcode/build/SourcePackages/artifacts/sparkle/Sparkle/bin`)
 
+The R2 credentials may also be provided as `AWS_ACCESS_KEY_ID` /
+`AWS_SECRET_ACCESS_KEY`, which is what the AWS CLI reads natively.
+
 The release flow:
 
-1. Runs preflight (macOS/tools/credentials/repo access/version/tag checks)
+1. Runs preflight (macOS/tools/notary/R2/Sparkle credentials)
 2. Builds `Vixen.app` (Release)
 3. Re-signs with Developer ID identity
 4. Creates `Vixen-<version>.dmg` containing `Vixen.app` + `/Applications` symlink
-5. Notarizes and staples DMG
-6. Generates `appcast.xml` via Sparkle `generate_appcast`
-7. Creates a GitHub release/tag in the app repo and uploads DMG + appcast
+5. Creates, signs, and notarizes `Vixen-Installer.pkg` for the privileged
+   management daemon install path
+6. Notarizes and staples DMG
+7. Generates `appcast.xml` via Sparkle `generate_appcast`
+8. Uploads the DMG, appcast, and installer pkg to Cloudflare R2
+
+Human-facing install and onboarding instructions belong in the logged-in
+`app.vixen.rs` dashboard. The mac release scripts only produce signed artifacts
+and machine-readable update metadata.
 
 ## Install and activate
 

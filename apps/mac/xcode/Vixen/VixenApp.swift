@@ -120,7 +120,7 @@ struct ContentView: View {
                 .multilineTextAlignment(.center)
 
             Button {
-                if let url = URL(string: "https://github.com/bearcove/vixen/issues/65") {
+                if let url = URL(string: "https://app.vixen.rs/") {
                     NSWorkspace.shared.open(url)
                 }
             } label: {
@@ -493,7 +493,7 @@ struct ContentView: View {
                 .fixedSize(horizontal: false, vertical: true)
 
                 Button {
-                    if let url = URL(string: "https://vixen.rs/") {
+                    if let url = URL(string: "https://app.vixen.rs/") {
                         NSWorkspace.shared.open(url)
                     }
                 } label: {

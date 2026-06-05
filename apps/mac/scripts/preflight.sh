@@ -26,7 +26,7 @@ if [[ "$(uname -s)" != "Darwin" ]]; then
   exit 1
 fi
 
-for cmd in gh xcodegen xcodebuild codesign hdiutil xcrun ditto python3 security git create-dmg just cargo; do
+for cmd in aws xcodegen xcodebuild codesign hdiutil xcrun ditto python3 security git create-dmg just cargo; do
   if ! command -v "$cmd" >/dev/null 2>&1; then
     echo "Missing required command: $cmd" >&2
     exit 1
@@ -44,9 +44,12 @@ done
 # fi
 
 NOTARY_PROFILE="${VX_MAC_NOTARY_PROFILE:-}"
-RELEASE_REPO="${VX_MAC_RELEASE_REPO:-bearcove/vixen-mac-app}"
 SPARKLE_ACCOUNT="${VX_MAC_SPARKLE_KEY_ACCOUNT:-ed25519}"
-SPARKLE_PUBLIC_ED_KEY="${VX_MAC_SPARKLE_PUBLIC_ED_KEY:-}"
+SPARKLE_PUBLIC_ED_KEY="${VX_MAC_SPARKLE_PUBLIC_ED_KEY:-${VX_MAC_SPARKLE_PUBLIC_KEY:-}}"
+R2_BUCKET_URL="${VX_MAC_R2_BUCKET_URL:-https://4051116950f6ef4b78cb96847a2221f9.r2.cloudflarestorage.com/vixen-mac-app}"
+PUBLIC_BASE_URL="${VX_MAC_PUBLIC_BASE_URL:-}"
+R2_ACCESS_KEY_ID="${AWS_ACCESS_KEY_ID:-${ACCESS_KEY_ID:-}}"
+R2_SECRET_ACCESS_KEY="${AWS_SECRET_ACCESS_KEY:-${SECRET_ACCESS_KEY:-}}"
 TAG="v${RELEASE_VERSION}"
 
 if [[ -z "$NOTARY_PROFILE" ]]; then
@@ -55,7 +58,22 @@ if [[ -z "$NOTARY_PROFILE" ]]; then
 fi
 
 if [[ -z "$SPARKLE_PUBLIC_ED_KEY" ]]; then
-  echo "Set VX_MAC_SPARKLE_PUBLIC_ED_KEY to the Sparkle Ed25519 public key used by your private keychain key." >&2
+  echo "Set VX_MAC_SPARKLE_PUBLIC_ED_KEY, or legacy VX_MAC_SPARKLE_PUBLIC_KEY, to the Sparkle Ed25519 public key used by your private keychain key." >&2
+  exit 1
+fi
+
+if [[ -z "$PUBLIC_BASE_URL" ]]; then
+  echo "Set VX_MAC_PUBLIC_BASE_URL to the public HTTPS root for the mac app bucket." >&2
+  exit 1
+fi
+
+if [[ -z "$R2_BUCKET_URL" ]]; then
+  echo "Set VX_MAC_R2_BUCKET_URL to the R2 S3 endpoint including the bucket name." >&2
+  exit 1
+fi
+
+if [[ -z "$R2_ACCESS_KEY_ID" || -z "$R2_SECRET_ACCESS_KEY" ]]; then
+  echo "Set ACCESS_KEY_ID and SECRET_ACCESS_KEY, or AWS_ACCESS_KEY_ID and AWS_SECRET_ACCESS_KEY, for the Cloudflare R2 token." >&2
   exit 1
 fi
 
@@ -72,21 +90,6 @@ if ! security find-generic-password \
   exit 1
 fi
 
-if ! gh repo view "$RELEASE_REPO" >/dev/null 2>&1; then
-  echo "Cannot access GitHub repo '$RELEASE_REPO' with current gh auth." >&2
-  exit 1
-fi
-
-if gh release view "$TAG" --repo "$RELEASE_REPO" >/dev/null 2>&1; then
-  echo "Release $TAG already exists in $RELEASE_REPO. Use a new version before releasing." >&2
-  exit 1
-fi
-
-if gh api "repos/${RELEASE_REPO}/git/ref/tags/${TAG}" >/dev/null 2>&1; then
-  echo "Tag $TAG already exists in $RELEASE_REPO. Use a new version before releasing." >&2
-  exit 1
-fi
-
 if [[ ! -f "$XCODE_DIR/project.yml" ]]; then
   echo "Missing $XCODE_DIR/project.yml" >&2
   exit 1
@@ -94,6 +97,7 @@ fi
 
 echo "Preflight passed:"
 echo "  version:        $RELEASE_VERSION"
-echo "  release repo:   $RELEASE_REPO"
 echo "  notary profile: $NOTARY_PROFILE"
 echo "  sparkle acct:   $SPARKLE_ACCOUNT"
+echo "  r2 bucket url:  $R2_BUCKET_URL"
+echo "  public base:    $PUBLIC_BASE_URL"
