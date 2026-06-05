@@ -44,8 +44,15 @@ const RUNTIME_TREE_WALKER_NEEDLES: &[&str] = &[
     "dispatch_scalar",
 ];
 
-const RUNTIME_EXEC_OWNERSHIP_NEEDLES: &[&str] =
-    &["pub struct ObserveService", "struct ObserveService"];
+const RUNTIME_EXEC_OWNERSHIP_NEEDLES: &[&str] = &[
+    "pub struct ObserveService",
+    "struct ObserveService",
+    "ScratchObserveService",
+    "local_observer",
+    "fn scratch_dir",
+    "fn capture_outputs",
+    "tokio::process::Command",
+];
 
 #[test]
 fn execution_crates_stay_source_blind() {
@@ -102,8 +109,8 @@ fn runtime_exec_spawning_stays_quarantined() {
         &root,
         files,
         RUNTIME_EXEC_OWNERSHIP_NEEDLES,
-        "runtime exec ownership gaps must stay explicitly quarantined",
-        "production-sounding observe executor affordance",
+        "runtime exec process spawning must stay deleted",
+        "runtime-local observe/process affordance",
     );
 }
 

@@ -140,22 +140,19 @@ Current progress:
 - Observe dispatch happens from graph boundary materialization through
   `dispatch_observe`, then the resulting graph node is seeded and the same demand
   loop resumes.
-- Current graph `exec` dispatch does not yet run through `vx-runner`'s
-  sandbox/CAS-VFS mount-run-flush spine. It still sends the minimal
-  `ObserveRequest { program, args, observer }`; the quarantined
-  `ScratchObserveService` runs the command in a scratch directory and evaluates
-  the observer over that result. This is a known gap, not the final exec
-  architecture.
+- Current graph `exec` dispatch sends the minimal
+  `ObserveRequest { program, args, observer, outputs }` to a runner-backed
+  `Observe` service. `vx-runtime` no longer contains the quarantined
+  `ScratchObserveService`; live mount-run-flush coverage sits in ignored
+  `vx-runner` proof targets because it requires the host CAS-VFS mount.
 - A top-level data observer result becomes graph output structure. A top-level
   producing tree result becomes `NodeOutput::OutputTree` plus a runtime remote
   handle entry keyed by the exec node.
-- `exec_on_strands` passes, including a cold-field tripwire where a failing exec
-  in tuple slot 0 stays undemanded while slot 1 is selected, an exact-L1 test
-  where two identical demanded backtick invocations dispatch once, a
-  non-aliasing test where different observer bundles dispatch separately, and a
-  binary-fingerprint test where a stable command path dispatches again after its
-  executable content changes. A declared-fingerprint test proves two commands
-  with the same binary but different advertised tool identities do not alias.
+- `exec_on_strands` now only keeps the cold-field tripwire where a failing exec
+  in tuple slot 0 stays undemanded while slot 1 is selected. Demanded exec
+  value-crossing, L1 keying, fingerprint disambiguation, writable-root
+  disambiguation, and disk-L2 reuse have moved to runner-owned live-VFS proof
+  targets.
 - `exec_boundaries.vx` passes through `lang_suite`: a real backtick exec in an
   undemanded tuple slot stays cold even though the source entry has no observe
   client available.
@@ -202,9 +199,10 @@ values as graph nodes and drives observer root demand.
 
 Current progress:
 
-- The quarantined scratch observe implementation still receives an observer
-  bundle, but evaluating that bundle calls `eval_body_wire`, which now enters
-  graph body execution.
+- `vx-runtime::observe::evaluate_observer` receives an observer bundle plus
+  executor-supplied process facts; evaluating that bundle calls
+  `eval_body_wire`, which enters graph body execution. The scratch observe
+  implementation has been deleted.
 - `Run` is bound as a graph external struct argument. Demanding `run.ok` or
   `run.stream` materializes native boundary fields only when reached.
 - Graph observer results cross to `WireValue` through graph/native boundary
@@ -247,7 +245,9 @@ Current progress:
 - Demand on the `.file(path)` boundary demands the receiver node and path node,
   then calls `force_remote(handle, PartKey::TreePath(path))`. Only that path's
   bytes cross; absent parts poison through the graph boundary.
-- `remote_tree_via_eval` and `exec_output_tree` pass through graph execution.
+- `remote_tree_via_eval` passes through graph execution. The old
+  scratch-backed `exec_output_tree` integration file has been deleted; its
+  shapes now live as runner-owned live-VFS proof targets.
 
 ## Strand integration
 
@@ -446,21 +446,20 @@ Verified green:
   fingerprint resolution, and disk-L2 reuse across fresh graph evaluations.
 - `cargo nextest run -p vx-runtime -E 'binary(bundle)' --no-fail-fast`: 3/3
   passed, including stable, content-sensitive observer bundle identity.
-- `cargo nextest run -p vx-runtime -E 'test(observe_runs_a_real_command_and_returns_the_observer_value) | test(observe_crosses_the_output_tree_as_a_handle_marker) | binary(observe_on_strands)' --no-fail-fast`: 4/4 passed.
+- `cargo nextest run -p vx-runtime -E 'test(observer_evaluation_accepts) | test(observe_runs_a_real_command) | test(observe_crosses_the_output_tree) | test(the_executor_serves_run_outputs)' --no-fail-fast`: 1/1 passed; only the pure observer-evaluation helper remains selected.
 - `cargo nextest run -p vx-runtime -E 'binary(exec_on_strands)' --no-fail-fast`:
-  8/8 passed, including cold exec non-demand, exact backtick exec L1 reuse,
-  observer-identity non-aliasing, executable-fingerprint non-aliasing,
-  declared-tool-fingerprint non-aliasing, and disk-L2 reuse across fresh graph
-  evaluations.
-- `cargo nextest run -p vx-runtime -E 'binary(exec_output_tree)' --no-fail-fast`:
-  3/3 passed.
+  1/1 passed, covering cold exec non-demand. Demanded exec cache/value crossing
+  proof targets now live in `vx-runner`.
+- The old scratch-backed `binary(exec_output_tree)` integration file has been
+  deleted.
 - `cargo nextest run -p vx-runtime -E 'binary(remote_tree_via_eval)' --no-fail-fast`:
   3/3 passed.
-- `cargo nextest run -p vx-runtime -E 'binary(cc_probe) | binary(hello_world)' --no-fail-fast`:
-  2/2 passed.
-- In the full `vx-runtime` package run, observe, observe-on-strands, exec,
-  output-tree, remote-tree eval, grammar import/toolchain, and
-  requested-toolchain capability tests now pass through graph execution.
+- `cargo nextest run -p vx-runtime -E 'binary(cc_probe)' --no-fail-fast`:
+  1/1 passed.
+- In the full `vx-runtime` package run, observer evaluation, cold exec,
+  remote-tree eval, grammar import/toolchain, and requested-toolchain capability
+  tests now pass through graph execution. Demanded exec/output-tree process
+  shapes live in `vx-runner` proof targets.
 
 Newly green boundary payloads:
 

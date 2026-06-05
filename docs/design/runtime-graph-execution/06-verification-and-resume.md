@@ -38,8 +38,8 @@ source-expression tree-walker plus `dispatch.rs` scalar planner are deleted.
 5. Inspect `crates/vx-runtime/src/eval.rs` before assuming no API-edge thunk
    cleanup remains.
 6. Continue the earliest incomplete phase. If the work is exec/observer related,
-   the active phase is `07-exec-observe-morph.md`: move scratch observe toward
-   runner-backed production execution, not another runtime-local fake.
+   the active phase is `07-exec-observe-morph.md`: keep exec on the
+   runner-backed path, then move protocol/cache ownership out of `vx-runtime`.
 7. Commit the known state before switching tasks.
 
 ## Verification layers
@@ -93,9 +93,9 @@ It scans `crates/vx-runtime-core/src`, `crates/vx-runtime-core/Cargo.toml`,
 `crates/vx-runtime-driver/src`, and `crates/vx-runtime-driver/Cargo.toml` for
 source-blindness. It also scans `crates/vx-runtime/src` for the deleted
 tree-walker affordances and asserts `crates/vx-runtime/src/dispatch.rs` remains
-absent. It also guards the current scratch observe implementation from being
-presented as the real executor `ObserveService`. Add future execution crates to
-the guarded list before relying on this check for them.
+absent. It also guards against reintroducing runtime-local process-spawning
+observe code. Add future execution crates to the guarded list before relying on
+this check for them.
 
 ### Runtime-path verification
 
@@ -181,7 +181,7 @@ Latest focused verification:
   call memo reuse, resolved-argument disambiguation, closure capture memo reuse,
   function-entry disambiguation for shared code identities, and proof that
   unresolved arguments or captures are not demanded to build a call memo key.
-- `cargo nextest run -p vx-runtime --no-fail-fast`: 143 run, 143 passed,
+- `cargo nextest run -p vx-runtime --no-fail-fast`: 140 run, 140 passed,
   0 failed, 0 skipped.
 - `cargo nextest run -p vx-runner --no-fail-fast`: 6 run, 6 passed, 12 skipped
   (the ignored live-VFS proof targets).
@@ -219,7 +219,7 @@ Latest focused verification:
   failed at the same live CAS-VFS boot boundary on this host, before any scratch
   fallback could run.
 - `cargo nextest run -p vx-services -p vx-runtime-graph -p vx-runtime-core -p vx-runtime-driver -p vx-runtime -p vx-runner --no-fail-fast`:
-  175 run, 175 passed, 12 skipped.
+  172 run, 172 passed, 12 skipped.
 - `cargo nextest run -p vx-daemon --no-fail-fast`: 2/2 passed.
 - `vx-runner::tests::strand_observe_reaches_runner_backed_service` drives a
   `vx-runtime` strand against a runner-backed `Observe` service and reaches the
@@ -233,10 +233,10 @@ Latest focused verification:
   `RunnerService` when a runner is configured. Direct observe-on-strands coverage
   has moved to runner-owned tests. The old scratch-backed
   `crates/vx-runtime/tests/exec_output_tree.rs` file has been deleted; remaining
-  `exec_on_strands` no longer uses `local_observer()` for demanded exec/cache
-  behavior; its remaining test is the cold non-demand proof. The green
-  `vx-runtime::observe` scratch-helper tests are compatibility evidence, not
-  proof that runner-backed observe is the production runtime path.
+  `exec_on_strands` no longer uses a runtime-local observe helper for demanded
+  exec/cache behavior; its remaining test is the cold non-demand proof. The old
+  `ScratchObserveService`, `scratch_dir`, `capture_outputs`, and
+  `local_observer()` helper have been deleted from `vx-runtime`.
 - Runner-backed observe now installs a CAS-backed `Producing` service when an
   observer returns `WireValue::Tree`. `RunnerAcceptor` and daemon-hosted runner
   sessions route `"Producing"`; the service walks flushed `DirectoryNode` output

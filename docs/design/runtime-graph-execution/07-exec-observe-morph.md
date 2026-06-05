@@ -18,15 +18,17 @@ flushing, and construction of the `Run` value. The observer closure is evaluated
 on the executor using the same graph evaluator semantics, then only the observer
 result or store-backed handles cross back.
 
-The current code still has a cheating path:
+The former runtime-local process runner has now been removed. The remaining
+exec/observe drift is the protocol/control-plane shape, not a process-spawning
+service in `vx-runtime`:
 
 - `vx-runtime::graph_exec` materializes a graph exec boundary and dispatches a
   minimal `ObserveRequest { program, args, observer }`.
-- `vx-runtime::observe` defines that minimal protocol and currently still carries
-  the shared wire value/result types.
-- The former runtime-local `ObserveService` was renamed
-  `ScratchObserveService`, but it still spawns in a scratch directory. That name
-  change is not the architecture. It is only a visible wound.
+- `vx-runtime::observe` defines that minimal protocol and still carries the
+  shared wire value/result types.
+- `vx-runner` implements the runtime `Observe` service and owns process
+  execution through `run_exec`; live CAS-VFS proofs are ignored by default
+  because this host lacks the Vixen Management mount trigger.
 
 The objective here is to morph that path into the production shape. Deleting the
 scratch path without a replacement is not durable: a compacted agent will see red
@@ -96,9 +98,8 @@ Current checkpoint:
 - This helper does not yet carry an executor output-tree identity. A returned
   `WireValue::Tree` is still only a marker until the service serving that tree is
   connected by M2/M3.
-- `ScratchObserveService` still spawns in a scratch directory and captures
-  outputs, but it now calls the helper instead of owning observer evaluation.
-- This narrows the violation; it does not make scratch execution acceptable.
+- `ScratchObserveService`, `scratch_dir`, `capture_outputs`, and
+  `local_observer()` have been deleted from `vx-runtime`.
 
 ### Phase M2 - Add runner-backed Observe service
 
@@ -153,11 +154,13 @@ Current checkpoint:
 
 ### Phase M3 - Move tests to the runner-backed path
 
-Runtime exec/output tests that currently call `local_observer()` must use a
-runner-backed local observe client. The remaining important coverage is:
+Runtime exec/output tests that used to call `local_observer()` now use
+runner-backed proof targets or have been deleted. Remaining important coverage is:
 
-- `vx-runtime::observe` scratch-helper tests and the helper they keep alive
-- any `.vx` exec boundary test that registers an observe client
+- any new `.vx` exec boundary test that registers an observe client must use the
+  runner-backed path.
+- ignored live-VFS proofs must stay visible and must fail at VFS boot when the
+  host cannot provide the mount.
 
 If a test cannot be moved in one slice, it must be marked as an honest missing
 production feature by failing through an explicit unsupported boundary, not by
@@ -256,8 +259,8 @@ Current checkpoint:
   and `out.file("out/hello.o")` through the runner-backed CAS-VFS path.
 - The old `crates/vx-runtime/tests/exec_output_tree.rs` file has been deleted.
   The old `crates/vx-runtime/tests/hello_world.rs` file has also been deleted.
-  The remaining old runtime observe helper tests still use `local_observer()`
-  until live-VFS or explicitly-unsupported runner-backed harnesses replace them.
+  The old runtime-local scratch observe helper has been deleted as well; its
+  process-running tests live as runner-owned proofs.
 
 ### Phase M4 - Remove scratch process execution from runtime production code
 
@@ -275,6 +278,15 @@ Delete `ScratchObserveService`, `scratch_dir`, and `capture_outputs` from
 Tests may have tightly-named fixtures only if they live under `tests/` and cannot
 be imported by production runtime code. Prefer not to keep such fixtures at all
 once the runner-backed client exists.
+
+Current checkpoint:
+
+- `ScratchObserveService`, `scratch_dir`, `capture_outputs`, and
+  `local_observer()` are absent from `vx-runtime`.
+- The focused observer selector now has only
+  `observer_evaluation_accepts_a_completed_process_without_spawning`, proving
+  the runtime-owned helper still evaluates observer bundles over executor-supplied
+  run facts without spawning.
 
 ### Phase M5 - Move protocol shape out of `vx-runtime`
 
@@ -329,14 +341,15 @@ Once exec runs through the runner-backed path:
 - `cargo check -p vx-services -p vx-runtime-graph -p vx-runtime-core -p vx-runtime-driver -p vx-runtime -p vx-runner -p vx-daemon`
   passed.
 - `cargo nextest list -p vx-runtime -E 'test(observer_evaluation_accepts) | test(observe_runs_a_real_command) | test(observe_crosses_the_output_tree) | test(the_executor_serves_run_outputs)'`
-  selected the four observer helper/scratch tests.
+  selected only `observer_evaluation_accepts_a_completed_process_without_spawning`;
+  the three scratch process/Producing tests have been deleted.
 - `cargo nextest run -p vx-runtime -E 'test(observer_evaluation_accepts) | test(observe_runs_a_real_command) | test(observe_crosses_the_output_tree) | test(the_executor_serves_run_outputs)' --no-fail-fast`:
-  4/4 passed.
+  1/1 passed.
 - `cargo nextest list -p vx-runtime -E 'binary(source_blind_guardrails) | binary(exec_on_strands)'`
   selected 4 tests.
 - `cargo nextest run -p vx-runtime -E 'binary(source_blind_guardrails) | binary(exec_on_strands)' --no-fail-fast`:
   4/4 passed.
-- `cargo nextest run -p vx-runtime --no-fail-fast`: 143/143 passed.
+- `cargo nextest run -p vx-runtime --no-fail-fast`: 140/140 passed.
 - `cargo nextest list -p vx-runner --run-ignored all` selected
   `output_tree::tests::reads_declared_output_root_from_cas`,
   `sandbox::tests::seatbelt_confines_writes_to_the_output_root`,
@@ -393,28 +406,28 @@ Once exec runs through the runner-backed path:
 - `cargo nextest run -p vx-runner --no-fail-fast`: 6/6 passed, 12 skipped
   (the live-VFS proof targets).
 - `cargo nextest run -p vx-services -p vx-runtime-graph -p vx-runtime-core -p vx-runtime-driver -p vx-runtime -p vx-runner --no-fail-fast`:
-  175/175 passed, 12 skipped.
+  172/172 passed, 12 skipped.
 - `cargo nextest run -p vx-daemon --no-fail-fast`: 2/2 passed.
 - The forbidden-symbol scans over `vx-runtime-core`, `vx-runtime-driver`, and the
   deleted tree-walker affordance scan over `vx-runtime/src` returned no matches.
 
-Important caveat: the green `vx-runtime::observe` scratch-helper tests still use
-`local_observer()`. They prove the M1 helper did not break the compatibility
-path; they do not prove that runtime exec has moved to the runner-backed
-service. The scratch-backed `exec_output_tree` and `hello_world` files have been
-deleted, and demanded `exec_on_strands` shapes now live as runner-owned live-VFS
-proof targets.
+Important caveat: the green default suite still skips live CAS-VFS proofs. The
+scratch-backed `exec_output_tree`, `hello_world`, demanded `exec_on_strands`,
+and runtime-local observe process-runner shapes now live as runner-owned proof
+targets. On this host the ignored live proofs fail at VFS boot before any
+fallback could run.
 
 ## Current next step
 
-Finish M2/M3:
+Finish M5/M6:
 
-1. Move the remaining `vx-runtime::observe` scratch-helper tests and helper to a
-   runner-backed observe boundary or delete them once covered elsewhere.
+1. Move the minimal exec/observe protocol shape out of `vx-runtime` into the
+   runner/control-plane boundary where it belongs.
 2. On a host with the Vixen CAS-VFS mount, run the ignored live proof with
    `cargo nextest run -p vx-runner --run-ignored only --no-fail-fast` and record
    the result. If the host cannot supply CAS-VFS, the proof should fail at the
    explicit VFS boot/runner-backed boundary, never by switching to scratch
    execution.
-3. Move any `.vx` exec boundary coverage that still registers an observe client
-   off `local_observer()`.
+3. Move `BoundaryL2Cache`/input-key lookup toward the daemon/orchestrator
+   cache/index and `vx-store`, instead of letting `vx-runtime` remain the cache
+   owner.

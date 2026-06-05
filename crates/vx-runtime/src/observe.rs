@@ -1,23 +1,18 @@
 //! The `observe` RPC — the orchestrator ships an observer bundle **and a command**
 //! to an executor (a fresh **mirror** runtime) over **vox**; the executor runs the
 //! command, builds a `Run` from the result, evaluates the observer against it, and
-//! returns the result. In-process uses a `transport-local` memory link; a remote
-//! executor is a different transport, the *same* service. Vox owns the serialization
-//! — this code never names a codec.
+//! returns the result. A local runner may use a transport-local memory link; a
+//! remote executor is a different transport, the *same* service. Vox owns the
+//! serialization — this code never names a codec.
 //!
 //! The `Run` is built and consumed *here*, on the executor: `run.ok` is a co-located
 //! force, not a remote one. The genuinely remote values are the **outputs** the
 //! observer returns (streams, the producing tree) — those cross back as handles, and
 //! that join (`force_remote`) lands with the streaming work.
 
-use std::path::Path;
-use std::sync::atomic::{AtomicU64, Ordering};
-use std::sync::{Arc, Mutex};
-
 use vx_ir::Bundle;
 
 use crate::eval::{KernelMode, eval_body_wire};
-use crate::remote::{self, ProducerService, ProducingDispatcher};
 use crate::run_value::{self, ProcOutcome};
 
 /// A command to run — minimal for now (program + args). The full `Command` value
@@ -128,135 +123,6 @@ pub trait Observe {
     async fn observe(&self, request: ObserveRequest) -> Observed;
 }
 
-/// Temporary in-process scratch executor used by the current runtime tests.
-///
-/// This is deliberately not the real executor service: it spawns directly in a
-/// scratch directory and captures files best-effort. The production boundary must
-/// move process execution to the daemon/executor layer, where sandbox and CAS-VFS
-/// mount-run-flush are owned.
-#[derive(Clone, Default)]
-struct ScratchObserveService {
-    /// The producer serving the latest run's outputs. Set by `observe` once the
-    /// command finishes; read by the `Producing` virtual-connection acceptor. One
-    /// slot for now (one exec at a time); a per-run id arrives with concurrency.
-    outputs: Arc<Mutex<Option<ProducerService>>>,
-}
-
-impl Observe for ScratchObserveService {
-    async fn observe(&self, request: ObserveRequest) -> Observed {
-        // Run the command in a fresh scratch dir so its filesystem writes are the
-        // run's output tree. (Slice-1 capture: every file under the scratch dir. The
-        // faithful set is the command's grammar-declared outputs under the VFS
-        // sandbox — the deferred `run_exec` piece.)
-        let scratch = scratch_dir();
-        if let Err(e) = std::fs::create_dir_all(&scratch) {
-            return Observed::Poisoned(format!("scratch dir {}: {e}", scratch.display()));
-        }
-        let proc = match tokio::process::Command::new(&request.command.program)
-            .args(&request.command.args)
-            .current_dir(&scratch)
-            .output()
-            .await
-        {
-            Ok(out) => ProcOutcome {
-                exit_code: out.status.code().unwrap_or(-1),
-                stdout: out.stdout,
-                stderr: out.stderr,
-            },
-            Err(e) => {
-                let _ = std::fs::remove_dir_all(&scratch);
-                return Observed::Poisoned(format!("spawn {}: {e}", request.command.program));
-            }
-        };
-
-        // Capture what the command wrote into a producer and serve it. The producer
-        // copies the bytes, so the scratch dir can be removed right after.
-        let (service, producer) = remote::producer();
-        capture_outputs(&scratch, &scratch, &producer);
-        producer.finish();
-        let _ = std::fs::remove_dir_all(&scratch);
-        *self.outputs.lock().unwrap() = Some(service);
-
-        evaluate_observer(CompletedRun::new(proc), request.observer)
-    }
-}
-
-/// A unique scratch dir for one run (process-id + a monotonic counter — no wall clock).
-fn scratch_dir() -> std::path::PathBuf {
-    static NEXT: AtomicU64 = AtomicU64::new(0);
-    let n = NEXT.fetch_add(1, Ordering::Relaxed);
-    std::env::temp_dir().join(format!("vx-exec-{}-{n}", std::process::id()))
-}
-
-/// Walk `dir` and write every file into `producer`, keyed by its path **relative to
-/// `root`** (forward-slashed). Recursive; ignores entries it can't read (best-effort
-/// for slice-1).
-fn capture_outputs(root: &Path, dir: &Path, producer: &remote::Producer) {
-    let Ok(entries) = std::fs::read_dir(dir) else {
-        return;
-    };
-    for entry in entries.flatten() {
-        let path = entry.path();
-        match entry.file_type() {
-            Ok(ft) if ft.is_dir() => capture_outputs(root, &path, producer),
-            Ok(ft) if ft.is_file() => {
-                if let (Ok(rel), Ok(bytes)) = (path.strip_prefix(root), std::fs::read(&path)) {
-                    producer.write_path(&rel.to_string_lossy().replace('\\', "/"), &bytes);
-                }
-            }
-            _ => {}
-        }
-    }
-}
-
-/// Stand up the temporary scratch observe implementation over an in-process vox
-/// memory link and return a client.
-///
-/// The bundle + command still cross as vox bytes, which keeps strand/boundary
-/// behavior close to the future executor path. The implementation behind the
-/// service is intentionally quarantined because it is not sandbox/CAS-VFS
-/// execution.
-pub async fn local_observer() -> ObserveClient {
-    let (client_link, server_link) = vox::memory_link_pair(64);
-    tokio::spawn(async move {
-        // One service instance, shared (via its `outputs` Arc) between the root
-        // `Observe` connection and the `Producing` virtual connections the
-        // orchestrator opens to pull this run's outputs.
-        let service = ScratchObserveService::default();
-        let acceptor = vox::acceptor_fn(
-            move |request: &vox::ConnectionRequest, connection: vox::PendingConnection| {
-                match request.service() {
-                    "Observe" => {
-                        connection.handle_with(ObserveDispatcher::new(service.clone()));
-                        Ok(())
-                    }
-                    // A virtual connection pulling the run's outputs — serve the
-                    // producer `observe` stored, if a run has finished.
-                    "Producing" => match service.outputs.lock().unwrap().clone() {
-                        Some(producer) => {
-                            connection.handle_with(ProducingDispatcher::new(producer));
-                            Ok(())
-                        }
-                        None => Err(vec![]),
-                    },
-                    _ => Err(vec![]),
-                }
-            },
-        );
-        if let Ok(client) = vox::acceptor_on(server_link)
-            .on_connection(acceptor)
-            .establish::<vox::NoopClient>()
-            .await
-        {
-            client.caller.closed().await;
-        }
-    });
-    vox::initiator_on(client_link, vox::TransportMode::Bare)
-        .establish::<ObserveClient>()
-        .await
-        .expect("establish in-process Observe client")
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -279,13 +145,6 @@ mod tests {
             })
             .expect("observe fn");
         reachable(&fe.program.arena, &fe.env, entry)
-    }
-
-    fn cmd(program: &str) -> ExecCommand {
-        ExecCommand {
-            program: program.to_string(),
-            args: vec![],
-        }
     }
 
     #[test]
@@ -316,144 +175,5 @@ mod tests {
             Some(bundle),
         );
         assert!(matches!(bad, Observed::Poisoned(_)));
-    }
-
-    /// The first real exec over vox: ship the observer + a command, the executor runs
-    /// the real process, builds a `Run`, `run.ok` gates on its actual exit code, and
-    /// the observer's value — the whole `Exit` struct — crosses back as data.
-    #[tokio::test]
-    async fn observe_runs_a_real_command_and_returns_the_observer_value() {
-        let bundle = observer_bundle();
-        let client = local_observer().await;
-
-        // `true` exits 0 → run.ok forces to an `Exit` → the struct crosses back
-        // verbatim (empty stdout/stderr for `true`), not a "clean" placeholder.
-        let ok = client
-            .observe(ObserveRequest {
-                observer: Some(bundle.clone()),
-                command: cmd("true"),
-                outputs: Vec::new(),
-            })
-            .await
-            .expect("observe over vox");
-        assert_eq!(
-            ok,
-            Observed::Value(WireValue::Struct(vec![
-                ("stdout".to_string(), WireValue::Str(String::new())),
-                ("stderr".to_string(), WireValue::Str(String::new())),
-            ])),
-            "exit 0 → the whole Exit value crosses back, got {ok:?}"
-        );
-
-        // `false` exits 1 → run.ok poisons.
-        let bad = client
-            .observe(ObserveRequest {
-                observer: Some(bundle),
-                command: cmd("false"),
-                outputs: Vec::new(),
-            })
-            .await
-            .expect("observe over vox");
-        assert!(
-            matches!(bad, Observed::Poisoned(_)),
-            "exit 1 → run.ok poisons, got {bad:?}"
-        );
-    }
-
-    /// An observer that returns the producing tree (`run.stream.out`) crosses back as
-    /// a tree **handle marker** — the genuinely-remote leaf does not travel inline.
-    /// (Turning the marker into a forceable handle — the orchestrator opens a
-    /// `Producing` virtual connection + `register_handle` — is the next piece.)
-    #[tokio::test]
-    async fn observe_crosses_the_output_tree_as_a_handle_marker() {
-        let fe = compile_source("fn observe(run: Run) -> Tree ( run.stream.out )", "observe")
-            .expect("front-end compiles");
-        let entry = fe
-            .program
-            .arena
-            .items
-            .iter()
-            .find_map(|it| match &it.kind {
-                ItemKind::Function(f) if f.name == "observe" => Some(f.body),
-                _ => None,
-            })
-            .expect("observe fn");
-        let bundle = reachable(&fe.program.arena, &fe.env, entry);
-
-        let client = local_observer().await;
-        let observed = client
-            .observe(ObserveRequest {
-                observer: Some(bundle),
-                command: cmd("true"),
-                outputs: Vec::new(),
-            })
-            .await
-            .expect("observe over vox");
-        assert_eq!(
-            observed,
-            Observed::Value(WireValue::Tree),
-            "the output tree crosses back as a handle marker, got {observed:?}"
-        );
-    }
-
-    /// The producer half, end to end over vox: after an `observe` whose command writes
-    /// a file, the orchestrator opens a `Producing` **virtual connection** on the
-    /// observe session and forces that file — the executor captured it and serves it.
-    /// (No scheduler here; this is the serving piece in isolation. The boss wiring that
-    /// turns the returned tree *marker* into a forceable `Value::Tree` is separate.)
-    #[tokio::test]
-    async fn the_executor_serves_run_outputs_over_a_producing_vconn() {
-        use crate::remote::{Part, PartKey, ProducingClient};
-        use vox::ConnectionSettings;
-
-        let fe = compile_source("fn observe(run: Run) -> Tree ( run.stream.out )", "observe")
-            .expect("front-end compiles");
-        let entry = fe
-            .program
-            .arena
-            .items
-            .iter()
-            .find_map(|it| match &it.kind {
-                ItemKind::Function(f) if f.name == "observe" => Some(f.body),
-                _ => None,
-            })
-            .expect("observe fn");
-        let bundle = reachable(&fe.program.arena, &fe.env, entry);
-
-        let client = local_observer().await;
-        // Run a command that writes a file into its scratch dir.
-        client
-            .observe(ObserveRequest {
-                observer: Some(bundle),
-                command: ExecCommand {
-                    program: "sh".to_string(),
-                    args: vec!["-c".to_string(), "printf CONTENT > out.txt".to_string()],
-                },
-                outputs: Vec::new(),
-            })
-            .await
-            .expect("observe over vox");
-
-        // Open a `Producing` virtual connection on the observe session and pull the file.
-        let producing: ProducingClient = client
-            .session
-            .as_ref()
-            .expect("client exposes a session handle")
-            .open(ConnectionSettings {
-                parity: vox::Parity::Odd,
-                max_concurrent_requests: 64,
-                initial_channel_credit: 16,
-            })
-            .await
-            .expect("open Producing virtual connection");
-        let part = producing
-            .force(PartKey::TreePath("out.txt".to_string()))
-            .await
-            .expect("force over the virtual connection");
-        assert_eq!(
-            part,
-            Part::Bytes(b"CONTENT".to_vec()),
-            "the executor serves the file the command wrote"
-        );
     }
 }

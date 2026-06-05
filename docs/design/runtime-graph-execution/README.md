@@ -79,12 +79,11 @@ Expected latest structural checkpoint:
 - `crates/vx-runtime/tests/source_blind_guardrails.rs` scans
   `vx-runtime-core` and `vx-runtime-driver` source/manifests for forbidden
   source-evaluator affordances, scans `vx-runtime/src` for the deleted runtime
-  tree-walker affordances, and guards the temporary scratch observe executor from
-  being renamed back into a production-looking `ObserveService`.
+  tree-walker affordances, and guards against reintroducing runtime-local
+  process-spawning observe code.
 - `docs/design/runtime-graph-execution/07-exec-observe-morph.md` records the
-  active plan for turning the quarantined scratch observe path into the
-  runner-backed production exec path instead of preserving it as a green-test
-  fallback.
+  active plan for the runner-backed exec path and the remaining protocol/cache
+  ownership work.
 - `vx-runtime::eval::{run, run_with_dispatches, run_in_mode}` enter through
   `graph_exec::run_source` and `vx-runtime-driver`.
 - `vx-runtime-graph::NodeKind::Const` carries `ConstValue`; core execution and
@@ -153,10 +152,12 @@ Expected latest structural checkpoint:
   demanded paths by walking `DirectoryNode` trees and fetching file chunks from
   `vx-store`. The old scratch-backed `exec_output_tree` runtime integration file
   has been deleted, and `exec_on_strands` no longer runs demanded execs through
-  `local_observer()`: its remaining runtime test is the cold non-demand proof
-  that intentionally never reaches observe. Direct observe-on-strands,
-  output-tree, and exec cache coverage has moved to runner-owned tests, with
-  live-VFS proofs ignored by default.
+  a runtime-local observe helper: its remaining runtime test is the cold
+  non-demand proof that intentionally never reaches observe. The old
+  `ScratchObserveService`, `scratch_dir`, `capture_outputs`, and
+  `local_observer()` helper have also been deleted from `vx-runtime`. Direct
+  observe-on-strands, output-tree, and exec cache coverage has moved to
+  runner-owned tests, with live-VFS proofs ignored by default.
 - Top-level producing trees returned by observe cross as remote handles attached
   to graph `OutputTree` nodes. Demanding `tree.file(path)` is a separate graph
   boundary that materializes only that path through strand remote-part demand.
@@ -207,7 +208,7 @@ Latest verified red/green shape:
   call memo reuse, resolved-argument disambiguation, closure capture memo reuse,
   function-entry disambiguation for shared code identities, and proof that
   unresolved arguments or captures are not demanded to build a call memo key.
-- `cargo nextest run -p vx-runtime --no-fail-fast`: 143 run, 143 passed,
+- `cargo nextest run -p vx-runtime --no-fail-fast`: 140 run, 140 passed,
   0 failed, 0 skipped.
 - `cargo nextest run -p vx-runner --no-fail-fast`: 6 run, 6 passed, 12 skipped
   (the ignored live-VFS proof targets).
@@ -245,7 +246,7 @@ Latest verified red/green shape:
   failed at the same live CAS-VFS boot boundary on this host, before any scratch
   fallback could run.
 - `cargo nextest run -p vx-services -p vx-runtime-graph -p vx-runtime-core -p vx-runtime-driver -p vx-runtime -p vx-runner --no-fail-fast`:
-  175 run, 175 passed, 12 skipped.
+  172 run, 172 passed, 12 skipped.
 - `cargo nextest run -p vx-daemon --no-fail-fast`: 2/2 passed.
 - `vx-runner::tests::strand_observe_reaches_runner_backed_service` drives
   `vx-runtime` strands against a runner-backed `Observe` client and reaches the
