@@ -164,6 +164,10 @@ Expected latest structural checkpoint:
   `Option<LocalCacheIndex>` field. It talks to a narrow persistent-layer adapter;
   the current adapter is still the temporary explicit local file index, and the
   next adapter should target daemon `CacheIndex` plus `Store`.
+- That persistent-layer adapter is now addressed by `(namespace,
+  pre_run_input_key_digest)`. `RuntimeCache` owns the Facet JSON key digest and
+  record encoding/decoding; `vx-cache-index::LocalCacheIndex` exposes temporary
+  digest-addressed raw records for the explicit local cache path.
 - `vx-runtime` must not import daemon cache service clients to make that happen:
   `CacheIndex`, `Store`, CAS cache-record nodes, and async RPC driving belong to
   the daemon/orchestrator or to a typed strand park path, not to `graph_exec`.
@@ -282,8 +286,10 @@ Latest verified red/green shape:
   `cache_record_nodes_round_trip_through_store`.
 - `cargo nextest run -p vx-daemon -p vx-store -E 'test(cache_index) | test(cache_record)' --no-fail-fast`:
   3/3 passed.
+- `cargo nextest run -p vx-cache-index --no-fail-fast`: 2/2 passed, covering
+  typed-key and digest-addressed local records.
 - `cargo nextest run -p vx-cache-index -p vx-exec-protocol -p vx-services -p vx-store -p vx-runtime-graph -p vx-runtime-core -p vx-runtime-driver -p vx-runtime -p vx-runner -p vx-daemon --no-fail-fast`:
-  181 run, 181 passed, 12 skipped.
+  183 run, 183 passed, 12 skipped.
 - `cargo nextest run -p vx-daemon --no-fail-fast`: 4/4 passed.
 - The raw forbidden-symbol scans over `vx-runtime-core`, `vx-runtime-driver`,
   the deleted tree-walker affordance scan over `vx-runtime/src`, and the

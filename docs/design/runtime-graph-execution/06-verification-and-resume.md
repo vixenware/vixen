@@ -53,6 +53,10 @@ source-expression tree-walker plus `dispatch.rs` scalar planner are deleted.
    `RuntimeCache` has a `PersistentCacheLayer` adapter slot; the current adapter
    is the temporary local file index, and the next cut should add a daemon
    `CacheIndex` + `Store` adapter rather than touching `graph_exec`.
+   The adapter is now addressed by `(namespace, pre_run_input_key_digest)`;
+   `RuntimeCache` derives the digest and encodes/decodes records before calling
+   it, and `LocalCacheIndex` exposes digest-addressed raw records for the
+   temporary explicit local cache path.
    `vx-runtime` must not import `vx-services`, `StoreClient`, `CacheIndexClient`,
    or CAS cache-record service types to do that wiring; use a daemon/orchestrator
    adapter or a typed strand park path for async cache RPC.
@@ -244,8 +248,9 @@ Latest focused verification:
   `cache_record_nodes_round_trip_through_store`.
 - `cargo nextest run -p vx-daemon -p vx-store -E 'test(cache_index) | test(cache_record)' --no-fail-fast`:
   3/3 passed.
+- `cargo nextest run -p vx-cache-index --no-fail-fast`: 2/2 passed.
 - `cargo nextest run -p vx-cache-index -p vx-exec-protocol -p vx-services -p vx-store -p vx-runtime-graph -p vx-runtime-core -p vx-runtime-driver -p vx-runtime -p vx-runner -p vx-daemon --no-fail-fast`:
-  181 run, 181 passed, 12 skipped.
+  183 run, 183 passed, 12 skipped.
 - `cargo nextest run -p vx-daemon --no-fail-fast`: 4/4 passed.
 - `vx-runner::tests::strand_observe_reaches_runner_backed_service` drives a
   `vx-runtime` strand against a runner-backed `Observe` service and reaches the

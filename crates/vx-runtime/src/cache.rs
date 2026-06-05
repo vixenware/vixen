@@ -10,6 +10,10 @@ use vx_runtime_driver::{CallCache, CallCacheKey};
 
 use crate::strand::HandleId;
 
+const EXEC_VALUE_NAMESPACE: &str = "exec-value-v1";
+const HOST_EXEC_NAMESPACE: &str = "host-exec-v1";
+const FUNCTION_OUTPUT_NAMESPACE: &str = "function-output-v1";
+
 #[derive(facet::Facet, Debug, Clone, PartialEq, Eq, Hash)]
 pub(crate) struct HostExecCacheKey {
     pub(crate) argv: Vec<String>,
@@ -98,13 +102,14 @@ pub(crate) enum CachedExecOutcome {
     Tree(HandleId),
 }
 
+struct PersistentCacheKey {
+    namespace: &'static str,
+    input_digest: String,
+}
+
 trait PersistentCacheLayer {
-    fn get_exec_invocation(&self, key: &ExecInvocationCacheKey) -> Option<WireValue>;
-    fn put_exec_invocation(&self, key: &ExecInvocationCacheKey, value: &WireValue);
-    fn get_host_exec(&self, key: &HostExecCacheKey) -> Option<crate::host::HostExec>;
-    fn put_host_exec(&self, key: &HostExecCacheKey, value: &crate::host::HostExec);
-    fn get_function_output(&self, key: &FunctionOutputCacheKey) -> Option<CacheableNodeOutput>;
-    fn put_function_output(&self, key: &FunctionOutputCacheKey, value: &CacheableNodeOutput);
+    fn get_record(&self, key: &PersistentCacheKey) -> Option<String>;
+    fn put_record(&self, key: &PersistentCacheKey, record: &str);
 }
 
 struct LocalIndexCacheLayer {
@@ -120,28 +125,13 @@ impl LocalIndexCacheLayer {
 }
 
 impl PersistentCacheLayer for LocalIndexCacheLayer {
-    fn get_exec_invocation(&self, key: &ExecInvocationCacheKey) -> Option<WireValue> {
-        self.index.read("exec-value-v1", key)
+    fn get_record(&self, key: &PersistentCacheKey) -> Option<String> {
+        self.index.read_record(key.namespace, &key.input_digest)
     }
 
-    fn put_exec_invocation(&self, key: &ExecInvocationCacheKey, value: &WireValue) {
-        self.index.write("exec-value-v1", key, value);
-    }
-
-    fn get_host_exec(&self, key: &HostExecCacheKey) -> Option<crate::host::HostExec> {
-        self.index.read("host-exec-v1", key)
-    }
-
-    fn put_host_exec(&self, key: &HostExecCacheKey, value: &crate::host::HostExec) {
-        self.index.write("host-exec-v1", key, value);
-    }
-
-    fn get_function_output(&self, key: &FunctionOutputCacheKey) -> Option<CacheableNodeOutput> {
-        self.index.read("function-output-v1", key)
-    }
-
-    fn put_function_output(&self, key: &FunctionOutputCacheKey, value: &CacheableNodeOutput) {
-        self.index.write("function-output-v1", key, value);
+    fn put_record(&self, key: &PersistentCacheKey, record: &str) {
+        self.index
+            .write_record(key.namespace, &key.input_digest, record);
     }
 }
 
@@ -182,10 +172,10 @@ impl RuntimeCache {
         if let Some(cached) = self.exec_invocation_l1.borrow().get(key).cloned() {
             return Some(cached);
         }
-        let wire = self
+        let wire: WireValue = self
             .persistent
             .as_ref()
-            .and_then(|cache| cache.get_exec_invocation(key))?;
+            .and_then(|cache| get_persistent_record(cache.as_ref(), EXEC_VALUE_NAMESPACE, key))?;
         let cached = CachedExecOutcome::Value(wire);
         self.exec_invocation_l1
             .borrow_mut()
@@ -199,7 +189,7 @@ impl RuntimeCache {
         outcome: CachedExecOutcome,
     ) {
         if let (Some(cache), CachedExecOutcome::Value(wire)) = (&self.persistent, &outcome) {
-            cache.put_exec_invocation(&key, wire);
+            put_persistent_record(cache.as_ref(), EXEC_VALUE_NAMESPACE, &key, wire);
         }
         self.exec_invocation_l1.borrow_mut().insert(key, outcome);
     }
@@ -208,10 +198,10 @@ impl RuntimeCache {
         if let Some(cached) = self.host_exec_l1.borrow().get(key).cloned() {
             return Some(cached);
         }
-        let cached = self
+        let cached: crate::host::HostExec = self
             .persistent
             .as_ref()
-            .and_then(|cache| cache.get_host_exec(key))?;
+            .and_then(|cache| get_persistent_record(cache.as_ref(), HOST_EXEC_NAMESPACE, key))?;
         self.host_exec_l1
             .borrow_mut()
             .insert(key.clone(), cached.clone());
@@ -220,17 +210,19 @@ impl RuntimeCache {
 
     pub(crate) fn put_host_exec(&self, key: HostExecCacheKey, value: crate::host::HostExec) {
         if let Some(cache) = &self.persistent {
-            cache.put_host_exec(&key, &value);
+            put_persistent_record(cache.as_ref(), HOST_EXEC_NAMESPACE, &key, &value);
         }
         self.host_exec_l1.borrow_mut().insert(key, value);
     }
 
     fn get_function_output(&self, key: &CallCacheKey) -> Option<NodeOutput> {
         let key = FunctionOutputCacheKey::from_call_key(key)?;
-        self.persistent
-            .as_ref()?
-            .get_function_output(&key)
-            .map(|value| value.into_output())
+        get_persistent_record::<_, CacheableNodeOutput>(
+            self.persistent.as_ref()?.as_ref(),
+            FUNCTION_OUTPUT_NAMESPACE,
+            &key,
+        )
+        .map(|value| value.into_output())
     }
 
     fn put_function_output(&self, key: &CallCacheKey, output: &NodeOutput) {
@@ -243,8 +235,51 @@ impl RuntimeCache {
         let Some(value) = CacheableNodeOutput::from_output(output) else {
             return;
         };
-        cache.put_function_output(&key, &value);
+        put_persistent_record(cache.as_ref(), FUNCTION_OUTPUT_NAMESPACE, &key, &value);
     }
+}
+
+fn get_persistent_record<K, V>(
+    cache: &dyn PersistentCacheLayer,
+    namespace: &'static str,
+    key: &K,
+) -> Option<V>
+where
+    K: for<'a> facet::Facet<'a>,
+    V: for<'a> facet::Facet<'a>,
+{
+    let key = persistent_cache_key(namespace, key)?;
+    let record = cache.get_record(&key)?;
+    facet_json::from_str(&record).ok()
+}
+
+fn put_persistent_record<K, V>(
+    cache: &dyn PersistentCacheLayer,
+    namespace: &'static str,
+    key: &K,
+    value: &V,
+) where
+    K: for<'a> facet::Facet<'a>,
+    V: for<'a> facet::Facet<'a>,
+{
+    let Some(key) = persistent_cache_key(namespace, key) else {
+        return;
+    };
+    let Ok(record) = facet_json::to_string(value) else {
+        return;
+    };
+    cache.put_record(&key, &record);
+}
+
+fn persistent_cache_key<K>(namespace: &'static str, key: &K) -> Option<PersistentCacheKey>
+where
+    K: for<'a> facet::Facet<'a>,
+{
+    let key_json = facet_json::to_string(key).ok()?;
+    Some(PersistentCacheKey {
+        namespace,
+        input_digest: blake3::hash(key_json.as_bytes()).to_hex().to_string(),
+    })
 }
 
 pub(crate) struct FunctionOutputCallCache {

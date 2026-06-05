@@ -403,6 +403,12 @@ Current slice:
   implementation is the explicit local file index; the adapter shape exists so a
   daemon `CacheIndex` + `Store` implementation can replace it without changing
   `graph_exec`.
+- `RuntimeCache` derives the pre-run input-key digest and encodes/decodes the
+  runtime record body before touching the persistent layer. The layer sees only
+  `(namespace, input_key_digest)` plus an opaque record string. The temporary
+  `LocalCacheIndex` now has digest-addressed raw-record methods, so the local
+  adapter is shaped like the daemon index instead of like per-kind runtime
+  cache-key methods.
 - `vx-runtime` is not the owner of daemon cache service clients. A future
   service-backed persistent layer must be installed from the daemon/orchestrator
   side, or mediated by a typed strand park reason if it crosses Vox while graph

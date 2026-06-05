@@ -365,6 +365,10 @@ Current checkpoint:
 - `RuntimeCache` now owns a `PersistentCacheLayer` adapter slot rather than a
   direct `Option<LocalCacheIndex>` field. The temporary local file index is one
   adapter; a daemon `CacheIndex` + `Store` adapter is the next cut.
+- `RuntimeCache` now derives the pre-run input-key digest and serializes the
+  cache record before calling that adapter. The adapter is addressed by
+  `(namespace, input_key_digest)` and stores opaque record text; the temporary
+  `LocalCacheIndex` supports that same digest-addressed local-record shape.
 - That next adapter must not be implemented by importing daemon cache service
   clients into `vx-runtime`. `vx-runtime` remains the graph/front-end runtime
   library; async cache RPC belongs behind a daemon/orchestrator adapter or a
@@ -428,6 +432,7 @@ Current checkpoint:
   `cache_record_nodes_round_trip_through_store`.
 - `cargo nextest run -p vx-daemon -p vx-store -E 'test(cache_index) | test(cache_record)' --no-fail-fast`:
   3/3 passed.
+- `cargo nextest run -p vx-cache-index --no-fail-fast`: 2/2 passed.
 - `cargo nextest run -p vx-runtime --no-fail-fast`: 140/140 passed.
 - `cargo nextest list -p vx-runner --run-ignored all` selected
   `output_tree::tests::reads_declared_output_root_from_cas`,
@@ -485,7 +490,7 @@ Current checkpoint:
 - `cargo nextest run -p vx-runner --no-fail-fast`: 6/6 passed, 12 skipped
   (the live-VFS proof targets).
 - `cargo nextest run -p vx-cache-index -p vx-exec-protocol -p vx-services -p vx-store -p vx-runtime-graph -p vx-runtime-core -p vx-runtime-driver -p vx-runtime -p vx-runner -p vx-daemon --no-fail-fast`:
-  181/181 passed, 12 skipped.
+  183/183 passed, 12 skipped.
 - `cargo nextest run -p vx-daemon --no-fail-fast`: 4/4 passed.
 - The forbidden-symbol scans over `vx-runtime-core`, `vx-runtime-driver`, the
   deleted tree-walker affordance scan over `vx-runtime/src`, and the
