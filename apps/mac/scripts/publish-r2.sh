@@ -14,6 +14,17 @@ fail() {
 [[ -n "$R2_SECRET_ACCESS_KEY" ]] || fail "set SECRET_ACCESS_KEY or AWS_SECRET_ACCESS_KEY for the Cloudflare R2 token"
 [[ -f "$DMG_PATH" ]] || fail "DMG not found at $DMG_PATH"
 
+R2_LATEST_PREFIX="${VX_MAC_R2_LATEST_PREFIX:-latest}"
+R2_LATEST_PREFIX="${R2_LATEST_PREFIX#/}"
+R2_LATEST_PREFIX="${R2_LATEST_PREFIX%/}"
+[[ -n "$R2_LATEST_PREFIX" ]] || fail "VX_MAC_R2_LATEST_PREFIX must not be empty"
+LATEST_DMG_KEY="${R2_LATEST_PREFIX}/Vixen.dmg"
+LATEST_PKG_KEY="${R2_LATEST_PREFIX}/Vixen-Installer.pkg"
+LATEST_MANIFEST_KEY="${VX_MAC_R2_LATEST_MANIFEST_KEY:-latest.json}"
+LATEST_MANIFEST_KEY="${LATEST_MANIFEST_KEY#/}"
+[[ -n "$LATEST_MANIFEST_KEY" ]] || fail "VX_MAC_R2_LATEST_MANIFEST_KEY must not be empty"
+LATEST_MANIFEST_PATH="$SPARKLE_DIR/latest.json"
+
 rm -rf "$SPARKLE_DIR"
 mkdir -p "$SPARKLE_DIR"
 
@@ -74,6 +85,8 @@ aws_cp() {
 echo "Uploading release artifacts to R2..."
 aws_cp "$DMG_PATH" "${R2_RELEASE_PREFIX}/$(basename "$DMG_PATH")" \
   "application/octet-stream" "public, max-age=31536000, immutable"
+aws_cp "$DMG_PATH" "$LATEST_DMG_KEY" \
+  "application/octet-stream" "public, max-age=300"
 aws_cp "$APPCAST_PATH" "${R2_RELEASE_PREFIX}/appcast.xml" \
   "application/xml" "public, max-age=300"
 aws_cp "$APPCAST_PATH" "$R2_APPCAST_KEY" \
@@ -82,14 +95,65 @@ aws_cp "$APPCAST_PATH" "$R2_APPCAST_KEY" \
 if [[ -f "$SIGNED_PKG_PATH" ]]; then
   aws_cp "$SIGNED_PKG_PATH" "${R2_RELEASE_PREFIX}/$(basename "$SIGNED_PKG_PATH")" \
     "application/octet-stream" "public, max-age=31536000, immutable"
+  aws_cp "$SIGNED_PKG_PATH" "$LATEST_PKG_KEY" \
+    "application/octet-stream" "public, max-age=300"
 else
   echo "Installer pkg not found at $SIGNED_PKG_PATH; skipping pkg upload."
 fi
 
+python3 - "$LATEST_MANIFEST_PATH" "$RELEASE_VERSION" "$TAG" \
+  "${PUBLIC_RELEASE_URL}/$(basename "$DMG_PATH")" \
+  "${PUBLIC_BASE_URL}/${LATEST_DMG_KEY}" \
+  "${PUBLIC_BASE_URL}/${R2_APPCAST_KEY}" \
+  "${PUBLIC_RELEASE_URL}/$(basename "$SIGNED_PKG_PATH")" \
+  "${PUBLIC_BASE_URL}/${LATEST_PKG_KEY}" \
+  "$([[ -f "$SIGNED_PKG_PATH" ]] && printf yes || printf no)" << 'PY'
+import json
+import sys
+
+(
+    path,
+    version,
+    tag,
+    release_dmg_url,
+    latest_dmg_url,
+    appcast_url,
+    release_pkg_url,
+    latest_pkg_url,
+    has_pkg,
+) = sys.argv[1:]
+
+manifest = {
+    "version": version,
+    "tag": tag,
+    "dmg": {
+        "release_url": release_dmg_url,
+        "latest_url": latest_dmg_url,
+    },
+    "appcast_url": appcast_url,
+}
+
+if has_pkg == "yes":
+    manifest["installer"] = {
+        "release_url": release_pkg_url,
+        "latest_url": latest_pkg_url,
+    }
+
+with open(path, "w", encoding="utf-8") as f:
+    json.dump(manifest, f, indent=2, sort_keys=True)
+    f.write("\n")
+PY
+
+aws_cp "$LATEST_MANIFEST_PATH" "$LATEST_MANIFEST_KEY" \
+  "application/json" "public, max-age=300"
+
 echo ""
 echo "R2 release complete:"
 echo "  DMG:     ${PUBLIC_RELEASE_URL}/$(basename "$DMG_PATH")"
+echo "  Latest:  ${PUBLIC_BASE_URL}/${LATEST_DMG_KEY}"
 if [[ -f "$SIGNED_PKG_PATH" ]]; then
   echo "  PKG:     ${PUBLIC_RELEASE_URL}/$(basename "$SIGNED_PKG_PATH")"
+  echo "  Latest:  ${PUBLIC_BASE_URL}/${LATEST_PKG_KEY}"
 fi
 echo "  Appcast: ${PUBLIC_BASE_URL}/${R2_APPCAST_KEY}"
+echo "  Manifest: ${PUBLIC_BASE_URL}/${LATEST_MANIFEST_KEY}"

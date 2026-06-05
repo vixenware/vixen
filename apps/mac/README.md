@@ -56,6 +56,8 @@ Optional environment variables:
 - `VX_MAC_R2_BUCKET_URL` (default: `https://4051116950f6ef4b78cb96847a2221f9.r2.cloudflarestorage.com/vixen-mac-app`)
 - `VX_MAC_R2_RELEASE_PREFIX` (default: `releases/v<version>`)
 - `VX_MAC_R2_APPCAST_KEY` (default: `appcast.xml`)
+- `VX_MAC_R2_LATEST_PREFIX` (default: `latest`)
+- `VX_MAC_R2_LATEST_MANIFEST_KEY` (default: `latest.json`)
 - `VX_MAC_SPARKLE_FEED_URL` (default: `$VX_MAC_PUBLIC_BASE_URL/$VX_MAC_R2_APPCAST_KEY`)
 - `VX_MAC_SPARKLE_PUBLIC_KEY` (legacy alias for `VX_MAC_SPARKLE_PUBLIC_ED_KEY`)
 - `VX_MAC_SPARKLE_KEY_ACCOUNT` (default: `ed25519`)
@@ -75,7 +77,15 @@ The release flow:
    management daemon install path
 6. Notarizes and staples DMG
 7. Generates `appcast.xml` via Sparkle `generate_appcast`
-8. Uploads the DMG, appcast, and installer pkg to Cloudflare R2
+8. Uploads the DMG, appcast, installer pkg, stable `latest/*` aliases, and
+   `latest.json` to Cloudflare R2
+
+Stable URLs after publish:
+
+- `https://mac.app.vixen.rs/latest/Vixen-Installer.pkg`
+- `https://mac.app.vixen.rs/latest/Vixen.dmg`
+- `https://mac.app.vixen.rs/latest.json`
+- `https://mac.app.vixen.rs/appcast.xml`
 
 Human-facing install and onboarding instructions belong in the logged-in
 `app.vixen.rs` dashboard. The mac release scripts only produce signed artifacts
