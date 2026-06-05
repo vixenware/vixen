@@ -44,11 +44,71 @@ struct VixenApp: App {
 }
 
 private enum ManagementService {
+    private static let label = "eu.bearcove.vixen.management"
     private static let plistName = "eu.bearcove.vixen.management.plist"
     private static let queueRoot = URL(
         fileURLWithPath: "/Library/Application Support/Vixen/management/queue",
         isDirectory: true
     )
+
+    struct StatusSnapshot {
+        let serviceStatus: SMAppService.Status
+        let launchdStatus: LaunchdStatus?
+
+        var isReady: Bool {
+            serviceStatus == .enabled && launchdStatus?.failureDescription == nil
+        }
+
+        var description: String {
+            switch serviceStatus {
+            case .enabled:
+                if launchdStatus?.failureDescription != nil {
+                    return "Launch failed"
+                }
+                return "Ready"
+            case .requiresApproval:
+                return "Needs approval"
+            case .notRegistered:
+                return "Not registered"
+            case .notFound:
+                return "Missing from app bundle"
+            @unknown default:
+                return "Unknown"
+            }
+        }
+
+        var detail: String? {
+            guard serviceStatus == .enabled else { return nil }
+            return launchdStatus?.failureDescription
+        }
+    }
+
+    struct LaunchdStatus {
+        let jobState: String?
+        let lastExitCode: String?
+        let commandError: String?
+
+        var failureDescription: String? {
+            if let commandError {
+                return commandError
+            }
+            if let jobState, jobState.localizedCaseInsensitiveContains("failed") {
+                if let lastExitCode, isFailureExit(lastExitCode) {
+                    return "launchd: \(jobState); last exit \(lastExitCode)"
+                }
+                return "launchd: \(jobState)"
+            }
+            if let lastExitCode, isFailureExit(lastExitCode) {
+                return "launchd: last exit \(lastExitCode)"
+            }
+            return nil
+        }
+
+        private func isFailureExit(_ value: String) -> Bool {
+            let trimmed = value.trimmingCharacters(in: .whitespacesAndNewlines)
+            return !trimmed.hasPrefix("0") && !trimmed.hasPrefix("(")
+        }
+    }
 
     static var service: SMAppService {
         SMAppService.daemon(plistName: plistName)
@@ -56,6 +116,12 @@ private enum ManagementService {
 
     static var status: SMAppService.Status {
         service.status
+    }
+
+    static func snapshot() -> StatusSnapshot {
+        let serviceStatus = status
+        let launchdStatus = serviceStatus == .enabled ? inspectLaunchd() : nil
+        return StatusSnapshot(serviceStatus: serviceStatus, launchdStatus: launchdStatus)
     }
 
     static func register() throws {
@@ -89,18 +155,10 @@ private enum ManagementService {
         }
     }
 
-    static func statusDescription(_ status: SMAppService.Status = status) -> String {
-        switch status {
-        case .enabled:
-            return "Ready"
-        case .requiresApproval:
-            return "Needs approval"
-        case .notRegistered:
-            return "Not registered"
-        case .notFound:
-            return "Missing from app bundle"
-        @unknown default:
-            return "Unknown"
+    static func printSnapshot(_ snapshot: StatusSnapshot = snapshot()) {
+        print("Vixen Management: \(snapshot.description)")
+        if let detail = snapshot.detail {
+            print("  \(detail)")
         }
     }
 
@@ -122,6 +180,71 @@ private enum ManagementService {
         Darwin.close(fd)
         return trigger
     }
+
+    private static func inspectLaunchd() -> LaunchdStatus {
+        let process = Process()
+        process.executableURL = URL(fileURLWithPath: "/bin/launchctl")
+        process.arguments = ["print", "system/\(label)"]
+
+        let stdout = Pipe()
+        let stderr = Pipe()
+        process.standardOutput = stdout
+        process.standardError = stderr
+
+        do {
+            try process.run()
+        } catch {
+            return LaunchdStatus(
+                jobState: nil,
+                lastExitCode: nil,
+                commandError: "launchctl unavailable: \(error.localizedDescription)"
+            )
+        }
+
+        process.waitUntilExit()
+
+        let output = String(
+            data: stdout.fileHandleForReading.readDataToEndOfFile(),
+            encoding: .utf8
+        ) ?? ""
+        let errorOutput = String(
+            data: stderr.fileHandleForReading.readDataToEndOfFile(),
+            encoding: .utf8
+        )?
+            .trimmingCharacters(in: .whitespacesAndNewlines)
+
+        if process.terminationStatus != 0 {
+            let detail =
+                errorOutput?.isEmpty == false ? errorOutput! : "exit \(process.terminationStatus)"
+            return LaunchdStatus(
+                jobState: nil,
+                lastExitCode: nil,
+                commandError: "launchctl print failed: \(detail)"
+            )
+        }
+
+        var jobState: String?
+        var lastExitCode: String?
+        for rawLine in output.split(whereSeparator: \.isNewline) {
+            let line = rawLine.trimmingCharacters(in: .whitespaces)
+            if let value = value(in: line, after: "job state = ") {
+                jobState = value
+            } else if let value = value(in: line, after: "last exit code = ") {
+                lastExitCode = value
+            }
+        }
+
+        return LaunchdStatus(
+            jobState: jobState,
+            lastExitCode: lastExitCode,
+            commandError: nil
+        )
+    }
+
+    private static func value(in line: String, after prefix: String) -> String? {
+        guard line.hasPrefix(prefix) else { return nil }
+        return String(line.dropFirst(prefix.count)).trimmingCharacters(in: .whitespaces)
+    }
 }
 
 private enum ManagementCommand {
@@ -135,15 +258,16 @@ private enum ManagementCommand {
             switch command {
             case "register":
                 try ManagementService.register()
-                print("Vixen Management: \(ManagementService.statusDescription())")
+                ManagementService.printSnapshot()
             case "unregister":
                 try ManagementService.unregister()
-                print("Vixen Management: \(ManagementService.statusDescription())")
+                ManagementService.printSnapshot()
             case "status":
-                print("Vixen Management: \(ManagementService.statusDescription())")
+                ManagementService.printSnapshot()
             case "mount", "unmount", "remount", "kill-fskitd":
                 let trigger = try ManagementService.fireQueue(command)
                 print("Vixen Management: queued \(command) via \(trigger.path)")
+                ManagementService.printSnapshot()
             case "help", "--help", "-h":
                 printUsage(to: stdout)
             default:
@@ -172,7 +296,10 @@ struct ContentView: View {
     @Environment(\.colorScheme) private var colorScheme
     @State private var isExtensionEnabled = false
     @State private var extensionError: String? = nil
-    @State private var managementStatus: SMAppService.Status = .notFound
+    @State private var managementSnapshot = ManagementService.StatusSnapshot(
+        serviceStatus: .notFound,
+        launchdStatus: nil
+    )
     @State private var managementError: String? = nil
     @State private var isConfiguringManagement = false
     @State private var demoToggleOn = false
@@ -189,7 +316,7 @@ struct ContentView: View {
         ProcessInfo.processInfo.operatingSystemVersion.majorVersion >= requiredMajorVersion
     }
     private var isManagementConfigured: Bool {
-        managementStatus == .enabled
+        managementSnapshot.isReady
     }
 
     var body: some View {
@@ -410,14 +537,20 @@ struct ContentView: View {
     }
 
     private var managementStatusText: String {
-        ManagementService.statusDescription(managementStatus)
+        managementSnapshot.description
+    }
+
+    private var managementDetailText: String? {
+        managementError ?? managementSnapshot.detail
     }
 
     private var managementButtonTitle: String {
         if isManagementConfigured {
             return "Recover"
         }
-        switch managementStatus {
+        switch managementSnapshot.serviceStatus {
+        case .enabled:
+            return "Retry"
         case .requiresApproval:
             return "Open Settings"
         default:
@@ -438,8 +571,8 @@ struct ContentView: View {
                 Text(managementStatusText)
                     .font(.system(size: 12))
                     .foregroundStyle(.secondary)
-                if let managementError {
-                    Text(managementError)
+                if let managementDetailText {
+                    Text(managementDetailText)
                         .font(.system(size: 11))
                         .foregroundStyle(.secondary)
                         .fixedSize(horizontal: false, vertical: true)
@@ -472,15 +605,17 @@ struct ContentView: View {
     private func managementButtonAction() {
         if isManagementConfigured {
             requestManagementRecovery()
-        } else if managementStatus == .requiresApproval {
+        } else if managementSnapshot.serviceStatus == .requiresApproval {
             openLoginItemsSettings()
+        } else if managementSnapshot.serviceStatus == .enabled {
+            requestManagementRecovery()
         } else {
             configureManagementDaemon()
         }
     }
 
     private func refreshManagementStatus() {
-        managementStatus = ManagementService.status
+        managementSnapshot = ManagementService.snapshot()
     }
 
     private func pollManagementStatus() async {
@@ -501,12 +636,12 @@ struct ContentView: View {
             try ManagementService.register()
             managementError = nil
             refreshManagementStatus()
-            if managementStatus == .requiresApproval {
+            if managementSnapshot.serviceStatus == .requiresApproval {
                 openLoginItemsSettings()
             }
         } catch {
             refreshManagementStatus()
-            if isManagementConfigured || managementStatus == .requiresApproval {
+            if isManagementConfigured || managementSnapshot.serviceStatus == .requiresApproval {
                 managementError = nil
             } else {
                 managementError = error.localizedDescription
@@ -523,7 +658,8 @@ struct ContentView: View {
 
         do {
             _ = try ManagementService.fireQueue("remount")
-            managementError = "Recovery requested"
+            managementError = nil
+            refreshManagementStatus()
         } catch {
             managementError = error.localizedDescription
         }
