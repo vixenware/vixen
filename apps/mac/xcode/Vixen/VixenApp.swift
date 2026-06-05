@@ -191,18 +191,17 @@ struct ContentView: View {
     private var isManagementConfigured: Bool {
         managementStatus == .enabled
     }
-    private var allComplete: Bool {
-        isSupportedOS && isExtensionEnabled
-    }
 
     var body: some View {
         Group {
             if !isSupportedOS {
                 unsupportedOSView
-            } else if allComplete {
-                completeView
-            } else {
+            } else if !isExtensionEnabled {
                 setupView
+            } else if !isManagementConfigured {
+                managementSetupView
+            } else {
+                completeView
             }
         }
         .padding(36)
@@ -211,6 +210,10 @@ struct ContentView: View {
         .task {
             guard isSupportedOS else { return }
             await pollExtensionStatus()
+        }
+        .task {
+            guard isSupportedOS else { return }
+            await pollManagementStatus()
         }
         .task {
             guard isSupportedOS else { return }
@@ -378,6 +381,34 @@ struct ContentView: View {
 
     // MARK: - Management daemon
 
+    private var managementSetupView: some View {
+        HStack(alignment: .center, spacing: 32) {
+            Image("fox_logo")
+                .resizable()
+                .aspectRatio(contentMode: .fit)
+                .frame(width: foxSize, height: foxSize)
+
+            VStack(spacing: 16) {
+                Text("One more step")
+                    .font(.system(size: 24, weight: .bold))
+
+                Text(
+                    "Allow Vixen's background management item so it can mount and recover VixenFS when privileged macOS filesystem work is needed."
+                )
+                .font(.system(size: 14))
+                .foregroundStyle(.secondary)
+                .multilineTextAlignment(.center)
+                .fixedSize(horizontal: false, vertical: true)
+
+                managementSetupPanel
+            }
+            .frame(maxWidth: .infinity)
+
+            Spacer()
+                .frame(width: foxSize)
+        }
+    }
+
     private var managementStatusText: String {
         ManagementService.statusDescription(managementStatus)
     }
@@ -452,6 +483,13 @@ struct ContentView: View {
         managementStatus = ManagementService.status
     }
 
+    private func pollManagementStatus() async {
+        while !Task.isCancelled {
+            refreshManagementStatus()
+            try? await Task.sleep(for: .seconds(4))
+        }
+    }
+
     private func configureManagementDaemon() {
         isConfiguringManagement = true
         defer {
@@ -462,6 +500,10 @@ struct ContentView: View {
         do {
             try ManagementService.register()
             managementError = nil
+            refreshManagementStatus()
+            if managementStatus == .requiresApproval {
+                openLoginItemsSettings()
+            }
         } catch {
             refreshManagementStatus()
             if isManagementConfigured || managementStatus == .requiresApproval {
