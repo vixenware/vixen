@@ -17,6 +17,7 @@
 pub mod killswitch;
 pub mod mount;
 pub mod queue;
+pub mod status;
 
 /// The fixed privileged capabilities. Each maps to one queue directory; a file
 /// appearing there *is* the request. Adding a button is a deliberate widening of the

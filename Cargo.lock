@@ -4033,6 +4033,8 @@ name = "vx-management"
 version = "0.1.0"
 dependencies = [
  "eyre",
+ "facet",
+ "facet-json",
  "libc",
  "tracing",
  "tracing-appender",

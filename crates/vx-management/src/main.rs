@@ -13,7 +13,7 @@ use eyre::{Result, WrapErr, bail};
 use tracing_subscriber::EnvFilter;
 use tracing_subscriber::layer::SubscriberExt;
 use tracing_subscriber::util::SubscriberInitExt;
-use vx_management::{Button, queue};
+use vx_management::{Button, queue, status};
 
 const LOG_DIR: &str = "/Library/Application Support/Vixen/management/logs";
 const LOG_FILE_NAME: &str = "vixen-management.log";
@@ -35,7 +35,11 @@ fn main() -> Result<()> {
             let Some(button) = Button::from_name(&arg) else {
                 bail!("unknown button {arg:?}; expected mount|unmount|remount|kill-fskitd");
             };
-            button.execute()
+            let outcome = button.execute();
+            if let Err(err) = status::record(button, &outcome) {
+                tracing::warn!(button = ?button, "failed to record direct action status: {err:#}");
+            }
+            outcome
         }
         // launchd mode: a queue fired (or RunAtLoad).
         None => run_launchd(),
@@ -77,6 +81,9 @@ fn run_launchd() -> Result<()> {
         fired_any = true;
         tracing::info!(button = ?button, "trigger fired");
         let outcome = button.execute();
+        if let Err(err) = status::record(button, &outcome) {
+            tracing::warn!(button = ?button, "failed to record action status: {err:#}");
+        }
         queue::drain(button)?;
         match outcome {
             Ok(()) => tracing::info!(button = ?button, "done"),

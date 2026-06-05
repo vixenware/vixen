@@ -7,7 +7,7 @@ echo "Running preflight checks..."
 "$SCRIPT_DIR/preflight.sh" "$RELEASE_VERSION"
 
 rm -rf "$DIST_DIR"
-mkdir -p "$STAGING_DIR" "$SPARKLE_DIR"
+mkdir -p "$STAGING_DIR" "$SPARKLE_DIR" "$EXPORT_DIR"
 
 echo "Generating Xcode project..."
 (
@@ -21,7 +21,30 @@ echo "Building Rust artifacts (Release)..."
   just build-rust Release
 )
 
-echo "Building Vixen.app (Release)..."
+RESOLVED_SIGNING_IDENTITY="$(resolve_codesign_identity "$SIGNING_IDENTITY" "Developer ID Application")"
+
+cat > "$EXPORT_OPTIONS_PLIST" <<EOF
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "https://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+  <key>destination</key>
+  <string>export</string>
+  <key>manageAppVersionAndBuildNumber</key>
+  <false/>
+  <key>method</key>
+  <string>developer-id</string>
+  <key>signingStyle</key>
+  <string>automatic</string>
+  <key>stripSwiftSymbols</key>
+  <true/>
+  <key>teamID</key>
+  <string>B2N6FSRTPV</string>
+</dict>
+</plist>
+EOF
+
+echo "Archiving Vixen.app (Release)..."
 (
   cd "$XCODE_DIR"
   xcodebuild \
@@ -29,13 +52,28 @@ echo "Building Vixen.app (Release)..."
     -scheme Vixen \
     -configuration Release \
     -sdk macosx \
+    -destination "generic/platform=macOS" \
+    -archivePath "$ARCHIVE_PATH" \
     -derivedDataPath build/DerivedData \
     -clonedSourcePackagesDirPath build/SourcePackages \
+    -allowProvisioningUpdates \
+    ARCHS=arm64 \
     MARKETING_VERSION="$RELEASE_VERSION" \
     CURRENT_PROJECT_VERSION="$RELEASE_VERSION" \
     SPARKLE_FEED_URL="$SPARKLE_FEED_URL" \
     SPARKLE_PUBLIC_ED_KEY="$SPARKLE_PUBLIC_ED_KEY" \
-    build
+    archive
+)
+
+echo "Exporting Vixen.app with Xcode-managed Developer ID signing..."
+(
+  cd "$XCODE_DIR"
+  xcodebuild \
+    -exportArchive \
+    -archivePath "$ARCHIVE_PATH" \
+    -exportPath "$EXPORT_DIR" \
+    -exportOptionsPlist "$EXPORT_OPTIONS_PLIST" \
+    -allowProvisioningUpdates
 )
 
 if [[ ! -d "$APP_BUNDLE_PATH" ]]; then
@@ -43,57 +81,38 @@ if [[ ! -d "$APP_BUNDLE_PATH" ]]; then
   exit 1
 fi
 
-RESOLVED_SIGNING_IDENTITY="$(resolve_codesign_identity "$SIGNING_IDENTITY" "Developer ID Application")"
-
-echo "Stripping embedded provisioning profiles (not valid for Developer ID)..."
-find "$APP_BUNDLE_PATH" -name "embedded.provisionprofile" -print -delete
-
-echo "Re-signing app bundle with '$SIGNING_IDENTITY' ($RESOLVED_SIGNING_IDENTITY) inside-out..."
-
 MANAGEMENT_HELPER="$APP_BUNDLE_PATH/Contents/MacOS/vixen-management"
 if [[ ! -f "$MANAGEMENT_HELPER" ]]; then
   echo "Expected management helper at $MANAGEMENT_HELPER but it was not found." >&2
   exit 1
 fi
+
+echo "Signing bundled management helper with '$SIGNING_IDENTITY' ($RESOLVED_SIGNING_IDENTITY)..."
 codesign --force --options runtime --timestamp --sign "$RESOLVED_SIGNING_IDENTITY" \
   --identifier "eu.bearcove.vixen" \
   "$MANAGEMENT_HELPER"
 
-# FSKit extension
+echo "Refreshing exported app signature after helper signing..."
 codesign --force --options runtime --timestamp \
-  --entitlements "$XCODE_DIR/VixenFS/VixenFS.entitlements" \
-  --sign "$RESOLVED_SIGNING_IDENTITY" \
-  "$APP_BUNDLE_PATH/Contents/Extensions/VixenFS.appex"
-
-# Sparkle framework (sign nested tools/apps first, then XPCs, then framework)
-SPARKLE_FW="$APP_BUNDLE_PATH/Contents/Frameworks/Sparkle.framework"
-SPARKLE_VER="$SPARKLE_FW/Versions/Current"
-
-if [[ -f "$SPARKLE_VER/Autoupdate" ]]; then
-  codesign --force --options runtime --timestamp --sign "$RESOLVED_SIGNING_IDENTITY" \
-    "$SPARKLE_VER/Autoupdate"
-fi
-
-if [[ -d "$SPARKLE_VER/Updater.app" ]]; then
-  if [[ -f "$SPARKLE_VER/Updater.app/Contents/MacOS/Updater" ]]; then
-    codesign --force --options runtime --timestamp --sign "$RESOLVED_SIGNING_IDENTITY" \
-      "$SPARKLE_VER/Updater.app/Contents/MacOS/Updater"
-  fi
-  codesign --force --options runtime --timestamp --sign "$RESOLVED_SIGNING_IDENTITY" \
-    "$SPARKLE_VER/Updater.app"
-fi
-
-for xpc in "$SPARKLE_VER"/XPCServices/*.xpc; do
-  [[ -e "$xpc" ]] || continue
-  codesign --force --options runtime --timestamp --sign "$RESOLVED_SIGNING_IDENTITY" "$xpc"
-done
-
-codesign --force --options runtime --timestamp --sign "$RESOLVED_SIGNING_IDENTITY" "$SPARKLE_FW"
-
-codesign --force --options runtime --timestamp \
-  --entitlements "$XCODE_DIR/Vixen/Vixen.entitlements" \
+  --preserve-metadata=entitlements \
   --sign "$RESOLVED_SIGNING_IDENTITY" \
   "$APP_BUNDLE_PATH"
+
+VIXENFS_APPEX="$APP_BUNDLE_PATH/Contents/Extensions/VixenFS.appex"
+appex_signature="$(codesign -dvvv "$VIXENFS_APPEX" 2>&1 || true)"
+case "$appex_signature" in
+  *"Authority=Developer ID Application"*) ;;
+  *)
+    echo "VixenFS.appex was not exported with a Developer ID Application signature:" >&2
+    echo "$appex_signature" >&2
+    exit 1
+    ;;
+esac
+
+if codesign -d --entitlements :- "$VIXENFS_APPEX" 2>/dev/null | grep -q "com.apple.security.get-task-allow"; then
+  echo "VixenFS.appex still has get-task-allow after Developer ID export." >&2
+  exit 1
+fi
 
 codesign --verify --deep --strict --verbose=2 "$APP_BUNDLE_PATH"
 
@@ -116,4 +135,6 @@ echo ""
 echo "Build complete:"
 echo "  DMG: $DMG_PATH"
 echo ""
-echo "Review the DMG, then run: just publish $RELEASE_VERSION"
+echo "Review the DMG, then run:"
+echo "  just release-pkg $RELEASE_VERSION"
+echo "  just release-publish $RELEASE_VERSION"

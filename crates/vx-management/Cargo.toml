@@ -17,6 +17,8 @@ workspace = true
 [dependencies]
 libc.workspace = true
 eyre.workspace = true
+facet.workspace = true
+facet-json.workspace = true
 tracing.workspace = true
 tracing-appender = "0.2.3"
 tracing-subscriber.workspace = true

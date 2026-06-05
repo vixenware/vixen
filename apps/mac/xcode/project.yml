@@ -12,6 +12,10 @@ settings:
     MACOSX_DEPLOYMENT_TARGET: "15.0"
     DEVELOPMENT_TEAM: B2N6FSRTPV
     CODE_SIGN_STYLE: Automatic
+  configs:
+    Release:
+      ARCHS: arm64
+      ENABLE_HARDENED_RUNTIME: YES
 
 packages:
   Sparkle:

@@ -50,10 +50,15 @@ private enum ManagementService {
         fileURLWithPath: "/Library/Application Support/Vixen/management/queue",
         isDirectory: true
     )
+    private static let lastActionURL = URL(
+        fileURLWithPath: "/Library/Application Support/Vixen/management/last-action.json",
+        isDirectory: false
+    )
 
     struct StatusSnapshot {
         let serviceStatus: SMAppService.Status
         let launchdStatus: LaunchdStatus?
+        let lastActionStatus: LastActionStatus?
 
         var isReady: Bool {
             serviceStatus == .enabled && launchdStatus?.failureDescription == nil
@@ -79,7 +84,18 @@ private enum ManagementService {
 
         var detail: String? {
             guard serviceStatus == .enabled else { return nil }
-            return launchdStatus?.failureDescription
+            return launchdStatus?.failureDescription ?? lastActionStatus?.failureDescription
+        }
+    }
+
+    struct LastActionStatus {
+        let button: String
+        let ok: Bool
+        let message: String
+
+        var failureDescription: String? {
+            guard !ok else { return nil }
+            return "last \(button) failed: \(message)"
         }
     }
 
@@ -121,7 +137,12 @@ private enum ManagementService {
     static func snapshot() -> StatusSnapshot {
         let serviceStatus = status
         let launchdStatus = serviceStatus == .enabled ? inspectLaunchd() : nil
-        return StatusSnapshot(serviceStatus: serviceStatus, launchdStatus: launchdStatus)
+        let lastActionStatus = serviceStatus == .enabled ? readLastActionStatus() : nil
+        return StatusSnapshot(
+            serviceStatus: serviceStatus,
+            launchdStatus: launchdStatus,
+            lastActionStatus: lastActionStatus
+        )
     }
 
     static func register() throws {
@@ -263,6 +284,20 @@ private enum ManagementService {
         guard line.hasPrefix(prefix) else { return nil }
         return String(line.dropFirst(prefix.count)).trimmingCharacters(in: .whitespaces)
     }
+
+    private static func readLastActionStatus() -> LastActionStatus? {
+        guard let data = try? Data(contentsOf: lastActionURL) else { return nil }
+        guard
+            let object = try? JSONSerialization.jsonObject(with: data),
+            let dictionary = object as? [String: Any],
+            let button = dictionary["button"] as? String,
+            let ok = dictionary["ok"] as? Bool
+        else {
+            return nil
+        }
+        let message = dictionary["message"] as? String ?? ""
+        return LastActionStatus(button: button, ok: ok, message: message)
+    }
 }
 
 private enum ManagementCommand {
@@ -319,7 +354,8 @@ struct ContentView: View {
     @State private var extensionError: String? = nil
     @State private var managementSnapshot = ManagementService.StatusSnapshot(
         serviceStatus: .notFound,
-        launchdStatus: nil
+        launchdStatus: nil,
+        lastActionStatus: nil
     )
     @State private var managementError: String? = nil
     @State private var isConfiguringManagement = false
