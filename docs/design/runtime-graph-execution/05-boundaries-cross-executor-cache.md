@@ -213,7 +213,9 @@ Current progress:
   `stdout`, `stderr`, then `out`. The stream fields poison explicitly if
   demanded before streaming lands; `out` crosses through executor-side
   `WireValue::Tree`, then the observe protocol promotes a top-level tree result
-  to `Observed::Tree` before the strand opens the `Producing` virtual connection.
+  to `Observed::Tree`, or a compound value containing tree leaves to
+  `Observed::ValueWithTree`, before the strand opens the `Producing` virtual
+  connection.
 
 ## Cross-executor remote values
 

@@ -196,9 +196,10 @@ Expected latest structural checkpoint:
   its hosted `RunnerService` when a runner is configured. The implementation
   calls `run_exec`, converts the process result to `CompletedRun`, and invokes
   the shared observer-evaluation helper.
-- Runner-backed top-level tree observe results now cross the protocol as
-  `Observed::Tree` and install a CAS-backed `Producing` service from flushed
-  `ExecResult.outputs`; both `RunnerAcceptor`
+- Runner-backed top-level tree observe results cross the protocol as
+  `Observed::Tree`; compound observer values containing output-tree leaves cross
+  as `Observed::ValueWithTree`. Both install a CAS-backed `Producing` service
+  from flushed `ExecResult.outputs`; both `RunnerAcceptor`
   and daemon-hosted runner sessions route `"Producing"`, and the service resolves
   demanded paths by walking `DirectoryNode` trees and fetching file chunks from
   `vx-store`. The old scratch-backed `exec_output_tree` runtime integration file
@@ -261,6 +262,19 @@ Latest verified red/green shape:
 - `cargo nextest run -p vx-exec-protocol -p vx-runtime -p vx-runner -p vx-daemon --no-fail-fast`:
   161/161 passed, 12 skipped, after making top-level producing-tree observe
   results explicit.
+- `cargo check -p vx-exec-protocol -p vx-runtime -p vx-runner -p vx-daemon`:
+  passed after wiring `Observed::ValueWithTree` nested output-tree crossing.
+- `cargo nextest run -p vx-runtime -E 'binary(nested_tree_observe)' --no-fail-fast`:
+  1/1 passed, proving a Vixen backtick observer result shaped as
+  `Nested { out: run.stream.out }` can later demand `nested.out.file("out")`
+  through the opened `Producing` handle.
+- `cargo nextest run -p vx-runtime -E 'test(observe::tests::) | test(strand::tests::)' --no-fail-fast`:
+  11/11 passed, including `Observed::ValueWithTree` helper coverage and strand
+  handle-crossing coverage.
+- `cargo nextest run -p vx-runtime -E 'binary(source_blind_guardrails)' --no-fail-fast`:
+  10/10 passed.
+- `cargo nextest run -p vx-exec-protocol -p vx-runtime -p vx-runner -p vx-daemon --no-fail-fast`:
+  163/163 passed, 12 skipped, after nested output-tree crossing.
 - `cargo check -p vx-runtime -p vx-runner -p vx-daemon`: passed after making
   `Value::OutputTree` carry a sealed executor-local marker.
 - `cargo check -p vx-runtime -p vx-runner -p vx-daemon`: passed after making

@@ -22,7 +22,10 @@ use crate::cache::{
     CachedExecOutcome, ExecInvocationCacheKey, HostExecCacheKey, ObserverCacheIdentity,
     RuntimeCache, RuntimeCacheBackend,
 };
-use crate::eval::{ExecutorOutputTree, FailureContext, Outcome, Poison, Thunk, Value, from_wire};
+use crate::eval::{
+    ExecutorOutputTree, FailureContext, Outcome, Poison, Thunk, Value, from_wire,
+    from_wire_with_tree_handle,
+};
 use crate::remote::{Part, PartKey};
 use crate::strand::{HandleId, ObserveClientId, ObserveOutcome, dispatch_observe, force_remote};
 
@@ -434,6 +437,10 @@ fn materialize_exec_invocation(
 fn cacheable_from_observed(observed: &ObserveOutcome) -> Result<CachedExecOutcome, String> {
     match observed {
         ObserveOutcome::Value(wire) => Ok(CachedExecOutcome::Value(wire.clone())),
+        ObserveOutcome::ValueWithTree { value, tree } => Ok(CachedExecOutcome::ValueWithTree {
+            value: value.clone(),
+            tree: *tree,
+        }),
         ObserveOutcome::Tree(handle) => Ok(CachedExecOutcome::Tree(*handle)),
         ObserveOutcome::Poisoned(reason) => Err(reason.clone()),
     }
@@ -451,6 +458,17 @@ fn seed_exec_outcome(
         match outcome {
             CachedExecOutcome::Value(wire) => {
                 let value = from_wire(&wire).map_err(|poison| poison.message())?;
+                node_output_from_value_in_driver(
+                    &mut driver,
+                    Rc::clone(&externals),
+                    runtime.clone(),
+                    node,
+                    value,
+                )?
+            }
+            CachedExecOutcome::ValueWithTree { value, tree } => {
+                let value =
+                    from_wire_with_tree_handle(&value, tree).map_err(|poison| poison.message())?;
                 node_output_from_value_in_driver(
                     &mut driver,
                     Rc::clone(&externals),
@@ -674,12 +692,11 @@ fn materialize_tree_file(
             "tree.file receiver must be a producing Tree, got {receiver_output:?}"
         ));
     }
-    let handle = runtime
-        .remote_trees
-        .borrow()
-        .get(receiver)
-        .copied()
-        .ok_or_else(|| format!("tree.file receiver node {receiver:?} has no remote handle"))?;
+    let handle = {
+        let driver = driver.borrow();
+        remote_tree_handle_for(&driver, &runtime, *receiver)
+            .ok_or_else(|| format!("tree.file receiver node {receiver:?} has no remote handle"))?
+    };
     let path = expect_string(
         demand_payload(
             Rc::clone(&driver),
@@ -1371,6 +1388,46 @@ fn output_tree_value(node: NodeId, runtime: &RuntimeBoundaries) -> Value {
         .copied()
         .map(Value::Tree)
         .unwrap_or_else(|| Value::OutputTree(ExecutorOutputTree::new()))
+}
+
+fn remote_tree_handle_for(
+    driver: &Driver,
+    runtime: &RuntimeBoundaries,
+    node: NodeId,
+) -> Option<HandleId> {
+    if let Some(handle) = runtime.remote_trees.borrow().get(&node).copied() {
+        return Some(handle);
+    }
+
+    let graph_node = driver.node(node)?;
+    let handle = match &graph_node.kind {
+        NodeKind::Project { index } => {
+            let container = *graph_node.inputs.first()?;
+            let field = projected_field_node(driver, container, *index)?;
+            remote_tree_handle_for(driver, runtime, field)?
+        }
+        NodeKind::Call { .. } => {
+            let body_root = *graph_node.inputs.first()?;
+            remote_tree_handle_for(driver, runtime, body_root)?
+        }
+        _ => return None,
+    };
+
+    if matches!(driver.output(node), Some(NodeOutput::OutputTree)) {
+        runtime.remote_trees.borrow_mut().insert(node, handle);
+        Some(handle)
+    } else {
+        None
+    }
+}
+
+fn projected_field_node(driver: &Driver, container: NodeId, index: u32) -> Option<NodeId> {
+    match driver.output(container)? {
+        NodeOutput::LazyData { fields, .. }
+        | NodeOutput::Struct { fields, .. }
+        | NodeOutput::Variant { fields, .. } => fields.get(index as usize).copied(),
+        _ => None,
+    }
 }
 
 fn value_from_ready_output(

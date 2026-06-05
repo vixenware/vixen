@@ -42,6 +42,7 @@ pub fn evaluate_observer(run: CompletedRun, observer: Option<Bundle>) -> Observe
                 KernelMode::GraphOnly,
             ) {
                 Ok(WireValue::Tree) => Observed::Tree,
+                Ok(value) if value.contains_tree() => Observed::ValueWithTree(value),
                 Ok(value) => Observed::Value(value),
                 Err(reason) => Observed::Poisoned(reason),
             }
@@ -66,6 +67,12 @@ mod tests {
 
     fn output_tree_observer_bundle() -> Bundle {
         bundle_for("fn observe(run: Run) -> Tree ( run.stream.out )")
+    }
+
+    fn nested_output_tree_observer_bundle() -> Bundle {
+        bundle_for(
+            "struct Nested { out: Tree }\nfn observe(run: Run) -> Nested ( Nested { out: run.stream.out } )",
+        )
     }
 
     fn bundle_for(src: &str) -> Bundle {
@@ -117,6 +124,25 @@ mod tests {
             Some(output_tree_observer_bundle()),
         );
         assert_eq!(observed, Observed::Tree);
+    }
+
+    #[test]
+    fn nested_output_tree_observer_returns_value_with_tree_result() {
+        let observed = evaluate_observer(
+            CompletedRun::new(ProcOutcome {
+                exit_code: 0,
+                stdout: Vec::new(),
+                stderr: Vec::new(),
+            }),
+            Some(nested_output_tree_observer_bundle()),
+        );
+        match observed {
+            Observed::ValueWithTree(value) => assert!(
+                value.contains_tree(),
+                "nested observer value should contain a producing-tree leaf"
+            ),
+            other => panic!("expected a value-with-tree observe result, got {other:?}"),
+        }
     }
 
     #[test]

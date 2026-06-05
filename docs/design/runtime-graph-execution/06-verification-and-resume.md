@@ -256,6 +256,19 @@ Latest focused verification:
 - `cargo nextest run -p vx-exec-protocol -p vx-runtime -p vx-runner -p vx-daemon --no-fail-fast`:
   161/161 passed, 12 skipped, after making top-level producing-tree observe
   results explicit.
+- `cargo check -p vx-exec-protocol -p vx-runtime -p vx-runner -p vx-daemon`:
+  passed after wiring `Observed::ValueWithTree` nested output-tree crossing.
+- `cargo nextest run -p vx-runtime -E 'binary(nested_tree_observe)' --no-fail-fast`:
+  1/1 passed, proving a Vixen backtick observer result shaped as
+  `Nested { out: run.stream.out }` can later demand `nested.out.file("out")`
+  through the opened `Producing` handle.
+- `cargo nextest run -p vx-runtime -E 'test(observe::tests::) | test(strand::tests::)' --no-fail-fast`:
+  11/11 passed, including `Observed::ValueWithTree` helper coverage and strand
+  handle-crossing coverage.
+- `cargo nextest run -p vx-runtime -E 'binary(source_blind_guardrails)' --no-fail-fast`:
+  10/10 passed.
+- `cargo nextest run -p vx-exec-protocol -p vx-runtime -p vx-runner -p vx-daemon --no-fail-fast`:
+  163/163 passed, 12 skipped, after nested output-tree crossing.
 - `cargo nextest run -p vx-runtime -p vx-runner -p vx-daemon --no-fail-fast`:
   159/159 passed, 12 skipped, after sealing the executor-local output tree
   marker.
@@ -367,11 +380,13 @@ Latest focused verification:
   `ScratchObserveService`, `scratch_dir`, `capture_outputs`, and
   `local_observer()` helper have been deleted from `vx-runtime`.
 - Runner-backed observe now installs a CAS-backed `Producing` service when an
-  observer returns a top-level `Observed::Tree`. `RunnerAcceptor` and
-  daemon-hosted runner sessions route `"Producing"`; the service walks flushed
-  `DirectoryNode` output roots and fetches file chunks from `vx-store` on
-  demand. Nested tree values still fail through the explicit wire-crossing gap
-  until the general nested-handle walk lands.
+  observer returns a top-level `Observed::Tree` or an
+  `Observed::ValueWithTree` compound value containing output-tree leaves.
+  `RunnerAcceptor` and daemon-hosted runner sessions route `"Producing"`; the
+  service walks flushed `DirectoryNode` output roots and fetches file chunks
+  from `vx-store` on demand. Nested output-tree leaves all refer to the exec's
+  output tree; multiple distinct tree handles inside one observed value remain
+  future work.
 - `vx-runner::output_tree::tests::reads_declared_output_root_from_cas` proves the
   CAS-backed producer serves a declared output path, and
   `vx-runner::tests::producing_vconn_serves_runner_output_tree_from_cas` proves

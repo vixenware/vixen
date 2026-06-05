@@ -48,6 +48,18 @@ pub enum WireValue {
     },
 }
 
+impl WireValue {
+    pub fn contains_tree(&self) -> bool {
+        match self {
+            Self::Tree => true,
+            Self::Tuple(fields) | Self::Array(fields) => fields.iter().any(Self::contains_tree),
+            Self::Struct(fields) => fields.iter().any(|(_, field)| field.contains_tree()),
+            Self::Variant { fields, .. } => fields.iter().any(|(_, field)| field.contains_tree()),
+            Self::U64(_) | Self::Bool(_) | Self::Str(_) | Self::Unit => false,
+        }
+    }
+}
+
 /// The result of observing: a crossed value or a poison message.
 #[derive(facet::Facet, Debug, Clone, PartialEq, Eq)]
 #[repr(u8)]
@@ -56,6 +68,10 @@ pub enum Observed {
     /// lazily through the `Producing` virtual connection opened on the same observe
     /// session; it is not ordinary eager data.
     Tree,
+    /// Ordinary observed data containing one or more producing-tree leaves. Every
+    /// `WireValue::Tree` leaf refers to this exec's output tree and crosses through
+    /// the same `Producing` virtual connection.
+    ValueWithTree(WireValue),
     Value(WireValue),
     Poisoned(String),
 }

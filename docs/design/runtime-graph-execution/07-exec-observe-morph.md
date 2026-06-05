@@ -100,9 +100,10 @@ Current checkpoint:
 - `vx-runtime::observe::evaluate_observer` evaluates an observer bundle over that
   completed run and returns `Observed`.
 - This helper promotes a top-level executor-side `WireValue::Tree` crossing to
-  `Observed::Tree`. It still does not carry nested output-tree handles inside
-  compound observer values; those remain an explicit unsupported gap until the
-  general nested-handle walk lands.
+  `Observed::Tree`, and a compound observer value containing `WireValue::Tree`
+  leaves to `Observed::ValueWithTree`. Those leaves all refer to the same exec
+  output tree; multiple distinct tree handles inside one observed value remain
+  future work.
 - `ScratchObserveService`, `scratch_dir`, `capture_outputs`, and
   `local_observer()` have been deleted from `vx-runtime`.
 
@@ -120,7 +121,8 @@ The runner-backed observe implementation must:
    first cut may materialize the flushed CAS tree into the current producer
    service; later cuts should serve paths directly from CAS/read-set state.
 4. Call the runtime observer-evaluation helper with the completed process data.
-5. Return `Observed::Tree`, `Observed::Value`, or `Observed::Poisoned` over Vox.
+5. Return `Observed::Tree`, `Observed::ValueWithTree`, `Observed::Value`, or
+   `Observed::Poisoned` over Vox.
 
 The runner may depend on `vx-runtime` because the executor links the shared
 evaluator. `vx-runtime` must not depend on `vx-runner`.
@@ -142,10 +144,11 @@ Current checkpoint:
   extracted as graph node refs, demanded only when the exec boundary materializes,
   included in the exec cache key, and forwarded by `vx-runner` as
   `ExecRequest.outputs`.
-- If an observer result is `Observed::Tree`, the runner-backed path installs a
-  CAS-backed `Producing` service over the flushed `ExecResult.outputs`; the
-  orchestrator opens the `"Producing"` virtual connection on the same Vox
-  session and demands individual paths from the returned write-set tree.
+- If an observer result is `Observed::Tree` or `Observed::ValueWithTree`, the
+  runner-backed path installs a CAS-backed `Producing` service over the flushed
+  `ExecResult.outputs`; the orchestrator opens the `"Producing"` virtual
+  connection on the same Vox session and demands individual paths from the
+  returned write-set tree.
 - The first CAS-backed producer resolves paths from the declared output-root
   namespace (`out/foo.o` for `writable: ["out"]`) by walking the flushed
   `DirectoryNode` tree and fetching small/large file chunks from `vx-store`.

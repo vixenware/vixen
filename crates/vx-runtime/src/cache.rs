@@ -99,6 +99,7 @@ pub(crate) enum ObserverCacheIdentity {
 #[derive(Debug, Clone)]
 pub(crate) enum CachedExecOutcome {
     Value(WireValue),
+    ValueWithTree { value: WireValue, tree: HandleId },
     Tree(HandleId),
 }
 

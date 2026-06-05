@@ -268,13 +268,17 @@ enum CacheOutcome {
 /// [`dispatch_observe`] hands eval. Distinct from the wire [`Observed`]: a returned
 /// producing tree ([`Observed::Tree`]) has been turned into a [`HandleId`] here (the
 /// boss opened a `Producing` virtual connection to the executor and registered it), so
-/// eval can `force_remote` it. Scalars/compounds ride as the [`WireValue`] they
-/// crossed as. (Slice-1 crosses a *top-level* tree; a tree nested inside a `Value`
-/// still poisons in `from_wire` until the general walk lands.)
+/// eval can `force_remote` it. Scalars/compounds without producing-tree leaves ride
+/// as the [`WireValue`] they crossed as. Compound values with producing-tree leaves
+/// carry the registered handle alongside the wire structure, so graph seeding can
+/// bind those leaves to remote tree nodes.
 #[derive(Debug)]
 pub enum ObserveOutcome {
-    /// A data value (no top-level producing tree).
+    /// A data value with no producing-tree leaves.
     Value(WireValue),
+    /// A data value containing one or more producing-tree leaves, all backed by
+    /// this handle.
+    ValueWithTree { value: WireValue, tree: HandleId },
     /// A returned producing tree, opened + registered as `HandleId`.
     Tree(HandleId),
     /// The observer poisoned, or the run couldn't start / its outputs couldn't be served.
@@ -665,9 +669,20 @@ impl Scheduler {
                         (Observed::Tree, Some(client)) => {
                             ObserveOutcome::Tree(self.register_handle(RemoteHandle::new(client)))
                         }
+                        (Observed::ValueWithTree(value), Some(client)) => {
+                            ObserveOutcome::ValueWithTree {
+                                value,
+                                tree: self.register_handle(RemoteHandle::new(client)),
+                            }
+                        }
                         (Observed::Tree, None) => ObserveOutcome::Poisoned(
                             "`exec` returned a tree, but opening its Producing virtual \
                              connection failed"
+                                .into(),
+                        ),
+                        (Observed::ValueWithTree(_), None) => ObserveOutcome::Poisoned(
+                            "`exec` returned a value containing a tree, but opening its \
+                             Producing virtual connection failed"
                                 .into(),
                         ),
                         (Observed::Value(value), _) => ObserveOutcome::Value(value),
@@ -844,11 +859,12 @@ async fn force_part(client: RemoteHandle, key: PartId) -> (PartId, Part) {
 /// Drive one `observe` RPC to completion on the boss runtime. A connection error
 /// becomes a poisoned [`Observed`], so the consumer always gets a definite answer.
 ///
-/// If the observer returned a producing tree ([`Observed::Tree`]), also open a
-/// `Producing` **virtual connection** on the *same* observe session — that's the demand
-/// path into the executor's outputs. The returned [`ProducingClient`] is registered by
-/// the boss loop (it owns the handle table); we open here because the session lives on
-/// the [`ObserveClient`].
+/// If the observer returned a producing tree ([`Observed::Tree`]) or an observed
+/// value containing one ([`Observed::ValueWithTree`]), also open a `Producing`
+/// **virtual connection** on the *same* observe session — that's the demand path
+/// into the executor's outputs. The returned [`ProducingClient`] is registered by
+/// the boss loop (it owns the handle table); we open here because the session lives
+/// on the [`ObserveClient`].
 async fn drive_observe(
     client: Arc<ObserveClient>,
     req: ObserveReqId,
@@ -858,7 +874,7 @@ async fn drive_observe(
         Ok(o) => o,
         Err(e) => Observed::Poisoned(format!("observe RPC failed: {e:?}")),
     };
-    let producing = if matches!(observed, Observed::Tree) {
+    let producing = if matches!(observed, Observed::Tree | Observed::ValueWithTree(_)) {
         match client.session.as_ref() {
             Some(session) => session
                 .open::<ProducingClient>(vox::ConnectionSettings {

@@ -466,42 +466,54 @@ fn wire_graph_fields(fields: &[(String, Thunk)]) -> Result<Vec<(String, WireValu
 /// crossing. The wire form is already fully forced, so every field is a resolved
 /// (`done`) thunk.
 pub fn from_wire(wire: &WireValue) -> Result<Value, Poison> {
+    from_wire_with_tree(wire, None)
+}
+
+pub(crate) fn from_wire_with_tree_handle(
+    wire: &WireValue,
+    tree: HandleId,
+) -> Result<Value, Poison> {
+    from_wire_with_tree(wire, Some(tree))
+}
+
+fn from_wire_with_tree(wire: &WireValue, tree: Option<HandleId>) -> Result<Value, Poison> {
     Ok(match wire {
         WireValue::U64(n) => Value::U64(*n),
         WireValue::Bool(b) => Value::Bool(*b),
         WireValue::Str(s) => Value::Str(Rc::from(s.as_str())),
         WireValue::Unit => Value::Unit,
-        WireValue::Tuple(ws) => Value::Tuple(from_wire_thunks(ws)?),
-        WireValue::Array(ws) => Value::Array(from_wire_thunks(ws)?),
-        WireValue::Struct(fields) => Value::Struct(from_wire_fields(fields)?),
+        WireValue::Tuple(ws) => Value::Tuple(from_wire_thunks(ws, tree)?),
+        WireValue::Array(ws) => Value::Array(from_wire_thunks(ws, tree)?),
+        WireValue::Struct(fields) => Value::Struct(from_wire_fields(fields, tree)?),
         WireValue::Variant { tag, fields } => Value::Variant {
             tag: tag.clone(),
-            fields: from_wire_fields(fields)?,
+            fields: from_wire_fields(fields, tree)?,
         },
-        // A producing tree crosses as a handle, but resolving it into a
-        // `Value::Tree(HandleId)` means opening a `Producing` virtual connection to the
-        // executor and `register_handle` — async, boss-side, during `dispatch_observe`.
-        // That join is the next piece; until then a returned tree poisons honestly
-        // rather than pretending to resolve.
-        WireValue::Tree => {
-            return Err(poison(
-                "`exec` returned a producing tree — the handle crossing (open a \
-                 Producing vconn + register) is not wired yet"
-                    .into(),
-            ));
-        }
+        WireValue::Tree => match tree {
+            Some(handle) => Value::Tree(handle),
+            None => {
+                return Err(poison(
+                    "`exec` returned a producing tree without a crossed Producing handle".into(),
+                ));
+            }
+        },
     })
 }
 
 /// Force-free reconstruction of wire elements into resolved (`done`) thunks.
-fn from_wire_thunks(ws: &[WireValue]) -> Result<Vec<Thunk>, Poison> {
-    ws.iter().map(|w| Ok(done(from_wire(w)?))).collect()
+fn from_wire_thunks(ws: &[WireValue], tree: Option<HandleId>) -> Result<Vec<Thunk>, Poison> {
+    ws.iter()
+        .map(|w| Ok(done(from_wire_with_tree(w, tree)?)))
+        .collect()
 }
 
-fn from_wire_fields(fields: &[(String, WireValue)]) -> Result<Vec<(String, Thunk)>, Poison> {
+fn from_wire_fields(
+    fields: &[(String, WireValue)],
+    tree: Option<HandleId>,
+) -> Result<Vec<(String, Thunk)>, Poison> {
     fields
         .iter()
-        .map(|(n, w)| Ok((n.clone(), done(from_wire(w)?))))
+        .map(|(n, w)| Ok((n.clone(), done(from_wire_with_tree(w, tree)?))))
         .collect()
 }
 
