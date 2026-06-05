@@ -24,6 +24,7 @@ const FORBIDDEN_NEEDLES: &[&str] = &[
     "fn force",
     ".force(",
     "pub fn boundary_payload",
+    "pub fn test_probe",
 ];
 
 const RUNTIME_TREE_WALKER_NEEDLES: &[&str] = &[

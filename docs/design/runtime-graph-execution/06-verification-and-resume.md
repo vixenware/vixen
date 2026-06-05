@@ -171,7 +171,8 @@ Current partial state:
 - Boundary payload demand is authorized by a non-clone `BoundaryDemand` returned
   from the driver on `DriverError::Boundary`; materializers borrow it to create
   request-shaping payload demands. There is no public free
-  `DemandRequest::boundary_payload(node)` constructor.
+  `DemandRequest::boundary_payload(node)` constructor, and test-probe demand
+  construction is cfg(test)-only.
 - The `.vx` harness uses `run_in_mode`, so source-language tests now exercise the
   graph driver and fail explicitly where graph payloads are unsupported.
 - The old `Evaluator`, `eval_inner`, `force_node`, expression-capturing
@@ -180,6 +181,13 @@ Current partial state:
 
 Latest focused verification:
 
+- `cargo check -p vx-runtime-driver -p vx-runtime`: passed after making
+  `DemandRequest::test_probe` cfg(test)-only.
+- `cargo nextest list -p vx-runtime -E 'binary(source_blind_guardrails)'`:
+  selected the seven source-blind guardrail tests.
+- `cargo nextest run -p vx-runtime-driver --no-fail-fast`: 12/12 passed.
+- `cargo nextest run -p vx-runtime -E 'binary(source_blind_guardrails)' --no-fail-fast`:
+  7/7 passed, including `execution_crates_stay_source_blind`.
 - `cargo check -p vx-cache-index -p vx-exec-protocol -p vx-services -p vx-store -p vx-runtime-graph -p vx-runtime-core -p vx-runtime-driver -p vx-runtime -p vx-runner -p vx-daemon`
   passes with no old-evaluator dead-code warnings.
 - `cargo nextest run -p vx-runtime -E 'binary(source_blind_guardrails) | binary(exec_on_strands)' --no-fail-fast`:

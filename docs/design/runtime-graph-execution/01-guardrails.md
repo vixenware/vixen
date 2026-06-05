@@ -71,8 +71,9 @@ Allowed:
 - `Step::Need`, `Step::Ready`, `Step::Boundary`, `Step::Poison`,
   `Step::Unsupported`.
 - Driver-owned memo table.
-- Driver-owned legal demand origins: root result, boundary materialization, test
-  probe.
+- Driver-owned legal demand origins: root result and boundary materialization.
+  Test probes may exist only behind `#[cfg(test)]`; they are not a production
+  demand constructor.
 - Kernel IR and kernel interpreter once kernel nodes carry structured kernel
   references or payloads.
 - Boundary request data once boundary nodes carry structured boundary payloads.
@@ -184,7 +185,8 @@ may borrow that token to create request-shaping payload demands with
 
 Do not make `DemandRequest` fields public. Do not add blanket conversion from
 `NodeId` to `DemandRequest`. Do not expose a free `boundary_payload(node)`
-constructor. Do not expose `resolve_node` publicly as a generic force operation.
+constructor. Do not expose a public `test_probe` constructor. Do not expose
+`resolve_node` publicly as a generic force operation.
 
 ## What counts as failure
 

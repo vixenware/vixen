@@ -14,6 +14,7 @@ pub enum DemandOrigin {
     RootResult,
     BoundaryPayload,
     PublicValueField,
+    #[cfg(test)]
     TestProbe,
 }
 
@@ -41,7 +42,8 @@ impl DemandRequest {
         }
     }
 
-    pub fn test_probe(node: NodeId) -> Self {
+    #[cfg(test)]
+    fn test_probe(node: NodeId) -> Self {
         Self {
             node,
             origin: DemandOrigin::TestProbe,
