@@ -24,6 +24,7 @@ vx-vfs = { workspace = true }
 vox = { workspace = true }
 moire = { workspace = true }
 vx-io = { workspace = true }
+vx-vfs-types = { workspace = true }
 
 # Async runtime
 tokio = { workspace = true }

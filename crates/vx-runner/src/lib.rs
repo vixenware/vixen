@@ -358,7 +358,9 @@ mod tests {
     async fn live_vfs_runner_service() -> (tempfile::TempDir, RunnerService) {
         let (temp, store) = store_client().await;
         let store = Arc::new(store);
-        let configured_mount = "/tmp/vx/vfs".parse().expect("utf8 VFS mount path");
+        let configured_mount = vx_vfsd::DEFAULT_CONFIGURED_VFS_MOUNT_PATH
+            .parse()
+            .expect("utf8 VFS mount path");
         let mount = vx_vfsd::effective_mount_path(&configured_mount);
         let vfsd = vx_vfsd::boot_with_store(Arc::clone(&store), &mount)
             .await

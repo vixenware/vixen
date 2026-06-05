@@ -1,0 +1,38 @@
+#!/bin/bash
+set -u
+
+label="eu.bearcove.vixen.management"
+plist="/Library/LaunchDaemons/${label}.plist"
+helper="/Applications/Vixen.app/Contents/MacOS/vixen-management"
+
+if [ ! -x "$helper" ]; then
+  echo "postinstall: missing executable helper at $helper" >&2
+  exit 1
+fi
+
+/usr/sbin/chown root:wheel "$plist" || {
+  echo "postinstall: failed to chown $plist" >&2
+  exit 1
+}
+/bin/chmod 644 "$plist" || {
+  echo "postinstall: failed to chmod $plist" >&2
+  exit 1
+}
+
+"$helper" ensure-queues || {
+  echo "postinstall: failed to prepare Vixen Management queues" >&2
+  exit 1
+}
+
+/bin/launchctl bootout "system/$label" >/dev/null 2>&1 || true
+/bin/launchctl bootout system "$plist" >/dev/null 2>&1 || true
+
+/bin/launchctl bootstrap system "$plist" || {
+  echo "postinstall: failed to bootstrap $plist" >&2
+  exit 1
+}
+
+/bin/launchctl kickstart -k "system/$label" >/dev/null 2>&1 || true
+
+echo "postinstall: installed Vixen Management LaunchDaemon"
+exit 0

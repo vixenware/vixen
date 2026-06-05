@@ -15,6 +15,12 @@ echo "Generating Xcode project..."
   xcodegen generate
 )
 
+echo "Building Rust artifacts (Release)..."
+(
+  cd "$APP_DIR"
+  just build-rust Release
+)
+
 echo "Building Vixen.app (Release)..."
 (
   cd "$XCODE_DIR"
@@ -44,6 +50,15 @@ echo "Re-signing app bundle with '$SIGNING_IDENTITY' (inside-out)..."
 
 # Sign nested components first (inside-out), each with hardened runtime + timestamp
 # and proper entitlements (without get-task-allow which Xcode adds for debug builds).
+
+# Privileged management helper
+MANAGEMENT_HELPER="$APP_BUNDLE_PATH/Contents/MacOS/vixen-management"
+if [[ ! -f "$MANAGEMENT_HELPER" ]]; then
+  echo "Expected management helper at $MANAGEMENT_HELPER but it was not found." >&2
+  exit 1
+fi
+codesign --force --options runtime --timestamp --sign "$SIGNING_IDENTITY" \
+  "$MANAGEMENT_HELPER"
 
 # FSKit extension
 codesign --force --options runtime --timestamp \

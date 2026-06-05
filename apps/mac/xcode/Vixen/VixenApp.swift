@@ -39,7 +39,7 @@ struct ContentView: View {
     @State private var demoToggleOn = false
     @State private var cursorBob = false
 
-    private let requiredMajorVersion = 26
+    private let requiredMajorVersion = 15
     private let foxSize: CGFloat = 96
     private let brandOrange = Color(hex: 0xE88602)
     private let baseBg = Color(light: 0xFFFFFF, dark: 0x1E2020)
@@ -184,6 +184,12 @@ struct ContentView: View {
     // MARK: - Extension status
 
     private func checkExtensionOnce() async {
+        guard #available(macOS 15.4, *) else {
+            isExtensionEnabled = false
+            extensionError = "VixenFS extension status requires macOS 15.4 or later."
+            return
+        }
+
         do {
             let extensions = try await FSClient.shared.installedExtensions
             let found = extensions.first { $0.bundleIdentifier == "eu.bearcove.vixenfs" }

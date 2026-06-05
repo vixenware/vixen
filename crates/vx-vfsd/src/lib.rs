@@ -24,19 +24,40 @@ use vx_vfs::{VfsConfig, VfsStart};
 
 use crate::vfs::CasVfs;
 
+pub use vx_vfs_types::DEFAULT_CONFIGURED_VFS_MOUNT_PATH;
+
 /// Canary item ID — must be high enough to never collide with real CAS item IDs.
 const CANARY_ITEM_ID: ItemId = 0xFFFF_FFFF_FFFD_0001;
 const ROOT_ITEM_ID: ItemId = 1;
-/// The single global mount on macOS — the configured `vfsd.mount` is ignored there;
-/// there is exactly one Vixen volume. Block era: a real `/Volumes` volume (must match
-/// `vx_management::mount::MOUNT_POINT`).
-const MACOS_GLOBAL_MOUNT_PATH: &str = "/Volumes/Vixen";
-
 pub fn effective_mount_path(configured_mount: &Utf8PathBuf) -> Utf8PathBuf {
     if cfg!(target_os = "macos") {
-        Utf8PathBuf::from(MACOS_GLOBAL_MOUNT_PATH)
+        Utf8PathBuf::from(vx_vfs_types::MACOS_VFS_MOUNT_POINT)
     } else {
         configured_mount.clone()
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use camino::Utf8PathBuf;
+
+    use super::{DEFAULT_CONFIGURED_VFS_MOUNT_PATH, effective_mount_path};
+
+    #[test]
+    fn macos_effective_mount_uses_the_shared_nested_mountpoint() {
+        let configured = Utf8PathBuf::from(DEFAULT_CONFIGURED_VFS_MOUNT_PATH);
+        let effective = effective_mount_path(&configured);
+
+        if cfg!(target_os = "macos") {
+            assert_eq!(
+                effective,
+                Utf8PathBuf::from(vx_vfs_types::MACOS_VFS_MOUNT_POINT)
+            );
+            assert_ne!(effective.as_str(), vx_vfs_types::MACOS_VFS_MOUNT_PARENT);
+            assert!(effective.starts_with(vx_vfs_types::MACOS_VFS_MOUNT_PARENT));
+        } else {
+            assert_eq!(effective, configured);
+        }
     }
 }
 

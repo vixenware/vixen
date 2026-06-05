@@ -2,14 +2,14 @@ name: Vixen
 options:
   bundleIdPrefix: eu.bearcove
   deploymentTarget:
-    macOS: "26.0"
+    macOS: "15.0"
   xcodeVersion: "16.0"
   createIntermediateGroups: true
 
 settings:
   base:
     SWIFT_VERSION: "6.0"
-    MACOSX_DEPLOYMENT_TARGET: "26.0"
+    MACOSX_DEPLOYMENT_TARGET: "15.0"
     DEVELOPMENT_TEAM: B2N6FSRTPV
     CODE_SIGN_STYLE: Automatic
 
@@ -27,6 +27,31 @@ targets:
         excludes:
           - "*.entitlements"
           - Info.plist
+    postBuildScripts:
+      - name: Embed Vixen Management
+        inputFiles:
+          - "$(SRCROOT)/build/RustLibs/vixen-management"
+        outputFiles:
+          - "$(TARGET_BUILD_DIR)/$(CONTENTS_FOLDER_PATH)/MacOS/vixen-management"
+        script: |
+          set -euo pipefail
+          helper_src="$SRCROOT/build/RustLibs/vixen-management"
+          contents="$TARGET_BUILD_DIR/$CONTENTS_FOLDER_PATH"
+          helper_dst="$contents/MacOS/vixen-management"
+          if [[ ! -f "$helper_src" ]]; then
+            echo "missing staged vixen-management helper at $helper_src" >&2
+            exit 1
+          fi
+          install -d "$contents/MacOS"
+          install -m 755 "$helper_src" "$helper_dst"
+          if [[ "${CODE_SIGNING_ALLOWED:-NO}" != "NO" ]]; then
+            identity="${EXPANDED_CODE_SIGN_IDENTITY:-}"
+            if [[ -n "$identity" && "$identity" != "-" ]]; then
+              codesign --force --sign "$identity" --timestamp=none "$helper_dst"
+            else
+              codesign --force --sign - "$helper_dst"
+            fi
+          fi
     entitlements:
       path: Vixen/Vixen.entitlements
       properties:
@@ -58,6 +83,7 @@ targets:
   VixenFS:
     type: extensionkit-extension
     platform: macOS
+    deploymentTarget: "15.4"
     preBuildScripts: []
     sources:
       - path: VixenFS

@@ -72,12 +72,11 @@ From least to most alarming:
 
 7. **Ghost mount** — not in `df`, `statfs` says local fs, but `mkdir`
    returns EBUSY. The kernel has a stale mount entry that userspace tools
-   don't see. `diskutil unmount force` may respond with "Refusing to
-   unmount (main Data volume)".
+   don't see. Disk Utility is the wrong tool for this state.
 
 8. **fskitd wedged** — the FSKit daemon itself has a thread blocked in a VFS
    call that will never return. No mount or unmount operations complete.
-   `diskutil` hangs.
+   filesystem unmounts hang.
 
 9. **Uninterruptible sleep** — the extension is not running, but processes
    that were exec'd from files *inside the VFS* are now in uninterruptible
@@ -208,8 +207,13 @@ KILL OPEN FILE HOLDERS
   ▼
 UNMOUNT
   │
-  diskutil unmount force <mount_path>
+  umount <mount_path>
   wait up to 1s
+  │
+  ▼
+DETACH BACKING IMAGE
+  │
+  hdiutil detach /dev/<vixen-backing-disk>
   │
   ▼
 Probe again

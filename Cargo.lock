@@ -4036,6 +4036,7 @@ dependencies = [
  "libc",
  "tracing",
  "tracing-subscriber",
+ "vx-vfs-types",
 ]
 
 [[package]]
@@ -4233,6 +4234,7 @@ dependencies = [
  "vx-io",
  "vx-services",
  "vx-vfs",
+ "vx-vfs-types",
 ]
 
 [[package]]

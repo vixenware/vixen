@@ -22,11 +22,11 @@ pub mod queue;
 /// privileged surface — there is no parameterized/general action.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Button {
-    /// Establish the block-backed `/Volumes/Vixen` mount (provision device + mount).
+    /// Establish the block-backed VixenFS mount (provision device + mount).
     Mount,
-    /// Force-unmount `/Volumes/Vixen`.
+    /// Unmount the VixenFS mount and detach its mock backing image.
     Unmount,
-    /// Force-unmount, then re-establish.
+    /// Unmount/detach, then re-establish.
     Remount,
     /// Terminate the system `fskitd` — the wedge kill-switch.
     KillFskitd,

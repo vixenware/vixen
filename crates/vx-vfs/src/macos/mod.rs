@@ -93,7 +93,7 @@ where
     })
 }
 
-/// Bring up the block-backed `/Volumes/Vixen` volume by firing the Vixen Management
+/// Bring up the block-backed VixenFS volume by firing the Vixen Management
 /// daemon's `mount` button — mounting a block device needs root, which the user-level
 /// daemon doesn't have. Waits, bounded, for the volume to appear. A missing queue
 /// directory means the management daemon isn't installed/approved, surfaced as the
@@ -128,7 +128,10 @@ async fn do_mount(_mount_path: &Utf8Path) -> Result<(), String> {
 }
 
 async fn read_status(mount_path: &Utf8Path) -> Result<vx_fskit_types::StatusPayload, String> {
-    let status_path = format!("{mount_path}/.vixenfs/status.json");
+    let status_path = format!(
+        "{mount_path}/{}",
+        vx_vfs_types::VIXENFS_STATUS_RELATIVE_PATH
+    );
     let output = Command::new("/bin/cat")
         .arg(&status_path)
         .output()

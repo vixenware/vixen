@@ -814,7 +814,8 @@ define_class!(
             _item: &FSItem,
             reply: &block2::DynBlock<dyn Fn(*mut NSArray<FSFileName>, *mut NSError)>,
         ) {
-            reply.call((ptr::null_mut(), ptr::null_mut()));
+            let empty = NSArray::<FSFileName>::from_slice(&[]);
+            reply.call((Retained::into_raw(empty), ptr::null_mut()));
         }
     }
 

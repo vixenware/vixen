@@ -2,11 +2,9 @@ use std::fmt::Write as _;
 
 use camino::Utf8PathBuf;
 use moire::process::Command;
+use vx_vfs_types::{VIXEN_EXTENSION_IDENTIFIER, VIXEN_FS_APPEX_PATH};
 
 use crate::Result;
-
-const VIXEN_EXTENSION_IDENTIFIER: &str = "eu.bearcove.vixenfs";
-const INSTALLED_APPEX_PATH: &str = "/Applications/Vixen.app/Contents/Extensions/VixenFS.appex";
 
 pub async fn cleanup_stuck_mount(_mount_path: &Utf8PathBuf) -> Result<()> {
     // Noop on macOS — vx_fskit::setup() handles all pre-mount cleanup.
@@ -17,7 +15,7 @@ pub async fn collect_vfs_diagnostics(mount_path: &Utf8PathBuf) -> String {
     let mut out = String::new();
     let _ = writeln!(out, "=== macOS VFS diagnostics ===");
     let _ = writeln!(out, "mount path: {mount_path}");
-    let _ = writeln!(out, "expected installed appex: {INSTALLED_APPEX_PATH}");
+    let _ = writeln!(out, "expected installed appex: {VIXEN_FS_APPEX_PATH}");
 
     append_command_output(
         &mut out,
@@ -132,7 +130,7 @@ fn append_registration_summary(out: &mut String, registration: Option<&str>) {
         let _ = writeln!(out, "registered appex: {path}");
     }
 
-    if appex_paths.iter().any(|path| path == INSTALLED_APPEX_PATH) {
+    if appex_paths.iter().any(|path| path == VIXEN_FS_APPEX_PATH) {
         let _ = writeln!(out, "installed app registration is present");
     } else {
         let _ = writeln!(out, "installed app registration is missing");
@@ -159,17 +157,18 @@ fn extract_appex_path(line: &str) -> Option<String> {
 
 #[cfg(test)]
 mod tests {
-    use super::{INSTALLED_APPEX_PATH, extract_appex_path};
+    use super::extract_appex_path;
+    use vx_vfs_types::VIXEN_FS_APPEX_PATH;
 
     #[test]
     fn extract_appex_path_finds_installed_path() {
         let line = format!(
             "    path = {} uuid = 01234567-89AB-CDEF-0123-456789ABCDEF",
-            INSTALLED_APPEX_PATH
+            VIXEN_FS_APPEX_PATH
         );
         assert_eq!(
             extract_appex_path(&line).as_deref(),
-            Some(INSTALLED_APPEX_PATH)
+            Some(VIXEN_FS_APPEX_PATH)
         );
     }
 

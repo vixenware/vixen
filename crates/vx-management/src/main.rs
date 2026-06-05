@@ -7,7 +7,7 @@
 //!   next trigger.
 //! - **direct CLI** (testing, under `sudo`): `vixen-management <button>` runs one
 //!   capability immediately — e.g. `sudo vixen-management mount` to bring up
-//!   `/Volumes/Vixen` before the launchd plumbing is installed.
+//!   the VixenFS volume before the launchd plumbing is installed.
 
 use eyre::{Result, bail};
 use vx_management::{Button, queue};

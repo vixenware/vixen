@@ -60,12 +60,10 @@ async fn exec_runs_against_the_vfs_and_flushes_the_write_set() {
     let temp = TempDir::new().expect("temp dir");
     let sock = temp.path().join("vx.sock");
     let store_root = temp.path().join("store");
-    // The default single-instance mount. `vixen://session` is *one* FSKit resource:
-    // a second `mount` of it (e.g. at a per-run path) is refused with "resource busy"
-    // (`canStartTask … resource state is 5`). The daemon reads status.json and *reuses*
-    // a live extension, so repeated runs share this one mount — that reuse is the
-    // resilience strategy, not a hazard. (A /tmp subdirectory, never top-level.)
-    let vfs_mount = "/tmp/vx/vfs";
+    // The configured default is platform-neutral. On macOS the daemon rewrites it
+    // through `vx_vfsd::effective_mount_path` so every process reuses the one live
+    // FSKit mount rather than trying to mount the same resource at a per-run path.
+    let vfs_mount = vx_vfsd::DEFAULT_CONFIGURED_VFS_MOUNT_PATH;
     let config = write_config(&temp, &sock, &store_root, vfs_mount);
     let mut daemon = start_daemon(&config);
 

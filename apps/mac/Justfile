@@ -32,12 +32,14 @@ build-rust profile='Debug':
     out_dir="$(pwd)/xcode/build/RustLibs"
     mkdir -p "$out_dir"
     if [[ "{{ profile }}" == "Release" ]]; then
-      cargo build --manifest-path "$repo_root/Cargo.toml" --workspace --lib --release
+      cargo build --manifest-path "$repo_root/Cargo.toml" --workspace --lib --bin vixen-management --release
       cp "$repo_root/target/release/libvx_fskit.a" "$out_dir/libvx_fskit.a"
+      cp "$repo_root/target/release/vixen-management" "$out_dir/vixen-management"
       header_dir="$repo_root/target/release/build"
     else
-      cargo build --manifest-path "$repo_root/Cargo.toml" --workspace --lib
+      cargo build --manifest-path "$repo_root/Cargo.toml" --workspace --lib --bin vixen-management
       cp "$repo_root/target/debug/libvx_fskit.a" "$out_dir/libvx_fskit.a"
+      cp "$repo_root/target/debug/vixen-management" "$out_dir/vixen-management"
       header_dir="$repo_root/target/debug/build"
     fi
     generated_header=$(find "$header_dir" -path '*/vx-fskit-*/out/RustFSKitBridge.h' | head -1)
@@ -125,6 +127,12 @@ fix-registration profile='Debug':
 # Optional argument: 'just release-build 1.2.3'
 release-build version='':
     ./scripts/build.sh {{ version }}
+
+# Build a signed installer pkg that installs Vixen.app and the privileged management daemon.
+
+# Optional argument: 'just release-pkg 1.2.3'
+release-pkg version='':
+    ./scripts/dist-pkg.sh {{ version }}
 
 # Notarize, generate appcast, and publish to GitHub.
 

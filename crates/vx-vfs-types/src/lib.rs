@@ -2,7 +2,15 @@ use facet::Facet;
 
 pub const VIXEN_EXTENSION_IDENTIFIER: &str = "eu.bearcove.vixenfs";
 pub const VIXEN_APP_PATH: &str = "/Applications/Vixen.app";
+pub const VIXEN_FS_APPEX_PATH: &str = "/Applications/Vixen.app/Contents/Extensions/VixenFS.appex";
 pub const VIXEN_DOWNLOAD_URL: &str = "https://vixen.rs/download/";
+pub const VIXENFS_STATUS_RELATIVE_PATH: &str = ".vixenfs/status.json";
+pub const DEFAULT_CONFIGURED_VFS_MOUNT_PATH: &str = "/tmp/vx/vfs";
+
+/// Plain APFS directory under `/Volumes`; the FSKit mount lives below it so
+/// enumerating `/Volumes` does not have to touch a wedged FSKit root.
+pub const MACOS_VFS_MOUNT_PARENT: &str = "/Volumes/Vixen";
+pub const MACOS_VFS_MOUNT_POINT: &str = "/Volumes/Vixen/vfs";
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Facet)]
 #[repr(u8)]

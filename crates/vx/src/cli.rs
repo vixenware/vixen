@@ -148,6 +148,6 @@ pub(crate) struct DaemonArgs {
     pub(crate) store_root: Option<camino::Utf8PathBuf>,
 
     /// VFS mount point
-    #[facet(args::named, default = "/tmp/vx/vfs")]
+    #[facet(args::named, default = vx_vfsd::DEFAULT_CONFIGURED_VFS_MOUNT_PATH)]
     pub(crate) vfs_mount: camino::Utf8PathBuf,
 }
