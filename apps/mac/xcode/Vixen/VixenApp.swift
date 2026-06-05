@@ -62,7 +62,7 @@ struct ContentView: View {
         managementStatus == .enabled || legacyManagementStatus == .enabled
     }
     private var allComplete: Bool {
-        isSupportedOS && isExtensionEnabled && isManagementConfigured
+        isSupportedOS && isExtensionEnabled
     }
 
     var body: some View {
@@ -95,7 +95,9 @@ struct ContentView: View {
             guard isSupportedOS else { return }
             Task {
                 await checkExtensionOnce()
-                refreshManagementStatus()
+                if isExtensionEnabled {
+                    refreshManagementStatus()
+                }
             }
         }
     }
@@ -150,7 +152,7 @@ struct ContentView: View {
                     .font(.system(size: 24, weight: .bold))
 
                 Text(
-                    "Vixen uses a virtual file system to give your builds a hermetic, reproducible view of the world. Enable VixenFS and configure the management daemon to get started."
+                    "Vixen uses a virtual file system to give your builds a hermetic, reproducible view of the world. Enable VixenFS in System Settings to get started."
                 )
                 .font(.system(size: 14))
                 .foregroundStyle(.secondary)
@@ -176,8 +178,6 @@ struct ContentView: View {
                             .foregroundStyle(.secondary)
                     }
                 }
-
-                managementSetupPanel
 
                 Button(action: openExtensionSettings) {
                     Text("Open Settings")
@@ -220,7 +220,6 @@ struct ContentView: View {
     private func pollExtensionStatus() async {
         while !Task.isCancelled {
             await checkExtensionOnce()
-            refreshManagementStatus()
             try? await Task.sleep(for: .seconds(4))
         }
     }
@@ -261,7 +260,7 @@ struct ContentView: View {
         case .notRegistered:
             return "Not installed"
         case .notFound:
-            return "Missing from app bundle"
+            return "Not configured"
         @unknown default:
             return "Unknown"
         }
@@ -486,7 +485,7 @@ struct ContentView: View {
                     .font(.system(size: 24, weight: .bold))
 
                 Text(
-                    "VixenFS and the management daemon are ready. Head to the docs to install the CLI and run your first build."
+                    "VixenFS is enabled. Head to the docs to install the CLI and run your first build."
                 )
                 .font(.system(size: 14))
                 .foregroundStyle(.secondary)
@@ -507,11 +506,16 @@ struct ContentView: View {
                             brandOrange, in: RoundedRectangle(cornerRadius: 10, style: .continuous))
                 }
                 .buttonStyle(.plain)
+
+                managementSetupPanel
             }
             .frame(maxWidth: .infinity)
 
             Spacer()
                 .frame(width: foxSize)
+        }
+        .onAppear {
+            refreshManagementStatus()
         }
     }
 }
