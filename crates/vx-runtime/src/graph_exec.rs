@@ -3,21 +3,22 @@ use std::collections::HashMap;
 use std::path::PathBuf;
 use std::rc::Rc;
 
-use vx_cache_index::LocalCacheIndex;
-use vx_exec_protocol::{ExecCommand, ObserveRequest, WireValue};
+use vx_exec_protocol::{ExecCommand, ObserveRequest};
 use vx_ir::build::VirProgram;
 use vx_ir::ids::{BodyId, PatternId};
 use vx_ir::pattern::PatternKind;
 use vx_runtime_core::{CoreFailureContext, CorePoison, NodeOutput, UnsupportedNode};
-use vx_runtime_driver::{
-    BoundaryDemand, CallCache, CallCacheKey, DemandRequest, Driver, DriverError,
-};
+use vx_runtime_driver::{BoundaryDemand, DemandRequest, Driver, DriverError};
 use vx_runtime_graph::{ConstValue, HostMethod, NodeId, NodeKind};
 use vx_types::TypeEnv;
 
 use crate::ability::{AttrLit, CmpOp, Constraint, ProviderRegistry};
 use crate::analyze::{
     CapabilityRequestMeta, CliArgPiece, CliArgTemplate, ExecInvocationMeta, GraphRuntimeMeta,
+};
+use crate::cache::{
+    CachedExecOutcome, ExecInvocationCacheKey, HostExecCacheKey, ObserverCacheIdentity,
+    RuntimeCache,
 };
 use crate::eval::{FailureContext, Outcome, Poison, Thunk, Value, from_wire};
 use crate::remote::{Part, PartKey};
@@ -32,9 +33,7 @@ struct RuntimeBoundaries {
     providers: ProviderRegistry,
     meta: Rc<GraphRuntimeMeta>,
     remote_trees: Rc<RefCell<HashMap<NodeId, HandleId>>>,
-    host_exec_cache: Rc<RefCell<HashMap<HostExecCacheKey, crate::host::HostExec>>>,
-    exec_invocation_cache: Rc<RefCell<HashMap<ExecInvocationCacheKey, CachedExecOutcome>>>,
-    l2_cache: Option<Rc<LocalCacheIndex>>,
+    cache: Rc<RuntimeCache>,
 }
 
 impl Default for RuntimeBoundaries {
@@ -44,131 +43,18 @@ impl Default for RuntimeBoundaries {
             providers: ProviderRegistry::default(),
             meta: Rc::new(GraphRuntimeMeta::default()),
             remote_trees: Rc::new(RefCell::new(HashMap::new())),
-            host_exec_cache: Rc::new(RefCell::new(HashMap::new())),
-            exec_invocation_cache: Rc::new(RefCell::new(HashMap::new())),
-            l2_cache: None,
+            cache: Rc::new(RuntimeCache::new()),
         }
     }
 }
 
 impl RuntimeBoundaries {
-    fn with_l2_cache_dir(cache_dir: PathBuf) -> Self {
+    fn with_cache_dir(cache_dir: PathBuf) -> Self {
         Self {
-            l2_cache: Some(Rc::new(LocalCacheIndex::new(cache_dir))),
+            cache: Rc::new(RuntimeCache::with_local_index_dir(cache_dir)),
             ..Self::default()
         }
     }
-}
-
-#[derive(facet::Facet, Debug, Clone, PartialEq, Eq, Hash)]
-struct HostExecCacheKey {
-    argv: Vec<String>,
-    program_fingerprint: String,
-}
-
-#[derive(facet::Facet, Debug, Clone, PartialEq, Eq, Hash)]
-struct ExecInvocationCacheKey {
-    command_package: String,
-    command_name: String,
-    program: String,
-    program_fingerprint: String,
-    declared_tool_fingerprint: Option<String>,
-    args: Vec<String>,
-    output_roots: Vec<String>,
-    observer: ObserverCacheIdentity,
-}
-
-#[derive(facet::Facet, Debug, Clone, PartialEq, Eq, Hash)]
-struct FunctionOutputCacheKey {
-    function: String,
-    code_identity: String,
-    args: Vec<CacheableNodeOutput>,
-}
-
-#[derive(facet::Facet, Debug, Clone, PartialEq, Eq, Hash)]
-#[repr(u8)]
-enum CacheableNodeOutput {
-    U64(u64),
-    Bool(bool),
-    Str(String),
-    Unit,
-}
-
-impl CacheableNodeOutput {
-    fn from_output(output: &NodeOutput) -> Option<Self> {
-        match output {
-            NodeOutput::U64(value) => Some(Self::U64(*value)),
-            NodeOutput::Bool(value) => Some(Self::Bool(*value)),
-            NodeOutput::Str(value) => Some(Self::Str(value.clone())),
-            NodeOutput::Unit => Some(Self::Unit),
-            NodeOutput::OutputTree
-            | NodeOutput::LazyData { .. }
-            | NodeOutput::Struct { .. }
-            | NodeOutput::Variant { .. }
-            | NodeOutput::Failure { .. }
-            | NodeOutput::FailureContext(_) => None,
-        }
-    }
-
-    fn into_output(self) -> NodeOutput {
-        match self {
-            Self::U64(value) => NodeOutput::U64(value),
-            Self::Bool(value) => NodeOutput::Bool(value),
-            Self::Str(value) => NodeOutput::Str(value),
-            Self::Unit => NodeOutput::Unit,
-        }
-    }
-}
-
-impl FunctionOutputCacheKey {
-    fn from_call_key(key: &CallCacheKey) -> Option<Self> {
-        let args = key
-            .args
-            .iter()
-            .map(CacheableNodeOutput::from_output)
-            .collect::<Option<Vec<_>>>()?;
-        Some(Self {
-            function: key.function.clone(),
-            code_identity: key.code_identity.clone(),
-            args,
-        })
-    }
-}
-
-struct FunctionOutputL2Cache {
-    cache: Rc<LocalCacheIndex>,
-}
-
-impl CallCache for FunctionOutputL2Cache {
-    fn get(&mut self, key: &CallCacheKey) -> Option<NodeOutput> {
-        let key = FunctionOutputCacheKey::from_call_key(key)?;
-        self.cache
-            .read::<FunctionOutputCacheKey, CacheableNodeOutput>("function-output-v1", &key)
-            .map(|value| value.into_output())
-    }
-
-    fn put(&mut self, key: &CallCacheKey, output: &NodeOutput) {
-        let Some(key) = FunctionOutputCacheKey::from_call_key(key) else {
-            return;
-        };
-        let Some(value) = CacheableNodeOutput::from_output(output) else {
-            return;
-        };
-        self.cache.write("function-output-v1", &key, &value);
-    }
-}
-
-#[derive(facet::Facet, Debug, Clone, PartialEq, Eq, Hash)]
-#[repr(u8)]
-enum ObserverCacheIdentity {
-    Default,
-    Bundle(String),
-}
-
-#[derive(Debug, Clone)]
-enum CachedExecOutcome {
-    Value(WireValue),
-    Tree(HandleId),
 }
 
 #[derive(Debug)]
@@ -210,7 +96,7 @@ pub(crate) fn run_body_with_cache_dir(
         env,
         body,
         args,
-        RuntimeBoundaries::with_l2_cache_dir(cache_dir),
+        RuntimeBoundaries::with_cache_dir(cache_dir),
     )
 }
 
@@ -248,7 +134,7 @@ pub(crate) fn run_body_with_exec_and_cache_dir(
         args,
         RuntimeBoundaries {
             exec_client: Some(exec_client),
-            ..RuntimeBoundaries::with_l2_cache_dir(cache_dir)
+            ..RuntimeBoundaries::with_cache_dir(cache_dir)
         },
     )
 }
@@ -321,8 +207,8 @@ fn drive_graph(
 ) -> Result<(Outcome, u64), String> {
     let root = graph.root;
     let mut driver = Driver::new(graph);
-    if let Some(cache) = runtime.l2_cache.clone() {
-        driver = driver.with_call_cache(FunctionOutputL2Cache { cache });
+    if runtime.cache.has_persistent_layer() {
+        driver = driver.with_call_cache(Rc::clone(&runtime.cache).function_output_call_cache());
     }
     for (node, output) in seeds {
         driver = driver.with_seed(node, output);
@@ -513,32 +399,14 @@ fn materialize_exec_invocation(
     }
 
     let program_fingerprint = crate::host::fingerprint_executable(&tool.binary)?;
-    let cache_key = exec_invocation_cache_key(
+    let cache_key = exec_invocation_key(
         &tool,
         program_fingerprint,
         args.clone(),
         output_roots.clone(),
         invocation,
     );
-    let cached = {
-        runtime
-            .exec_invocation_cache
-            .borrow()
-            .get(&cache_key)
-            .cloned()
-    };
-    if let Some(cached) = cached {
-        seed_exec_outcome(driver, externals, runtime, node, cached)?;
-        return Ok(());
-    }
-    if let Some(wire) = runtime.l2_cache.as_ref().and_then(|cache| {
-        cache.read::<ExecInvocationCacheKey, WireValue>("exec-value-v1", &cache_key)
-    }) {
-        let cached = CachedExecOutcome::Value(wire);
-        runtime
-            .exec_invocation_cache
-            .borrow_mut()
-            .insert(cache_key.clone(), cached.clone());
+    if let Some(cached) = runtime.cache.get_exec_invocation(&cache_key) {
         seed_exec_outcome(driver, externals, runtime, node, cached)?;
         return Ok(());
     }
@@ -555,13 +423,9 @@ fn materialize_exec_invocation(
         },
     );
     let cacheable = cacheable_from_observed(&observed)?;
-    if let (Some(cache), CachedExecOutcome::Value(wire)) = (&runtime.l2_cache, &cacheable) {
-        cache.write("exec-value-v1", &cache_key, wire);
-    }
     runtime
-        .exec_invocation_cache
-        .borrow_mut()
-        .insert(cache_key, cacheable.clone());
+        .cache
+        .put_exec_invocation(cache_key, cacheable.clone());
     seed_exec_outcome(driver, externals, runtime, node, cacheable)?;
     Ok(())
 }
@@ -722,7 +586,7 @@ fn command_coordinate(
     Ok((package, name))
 }
 
-fn exec_invocation_cache_key(
+fn exec_invocation_key(
     tool: &ToolRequest,
     program_fingerprint: String,
     args: Vec<String>,
@@ -1016,22 +880,8 @@ fn materialize_host_exec(
         args.push(expect_string(value, "host.exec argv element")?);
     }
 
-    let cache_key = host_exec_cache_key(&args)?;
-    if let Some(cached) = runtime.host_exec_cache.borrow().get(&cache_key).cloned() {
-        let output = {
-            let mut driver = driver.borrow_mut();
-            host_exec_output(&mut driver, cached)
-        };
-        driver.borrow_mut().seed(node, output);
-        return Ok(());
-    }
-    if let Some(cached) = runtime.l2_cache.as_ref().and_then(|cache| {
-        cache.read::<HostExecCacheKey, crate::host::HostExec>("host-exec-v1", &cache_key)
-    }) {
-        runtime
-            .host_exec_cache
-            .borrow_mut()
-            .insert(cache_key.clone(), cached.clone());
+    let cache_key = host_exec_key(&args)?;
+    if let Some(cached) = runtime.cache.get_host_exec(&cache_key) {
         let output = {
             let mut driver = driver.borrow_mut();
             host_exec_output(&mut driver, cached)
@@ -1042,13 +892,7 @@ fn materialize_host_exec(
 
     let observed = crate::host::exec_with_fingerprint(&args, cache_key.program_fingerprint.clone())
         .map_err(|e| format!("host.exec: {e}"))?;
-    if let Some(cache) = &runtime.l2_cache {
-        cache.write("host-exec-v1", &cache_key, &observed);
-    }
-    runtime
-        .host_exec_cache
-        .borrow_mut()
-        .insert(cache_key, observed.clone());
+    runtime.cache.put_host_exec(cache_key, observed.clone());
     let output = {
         let mut driver = driver.borrow_mut();
         host_exec_output(&mut driver, observed)
@@ -1057,7 +901,7 @@ fn materialize_host_exec(
     Ok(())
 }
 
-fn host_exec_cache_key(args: &[String]) -> Result<HostExecCacheKey, String> {
+fn host_exec_key(args: &[String]) -> Result<HostExecCacheKey, String> {
     let program = args
         .first()
         .ok_or_else(|| "host.exec needs a program".to_string())?;

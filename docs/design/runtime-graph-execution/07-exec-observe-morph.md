@@ -346,6 +346,13 @@ Current checkpoint:
 
 - `crates/vx-cache-index` owns the temporary local Facet-JSON file index and
   key-digest-to-path layout.
+- `vx-runtime::cache::RuntimeCache` owns the temporary per-run boundary L1 maps
+  and optional `vx-cache-index::LocalCacheIndex` adapter used by explicit
+  `*_with_cache_dir` entry points. This is a transitional cache-owner seam, not
+  the final daemon/vx-store cache index.
+- `vx-runtime::graph_exec` still computes pre-run boundary cache keys while
+  materializing demanded boundary nodes, but it no longer directly owns L1 maps,
+  `LocalCacheIndex`, cache namespace strings, or file-index layout.
 - `RuntimeBoundaries::default()` is cacheless. The old ambient
   `VX_RUNTIME_L2_DIR` lookup no longer participates in default graph execution.
 - `eval_body_with_cache_dir`, `eval_body_with_exec_and_cache_dir`, and internal
@@ -353,7 +360,9 @@ Current checkpoint:
   cache-behavior proofs while daemon/control-plane cache lookup is introduced.
 - `source_blind_guardrails` scans `vx-runtime/src` for `BoundaryL2Cache`,
   `VX_RUNTIME_L2_DIR`, the runtime write counter, and the deleted file-index
-  helper methods.
+  helper methods. It also scans `vx-runtime/src/graph_exec.rs` for direct
+  `LocalCacheIndex`, `vx_cache_index`, L1 map field names, and local-index
+  namespace strings.
 
 ## Resilience rules
 
@@ -377,15 +386,19 @@ Current checkpoint:
 - `cargo nextest run -p vx-runtime -E 'test(observer_evaluation_accepts) | test(observe_runs_a_real_command) | test(observe_crosses_the_output_tree) | test(the_executor_serves_run_outputs)' --no-fail-fast`:
   1/1 passed.
 - `cargo nextest list -p vx-runtime -E 'binary(source_blind_guardrails) | binary(exec_on_strands)'`
-  selected 5 tests.
+  selected 6 tests, including `graph_exec_does_not_own_cache_index_details`.
 - `cargo nextest run -p vx-runtime -E 'binary(source_blind_guardrails) | binary(exec_on_strands)' --no-fail-fast`:
-  5/5 passed, including
-  `runtime_cache_file_index_stays_out_of_graph_exec`.
+  6/6 passed, including
+  `runtime_cache_file_index_stays_out_of_graph_exec` and
+  `graph_exec_does_not_own_cache_index_details`.
 - The raw protocol-ownership scan
   `rg -n 'pub struct ExecCommand|pub struct ObserveRequest|pub enum WireValue|pub enum Observed|pub trait Observe|ScratchObserveService|local_observer|fn scratch_dir|fn capture_outputs|tokio::process::Command|pub struct ObserveService|struct ObserveService' crates/vx-runtime/src`
   returned no matches.
 - The raw cache-index ownership scan
   `rg -n 'struct BoundaryL2Cache|impl BoundaryL2Cache|VX_RUNTIME_L2_DIR|L2_WRITE_COUNTER|fn cache_path|fn read_json|fn write_json' crates/vx-runtime/src`
+  returned no matches.
+- The raw direct graph-exec cache-index scan
+  `rg -n 'LocalCacheIndex|vx_cache_index|host_exec_cache|exec_invocation_cache|host-exec-v1|exec-value-v1|function-output-v1' crates/vx-runtime/src/graph_exec.rs`
   returned no matches.
 - `cargo nextest run -p vx-runtime --no-fail-fast`: 140/140 passed.
 - `cargo nextest list -p vx-runner --run-ignored all` selected
@@ -444,9 +457,7 @@ Current checkpoint:
 - `cargo nextest run -p vx-runner --no-fail-fast`: 6/6 passed, 12 skipped
   (the live-VFS proof targets).
 - `cargo nextest run -p vx-cache-index -p vx-exec-protocol -p vx-services -p vx-runtime-graph -p vx-runtime-core -p vx-runtime-driver -p vx-runtime -p vx-runner --no-fail-fast`:
-  173/173 passed, 12 skipped. Nextest reported
-  `analyze::tests::direct_function_call_identity_ignores_formatting` as leaky,
-  but not failed.
+  174/174 passed, 12 skipped.
 - `cargo nextest run -p vx-daemon --no-fail-fast`: 2/2 passed.
 - The forbidden-symbol scans over `vx-runtime-core`, `vx-runtime-driver`, the
   deleted tree-walker affordance scan over `vx-runtime/src`, and the
@@ -468,7 +479,6 @@ Finish M6:
    the result. If the host cannot supply CAS-VFS, the proof should fail at the
    explicit VFS boot/runner-backed boundary, never by switching to scratch
    execution.
-2. Move the remaining input-key lookup calls out of graph boundary
-   materialization and into daemon/orchestrator cache-index state backed by
-   `vx-store` cache-record bodies. `vx-cache-index` is still only the temporary
-   local compatibility substrate.
+2. Replace the temporary `RuntimeCache` local owner with daemon/orchestrator
+   cache-index state backed by `vx-store` cache-record bodies. `vx-cache-index`
+   is still only the temporary local compatibility substrate.

@@ -69,6 +69,16 @@ const RUNTIME_CACHE_OWNERSHIP_NEEDLES: &[&str] = &[
     "fn write_json",
 ];
 
+const GRAPH_EXEC_CACHE_INDEX_NEEDLES: &[&str] = &[
+    "LocalCacheIndex",
+    "vx_cache_index",
+    "host_exec_cache",
+    "exec_invocation_cache",
+    "host-exec-v1",
+    "exec-value-v1",
+    "function-output-v1",
+];
+
 #[test]
 fn execution_crates_stay_source_blind() {
     let root = workspace_root();
@@ -141,6 +151,20 @@ fn runtime_cache_file_index_stays_out_of_graph_exec() {
         RUNTIME_CACHE_OWNERSHIP_NEEDLES,
         "runtime graph execution must not own the L2 file index",
         "runtime-owned cache-index affordance",
+    );
+}
+
+#[test]
+fn graph_exec_does_not_own_cache_index_details() {
+    let root = workspace_root();
+    let graph_exec = root.join("crates/vx-runtime/src/graph_exec.rs");
+
+    assert_no_forbidden_needles(
+        &root,
+        vec![graph_exec],
+        GRAPH_EXEC_CACHE_INDEX_NEEDLES,
+        "graph_exec must not own L1 maps or temporary cache-index layout",
+        "graph_exec-owned cache detail",
     );
 }
 

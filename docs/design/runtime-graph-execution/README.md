@@ -148,8 +148,11 @@ Expected latest structural checkpoint:
   `WireValue`, `Observed`, and the generated Observe Vox client/dispatcher.
   `vx-runtime::observe` owns only `CompletedRun` and `evaluate_observer`.
 - `crates/vx-cache-index` owns the temporary local Facet-JSON file index used by
-  explicit `*_with_cache_dir` entry points. `vx-runtime::graph_exec` no longer
-  defines `BoundaryL2Cache`, the file path layout, or ambient
+  explicit `*_with_cache_dir` entry points. `vx-runtime::cache::RuntimeCache`
+  owns the temporary per-run boundary L1 maps and optional `LocalCacheIndex`
+  adapter. `vx-runtime::graph_exec` computes pre-run boundary cache keys while
+  materializing demanded boundaries, but it no longer owns the L1 maps,
+  `LocalCacheIndex`, file path layout, cache namespace strings, or ambient
   `VX_RUNTIME_L2_DIR` lookup.
 - `vx-runner` now implements the runtime `Observe` service and routes `"Observe"`
   through `RunnerAcceptor`; `vx-daemon` also advertises and routes `"Observe"` to
@@ -193,8 +196,9 @@ Latest verified red/green shape:
 - `cargo check -p vx-cache-index -p vx-exec-protocol -p vx-services -p vx-runtime-graph -p vx-runtime-core -p vx-runtime-driver -p vx-runtime -p vx-runner -p vx-daemon`
   passes with no old-evaluator dead-code warnings.
 - `cargo nextest run -p vx-runtime -E 'binary(source_blind_guardrails) | binary(exec_on_strands)' --no-fail-fast`:
-  5/5 passed, including `undemanded_exec_in_tuple_does_not_dispatch` and
-  `runtime_cache_file_index_stays_out_of_graph_exec`. The basic `run.ok`
+  6/6 passed, including `undemanded_exec_in_tuple_does_not_dispatch`,
+  `runtime_cache_file_index_stays_out_of_graph_exec`, and
+  `graph_exec_does_not_own_cache_index_details`. The basic `run.ok`
   success/failure value-crossing tests, identical-demanded-backtick L1 reuse,
   writable-root disambiguation, observer-identity disambiguation,
   declared-tool-fingerprint disambiguation, executable-fingerprint
@@ -257,14 +261,12 @@ Latest verified red/green shape:
   failed at the same live CAS-VFS boot boundary on this host, before any scratch
   fallback could run.
 - `cargo nextest run -p vx-cache-index -p vx-exec-protocol -p vx-services -p vx-runtime-graph -p vx-runtime-core -p vx-runtime-driver -p vx-runtime -p vx-runner --no-fail-fast`:
-  173 run, 173 passed, 12 skipped. Nextest reported
-  `analyze::tests::direct_function_call_identity_ignores_formatting` as leaky,
-  but not failed.
+  174 run, 174 passed, 12 skipped.
 - `cargo nextest run -p vx-daemon --no-fail-fast`: 2/2 passed.
 - The raw forbidden-symbol scans over `vx-runtime-core`, `vx-runtime-driver`,
   the deleted tree-walker affordance scan over `vx-runtime/src`, and the
-  runtime-owned exec/observe protocol and cache file-index scans over
-  `vx-runtime/src` returned no matches.
+  runtime-owned exec/observe protocol, cache file-index, and direct
+  `graph_exec.rs` cache-index-detail scans returned no matches.
 - `vx-runner::tests::strand_observe_reaches_runner_backed_service` drives
   `vx-runtime` strands against a runner-backed `Observe` client and reaches the
   explicit no-CAS-VFS poison. This proves the strand/Observe seam can target the

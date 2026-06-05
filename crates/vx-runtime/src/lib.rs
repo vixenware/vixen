@@ -29,6 +29,7 @@
 
 pub mod ability;
 pub mod analyze;
+mod cache;
 pub mod command;
 pub mod compile;
 pub mod error_union;

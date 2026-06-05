@@ -387,6 +387,10 @@ Current slice:
 - The temporary file index lives in `vx-cache-index::LocalCacheIndex`, encodes
   records with `facet-json`, and derives file paths from a blake3 hash of the
   Facet JSON cache key.
+- `vx-runtime::cache::RuntimeCache` is the current temporary owner seam for the
+  in-process L1 maps and optional local file-index adapter. Graph boundary
+  materialization still computes the pre-run keys it is allowed to know, but
+  `graph_exec` must not own the maps, local-index namespaces, or file layout.
 - This is not the final CAS-backed L2 and it does not record read-set witnesses.
 
 Final cache/store shape:
@@ -407,8 +411,9 @@ Final cache/store shape:
   layer for proving input-key semantics. Replacing that storage with `vx-store`
   and a daemon/control-plane index must not change cache-key law, demand
   origins, or read-set semantics. `vx-runtime::graph_exec` no longer owns the
-  file-index layout or the ambient `VX_RUNTIME_L2_DIR` hook; explicit
-  `*_with_cache_dir` entry points are the remaining compatibility path.
+  file-index layout, cache namespace strings, L1 maps, or the ambient
+  `VX_RUNTIME_L2_DIR` hook; explicit `*_with_cache_dir` entry points are the
+  remaining compatibility path.
 
 ### 5. Read-set provenance
 
