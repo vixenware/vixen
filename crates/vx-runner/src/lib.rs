@@ -118,6 +118,11 @@ impl vox::ConnectionAcceptor for RunnerAcceptor {
 
 #[cfg(test)]
 mod tests {
+    use vx_ir::item::ItemKind;
+    use vx_runtime::compile::{FrontEnd, compile_source};
+    use vx_runtime::eval::{
+        KernelMode, Outcome as EvalOutcome, Value, eval_body_with_exec, tool_value,
+    };
     use vx_runtime::observe::{ExecCommand, ObserveClient, ObserveRequest};
     use vx_runtime::remote::{Part, PartKey, ProducingClient};
     use vx_runtime::strand::{ObserveOutcome, Outcome, ResourceId, Scheduler, dispatch_observe};
@@ -127,6 +132,18 @@ mod tests {
 
     use super::{RunnerAcceptor, RunnerService};
     use crate::output_tree::CasOutputTreeService;
+
+    fn entry_body(fe: &FrontEnd, name: &str) -> vx_ir::BodyId {
+        fe.program
+            .arena
+            .items
+            .iter()
+            .find_map(|it| match &it.kind {
+                ItemKind::Function(f) if f.name == name => Some(f.body),
+                _ => None,
+            })
+            .expect("entry function")
+    }
 
     async fn observe_client_for(service: RunnerService) -> ObserveClient {
         let (client_link, server_link) = vox::memory_link_pair(64);
@@ -220,6 +237,68 @@ mod tests {
                 }
                 other => Outcome::Poisoned(format!(
                     "expected runner-backed no-CAS-VFS poison, got {other:?}"
+                )),
+            }
+        });
+        scheduler.demand(strand);
+        scheduler.run();
+        assert_eq!(scheduler.outcome(strand), Some(Outcome::Clean));
+    }
+
+    #[test]
+    fn demanded_vixen_exec_reaches_runner_backed_observe() {
+        let fe = compile_source(
+            "fn t(cmd: Command) -> Exit ( `$cmd` with { observer: (run) => run.ok } )",
+            "t",
+        )
+        .expect("exec program compiles");
+        let entry = entry_body(&fe, "t");
+
+        let scheduler = Scheduler::new(&[1]);
+        let client = scheduler.block_on(observe_client_for(RunnerService::default()));
+        let cid = scheduler.register_observe_client(client);
+        let program = fe.program;
+        let env = fe.env;
+        let strand = scheduler.spawn(ResourceId(0), move || {
+            let cmd = tool_value("@vixen/grammar-cc", "cc", "true");
+            match eval_body_with_exec(&program, &env, entry, vec![cmd], KernelMode::Off, cid) {
+                EvalOutcome::Poisoned { reason, .. }
+                    if reason.contains("runner-backed observe has no CAS-VFS configured") =>
+                {
+                    Outcome::Clean
+                }
+                other => Outcome::Poisoned(format!(
+                    "expected demanded exec to reach runner no-CAS-VFS poison, got {other:?}"
+                )),
+            }
+        });
+        scheduler.demand(strand);
+        scheduler.run();
+        assert_eq!(scheduler.outcome(strand), Some(Outcome::Clean));
+    }
+
+    #[test]
+    fn undemanded_vixen_exec_with_runner_backed_client_stays_cold() {
+        let fe = compile_source(
+            "fn t(cmd: Command) -> U64 ( \
+               let pair = ( `$cmd` with { observer: (run) => run.ok }, 42 ); \
+               pair[1] )",
+            "t",
+        )
+        .expect("exec demand program compiles");
+        let entry = entry_body(&fe, "t");
+
+        let scheduler = Scheduler::new(&[1]);
+        let client = scheduler.block_on(observe_client_for(RunnerService::default()));
+        let cid = scheduler.register_observe_client(client);
+        let program = fe.program;
+        let env = fe.env;
+        let strand = scheduler.spawn(ResourceId(0), move || {
+            let cmd = tool_value("@vixen/grammar-cc", "cc", "false");
+            match eval_body_with_exec(&program, &env, entry, vec![cmd], KernelMode::Off, cid) {
+                EvalOutcome::Clean(Value::U64(42)) => Outcome::Clean,
+                other => Outcome::Poisoned(format!(
+                    "undemanded exec should stay cold and return 42, got {other:?}"
                 )),
             }
         });

@@ -4045,6 +4045,7 @@ dependencies = [
  "tokio",
  "tracing",
  "vox",
+ "vx-ir",
  "vx-runtime",
  "vx-services",
  "vx-store",

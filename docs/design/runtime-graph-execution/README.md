@@ -209,7 +209,7 @@ Latest verified red/green shape:
 - `cargo nextest run -p vx-runtime --no-fail-fast`: 154 run, 154 passed,
   0 failed, 0 skipped.
 - `cargo nextest run -p vx-services -p vx-runtime-graph -p vx-runtime-core -p vx-runtime-driver -p vx-runtime -p vx-runner --no-fail-fast`:
-  187 run, 187 passed, 0 skipped.
+  189 run, 189 passed, 0 skipped.
 - `cargo nextest run -p vx-daemon --no-fail-fast`: 2/2 passed.
 - `vx-runner::tests::strand_observe_reaches_runner_backed_service` drives
   `vx-runtime` strands against a runner-backed `Observe` client and reaches the
@@ -219,8 +219,13 @@ Latest verified red/green shape:
   flushed CAS output root can serve `out/y.txt` over the runner `Producing`
   service. `vx-runner::tests::producing_vconn_serves_runner_output_tree_from_cas`
   proves `RunnerAcceptor` routes the `"Producing"` virtual connection to that
-  CAS-backed service. These do not yet prove live CAS-VFS execution from a
-  demanded `.vx` backtick invocation.
+  CAS-backed service.
+- `vx-runner::tests::demanded_vixen_exec_reaches_runner_backed_observe` and
+  `vx-runner::tests::undemanded_vixen_exec_with_runner_backed_client_stays_cold`
+  compile real `.vx` backtick invocation shapes against a runner-backed observe
+  client. The demanded case reaches the explicit no-CAS-VFS runner poison; the
+  undemanded tuple-slot case stays cold. These do not yet prove live CAS-VFS
+  execution from a demanded `.vx` backtick invocation.
 - `vx-runtime::analyze::tests::exec_invocation_metadata_carries_writable_roots`
   proves `writable: ["out"]` is recorded as exec metadata rather than being
   accepted only by the front-end.

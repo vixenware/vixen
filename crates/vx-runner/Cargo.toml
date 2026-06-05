@@ -26,6 +26,7 @@ moire = { workspace = true }
 [dev-dependencies]
 tokio = { workspace = true }
 tempfile = { workspace = true }
+vx-ir = { path = "../vx-ir" }
 vx-store = { path = "../vx-store" }
 
 [lints]

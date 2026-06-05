@@ -175,9 +175,15 @@ Current checkpoint:
   runner CAS-backed `Producing` implementation.
 - `vx-runner::tests::producing_vconn_serves_runner_output_tree_from_cas` proves
   `RunnerAcceptor` routes a `"Producing"` connection to that CAS-backed service.
-- These tests prove the output-tree serving substrate without a live mounted VFS.
-  They do not prove a full demanded `.vx` backtick invocation running through
-  live CAS-VFS yet.
+- `vx-runner::tests::demanded_vixen_exec_reaches_runner_backed_observe` compiles
+  a real `.vx` backtick invocation and proves a demanded exec reaches
+  `RunnerService::observe` by receiving the runner-backed no-CAS-VFS poison.
+- `vx-runner::tests::undemanded_vixen_exec_with_runner_backed_client_stays_cold`
+  compiles the same language shape in an undemanded tuple slot and proves graph
+  demand leaves it cold even though a runner-backed observe client is registered.
+- These tests prove the runner-backed Observe seam and output-tree serving
+  substrate without a live mounted VFS. They do not prove a demanded `.vx`
+  backtick invocation running through live CAS-VFS yet.
 - The old runtime tests still use `local_observer()` until a live-VFS or
   explicitly-unsupported runner-backed harness replaces them.
 
@@ -263,11 +269,13 @@ Once exec runs through the runner-backed path:
 - `cargo nextest list -p vx-runner` selected
   `output_tree::tests::reads_declared_output_root_from_cas`,
   `sandbox::tests::seatbelt_confines_writes_to_the_output_root`,
+  `tests::demanded_vixen_exec_reaches_runner_backed_observe`,
   `tests::producing_vconn_serves_runner_output_tree_from_cas`, and
-  `tests::strand_observe_reaches_runner_backed_service`.
-- `cargo nextest run -p vx-runner --no-fail-fast`: 4/4 passed.
+  `tests::strand_observe_reaches_runner_backed_service`, and
+  `tests::undemanded_vixen_exec_with_runner_backed_client_stays_cold`.
+- `cargo nextest run -p vx-runner --no-fail-fast`: 6/6 passed.
 - `cargo nextest run -p vx-services -p vx-runtime-graph -p vx-runtime-core -p vx-runtime-driver -p vx-runtime -p vx-runner --no-fail-fast`:
-  187/187 passed.
+  189/189 passed.
 - `cargo nextest run -p vx-daemon --no-fail-fast`: 2/2 passed.
 - The forbidden-symbol scans over `vx-runtime-core`, `vx-runtime-driver`, and the
   deleted tree-walker affordance scan over `vx-runtime/src` returned no matches.

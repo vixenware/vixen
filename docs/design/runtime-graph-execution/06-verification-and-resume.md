@@ -186,7 +186,7 @@ Latest focused verification:
 - `cargo nextest run -p vx-runtime --no-fail-fast`: 154 run, 154 passed,
   0 failed, 0 skipped.
 - `cargo nextest run -p vx-services -p vx-runtime-graph -p vx-runtime-core -p vx-runtime-driver -p vx-runtime -p vx-runner --no-fail-fast`:
-  187 run, 187 passed, 0 skipped.
+  189 run, 189 passed, 0 skipped.
 - `cargo nextest run -p vx-daemon --no-fail-fast`: 2/2 passed.
 - `vx-runner::tests::strand_observe_reaches_runner_backed_service` drives a
   `vx-runtime` strand against a runner-backed `Observe` service and reaches the
@@ -209,8 +209,13 @@ Latest focused verification:
 - `vx-runner::output_tree::tests::reads_declared_output_root_from_cas` proves the
   CAS-backed producer serves a declared output path, and
   `vx-runner::tests::producing_vconn_serves_runner_output_tree_from_cas` proves
-  the runner acceptor routes the `Producing` virtual connection. These do not yet
-  prove live mounted CAS-VFS execution from a demanded `.vx` backtick invocation.
+  the runner acceptor routes the `Producing` virtual connection.
+- `vx-runner::tests::demanded_vixen_exec_reaches_runner_backed_observe` and
+  `vx-runner::tests::undemanded_vixen_exec_with_runner_backed_client_stays_cold`
+  compile real `.vx` backtick invocation shapes against a runner-backed observe
+  client. The demanded case reaches the explicit no-CAS-VFS runner poison; the
+  undemanded tuple-slot case stays cold. These do not yet prove live mounted
+  CAS-VFS execution from a demanded `.vx` backtick invocation.
 - The forbidden-symbol scan over `vx-runtime-core` and `vx-runtime-driver`
   returns no matches.
 - The deleted tree-walker affordance scan over `vx-runtime/src` returns no
