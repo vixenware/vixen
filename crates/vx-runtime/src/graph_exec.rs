@@ -18,7 +18,7 @@ use crate::analyze::{
 };
 use crate::cache::{
     CachedExecOutcome, ExecInvocationCacheKey, HostExecCacheKey, ObserverCacheIdentity,
-    RuntimeCache,
+    RuntimeCache, RuntimeCacheBackend,
 };
 use crate::eval::{FailureContext, Outcome, Poison, Thunk, Value, from_wire};
 use crate::remote::{Part, PartKey};
@@ -52,6 +52,13 @@ impl RuntimeBoundaries {
     fn with_cache_dir(cache_dir: PathBuf) -> Self {
         Self {
             cache: Rc::new(RuntimeCache::with_local_index_dir(cache_dir)),
+            ..Self::default()
+        }
+    }
+
+    fn with_cache_backend(backend: Box<dyn RuntimeCacheBackend>) -> Self {
+        Self {
+            cache: Rc::new(RuntimeCache::with_backend(backend)),
             ..Self::default()
         }
     }
@@ -100,6 +107,22 @@ pub(crate) fn run_body_with_cache_dir(
     )
 }
 
+pub(crate) fn run_body_with_cache_backend(
+    program: &VirProgram,
+    env: &TypeEnv,
+    body: BodyId,
+    args: Vec<Value>,
+    backend: Box<dyn RuntimeCacheBackend>,
+) -> Result<(Outcome, u64), String> {
+    run_body_with_boundaries(
+        program,
+        env,
+        body,
+        args,
+        RuntimeBoundaries::with_cache_backend(backend),
+    )
+}
+
 pub(crate) fn run_body_with_exec(
     program: &VirProgram,
     env: &TypeEnv,
@@ -135,6 +158,26 @@ pub(crate) fn run_body_with_exec_and_cache_dir(
         RuntimeBoundaries {
             exec_client: Some(exec_client),
             ..RuntimeBoundaries::with_cache_dir(cache_dir)
+        },
+    )
+}
+
+pub(crate) fn run_body_with_exec_and_cache_backend(
+    program: &VirProgram,
+    env: &TypeEnv,
+    body: BodyId,
+    args: Vec<Value>,
+    exec_client: ObserveClientId,
+    backend: Box<dyn RuntimeCacheBackend>,
+) -> Result<(Outcome, u64), String> {
+    run_body_with_boundaries(
+        program,
+        env,
+        body,
+        args,
+        RuntimeBoundaries {
+            exec_client: Some(exec_client),
+            ..RuntimeBoundaries::with_cache_backend(backend)
         },
     )
 }

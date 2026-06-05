@@ -168,6 +168,10 @@ Expected latest structural checkpoint:
   pre_run_input_key_digest)`. `RuntimeCache` owns the Facet JSON key digest and
   record encoding/decoding; `vx-cache-index::LocalCacheIndex` exposes temporary
   digest-addressed raw records for the explicit local cache path.
+- `vx-runtime::cache::RuntimeCacheBackend` is the public hook for a
+  caller-owned persistent backend. `eval_body_with_cache_backend` and
+  `eval_body_with_exec_and_cache_backend` install that backend without exposing
+  `graph_exec` to daemon services.
 - `vx-runtime` must not import daemon cache service clients to make that happen:
   `CacheIndex`, `Store`, CAS cache-record nodes, and async RPC driving belong to
   the daemon/orchestrator or to a typed strand park path, not to `graph_exec`.
@@ -242,7 +246,10 @@ Latest verified red/green shape:
   call memo reuse, resolved-argument disambiguation, closure capture memo reuse,
   function-entry disambiguation for shared code identities, and proof that
   unresolved arguments or captures are not demanded to build a call memo key.
-- `cargo nextest run -p vx-runtime --no-fail-fast`: 140 run, 140 passed,
+- `cargo nextest run -p vx-runtime -E 'test(function_output_cache_backend) | test(function_output_l2_reuses_scalar_result)' --no-fail-fast`:
+  2/2 passed, proving both the explicit local L2 and injected cache backend
+  reuse scalar graph function outputs across fresh graph executions.
+- `cargo nextest run -p vx-runtime --no-fail-fast`: 145 run, 145 passed,
   0 failed, 0 skipped.
 - `cargo nextest run -p vx-runner --no-fail-fast`: 6 run, 6 passed, 12 skipped
   (the ignored live-VFS proof targets).
@@ -289,7 +296,7 @@ Latest verified red/green shape:
 - `cargo nextest run -p vx-cache-index --no-fail-fast`: 2/2 passed, covering
   typed-key and digest-addressed local records.
 - `cargo nextest run -p vx-cache-index -p vx-exec-protocol -p vx-services -p vx-store -p vx-runtime-graph -p vx-runtime-core -p vx-runtime-driver -p vx-runtime -p vx-runner -p vx-daemon --no-fail-fast`:
-  183 run, 183 passed, 12 skipped.
+  184 run, 184 passed, 12 skipped.
 - `cargo nextest run -p vx-daemon --no-fail-fast`: 4/4 passed.
 - The raw forbidden-symbol scans over `vx-runtime-core`, `vx-runtime-driver`,
   the deleted tree-walker affordance scan over `vx-runtime/src`, and the

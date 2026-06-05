@@ -409,6 +409,10 @@ Current slice:
   `LocalCacheIndex` now has digest-addressed raw-record methods, so the local
   adapter is shaped like the daemon index instead of like per-kind runtime
   cache-key methods.
+- `vx-runtime::cache::RuntimeCacheBackend` is the public backend hook:
+  `eval_body_with_cache_backend` and `eval_body_with_exec_and_cache_backend`
+  let a caller install a backend without importing daemon service clients into
+  the runtime.
 - `vx-runtime` is not the owner of daemon cache service clients. A future
   service-backed persistent layer must be installed from the daemon/orchestrator
   side, or mediated by a typed strand park reason if it crosses Vox while graph

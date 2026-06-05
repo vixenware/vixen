@@ -369,6 +369,9 @@ Current checkpoint:
   cache record before calling that adapter. The adapter is addressed by
   `(namespace, input_key_digest)` and stores opaque record text; the temporary
   `LocalCacheIndex` supports that same digest-addressed local-record shape.
+- `RuntimeCacheBackend` is the public caller-owned backend hook. The public
+  `eval_body_with_cache_backend` and `eval_body_with_exec_and_cache_backend`
+  entry points install it while keeping `graph_exec` service-blind.
 - That next adapter must not be implemented by importing daemon cache service
   clients into `vx-runtime`. `vx-runtime` remains the graph/front-end runtime
   library; async cache RPC belongs behind a daemon/orchestrator adapter or a
@@ -433,7 +436,9 @@ Current checkpoint:
 - `cargo nextest run -p vx-daemon -p vx-store -E 'test(cache_index) | test(cache_record)' --no-fail-fast`:
   3/3 passed.
 - `cargo nextest run -p vx-cache-index --no-fail-fast`: 2/2 passed.
-- `cargo nextest run -p vx-runtime --no-fail-fast`: 140/140 passed.
+- `cargo nextest run -p vx-runtime -E 'test(function_output_cache_backend) | test(function_output_l2_reuses_scalar_result)' --no-fail-fast`:
+  2/2 passed.
+- `cargo nextest run -p vx-runtime --no-fail-fast`: 145/145 passed.
 - `cargo nextest list -p vx-runner --run-ignored all` selected
   `output_tree::tests::reads_declared_output_root_from_cas`,
   `sandbox::tests::seatbelt_confines_writes_to_the_output_root`,
@@ -490,7 +495,7 @@ Current checkpoint:
 - `cargo nextest run -p vx-runner --no-fail-fast`: 6/6 passed, 12 skipped
   (the live-VFS proof targets).
 - `cargo nextest run -p vx-cache-index -p vx-exec-protocol -p vx-services -p vx-store -p vx-runtime-graph -p vx-runtime-core -p vx-runtime-driver -p vx-runtime -p vx-runner -p vx-daemon --no-fail-fast`:
-  183/183 passed, 12 skipped.
+  184/184 passed, 12 skipped.
 - `cargo nextest run -p vx-daemon --no-fail-fast`: 4/4 passed.
 - The forbidden-symbol scans over `vx-runtime-core`, `vx-runtime-driver`, the
   deleted tree-walker affordance scan over `vx-runtime/src`, and the

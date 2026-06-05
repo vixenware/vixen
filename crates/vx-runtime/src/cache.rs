@@ -102,14 +102,25 @@ pub(crate) enum CachedExecOutcome {
     Tree(HandleId),
 }
 
-struct PersistentCacheKey {
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
+pub struct RuntimeCacheRecordKey {
     namespace: &'static str,
     input_digest: String,
 }
 
-trait PersistentCacheLayer {
-    fn get_record(&self, key: &PersistentCacheKey) -> Option<String>;
-    fn put_record(&self, key: &PersistentCacheKey, record: &str);
+impl RuntimeCacheRecordKey {
+    pub fn namespace(&self) -> &str {
+        self.namespace
+    }
+
+    pub fn input_digest(&self) -> &str {
+        &self.input_digest
+    }
+}
+
+pub trait RuntimeCacheBackend: Send {
+    fn get_record(&self, key: &RuntimeCacheRecordKey) -> Option<String>;
+    fn put_record(&self, key: &RuntimeCacheRecordKey, record: &str);
 }
 
 struct LocalIndexCacheLayer {
@@ -124,12 +135,12 @@ impl LocalIndexCacheLayer {
     }
 }
 
-impl PersistentCacheLayer for LocalIndexCacheLayer {
-    fn get_record(&self, key: &PersistentCacheKey) -> Option<String> {
+impl RuntimeCacheBackend for LocalIndexCacheLayer {
+    fn get_record(&self, key: &RuntimeCacheRecordKey) -> Option<String> {
         self.index.read_record(key.namespace, &key.input_digest)
     }
 
-    fn put_record(&self, key: &PersistentCacheKey, record: &str) {
+    fn put_record(&self, key: &RuntimeCacheRecordKey, record: &str) {
         self.index
             .write_record(key.namespace, &key.input_digest, record);
     }
@@ -138,7 +149,7 @@ impl PersistentCacheLayer for LocalIndexCacheLayer {
 pub(crate) struct RuntimeCache {
     host_exec_l1: RefCell<HashMap<HostExecCacheKey, crate::host::HostExec>>,
     exec_invocation_l1: RefCell<HashMap<ExecInvocationCacheKey, CachedExecOutcome>>,
-    persistent: Option<Box<dyn PersistentCacheLayer>>,
+    persistent: Option<Box<dyn RuntimeCacheBackend>>,
 }
 
 impl RuntimeCache {
@@ -153,6 +164,13 @@ impl RuntimeCache {
     pub(crate) fn with_local_index_dir(cache_dir: PathBuf) -> Self {
         Self {
             persistent: Some(Box::new(LocalIndexCacheLayer::new(cache_dir))),
+            ..Self::new()
+        }
+    }
+
+    pub(crate) fn with_backend(backend: Box<dyn RuntimeCacheBackend>) -> Self {
+        Self {
+            persistent: Some(backend),
             ..Self::new()
         }
     }
@@ -240,7 +258,7 @@ impl RuntimeCache {
 }
 
 fn get_persistent_record<K, V>(
-    cache: &dyn PersistentCacheLayer,
+    cache: &dyn RuntimeCacheBackend,
     namespace: &'static str,
     key: &K,
 ) -> Option<V>
@@ -254,7 +272,7 @@ where
 }
 
 fn put_persistent_record<K, V>(
-    cache: &dyn PersistentCacheLayer,
+    cache: &dyn RuntimeCacheBackend,
     namespace: &'static str,
     key: &K,
     value: &V,
@@ -271,12 +289,12 @@ fn put_persistent_record<K, V>(
     cache.put_record(&key, &record);
 }
 
-fn persistent_cache_key<K>(namespace: &'static str, key: &K) -> Option<PersistentCacheKey>
+fn persistent_cache_key<K>(namespace: &'static str, key: &K) -> Option<RuntimeCacheRecordKey>
 where
     K: for<'a> facet::Facet<'a>,
 {
     let key_json = facet_json::to_string(key).ok()?;
-    Some(PersistentCacheKey {
+    Some(RuntimeCacheRecordKey {
         namespace,
         input_digest: blake3::hash(key_json.as_bytes()).to_hex().to_string(),
     })

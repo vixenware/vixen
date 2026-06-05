@@ -21,6 +21,7 @@ use vx_ir::ids::BodyId;
 use vx_types::TypeEnv;
 
 use crate::ability::ProviderRegistry;
+use crate::cache::RuntimeCacheBackend;
 use crate::graph::Span;
 use crate::strand::{HandleId, ObserveClientId};
 
@@ -297,6 +298,31 @@ pub fn eval_body_with_cache_dir(
     }
 }
 
+/// As [`eval_body`], but with a caller-owned persistent cache backend. The
+/// backend receives only `(namespace, pre-run input digest)` plus opaque record
+/// text; it must not demand graph values or run service RPC directly on the
+/// evaluator stack.
+pub fn eval_body_with_cache_backend(
+    program: &VirProgram,
+    env: &TypeEnv,
+    body: BodyId,
+    args: Vec<Value>,
+    mode: KernelMode,
+    backend: impl RuntimeCacheBackend + 'static,
+) -> Outcome {
+    let _ = mode;
+    match crate::graph_exec::run_body_with_cache_backend(
+        program,
+        env,
+        body,
+        args,
+        Box::new(backend),
+    ) {
+        Ok((outcome, _)) => outcome,
+        Err(reason) => Outcome::Poisoned { reason, span: None },
+    }
+}
+
 /// As [`eval_body`], but with the executor an `exec(…)` in `body` dispatches to —
 /// the **orchestrator** entry. eval must run on a strand (so the `observe` RPC can
 /// park via the strand boss); register the client with
@@ -333,6 +359,32 @@ pub fn eval_body_with_exec_and_cache_dir(
         args,
         exec_client,
         cache_dir.as_ref().to_path_buf(),
+    ) {
+        Ok((outcome, _)) => outcome,
+        Err(reason) => Outcome::Poisoned { reason, span: None },
+    }
+}
+
+/// As [`eval_body_with_exec`], but with a caller-owned persistent cache backend.
+/// Async cache services must be hidden behind an orchestrator/strand boundary,
+/// not driven directly from runtime evaluation.
+pub fn eval_body_with_exec_and_cache_backend(
+    program: &VirProgram,
+    env: &TypeEnv,
+    body: BodyId,
+    args: Vec<Value>,
+    mode: KernelMode,
+    exec_client: ObserveClientId,
+    backend: impl RuntimeCacheBackend + 'static,
+) -> Outcome {
+    let _ = mode;
+    match crate::graph_exec::run_body_with_exec_and_cache_backend(
+        program,
+        env,
+        body,
+        args,
+        exec_client,
+        Box::new(backend),
     ) {
         Ok((outcome, _)) => outcome,
         Err(reason) => Outcome::Poisoned { reason, span: None },
@@ -629,6 +681,81 @@ mod tests {
         );
 
         let _ = std::fs::remove_dir_all(cache_dir);
+    }
+
+    #[derive(Clone, Default)]
+    struct RecordingCacheBackend {
+        records:
+            std::sync::Arc<std::sync::Mutex<std::collections::HashMap<(String, String), String>>>,
+        puts: std::sync::Arc<std::sync::atomic::AtomicUsize>,
+    }
+
+    impl RecordingCacheBackend {
+        fn put_count(&self) -> usize {
+            self.puts.load(std::sync::atomic::Ordering::SeqCst)
+        }
+    }
+
+    impl RuntimeCacheBackend for RecordingCacheBackend {
+        fn get_record(&self, key: &crate::cache::RuntimeCacheRecordKey) -> Option<String> {
+            self.records
+                .lock()
+                .unwrap()
+                .get(&(key.namespace().to_string(), key.input_digest().to_string()))
+                .cloned()
+        }
+
+        fn put_record(&self, key: &crate::cache::RuntimeCacheRecordKey, record: &str) {
+            self.puts.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+            self.records.lock().unwrap().insert(
+                (key.namespace().to_string(), key.input_digest().to_string()),
+                record.to_string(),
+            );
+        }
+    }
+
+    #[test]
+    fn function_output_cache_backend_reuses_scalar_result_across_fresh_graphs() {
+        let src = "fn answer() -> U64 ( 40 + 2 ) fn main() -> U64 ( answer() )";
+        let fe = crate::compile::semantic_front_end_bundled(src).expect("front-end");
+        let body = body_in(&fe.program, "main");
+        let backend = RecordingCacheBackend::default();
+
+        let first = eval_body_with_cache_backend(
+            &fe.program,
+            &fe.env,
+            body,
+            vec![],
+            KernelMode::Off,
+            backend.clone(),
+        );
+        assert!(
+            matches!(first, Outcome::Clean(Value::U64(42))),
+            "first run got {first:?}"
+        );
+        let puts_after_first = backend.put_count();
+        assert!(
+            puts_after_first > 0,
+            "first run should write the scalar function output"
+        );
+
+        let second = eval_body_with_cache_backend(
+            &fe.program,
+            &fe.env,
+            body,
+            vec![],
+            KernelMode::Off,
+            backend.clone(),
+        );
+        assert!(
+            matches!(second, Outcome::Clean(Value::U64(42))),
+            "second run got {second:?}"
+        );
+        assert_eq!(
+            backend.put_count(),
+            puts_after_first,
+            "fresh graph should reuse the injected cache backend"
+        );
     }
 
     #[test]

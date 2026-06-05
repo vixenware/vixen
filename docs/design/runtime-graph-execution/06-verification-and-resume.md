@@ -57,6 +57,9 @@ source-expression tree-walker plus `dispatch.rs` scalar planner are deleted.
    `RuntimeCache` derives the digest and encodes/decodes records before calling
    it, and `LocalCacheIndex` exposes digest-addressed raw records for the
    temporary explicit local cache path.
+   `vx-runtime::cache::RuntimeCacheBackend` is the public caller-owned backend
+   hook, installed through `eval_body_with_cache_backend` or
+   `eval_body_with_exec_and_cache_backend`.
    `vx-runtime` must not import `vx-services`, `StoreClient`, `CacheIndexClient`,
    or CAS cache-record service types to do that wiring; use a daemon/orchestrator
    adapter or a typed strand park path for async cache RPC.
@@ -205,7 +208,9 @@ Latest focused verification:
   call memo reuse, resolved-argument disambiguation, closure capture memo reuse,
   function-entry disambiguation for shared code identities, and proof that
   unresolved arguments or captures are not demanded to build a call memo key.
-- `cargo nextest run -p vx-runtime --no-fail-fast`: 140 run, 140 passed,
+- `cargo nextest run -p vx-runtime -E 'test(function_output_cache_backend) | test(function_output_l2_reuses_scalar_result)' --no-fail-fast`:
+  2/2 passed.
+- `cargo nextest run -p vx-runtime --no-fail-fast`: 145 run, 145 passed,
   0 failed, 0 skipped.
 - `cargo nextest run -p vx-runner --no-fail-fast`: 6 run, 6 passed, 12 skipped
   (the ignored live-VFS proof targets).
@@ -250,7 +255,7 @@ Latest focused verification:
   3/3 passed.
 - `cargo nextest run -p vx-cache-index --no-fail-fast`: 2/2 passed.
 - `cargo nextest run -p vx-cache-index -p vx-exec-protocol -p vx-services -p vx-store -p vx-runtime-graph -p vx-runtime-core -p vx-runtime-driver -p vx-runtime -p vx-runner -p vx-daemon --no-fail-fast`:
-  183 run, 183 passed, 12 skipped.
+  184 run, 184 passed, 12 skipped.
 - `cargo nextest run -p vx-daemon --no-fail-fast`: 4/4 passed.
 - `vx-runner::tests::strand_observe_reaches_runner_backed_service` drives a
   `vx-runtime` strand against a runner-backed `Observe` service and reaches the
