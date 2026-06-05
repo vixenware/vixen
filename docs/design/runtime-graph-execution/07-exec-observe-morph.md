@@ -236,6 +236,12 @@ Current checkpoint:
   `Observe` RPCs at the Vox service boundary while delegating to
   `RunnerService::with_vfsd`; two otherwise-identical demanded invocations with
   different declared tool fingerprints must dispatch observe twice.
+- `vx-runner::tests::executable_fingerprint_disambiguates_runner_backed_l1_entry`
+  is the ignored live-VFS proof formerly covered by the scratch-backed
+  `exec_on_strands` executable-fingerprint L1 test. It changes the host
+  executable symlink between two demanded boundaries at the same path while
+  counting actual `Observe` RPCs at the Vox service boundary; the second boundary
+  must dispatch instead of reusing a path-keyed L1 entry.
 - `vx-runner::tests::hello_world_uses_runner_backed_live_vfs_and_where_injection`
   is the ignored live-VFS proof formerly covered by the scratch-backed
   `hello_world` runtime integration. It exercises `where` provider injection, a
@@ -320,10 +326,10 @@ Once exec runs through the runner-backed path:
 - `cargo nextest run -p vx-runtime -E 'test(observer_evaluation_accepts) | test(observe_runs_a_real_command) | test(observe_crosses_the_output_tree) | test(the_executor_serves_run_outputs)' --no-fail-fast`:
   4/4 passed.
 - `cargo nextest list -p vx-runtime -E 'binary(source_blind_guardrails) | binary(exec_on_strands)'`
-  selected 6 tests.
+  selected 5 tests.
 - `cargo nextest run -p vx-runtime -E 'binary(source_blind_guardrails) | binary(exec_on_strands)' --no-fail-fast`:
-  6/6 passed.
-- `cargo nextest run -p vx-runtime --no-fail-fast`: 145/145 passed.
+  5/5 passed.
+- `cargo nextest run -p vx-runtime --no-fail-fast`: 144/144 passed.
 - `cargo nextest list -p vx-runner --run-ignored all` selected
   `output_tree::tests::reads_declared_output_root_from_cas`,
   `sandbox::tests::seatbelt_confines_writes_to_the_output_root`,
@@ -331,6 +337,7 @@ Once exec runs through the runner-backed path:
   `tests::declared_tool_fingerprint_disambiguates_runner_backed_l1_entry`,
   `tests::demanded_vixen_exec_reaches_runner_backed_observe`,
   `tests::demanded_vixen_exec_runs_through_runner_backed_live_vfs_and_serves_output_tree`,
+  `tests::executable_fingerprint_disambiguates_runner_backed_l1_entry`,
   `tests::explicit_stream_observer_returns_runner_backed_live_output_tree`,
   `tests::hello_world_uses_runner_backed_live_vfs_and_where_injection`,
   `tests::identical_backtick_exec_boundaries_share_runner_backed_l1_entry`,
@@ -346,6 +353,7 @@ Once exec runs through the runner-backed path:
   `tests::bare_invocation_failure_poisons_through_runner_backed_live_vfs`,
   `tests::declared_tool_fingerprint_disambiguates_runner_backed_l1_entry`,
   `tests::demanded_vixen_exec_runs_through_runner_backed_live_vfs_and_serves_output_tree`,
+  `tests::executable_fingerprint_disambiguates_runner_backed_l1_entry`,
   `tests::explicit_stream_observer_returns_runner_backed_live_output_tree`,
   `tests::hello_world_uses_runner_backed_live_vfs_and_where_injection`,
   `tests::identical_backtick_exec_boundaries_share_runner_backed_l1_entry`,
@@ -367,10 +375,13 @@ Once exec runs through the runner-backed path:
 - `cargo nextest run -p vx-runner --run-ignored only -E 'test(=tests::declared_tool_fingerprint_disambiguates_runner_backed_l1_entry)' --no-fail-fast`:
   failed at the same live CAS-VFS boot boundary on this host, before any scratch
   fallback could run.
-- `cargo nextest run -p vx-runner --no-fail-fast`: 6/6 passed, 10 skipped
+- `cargo nextest run -p vx-runner --run-ignored only -E 'test(=tests::executable_fingerprint_disambiguates_runner_backed_l1_entry)' --no-fail-fast`:
+  failed at the same live CAS-VFS boot boundary on this host, before any scratch
+  fallback could run.
+- `cargo nextest run -p vx-runner --no-fail-fast`: 6/6 passed, 11 skipped
   (the live-VFS proof targets).
 - `cargo nextest run -p vx-services -p vx-runtime-graph -p vx-runtime-core -p vx-runtime-driver -p vx-runtime -p vx-runner --no-fail-fast`:
-  177/177 passed, 10 skipped.
+  176/176 passed, 11 skipped.
 - `cargo nextest run -p vx-daemon --no-fail-fast`: 2/2 passed.
 - The forbidden-symbol scans over `vx-runtime-core`, `vx-runtime-driver`, and the
   deleted tree-walker affordance scan over `vx-runtime/src` returned no matches.

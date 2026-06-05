@@ -158,11 +158,11 @@ Latest focused verification:
 - `cargo nextest run -p vx-runtime -E 'binary(source_blind_guardrails)' --no-fail-fast`:
   3/3 passed.
 - `cargo nextest run -p vx-runtime -E 'binary(exec_on_strands)' --no-fail-fast`:
-  3/3 passed, including cold exec non-demand, executable-fingerprint
-  non-aliasing, and disk-L2 reuse across fresh graph evaluations. The basic
-  `run.ok` success/failure value-crossing tests, identical-demanded-backtick L1
-  reuse, writable-root disambiguation, observer-identity disambiguation, and
-  declared-tool-fingerprint disambiguation moved to runner-owned live-VFS proof
+  2/2 passed, including cold exec non-demand and disk-L2 reuse across fresh
+  graph evaluations. The basic `run.ok` success/failure value-crossing tests,
+  identical-demanded-backtick L1 reuse, writable-root disambiguation,
+  observer-identity disambiguation, declared-tool-fingerprint disambiguation,
+  and executable-fingerprint disambiguation moved to runner-owned live-VFS proof
   coverage.
 - `cargo nextest run -p vx-runtime -E 'binary(host_probe)' --no-fail-fast`:
   6/6 passed, including the input-keyed `host.exec` L1 cache test, bare
@@ -183,14 +183,15 @@ Latest focused verification:
   call memo reuse, resolved-argument disambiguation, closure capture memo reuse,
   function-entry disambiguation for shared code identities, and proof that
   unresolved arguments or captures are not demanded to build a call memo key.
-- `cargo nextest run -p vx-runtime --no-fail-fast`: 145 run, 145 passed,
+- `cargo nextest run -p vx-runtime --no-fail-fast`: 144 run, 144 passed,
   0 failed, 0 skipped.
-- `cargo nextest run -p vx-runner --no-fail-fast`: 6 run, 6 passed, 10 skipped
+- `cargo nextest run -p vx-runner --no-fail-fast`: 6 run, 6 passed, 11 skipped
   (the ignored live-VFS proof targets).
 - `cargo nextest list -p vx-runner --run-ignored only`: selected
   `tests::bare_invocation_failure_poisons_through_runner_backed_live_vfs`,
   `tests::declared_tool_fingerprint_disambiguates_runner_backed_l1_entry`,
   `tests::demanded_vixen_exec_runs_through_runner_backed_live_vfs_and_serves_output_tree`,
+  `tests::executable_fingerprint_disambiguates_runner_backed_l1_entry`,
   `tests::explicit_stream_observer_returns_runner_backed_live_output_tree`,
   `tests::hello_world_uses_runner_backed_live_vfs_and_where_injection`,
   `tests::identical_backtick_exec_boundaries_share_runner_backed_l1_entry`,
@@ -212,8 +213,11 @@ Latest focused verification:
 - `cargo nextest run -p vx-runner --run-ignored only -E 'test(=tests::declared_tool_fingerprint_disambiguates_runner_backed_l1_entry)' --no-fail-fast`:
   failed at the same live CAS-VFS boot boundary on this host, before any scratch
   fallback could run.
+- `cargo nextest run -p vx-runner --run-ignored only -E 'test(=tests::executable_fingerprint_disambiguates_runner_backed_l1_entry)' --no-fail-fast`:
+  failed at the same live CAS-VFS boot boundary on this host, before any scratch
+  fallback could run.
 - `cargo nextest run -p vx-services -p vx-runtime-graph -p vx-runtime-core -p vx-runtime-driver -p vx-runtime -p vx-runner --no-fail-fast`:
-  177 run, 177 passed, 10 skipped.
+  176 run, 176 passed, 11 skipped.
 - `cargo nextest run -p vx-daemon --no-fail-fast`: 2/2 passed.
 - `vx-runner::tests::strand_observe_reaches_runner_backed_service` drives a
   `vx-runtime` strand against a runner-backed `Observe` service and reaches the
@@ -288,6 +292,11 @@ Latest focused verification:
   declared tool-fingerprint L1 disambiguation. It uses identical command argv
   and different declared tool fingerprints; the runner-backed `Observe` boundary
   must dispatch twice.
+- `vx-runner::tests::executable_fingerprint_disambiguates_runner_backed_l1_entry`
+  is the ignored live-VFS proof target moved out of `exec_on_strands` for
+  executable fingerprint L1 disambiguation. It changes the host executable
+  symlink between two demanded boundaries at the same path; the runner-backed
+  `Observe` boundary must dispatch twice.
 - `vx-runner::tests::hello_world_uses_runner_backed_live_vfs_and_where_injection`
   is the ignored live-VFS proof target moved out of
   `crates/vx-runtime/tests/hello_world.rs`. It exercises provider injection,

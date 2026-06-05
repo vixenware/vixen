@@ -119,8 +119,8 @@ impl vox::ConnectionAcceptor for RunnerAcceptor {
 #[cfg(test)]
 mod tests {
     use std::rc::Rc;
-    use std::sync::Arc;
     use std::sync::atomic::{AtomicUsize, Ordering};
+    use std::sync::{Arc, Mutex};
 
     use vx_ir::item::ItemKind;
     use vx_ir::reachable;
@@ -228,6 +228,80 @@ mod tests {
             .establish::<ObserveClient>()
             .await
             .expect("establish counting runner-backed Observe client");
+        (client, observes)
+    }
+
+    type AfterFirstObserve = Arc<Mutex<Option<Box<dyn FnOnce() + Send + 'static>>>>;
+
+    #[derive(Clone)]
+    struct AfterFirstObserveService {
+        inner: RunnerService,
+        observes: Arc<AtomicUsize>,
+        after_first: AfterFirstObserve,
+    }
+
+    impl Observe for AfterFirstObserveService {
+        async fn observe(&self, request: ObserveRequest) -> Observed {
+            let prior = self.observes.fetch_add(1, Ordering::SeqCst);
+            let observed = <RunnerService as Observe>::observe(&self.inner, request).await;
+            if prior == 0
+                && let Some(after_first) = self.after_first.lock().unwrap().take()
+            {
+                after_first();
+            }
+            observed
+        }
+    }
+
+    #[derive(Clone)]
+    struct AfterFirstRunnerAcceptor {
+        service: AfterFirstObserveService,
+    }
+
+    impl vox::ConnectionAcceptor for AfterFirstRunnerAcceptor {
+        fn accept(
+            &self,
+            request: &vox::ConnectionRequest,
+            connection: vox::PendingConnection,
+        ) -> std::result::Result<(), vox::Metadata<'static>> {
+            match request.service() {
+                "Observe" => {
+                    connection.handle_with(ObserveDispatcher::new(self.service.clone()));
+                    Ok(())
+                }
+                "Producing" => self.service.inner.handle_producing_connection(connection),
+                _ => Err(vec![]),
+            }
+        }
+    }
+
+    async fn observe_client_with_after_first<F>(
+        service: RunnerService,
+        after_first: F,
+    ) -> (ObserveClient, Arc<AtomicUsize>)
+    where
+        F: FnOnce() + Send + 'static,
+    {
+        let observes = Arc::new(AtomicUsize::new(0));
+        let service = AfterFirstObserveService {
+            inner: service,
+            observes: Arc::clone(&observes),
+            after_first: Arc::new(Mutex::new(Some(Box::new(after_first)))),
+        };
+        let (client_link, server_link) = vox::memory_link_pair(64);
+        tokio::spawn(async move {
+            if let Ok(client) = vox::acceptor_on(server_link)
+                .on_connection(AfterFirstRunnerAcceptor { service })
+                .establish::<vox::NoopClient>()
+                .await
+            {
+                client.caller.closed().await;
+            }
+        });
+        let client = vox::initiator_on(client_link, vox::TransportMode::Bare)
+            .establish::<ObserveClient>()
+            .await
+            .expect("establish mutating runner-backed Observe client");
         (client, observes)
     }
 
@@ -729,6 +803,72 @@ mod tests {
             observes.load(Ordering::SeqCst),
             2,
             "different declared tool fingerprints must not alias in the runner-backed L1"
+        );
+    }
+
+    #[cfg(unix)]
+    #[test]
+    #[ignore = "needs the live CAS-VFS mount; run with --ignored on a host with the Vixen VFS"]
+    fn executable_fingerprint_disambiguates_runner_backed_l1_entry() {
+        use std::os::unix::fs::PermissionsExt;
+
+        let temp = tempfile::TempDir::new().expect("executable fingerprint temp dir");
+        let link = temp.path().join("tool");
+        let first_path = temp.path().join("tool.first");
+        let second_path = temp.path().join("tool.second");
+        std::fs::write(&first_path, "#!/bin/sh\nprintf same\n# first\n")
+            .expect("write first executable");
+        std::fs::write(&second_path, "#!/bin/sh\nprintf same\n# second\n")
+            .expect("write second executable");
+        for path in [&first_path, &second_path] {
+            let mut perms = std::fs::metadata(path)
+                .expect("executable metadata")
+                .permissions();
+            perms.set_mode(0o755);
+            std::fs::set_permissions(path, perms).expect("make executable runnable");
+        }
+        std::os::unix::fs::symlink(&first_path, &link).expect("link executable path to v1");
+
+        let fe = compile_source(
+            "fn t(cmd: Command) ( \
+               let first = `$cmd` with { observer: (run) => run.ok }; \
+               let second = `$cmd` with { observer: (run) => run.ok }; \
+               assert_eq(first.stdout, second.stdout) )",
+            "t",
+        )
+        .expect("exec binary-fingerprint program compiles");
+        let entry = entry_body(&fe, "t");
+
+        let scheduler = Scheduler::new(&[1]);
+        let (_temp, service) = scheduler.block_on(live_vfs_runner_service());
+        let link_for_hook = link.clone();
+        let second_for_hook = second_path.clone();
+        let (client, observes) =
+            scheduler.block_on(observe_client_with_after_first(service, move || {
+                std::fs::remove_file(&link_for_hook).expect("remove v1 executable link");
+                std::os::unix::fs::symlink(&second_for_hook, &link_for_hook)
+                    .expect("relink executable path to v2");
+            }));
+        let cid = scheduler.register_observe_client(client);
+        let program = fe.program;
+        let env = fe.env;
+        let binary = link.to_string_lossy().into_owned();
+        let strand = scheduler.spawn(ResourceId(0), move || {
+            let cmd = tool_value("@vixen/grammar-cc", "cc", &binary);
+            match eval_body_with_exec(&program, &env, entry, vec![cmd], KernelMode::Off, cid) {
+                EvalOutcome::Clean(Value::Unit) => Outcome::Clean,
+                other => Outcome::Poisoned(format!(
+                    "expected executable-fingerprint-distinct runner-backed execs to resolve, got {other:?}"
+                )),
+            }
+        });
+        scheduler.demand(strand);
+        scheduler.run();
+        assert_eq!(scheduler.outcome(strand), Some(Outcome::Clean));
+        assert_eq!(
+            observes.load(Ordering::SeqCst),
+            2,
+            "changing executable content at one path must not alias in the runner-backed L1"
         );
     }
 
