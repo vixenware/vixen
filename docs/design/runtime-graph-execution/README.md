@@ -183,13 +183,13 @@ Latest verified red/green shape:
 - `cargo nextest run -p vx-runtime -E 'binary(source_blind_guardrails)' --no-fail-fast`:
   3/3 passed.
 - `cargo nextest run -p vx-runtime -E 'binary(exec_on_strands)' --no-fail-fast`:
-  6/6 passed, including `undemanded_exec_in_tuple_does_not_dispatch`,
+  5/5 passed, including `undemanded_exec_in_tuple_does_not_dispatch`,
   observer identity non-aliasing, executable-fingerprint non-aliasing when a
   stable binary path changes content, declared-tool-fingerprint non-aliasing,
-  writable-root disambiguation, and disk-L2 reuse across fresh graph
-  evaluations. The basic `run.ok` success/failure value-crossing tests and the
-  identical-demanded-backtick L1 reuse proof moved to runner-owned live-VFS
-  proof coverage.
+  and disk-L2 reuse across fresh graph evaluations. The basic `run.ok`
+  success/failure value-crossing tests, identical-demanded-backtick L1 reuse,
+  and writable-root disambiguation moved to runner-owned live-VFS proof
+  coverage.
 - `cargo nextest run -p vx-runtime -E 'binary(host_probe)' --no-fail-fast`:
   6/6 passed, including the input-keyed `host.exec` L1 cache test, bare
   executable-name fingerprint resolution, and disk-L2 reuse across fresh graph
@@ -209,9 +209,9 @@ Latest verified red/green shape:
   call memo reuse, resolved-argument disambiguation, closure capture memo reuse,
   function-entry disambiguation for shared code identities, and proof that
   unresolved arguments or captures are not demanded to build a call memo key.
-- `cargo nextest run -p vx-runtime --no-fail-fast`: 148 run, 148 passed,
+- `cargo nextest run -p vx-runtime --no-fail-fast`: 147 run, 147 passed,
   0 failed, 0 skipped.
-- `cargo nextest run -p vx-runner --no-fail-fast`: 6 run, 6 passed, 7 skipped
+- `cargo nextest run -p vx-runner --no-fail-fast`: 6 run, 6 passed, 8 skipped
   (the ignored live-VFS proof targets).
 - `cargo nextest list -p vx-runner --run-ignored only`: selected
   `tests::bare_invocation_failure_poisons_through_runner_backed_live_vfs`,
@@ -220,14 +220,18 @@ Latest verified red/green shape:
   `tests::hello_world_uses_runner_backed_live_vfs_and_where_injection`,
   `tests::identical_backtick_exec_boundaries_share_runner_backed_l1_entry`,
   `tests::run_ok_observer_crosses_runner_backed_live_vfs_for_success_and_failure`,
-  and `tests::strand_observe_uses_runner_backed_live_vfs_for_success_and_failure`.
+  `tests::strand_observe_uses_runner_backed_live_vfs_for_success_and_failure`,
+  and `tests::writable_roots_disambiguate_runner_backed_l1_entry`.
 - `cargo nextest run -p vx-runner --run-ignored only -E 'test(=tests::identical_backtick_exec_boundaries_share_runner_backed_l1_entry)' --no-fail-fast`:
   failed at live CAS-VFS boot because this host does not have the Vixen
   Management mount trigger installed (`/Library/Application Support/Vixen/management/queue/mount`
   was missing). This is the expected environmental boundary for ignored
   live-VFS proofs; do not replace it with scratch execution.
+- `cargo nextest run -p vx-runner --run-ignored only -E 'test(=tests::writable_roots_disambiguate_runner_backed_l1_entry)' --no-fail-fast`:
+  failed at the same live CAS-VFS boot boundary on this host, before any scratch
+  fallback could run.
 - `cargo nextest run -p vx-services -p vx-runtime-graph -p vx-runtime-core -p vx-runtime-driver -p vx-runtime -p vx-runner --no-fail-fast`:
-  180 run, 180 passed, 7 skipped.
+  179 run, 179 passed, 8 skipped.
 - `cargo nextest run -p vx-daemon --no-fail-fast`: 2/2 passed.
 - `vx-runner::tests::strand_observe_reaches_runner_backed_service` drives
   `vx-runtime` strands against a runner-backed `Observe` client and reaches the
@@ -277,6 +281,10 @@ Latest verified red/green shape:
   demanded backtick L1 reuse. It counts runner-backed `Observe` RPCs at the Vox
   service boundary while delegating to `RunnerService::with_vfsd`; two identical
   demanded invocations must dispatch observe once.
+- `vx-runner::tests::writable_roots_disambiguate_runner_backed_l1_entry`
+  is the ignored live-VFS proof moved out of `exec_on_strands` for writable-root
+  L1 disambiguation. It uses identical command argv and different declared
+  `writable` roots; the runner-backed `Observe` boundary must dispatch twice.
 - `vx-runner::tests::hello_world_uses_runner_backed_live_vfs_and_where_injection`
   is the ignored live-VFS proof moved out of
   `crates/vx-runtime/tests/hello_world.rs`. It exercises `where` provider
@@ -287,9 +295,6 @@ Latest verified red/green shape:
 - `vx-runtime::analyze::tests::exec_invocation_metadata_carries_writable_roots`
   proves `writable: ["out"]` is recorded as exec metadata rather than being
   accepted only by the front-end.
-- `vx-runtime::exec_on_strands::writable_roots_are_part_of_the_backtick_exec_l1_key`
-  proves two otherwise-identical backtick execs with different writable roots do
-  not alias in the in-process exec L1.
 - The forbidden-symbol scan over `crates/vx-runtime-core` and
   `crates/vx-runtime-driver` returns no matches.
 - The deleted tree-walker affordance scan over `crates/vx-runtime/src` returns
