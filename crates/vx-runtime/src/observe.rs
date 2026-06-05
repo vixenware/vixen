@@ -41,12 +41,13 @@ pub fn evaluate_observer(run: CompletedRun, observer: Option<Bundle>) -> Observe
                 vec![run],
                 KernelMode::GraphOnly,
             ) {
+                Ok(WireValue::Tree) => Observed::Tree,
                 Ok(value) => Observed::Value(value),
                 Err(reason) => Observed::Poisoned(reason),
             }
         }
         None => match run_value::ok_gate_result(&run.proc) {
-            Ok(()) => Observed::Value(WireValue::Tree),
+            Ok(()) => Observed::Tree,
             Err(reason) => Observed::Poisoned(reason),
         },
     }
@@ -60,9 +61,15 @@ mod tests {
     use vx_ir::reachable;
 
     fn observer_bundle() -> Bundle {
-        // An observer that forces `run.ok` — clean on exit 0, poisons on nonzero.
-        let fe = compile_source("fn observe(run: Run) -> Exit ( run.ok )", "observe")
-            .expect("front-end compiles");
+        bundle_for("fn observe(run: Run) -> Exit ( run.ok )")
+    }
+
+    fn output_tree_observer_bundle() -> Bundle {
+        bundle_for("fn observe(run: Run) -> Tree ( run.stream.out )")
+    }
+
+    fn bundle_for(src: &str) -> Bundle {
+        let fe = compile_source(src, "observe").expect("front-end compiles");
         let entry = fe
             .program
             .arena
@@ -74,6 +81,42 @@ mod tests {
             })
             .expect("observe fn");
         reachable(&fe.program.arena, &fe.env, entry)
+    }
+
+    #[test]
+    fn default_observer_returns_an_explicit_tree_result() {
+        let ok = evaluate_observer(
+            CompletedRun::new(ProcOutcome {
+                exit_code: 0,
+                stdout: Vec::new(),
+                stderr: Vec::new(),
+            }),
+            None,
+        );
+        assert_eq!(ok, Observed::Tree);
+
+        let bad = evaluate_observer(
+            CompletedRun::new(ProcOutcome {
+                exit_code: 7,
+                stdout: Vec::new(),
+                stderr: Vec::new(),
+            }),
+            None,
+        );
+        assert!(matches!(bad, Observed::Poisoned(_)));
+    }
+
+    #[test]
+    fn top_level_output_tree_observer_returns_an_explicit_tree_result() {
+        let observed = evaluate_observer(
+            CompletedRun::new(ProcOutcome {
+                exit_code: 0,
+                stdout: Vec::new(),
+                stderr: Vec::new(),
+            }),
+            Some(output_tree_observer_bundle()),
+        );
+        assert_eq!(observed, Observed::Tree);
     }
 
     #[test]

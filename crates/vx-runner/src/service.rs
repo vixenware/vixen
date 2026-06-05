@@ -1,4 +1,4 @@
-use vx_exec_protocol::{Observe, ObserveRequest, Observed, WireValue};
+use vx_exec_protocol::{Observe, ObserveRequest, Observed};
 use vx_runtime::observe::{CompletedRun, evaluate_observer};
 use vx_runtime::run_value::ProcOutcome;
 use vx_services::{DiscoverProbeRequest, DiscoverResult, ExecRequest, ExecResult, Runner};
@@ -63,10 +63,10 @@ impl RunnerService {
             request.observer,
         );
         match observed {
-            Observed::Value(WireValue::Tree) => match self.store() {
+            Observed::Tree => match self.store() {
                 Some(store) => {
                     self.install_produced_outputs(Some(CasOutputTreeService::new(store, outputs)));
-                    Observed::Value(WireValue::Tree)
+                    Observed::Tree
                 }
                 None => Observed::Poisoned(
                     "runner-backed observe returned a tree, but the runner has no CAS store \

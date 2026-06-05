@@ -52,6 +52,10 @@ pub enum WireValue {
 #[derive(facet::Facet, Debug, Clone, PartialEq, Eq)]
 #[repr(u8)]
 pub enum Observed {
+    /// A top-level producing tree returned by the observer. The tree's paths cross
+    /// lazily through the `Producing` virtual connection opened on the same observe
+    /// session; it is not ordinary eager data.
+    Tree,
     Value(WireValue),
     Poisoned(String),
 }

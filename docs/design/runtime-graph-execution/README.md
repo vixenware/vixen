@@ -196,8 +196,9 @@ Expected latest structural checkpoint:
   its hosted `RunnerService` when a runner is configured. The implementation
   calls `run_exec`, converts the process result to `CompletedRun`, and invokes
   the shared observer-evaluation helper.
-- Runner-backed `WireValue::Tree` observe results now install a CAS-backed
-  `Producing` service from flushed `ExecResult.outputs`; both `RunnerAcceptor`
+- Runner-backed top-level tree observe results now cross the protocol as
+  `Observed::Tree` and install a CAS-backed `Producing` service from flushed
+  `ExecResult.outputs`; both `RunnerAcceptor`
   and daemon-hosted runner sessions route `"Producing"`, and the service resolves
   demanded paths by walking `DirectoryNode` trees and fetching file chunks from
   `vx-store`. The old scratch-backed `exec_output_tree` runtime integration file
@@ -249,6 +250,17 @@ Expected latest structural checkpoint:
 
 Latest verified red/green shape:
 
+- `cargo check -p vx-exec-protocol -p vx-runtime -p vx-runner -p vx-daemon`:
+  passed after making top-level producing-tree observe results explicit
+  `Observed::Tree` protocol results.
+- `cargo nextest run -p vx-runtime -E 'test(observe::tests::) | test(strand::tests::)' --no-fail-fast`:
+  10/10 passed, including default `run.ok.out`, explicit `run.stream.out`, and
+  strand handle-crossing coverage.
+- `cargo nextest run -p vx-runner --no-fail-fast`: 6/6 passed, 11 skipped
+  (the live-VFS proof targets).
+- `cargo nextest run -p vx-exec-protocol -p vx-runtime -p vx-runner -p vx-daemon --no-fail-fast`:
+  161/161 passed, 12 skipped, after making top-level producing-tree observe
+  results explicit.
 - `cargo check -p vx-runtime -p vx-runner -p vx-daemon`: passed after making
   `Value::OutputTree` carry a sealed executor-local marker.
 - `cargo check -p vx-runtime -p vx-runner -p vx-daemon`: passed after making

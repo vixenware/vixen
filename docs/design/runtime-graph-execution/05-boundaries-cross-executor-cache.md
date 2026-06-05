@@ -211,7 +211,9 @@ Current progress:
   observer path uses graph body execution plus API-edge graph/native crossing.
 - The executor-local `run.stream` value now matches the stdlib `Live` layout:
   `stdout`, `stderr`, then `out`. The stream fields poison explicitly if
-  demanded before streaming lands; `out` crosses as `WireValue::Tree`.
+  demanded before streaming lands; `out` crosses through executor-side
+  `WireValue::Tree`, then the observe protocol promotes a top-level tree result
+  to `Observed::Tree` before the strand opens the `Producing` virtual connection.
 
 ## Cross-executor remote values
 

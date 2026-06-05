@@ -245,6 +245,17 @@ Latest focused verification:
 - `cargo nextest run -p vx-runtime-graph -p vx-runtime-core -p vx-runtime-driver -p vx-runtime --no-fail-fast`:
   163/163 passed, including `boundary_payload_field_is_bound_to_resolved_payload_output`,
   source-blind guardrails, and `lang_suite`.
+- `cargo check -p vx-exec-protocol -p vx-runtime -p vx-runner -p vx-daemon`:
+  passed after making top-level producing-tree observe results explicit
+  `Observed::Tree` protocol results.
+- `cargo nextest run -p vx-runtime -E 'test(observe::tests::) | test(strand::tests::)' --no-fail-fast`:
+  10/10 passed, including default `run.ok.out`, explicit `run.stream.out`, and
+  strand handle-crossing coverage.
+- `cargo nextest run -p vx-runner --no-fail-fast`: 6/6 passed, 11 skipped
+  (the live-VFS proof targets).
+- `cargo nextest run -p vx-exec-protocol -p vx-runtime -p vx-runner -p vx-daemon --no-fail-fast`:
+  161/161 passed, 12 skipped, after making top-level producing-tree observe
+  results explicit.
 - `cargo nextest run -p vx-runtime -p vx-runner -p vx-daemon --no-fail-fast`:
   159/159 passed, 12 skipped, after sealing the executor-local output tree
   marker.
@@ -356,9 +367,11 @@ Latest focused verification:
   `ScratchObserveService`, `scratch_dir`, `capture_outputs`, and
   `local_observer()` helper have been deleted from `vx-runtime`.
 - Runner-backed observe now installs a CAS-backed `Producing` service when an
-  observer returns `WireValue::Tree`. `RunnerAcceptor` and daemon-hosted runner
-  sessions route `"Producing"`; the service walks flushed `DirectoryNode` output
-  roots and fetches file chunks from `vx-store` on demand.
+  observer returns a top-level `Observed::Tree`. `RunnerAcceptor` and
+  daemon-hosted runner sessions route `"Producing"`; the service walks flushed
+  `DirectoryNode` output roots and fetches file chunks from `vx-store` on
+  demand. Nested tree values still fail through the explicit wire-crossing gap
+  until the general nested-handle walk lands.
 - `vx-runner::output_tree::tests::reads_declared_output_root_from_cas` proves the
   CAS-backed producer serves a declared output path, and
   `vx-runner::tests::producing_vconn_serves_runner_output_tree_from_cas` proves
