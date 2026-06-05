@@ -3,36 +3,37 @@ set -u
 
 label="eu.bearcove.vixen.management"
 plist="/Library/LaunchDaemons/${label}.plist"
+app="/Applications/Vixen.app/Contents/MacOS/Vixen"
 helper="/Applications/Vixen.app/Contents/MacOS/vixen-management"
+
+if [ ! -x "$app" ]; then
+  echo "postinstall: missing app executable at $app" >&2
+  exit 1
+fi
 
 if [ ! -x "$helper" ]; then
   echo "postinstall: missing executable helper at $helper" >&2
   exit 1
 fi
 
-/usr/sbin/chown root:wheel "$plist" || {
-  echo "postinstall: failed to chown $plist" >&2
-  exit 1
-}
-/bin/chmod 644 "$plist" || {
-  echo "postinstall: failed to chmod $plist" >&2
-  exit 1
-}
+if [ -e "$plist" ]; then
+  /bin/launchctl bootout "system/$label" >/dev/null 2>&1 || true
+  /bin/launchctl bootout system "$plist" >/dev/null 2>&1 || true
+  /bin/rm -f "$plist" || {
+    echo "postinstall: failed to remove old $plist" >&2
+    exit 1
+  }
+fi
 
 "$helper" ensure-queues || {
   echo "postinstall: failed to prepare Vixen Management queues" >&2
   exit 1
 }
 
-/bin/launchctl bootout "system/$label" >/dev/null 2>&1 || true
-/bin/launchctl bootout system "$plist" >/dev/null 2>&1 || true
-
-/bin/launchctl bootstrap system "$plist" || {
-  echo "postinstall: failed to bootstrap $plist" >&2
+"$app" management register || {
+  echo "postinstall: failed to register Vixen Management" >&2
   exit 1
 }
 
-/bin/launchctl kickstart -k "system/$label" >/dev/null 2>&1 || true
-
-echo "postinstall: installed Vixen Management LaunchDaemon"
+echo "postinstall: registered Vixen Management"
 exit 0

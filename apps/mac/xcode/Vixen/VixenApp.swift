@@ -1,10 +1,21 @@
 import AppKit
+import Darwin
 @preconcurrency import FSKit
 import ServiceManagement
 import Sparkle
 import SwiftUI
 
 @main
+enum VixenMain {
+    static func main() {
+        let arguments = Array(CommandLine.arguments.dropFirst())
+        if arguments.first == "management" {
+            Darwin.exit(ManagementCommand.run(Array(arguments.dropFirst())))
+        }
+        VixenApp.main()
+    }
+}
+
 struct VixenApp: App {
     private let updaterController = SparkleBootstrap.makeUpdaterController()
 
@@ -32,21 +43,140 @@ struct VixenApp: App {
     }
 }
 
+private enum ManagementService {
+    private static let plistName = "eu.bearcove.vixen.management.plist"
+    private static let queueRoot = URL(
+        fileURLWithPath: "/Library/Application Support/Vixen/management/queue",
+        isDirectory: true
+    )
+
+    static var service: SMAppService {
+        SMAppService.daemon(plistName: plistName)
+    }
+
+    static var status: SMAppService.Status {
+        service.status
+    }
+
+    static func register() throws {
+        let daemon = service
+        switch daemon.status {
+        case .enabled, .requiresApproval:
+            return
+        default:
+            break
+        }
+
+        do {
+            try daemon.register()
+        } catch {
+            switch service.status {
+            case .enabled, .requiresApproval:
+                return
+            default:
+                throw error
+            }
+        }
+    }
+
+    static func unregister() throws {
+        let daemon = service
+        switch daemon.status {
+        case .notFound, .notRegistered:
+            return
+        default:
+            try daemon.unregister()
+        }
+    }
+
+    static func statusDescription(_ status: SMAppService.Status = status) -> String {
+        switch status {
+        case .enabled:
+            return "Ready"
+        case .requiresApproval:
+            return "Needs approval"
+        case .notRegistered:
+            return "Not registered"
+        case .notFound:
+            return "Missing from app bundle"
+        @unknown default:
+            return "Unknown"
+        }
+    }
+
+    static func fireQueue(_ name: String) throws -> URL {
+        let trigger = queueRoot
+            .appendingPathComponent(name, isDirectory: true)
+            .appendingPathComponent("trigger-\(getpid())-\(UUID().uuidString)")
+        let fd = trigger.path.withCString {
+            Darwin.open($0, O_CREAT | O_EXCL | O_WRONLY, mode_t(S_IRUSR | S_IWUSR))
+        }
+        guard fd >= 0 else {
+            let code = Int(errno)
+            throw NSError(
+                domain: NSPOSIXErrorDomain,
+                code: code,
+                userInfo: [NSLocalizedDescriptionKey: String(cString: strerror(Int32(code)))]
+            )
+        }
+        Darwin.close(fd)
+        return trigger
+    }
+}
+
+private enum ManagementCommand {
+    static func run(_ arguments: [String]) -> Int32 {
+        guard let command = arguments.first else {
+            printUsage(to: stderr)
+            return 64
+        }
+
+        do {
+            switch command {
+            case "register":
+                try ManagementService.register()
+                print("Vixen Management: \(ManagementService.statusDescription())")
+            case "unregister":
+                try ManagementService.unregister()
+                print("Vixen Management: \(ManagementService.statusDescription())")
+            case "status":
+                print("Vixen Management: \(ManagementService.statusDescription())")
+            case "mount", "unmount", "remount", "kill-fskitd":
+                let trigger = try ManagementService.fireQueue(command)
+                print("Vixen Management: queued \(command) via \(trigger.path)")
+            case "help", "--help", "-h":
+                printUsage(to: stdout)
+            default:
+                printUsage(to: stderr)
+                return 64
+            }
+            return 0
+        } catch {
+            fputs("Vixen Management \(command) failed: \(error.localizedDescription)\n", stderr)
+            return 1
+        }
+    }
+
+    private static func printUsage(to stream: UnsafeMutablePointer<FILE>) {
+        fputs(
+            """
+            Usage: Vixen management register|status|unregister|mount|unmount|remount|kill-fskitd
+
+            """,
+            stream
+        )
+    }
+}
+
 struct ContentView: View {
     @Environment(\.colorScheme) private var colorScheme
     @State private var isExtensionEnabled = false
     @State private var extensionError: String? = nil
     @State private var managementStatus: SMAppService.Status = .notFound
-    @State private var legacyManagementStatus: SMAppService.Status = .notFound
     @State private var managementError: String? = nil
     @State private var isConfiguringManagement = false
     @State private var demoToggleOn = false
     @State private var cursorBob = false
-
-    private let managementService = SMAppService.daemon(
-        plistName: "eu.bearcove.vixen.management.plist")
-    private let legacyManagementPlistURL = URL(
-        fileURLWithPath: "/Library/LaunchDaemons/eu.bearcove.vixen.management.plist")
 
     private let requiredMajorVersion = 15
     private let foxSize: CGFloat = 96
@@ -59,7 +189,7 @@ struct ContentView: View {
         ProcessInfo.processInfo.operatingSystemVersion.majorVersion >= requiredMajorVersion
     }
     private var isManagementConfigured: Bool {
-        managementStatus == .enabled || legacyManagementStatus == .enabled
+        managementStatus == .enabled
     }
     private var allComplete: Bool {
         isSupportedOS && isExtensionEnabled
@@ -249,26 +379,12 @@ struct ContentView: View {
     // MARK: - Management daemon
 
     private var managementStatusText: String {
-        if legacyManagementStatus == .enabled {
-            return "Installed by package"
-        }
-        switch managementStatus {
-        case .enabled:
-            return "Ready"
-        case .requiresApproval:
-            return "Needs approval"
-        case .notRegistered:
-            return "Not installed"
-        case .notFound:
-            return "Not configured"
-        @unknown default:
-            return "Unknown"
-        }
+        ManagementService.statusDescription(managementStatus)
     }
 
     private var managementButtonTitle: String {
         if isManagementConfigured {
-            return "Configured"
+            return "Recover"
         }
         switch managementStatus {
         case .requiresApproval:
@@ -308,12 +424,12 @@ struct ContentView: View {
                     .padding(.horizontal, 16)
                     .padding(.vertical, 8)
                     .background(
-                        (isManagementConfigured ? Color.gray : brandOrange),
+                        brandOrange,
                         in: RoundedRectangle(cornerRadius: 8, style: .continuous)
                     )
             }
             .buttonStyle(.plain)
-            .disabled(isConfiguringManagement || isManagementConfigured)
+            .disabled(isConfiguringManagement)
         }
         .padding(12)
         .background(
@@ -323,7 +439,9 @@ struct ContentView: View {
     }
 
     private func managementButtonAction() {
-        if managementStatus == .requiresApproval {
+        if isManagementConfigured {
+            requestManagementRecovery()
+        } else if managementStatus == .requiresApproval {
             openLoginItemsSettings()
         } else {
             configureManagementDaemon()
@@ -331,8 +449,7 @@ struct ContentView: View {
     }
 
     private func refreshManagementStatus() {
-        managementStatus = managementService.status
-        legacyManagementStatus = SMAppService.statusForLegacyPlist(at: legacyManagementPlistURL)
+        managementStatus = ManagementService.status
     }
 
     private func configureManagementDaemon() {
@@ -343,7 +460,7 @@ struct ContentView: View {
         }
 
         do {
-            try managementService.register()
+            try ManagementService.register()
             managementError = nil
         } catch {
             refreshManagementStatus()
@@ -352,6 +469,21 @@ struct ContentView: View {
             } else {
                 managementError = error.localizedDescription
             }
+        }
+    }
+
+    private func requestManagementRecovery() {
+        isConfiguringManagement = true
+        defer {
+            isConfiguringManagement = false
+            refreshManagementStatus()
+        }
+
+        do {
+            _ = try ManagementService.fireQueue("remount")
+            managementError = "Recovery requested"
+        } catch {
+            managementError = error.localizedDescription
         }
     }
 

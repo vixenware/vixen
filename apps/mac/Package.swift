@@ -21,7 +21,8 @@ let package = Package(
             ],
             path: "xcode/Vixen",
             linkerSettings: [
-                .linkedFramework("FSKit")
+                .linkedFramework("FSKit"),
+                .linkedFramework("ServiceManagement")
             ]
         ),
         .target(

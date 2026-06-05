@@ -73,8 +73,9 @@ The release flow:
 3. Resolves the Developer ID Application certificate to a stable hash, strips
    development provisioning profiles, and re-signs the app bundle inside-out
 4. Creates `Vixen-<version>.dmg` containing `Vixen.app` + `/Applications` symlink
-5. Creates, signs, and notarizes `Vixen-Installer.pkg` for the privileged
-   management daemon install path
+5. Creates, signs, and notarizes `Vixen-Installer.pkg`; the package installs
+   `Vixen.app`, prepares the management queues, and registers the bundled
+   management daemon with `SMAppService`
 6. Notarizes and staples DMG
 7. Generates `appcast.xml` via Sparkle `generate_appcast`
 8. Uploads the DMG, appcast, installer pkg, stable `latest/*` aliases, and
@@ -90,6 +91,31 @@ Stable URLs after publish:
 Human-facing install and onboarding instructions belong in the logged-in
 `app.vixen.rs` dashboard. The mac release scripts only produce signed artifacts
 and machine-readable update metadata.
+
+## Management daemon
+
+`Vixen.app` contains the privileged management helper and its bundled
+`SMAppService` LaunchDaemon plist:
+
+- helper: `Contents/MacOS/vixen-management`
+- plist: `Contents/Library/LaunchDaemons/eu.bearcove.vixen.management.plist`
+
+The installer does not install a competing plist in `/Library/LaunchDaemons`.
+Its postinstall script removes the old `/Library/LaunchDaemons` registration if
+present, runs the helper's `ensure-queues` command, and invokes the installed app:
+
+- `/Applications/Vixen.app/Contents/MacOS/Vixen management register`
+
+Useful installed-app commands:
+
+- `/Applications/Vixen.app/Contents/MacOS/Vixen management status`
+- `/Applications/Vixen.app/Contents/MacOS/Vixen management register`
+- `/Applications/Vixen.app/Contents/MacOS/Vixen management unregister`
+- `/Applications/Vixen.app/Contents/MacOS/Vixen management remount`
+
+The queue-trigger commands (`mount`, `unmount`, `remount`, `kill-fskitd`) only
+drop fixed trigger files into the root-owned management queues. The privileged
+work still runs inside `vixen-management` under launchd.
 
 ## Install and activate
 

@@ -126,7 +126,7 @@ fix-registration profile='Debug':
 release-build version='':
     ./scripts/build.sh {{ version }}
 
-# Build a signed installer pkg that installs Vixen.app and the privileged management daemon.
+# Build a signed installer pkg that installs Vixen.app and registers the bundled management daemon.
 
 # Optional argument: 'just release-pkg 1.2.3'
 release-pkg version='':
