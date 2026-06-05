@@ -12,7 +12,7 @@ use crate::Blake3Hash;
 
 /// Runner protocol version.
 /// Bump this when making breaking changes to the Runner RPC interface.
-pub const RUNNER_PROTOCOL_VERSION: u32 = 20;
+pub const RUNNER_PROTOCOL_VERSION: u32 = 21;
 
 // =============================================================================
 // Generic Sandboxed Tool Execution
@@ -75,6 +75,9 @@ pub struct ExecRequest {
     /// Writable output directories (prefix-relative) to create before launch and
     /// flush as trees afterward.
     pub outputs: Vec<String>,
+    /// Additional directories to create before launch. Each one must be equal to or
+    /// nested under a writable output root.
+    pub create_dirs: Vec<String>,
 }
 
 /// The result of an execution: the process outcome plus the captured write-set.

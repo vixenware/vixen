@@ -73,6 +73,7 @@ impl RunnerService {
                 env: Vec::new(),
                 mounts: Vec::new(),
                 outputs: request.outputs,
+                create_dirs: request.create_dirs,
             },
         )
         .await;

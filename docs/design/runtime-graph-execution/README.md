@@ -145,10 +145,13 @@ Expected latest structural checkpoint:
   observe on miss, seeds cached graph output on an exact in-process L1 or opt-in
   disk L2 hit keyed by the materialized request plus the pre-run executable
   content fingerprint, and memoizes the graph output.
-- Invocation `writable: [...]` roots lower into exec boundary metadata as graph
-  node refs, are demanded only during boundary materialization, cross in
-  `ObserveRequest.outputs`, are included in the exec cache key, and are consumed
-  by `vx-runner` as `ExecRequest.outputs`.
+- Invocation `writable: [...]` roots and `create_dirs: [...]` supplements lower
+  into exec boundary metadata as graph node refs, are demanded only during
+  boundary materialization, cross in `ObserveRequest.outputs` /
+  `ObserveRequest.create_dirs`, are included in the exec cache key, and are
+  consumed by `vx-runner` as `ExecRequest.outputs` / `ExecRequest.create_dirs`.
+  The runner rejects `create_dirs` outside declared writable roots and creates
+  valid nested dirs before launch.
 - Observer execution uses graph body execution and graph/native wire crossing.
 - `crates/vx-exec-protocol` owns `ExecCommand`, `ObserveRequest`,
   `WireValue`, `Observed`, and the generated Observe Vox client/dispatcher.
@@ -426,6 +429,16 @@ Latest verified red/green shape:
   155 run, 155 passed, 12 skipped after deleting all cache-dir runtime APIs
   and `vx-runtime`'s `vx-cache-index` dependency.
 - `cargo nextest run -p vx-daemon --no-fail-fast`: 5/5 passed, 1 skipped.
+- `cargo check -p vx-exec-protocol -p vx-services -p vx-runtime -p vx-runner -p vx-daemon -p vx`:
+  passed after adding `create_dirs` to the observe/runner payload.
+- `cargo nextest list -p vx-runtime -E 'binary(exec_create_dirs) | test(exec_invocation_metadata_carries_writable_roots_and_create_dirs)'`:
+  selected `vx-runtime analyze::tests::exec_invocation_metadata_carries_writable_roots_and_create_dirs`
+  and `vx-runtime::exec_create_dirs demanded_exec_forwards_create_dirs_to_observe_request`.
+- `cargo nextest run -p vx-runtime -E 'binary(exec_create_dirs) | test(exec_invocation_metadata_carries_writable_roots_and_create_dirs)' --no-fail-fast`:
+  2/2 passed, proving `.vx` exec metadata carries `create_dirs` and demanded
+  graph exec forwards it to `ObserveRequest`.
+- `cargo nextest run -p vx-exec-protocol -p vx-services -p vx-runtime -p vx-runner -p vx-daemon -p vx --no-fail-fast`:
+  194 run, 194 passed, 16 skipped.
 - The raw forbidden-symbol scans over `vx-runtime-core`, `vx-runtime-driver`,
   the deleted tree-walker affordance scan over `vx-runtime/src`, and the
   runtime-owned exec/observe protocol, cache file-index, and direct
@@ -512,9 +525,11 @@ Latest verified red/green shape:
   `writable: ["out"]`, and `out.file("out/hello.o")` through the runner-backed
   CAS-VFS path. The old scratch-backed runtime integration file has been
   deleted.
-- `vx-runtime::analyze::tests::exec_invocation_metadata_carries_writable_roots`
-  proves `writable: ["out"]` is recorded as exec metadata rather than being
-  accepted only by the front-end.
+- `vx-runtime::analyze::tests::exec_invocation_metadata_carries_writable_roots_and_create_dirs`
+  proves `writable: ["out"]` and `create_dirs: ["out/obj"]` are recorded as exec
+  metadata rather than being accepted only by the front-end.
+- `vx-runtime::exec_create_dirs::demanded_exec_forwards_create_dirs_to_observe_request`
+  proves a demanded `.vx` backtick forwards `create_dirs` to `ObserveRequest`.
 - The forbidden-symbol scan over `crates/vx-runtime-core` and
   `crates/vx-runtime-driver` returns no matches.
 - The deleted tree-walker affordance scan over `crates/vx-runtime/src` returns

@@ -446,6 +446,7 @@ mod tests {
                         args: Vec::new(),
                     },
                     outputs: Vec::new(),
+                    create_dirs: Vec::new(),
                 },
             );
             match observed.as_ref() {
@@ -482,6 +483,7 @@ mod tests {
                         args: Vec::new(),
                     },
                     outputs: Vec::new(),
+                    create_dirs: Vec::new(),
                 },
             );
             match observed.as_ref() {
@@ -501,6 +503,7 @@ mod tests {
                         args: Vec::new(),
                     },
                     outputs: Vec::new(),
+                    create_dirs: Vec::new(),
                 },
             );
             match observed.as_ref() {

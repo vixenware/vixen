@@ -25,6 +25,7 @@ pub struct ObserveRequest {
     pub observer: Option<Bundle>,
     pub command: ExecCommand,
     pub outputs: Vec<String>,
+    pub create_dirs: Vec<String>,
 }
 
 /// A runtime value crossing back from the executor to the orchestrator over Vox.

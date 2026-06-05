@@ -61,6 +61,26 @@ async fn run_exec_inner(vfsd: &VfsdService, req: &ExecRequest) -> Result<ExecRes
             .await
             .map_err(|e| format!("mkdir output {at}: {e}"))?;
     }
+    for dir in unique_create_dirs(&req.create_dirs) {
+        let dir = normalize_prefix_relative_path(&dir)?;
+        if !is_under_writable_root(&dir, &req.outputs) {
+            return Err(format!(
+                "create dir `{dir}` is not under a declared writable output root"
+            ));
+        }
+        if req
+            .outputs
+            .iter()
+            .any(|root| normalize_prefix_relative_path(root).as_deref() == Ok(dir.as_str()))
+        {
+            continue;
+        }
+        let at = join(&prefix, &dir);
+        mkdir_parents(vfsd, &at).await?;
+        vfsd.mkdir(at.clone())
+            .await
+            .map_err(|e| format!("mkdir create dir {at}: {e}"))?;
+    }
 
     // The real filesystem path the VFS is mounted at — the process runs there, so it
     // sees the mounted inputs and writes into the output roots.
@@ -119,6 +139,40 @@ async fn run_exec_inner(vfsd: &VfsdService, req: &ExecRequest) -> Result<ExecRes
 /// Join a VFS prefix (`/exec-…`) with a prefix-relative path, normalizing slashes.
 fn join(prefix: &str, rel: &str) -> String {
     format!("{}/{}", prefix.trim_end_matches('/'), rel.trim_matches('/'))
+}
+
+fn unique_create_dirs(dirs: &[String]) -> Vec<String> {
+    let mut dirs = dirs.to_vec();
+    dirs.sort();
+    dirs.dedup();
+    dirs
+}
+
+fn normalize_prefix_relative_path(path: &str) -> Result<String, String> {
+    let mut components = Vec::new();
+    for component in path.split('/') {
+        match component {
+            "" | "." => {}
+            ".." => return Err(format!("prefix-relative path `{path}` contains `..`")),
+            _ => components.push(component),
+        }
+    }
+    if components.is_empty() {
+        return Err("prefix-relative path is empty".to_string());
+    }
+    Ok(components.join("/"))
+}
+
+fn is_under_writable_root(path: &str, roots: &[String]) -> bool {
+    roots.iter().any(|root| {
+        let Ok(root) = normalize_prefix_relative_path(root) else {
+            return false;
+        };
+        path == root
+            || path
+                .strip_prefix(&root)
+                .is_some_and(|rest| rest.starts_with('/'))
+    })
 }
 
 /// `mkdir -p` the ancestors of `path` (the VFS `mkdir` needs the parent to exist).

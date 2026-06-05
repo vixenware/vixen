@@ -60,6 +60,7 @@ pub(crate) struct ExecInvocationMeta {
     pub(crate) args: Vec<CliArgTemplate>,
     pub(crate) observer: Option<vx_ir::Bundle>,
     pub(crate) writable_roots: Vec<NodeId>,
+    pub(crate) create_dirs: Vec<NodeId>,
 }
 
 #[derive(Debug, Clone)]
@@ -238,6 +239,7 @@ struct CallableTemplate {
 struct ExecKeywords {
     observer: Option<BodyId>,
     writable_roots: Vec<NodeId>,
+    create_dirs: Vec<NodeId>,
 }
 
 impl Builder<'_> {
@@ -383,6 +385,7 @@ impl Builder<'_> {
             })
             .collect();
         inputs.extend(meta.writable_roots.iter().copied());
+        inputs.extend(meta.create_dirs.iter().copied());
         let node = self.emit(NodeKind::Boundary, "`…`".into(), span, inputs);
         let observer = meta
             .observer
@@ -393,6 +396,7 @@ impl Builder<'_> {
                 args,
                 observer,
                 writable_roots: meta.writable_roots,
+                create_dirs: meta.create_dirs,
             },
         );
         node
@@ -426,9 +430,11 @@ impl Builder<'_> {
             None => None,
         };
         let writable_roots = self.keyword_path_array(record, "writable")?;
+        let create_dirs = self.keyword_path_array(record, "create_dirs")?;
         Ok(ExecKeywords {
             observer,
             writable_roots,
+            create_dirs,
         })
     }
 
@@ -2714,9 +2720,13 @@ mod tests {
     }
 
     #[test]
-    fn exec_invocation_metadata_carries_writable_roots() {
+    fn exec_invocation_metadata_carries_writable_roots_and_create_dirs() {
         let src = "fn t(cmd: Command) -> Tree ( \
-                   `$cmd` with { writable: [\"out\"], observer: (run) => run.ok.out } )";
+                   `$cmd` with { \
+                     writable: [\"out\"], \
+                     create_dirs: [\"out/obj\"], \
+                     observer: (run) => run.ok.out \
+                   } )";
         let fe = crate::compile::compile_source(src, "t").expect("program compiles");
         let entry = fe
             .program
@@ -2744,6 +2754,17 @@ mod tests {
         assert!(
             matches!(&node.kind, NodeKind::Const(ConstValue::Str(value)) if value == "out"),
             "writable root node should be the literal path, got {node:?}"
+        );
+        assert_eq!(
+            exec.create_dirs.len(),
+            1,
+            "create_dirs is part of exec runtime metadata"
+        );
+        let dir = exec.create_dirs[0];
+        let node = &graph.nodes[dir.0 as usize];
+        assert!(
+            matches!(&node.kind, NodeKind::Const(ConstValue::Str(value)) if value == "out/obj"),
+            "create dir node should be the literal path, got {node:?}"
         );
     }
 

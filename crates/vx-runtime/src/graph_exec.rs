@@ -401,6 +401,17 @@ fn materialize_exec_invocation(
         )?;
         output_roots.push(expect_string(output, "exec writable root")?);
     }
+    let mut create_dirs = Vec::with_capacity(invocation.create_dirs.len());
+    for dir in &invocation.create_dirs {
+        let output = demand_payload(
+            Rc::clone(&driver),
+            Rc::clone(&externals),
+            runtime.clone(),
+            boundary,
+            *dir,
+        )?;
+        create_dirs.push(expect_string(output, "exec create dir")?);
+    }
 
     let program_fingerprint = crate::host::fingerprint_executable(&tool.binary)?;
     let cache_key = exec_invocation_key(
@@ -408,6 +419,7 @@ fn materialize_exec_invocation(
         program_fingerprint,
         args.clone(),
         output_roots.clone(),
+        create_dirs.clone(),
         invocation,
     );
     if let Some(cached) = runtime.cache.get_exec_invocation(&cache_key) {
@@ -424,6 +436,7 @@ fn materialize_exec_invocation(
                 args: args.clone(),
             },
             outputs: output_roots,
+            create_dirs,
         },
     );
     let cacheable = cacheable_from_observed(&observed)?;
@@ -609,6 +622,7 @@ fn exec_invocation_key(
     program_fingerprint: String,
     args: Vec<String>,
     output_roots: Vec<String>,
+    create_dirs: Vec<String>,
     invocation: &ExecInvocationMeta,
 ) -> ExecInvocationCacheKey {
     let observer = match &invocation.observer {
@@ -623,6 +637,7 @@ fn exec_invocation_key(
         declared_tool_fingerprint: tool.declared_fingerprint.clone(),
         args,
         output_roots,
+        create_dirs,
         observer,
     }
 }

@@ -372,13 +372,27 @@ Latest focused verification:
   155 run, 155 passed, 12 skipped after deleting the remaining cache-dir API and
   `vx-runtime`'s `vx-cache-index` dependency.
 - `cargo nextest run -p vx-daemon --no-fail-fast`: 5/5 passed, 1 skipped.
+- `cargo check -p vx-exec-protocol -p vx-services -p vx-runtime -p vx-runner -p vx-daemon -p vx`:
+  passed after adding `create_dirs` to the observe/runner payload.
+- `cargo nextest list -p vx-runtime -E 'binary(exec_create_dirs) | test(exec_invocation_metadata_carries_writable_roots_and_create_dirs)'`:
+  selected `vx-runtime analyze::tests::exec_invocation_metadata_carries_writable_roots_and_create_dirs`
+  and `vx-runtime::exec_create_dirs demanded_exec_forwards_create_dirs_to_observe_request`.
+- `cargo nextest run -p vx-runtime -E 'binary(exec_create_dirs) | test(exec_invocation_metadata_carries_writable_roots_and_create_dirs)' --no-fail-fast`:
+  2/2 passed.
+- `cargo nextest run -p vx-exec-protocol -p vx-services -p vx-runtime -p vx-runner -p vx-daemon -p vx --no-fail-fast`:
+  194/194 passed, 16 skipped.
 - `vx-runner::tests::strand_observe_reaches_runner_backed_service` drives a
   `vx-runtime` strand against a runner-backed `Observe` service and reaches the
   explicit no-CAS-VFS poison without importing `vx-runner` into `vx-runtime`.
-- `vx-runtime::analyze::tests::exec_invocation_metadata_carries_writable_roots`
-  proves `writable: ["out"]` is recorded as graph exec metadata. Graph exec
-  materialization sends those roots in `ObserveRequest.outputs`, includes them in
-  the exec cache key, and `vx-runner` forwards them as `ExecRequest.outputs`.
+- `vx-runtime::analyze::tests::exec_invocation_metadata_carries_writable_roots_and_create_dirs`
+  proves `writable: ["out"]` and `create_dirs: ["out/obj"]` are recorded as
+  graph exec metadata. Graph exec materialization sends those roots in
+  `ObserveRequest.outputs` / `ObserveRequest.create_dirs`, includes them in the
+  exec cache key, and `vx-runner` forwards them as `ExecRequest.outputs` /
+  `ExecRequest.create_dirs`.
+- `vx-runtime::exec_create_dirs::demanded_exec_forwards_create_dirs_to_observe_request`
+  compiles a real `.vx` backtick invocation with `create_dirs` and proves the
+  demanded graph exec boundary forwards it to the registered Observe client.
 - `vx-runner` implements the runtime `Observe` service and routes it through
   `RunnerAcceptor`; `vx-daemon` advertises and routes `"Observe"` to its hosted
   `RunnerService` when a runner is configured. Direct observe-on-strands coverage

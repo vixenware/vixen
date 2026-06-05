@@ -93,6 +93,7 @@ async fn exec_runs_against_the_vfs_and_flushes_the_write_set() {
             env: Vec::new(),
             mounts: Vec::new(),
             outputs: vec!["out".to_string()],
+            create_dirs: Vec::new(),
         })
         .await
         .expect("runner.exec RPC");
