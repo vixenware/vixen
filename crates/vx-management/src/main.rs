@@ -9,7 +9,7 @@
 //!   capability immediately — e.g. `sudo vixen-management mount` to bring up
 //!   the VixenFS volume before the launchd plumbing is installed.
 
-use eyre::{Result, WrapErr, bail};
+use eyre::{Result, bail};
 use tracing_subscriber::EnvFilter;
 use tracing_subscriber::layer::SubscriberExt;
 use tracing_subscriber::util::SubscriberInitExt;
@@ -73,7 +73,6 @@ fn init_tracing() {
 fn run_launchd() -> Result<()> {
     queue::ensure_queues()?;
     let mut fired_any = false;
-    let mut failure = None;
     for button in Button::ALL {
         if !queue::is_fired(button) {
             continue;
@@ -89,17 +88,11 @@ fn run_launchd() -> Result<()> {
             Ok(()) => tracing::info!(button = ?button, "done"),
             Err(e) => {
                 tracing::error!(button = ?button, "failed: {e:#}");
-                if failure.is_none() {
-                    failure = Some(e);
-                }
             }
         }
     }
     if !fired_any {
         tracing::info!("launched with no fired queue (RunAtLoad perm-repair only)");
-    }
-    if let Some(err) = failure {
-        return Err(err).wrap_err("one or more management actions failed");
     }
     Ok(())
 }

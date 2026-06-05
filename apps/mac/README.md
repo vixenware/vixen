@@ -154,7 +154,10 @@ The old standalone executable-swap experiment has been retired. `install-rust-fs
 
 ### What actually registers the extension
 
-- `Vixen.app` calls `pluginkit -a <appex-path>` on launch from [VixenApp.swift](xcode/Vixen/VixenApp.swift).
+- The installed `Vixen.app` and its `management` CLI entrypoint repair registration
+  toward `/Applications/Vixen.app`: unregister stale `eu.bearcove.vixenfs`
+  appex paths, register the installed appex, then run `lsregister` on the app
+  bundle.
 - Our explicit reload helper in [reload-vixen-fs-extension.sh](scripts/reload-vixen-fs-extension.sh) does:
   - `pluginkit -r <appex-path>`
   - `pluginkit -a <appex-path>`

@@ -1,6 +1,7 @@
 import AppKit
 import Darwin
 @preconcurrency import FSKit
+import os
 import ServiceManagement
 import Sparkle
 import SwiftUI
@@ -10,6 +11,7 @@ enum VixenMain {
     static func main() {
         let arguments = Array(CommandLine.arguments.dropFirst())
         if arguments.first == "management" {
+            ExtensionRegistration.repairInstalledAppIfNeeded()
             Darwin.exit(ManagementCommand.run(Array(arguments.dropFirst())))
         }
         VixenApp.main()
@@ -20,7 +22,7 @@ struct VixenApp: App {
     private let updaterController = SparkleBootstrap.makeUpdaterController()
 
     init() {
-        registerExtension()
+        ExtensionRegistration.repairInstalledAppIfNeededAsync()
     }
 
     var body: some Scene {
@@ -38,8 +40,131 @@ struct VixenApp: App {
         }
     }
 
-    private func registerExtension() {
-        // Happens automatically on app launch?
+}
+
+private enum ExtensionRegistration {
+    private static let log = Logger(
+        subsystem: "eu.bearcove.vixen",
+        category: "ExtensionRegistration"
+    )
+    private static let bundleIdentifier = "eu.bearcove.vixenfs"
+    private static let installedAppPath = "/Applications/Vixen.app"
+    private static let pluginkitPath = "/usr/bin/pluginkit"
+    private static let lsregisterPath =
+        "/System/Library/Frameworks/CoreServices.framework/Versions/Current/Frameworks/LaunchServices.framework/Versions/Current/Support/lsregister"
+
+    static func repairInstalledAppIfNeededAsync() {
+        DispatchQueue.global(qos: .utility).async {
+            repairInstalledAppIfNeeded()
+        }
+    }
+
+    static func repairInstalledAppIfNeeded() {
+        let appURL = Bundle.main.bundleURL.standardizedFileURL
+        guard appURL.path == installedAppPath else { return }
+        repair(appURL: appURL)
+    }
+
+    private static func repair(appURL: URL) {
+        guard let extensionURL = bundledExtensionURL(in: appURL) else {
+            log.error("bundled VixenFS extension not found in \(appURL.path, privacy: .public)")
+            return
+        }
+
+        let desiredPath = extensionURL.standardizedFileURL.path
+        let registeredPaths = registeredExtensionPaths()
+        let stalePaths = registeredPaths.filter { normalized($0) != desiredPath }
+        let hasDesiredPath = registeredPaths.contains { normalized($0) == desiredPath }
+        guard !stalePaths.isEmpty || !hasDesiredPath else { return }
+
+        for path in stalePaths {
+            let result = run(pluginkitPath, ["-r", path])
+            if result.status != 0 {
+                log.warning(
+                    "failed to unregister stale VixenFS extension at \(path, privacy: .public): \(result.stderr, privacy: .public)"
+                )
+            }
+        }
+
+        let addResult = run(pluginkitPath, ["-a", desiredPath])
+        if addResult.status != 0 {
+            log.warning(
+                "failed to register VixenFS extension at \(desiredPath, privacy: .public): \(addResult.stderr, privacy: .public)"
+            )
+        }
+
+        if FileManager.default.isExecutableFile(atPath: lsregisterPath) {
+            let lsResult = run(lsregisterPath, ["-f", "-R", "-trusted", appURL.path])
+            if lsResult.status != 0 {
+                log.warning(
+                    "failed to register Vixen.app with LaunchServices: \(lsResult.stderr, privacy: .public)"
+                )
+            }
+        }
+    }
+
+    private static func bundledExtensionURL(in appURL: URL) -> URL? {
+        for directory in ["Extensions", "PlugIns"] {
+            let url = appURL
+                .appendingPathComponent("Contents", isDirectory: true)
+                .appendingPathComponent(directory, isDirectory: true)
+                .appendingPathComponent("VixenFS.appex", isDirectory: true)
+            if FileManager.default.fileExists(atPath: url.path) {
+                return url
+            }
+        }
+        return nil
+    }
+
+    private static func registeredExtensionPaths() -> [String] {
+        let result = run(pluginkitPath, ["-mAvvv", "-i", bundleIdentifier])
+        guard result.status == 0 else {
+            log.warning("failed to query VixenFS registrations: \(result.stderr, privacy: .public)")
+            return []
+        }
+
+        var paths = [String]()
+        var seen = Set<String>()
+        for rawLine in result.stdout.split(whereSeparator: \.isNewline) {
+            let line = rawLine.trimmingCharacters(in: .whitespaces)
+            guard line.hasPrefix("Path = ") else { continue }
+            let path = String(line.dropFirst("Path = ".count))
+            let key = normalized(path)
+            if seen.insert(key).inserted {
+                paths.append(path)
+            }
+        }
+        return paths
+    }
+
+    private static func normalized(_ path: String) -> String {
+        URL(fileURLWithPath: path).standardizedFileURL.path
+    }
+
+    private static func run(_ executable: String, _ arguments: [String]) -> (
+        status: Int32, stdout: String, stderr: String
+    ) {
+        let process = Process()
+        process.executableURL = URL(fileURLWithPath: executable)
+        process.arguments = arguments
+
+        let stdout = Pipe()
+        let stderr = Pipe()
+        process.standardOutput = stdout
+        process.standardError = stderr
+
+        do {
+            try process.run()
+        } catch {
+            return (127, "", error.localizedDescription)
+        }
+
+        process.waitUntilExit()
+        return (
+            process.terminationStatus,
+            String(data: stdout.fileHandleForReading.readDataToEndOfFile(), encoding: .utf8) ?? "",
+            String(data: stderr.fileHandleForReading.readDataToEndOfFile(), encoding: .utf8) ?? ""
+        )
     }
 }
 
