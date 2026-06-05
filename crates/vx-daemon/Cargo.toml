@@ -39,5 +39,8 @@ vx-vfsd = { path = "../vx-vfsd" }
 # (the eager runtime_eval is gone). The sole evaluator entry point.
 vx-runtime = { path = "../vx-runtime" }
 
+[dev-dependencies]
+tempfile = { workspace = true }
+
 [lints]
 workspace = true

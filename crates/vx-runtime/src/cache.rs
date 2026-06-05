@@ -1,6 +1,8 @@
 use std::cell::RefCell;
 use std::collections::HashMap;
+use std::future::Future;
 use std::path::PathBuf;
+use std::pin::Pin;
 use std::rc::Rc;
 
 use vx_cache_index::LocalCacheIndex;
@@ -8,7 +10,7 @@ use vx_exec_protocol::WireValue;
 use vx_runtime_core::NodeOutput;
 use vx_runtime_driver::{CallCache, CallCacheKey};
 
-use crate::strand::HandleId;
+use crate::strand::{CacheClientId, HandleId};
 
 const EXEC_VALUE_NAMESPACE: &str = "exec-value-v1";
 const HOST_EXEC_NAMESPACE: &str = "host-exec-v1";
@@ -121,6 +123,44 @@ impl RuntimeCacheRecordKey {
 pub trait RuntimeCacheBackend: Send {
     fn get_record(&self, key: &RuntimeCacheRecordKey) -> Option<String>;
     fn put_record(&self, key: &RuntimeCacheRecordKey, record: &str);
+}
+
+pub type RuntimeCacheFuture<'a, T> = Pin<Box<dyn Future<Output = T> + 'a>>;
+
+pub trait RuntimeCacheService: Send + Sync + 'static {
+    fn get_record<'a>(
+        &'a self,
+        key: RuntimeCacheRecordKey,
+    ) -> RuntimeCacheFuture<'a, Result<Option<String>, String>>;
+
+    fn put_record<'a>(
+        &'a self,
+        key: RuntimeCacheRecordKey,
+        record: String,
+    ) -> RuntimeCacheFuture<'a, Result<(), String>>;
+}
+
+#[derive(Debug, Clone, Copy)]
+pub struct StrandCacheBackend {
+    client: CacheClientId,
+}
+
+impl StrandCacheBackend {
+    pub fn new(client: CacheClientId) -> Self {
+        Self { client }
+    }
+}
+
+impl RuntimeCacheBackend for StrandCacheBackend {
+    fn get_record(&self, key: &RuntimeCacheRecordKey) -> Option<String> {
+        crate::strand::dispatch_cache_get(self.client, key.clone())
+            .ok()
+            .flatten()
+    }
+
+    fn put_record(&self, key: &RuntimeCacheRecordKey, record: &str) {
+        let _ = crate::strand::dispatch_cache_put(self.client, key.clone(), record.to_string());
+    }
 }
 
 struct LocalIndexCacheLayer {

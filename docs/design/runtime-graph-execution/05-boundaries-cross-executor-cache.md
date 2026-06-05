@@ -396,13 +396,11 @@ Current slice:
 - `vx-services::CacheIndex` is the control-plane index protocol:
   `(namespace, pre-run input-key digest) -> candidate cache-record NodeHash(es)`.
   `vx-daemon` currently hosts an in-process implementation when the orchestrator
-  slot is configured. Runtime cache lookup still uses `RuntimeCache`; wiring it
-  through `CacheIndex` is the next cut.
-- `RuntimeCache` now talks to a `PersistentCacheLayer` adapter instead of owning
-  an `Option<LocalCacheIndex>` directly. The only current persistent-layer
-  implementation is the explicit local file index; the adapter shape exists so a
-  daemon `CacheIndex` + `Store` implementation can replace it without changing
-  `graph_exec`.
+  slot is configured.
+- `RuntimeCache` now talks to a `RuntimeCacheBackend` adapter instead of owning
+  an `Option<LocalCacheIndex>` directly. The explicit local file index and
+  strand-backed service path are both adapters; `graph_exec` does not know which
+  one is installed.
 - `RuntimeCache` derives the pre-run input-key digest and encodes/decodes the
   runtime record body before touching the persistent layer. The layer sees only
   `(namespace, input_key_digest)` plus an opaque record string. The temporary
@@ -413,12 +411,18 @@ Current slice:
   `eval_body_with_cache_backend` and `eval_body_with_exec_and_cache_backend`
   let a caller install a backend without importing daemon service clients into
   the runtime.
-- `vx-runtime` is not the owner of daemon cache service clients. A future
-  service-backed persistent layer must be installed from the daemon/orchestrator
-  side, or mediated by a typed strand park reason if it crosses Vox while graph
-  execution is running. Direct `StoreClient`/`CacheIndexClient` imports in
-  `vx-runtime` are a boundary violation.
-- This is not the final CAS-backed L2 and it does not record read-set witnesses.
+- `vx-runtime::cache::RuntimeCacheService` is the runtime-owned async cache
+  service trait. `StrandCacheBackend` implements the sync backend hook by
+  parking on `strand::ParkReason::AwaitingCache`, so the scheduler boss drives
+  cache lookup/write futures instead of a worker blocking on RPC.
+- `vx-daemon::CacheIndexRuntimeCacheService` implements that async service with
+  `CacheIndexClient` plus `StoreClient`, storing opaque runtime record JSON as
+  `vx-store` `CacheRecord` nodes and indexing the resulting `NodeHash`.
+- `vx-runtime` is not the owner of daemon cache service clients. Direct
+  `StoreClient`/`CacheIndexClient` imports in `vx-runtime` are a boundary
+  violation.
+- This is still not the final cache model: record bodies are opaque runtime JSON
+  and read-set witnesses are not recorded yet.
 
 Final cache/store shape:
 

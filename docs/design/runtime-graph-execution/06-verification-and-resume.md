@@ -48,11 +48,11 @@ source-expression tree-walker plus `dispatch.rs` scalar planner are deleted.
    cache keys, but must not directly name `LocalCacheIndex`, `vx_cache_index`,
    local-index namespace strings, or private L1 cache map fields.
    `vx-services::CasNode::CacheRecord` and `vx-services::CacheIndex` are the
-   new store/index seam; `vx-daemon` hosts the index when the orchestrator slot
-   is configured, but runtime cache lookup is not wired through it yet.
-   `RuntimeCache` has a `PersistentCacheLayer` adapter slot; the current adapter
-   is the temporary local file index, and the next cut should add a daemon
-   `CacheIndex` + `Store` adapter rather than touching `graph_exec`.
+   store/index seam; `vx-daemon` hosts the index when the orchestrator slot is
+   configured.
+   `RuntimeCache` has a `RuntimeCacheBackend` adapter slot; current adapters
+   include the temporary local file index and the strand-backed
+   daemon/orchestrator service path.
    The adapter is now addressed by `(namespace, pre_run_input_key_digest)`;
    `RuntimeCache` derives the digest and encodes/decodes records before calling
    it, and `LocalCacheIndex` exposes digest-addressed raw records for the
@@ -60,6 +60,12 @@ source-expression tree-walker plus `dispatch.rs` scalar planner are deleted.
    `vx-runtime::cache::RuntimeCacheBackend` is the public caller-owned backend
    hook, installed through `eval_body_with_cache_backend` or
    `eval_body_with_exec_and_cache_backend`.
+   `vx-runtime::cache::RuntimeCacheService` plus
+   `vx-runtime::cache::StrandCacheBackend` are the async-safe service path:
+   runtime cache lookup/write parks as `AwaitingCache`, and the strand boss
+   drives the daemon/orchestrator service future.
+   `vx-daemon::CacheIndexRuntimeCacheService` stores opaque runtime records as
+   `vx-store` `CacheRecord` nodes and indexes them through `CacheIndex`.
    `vx-runtime` must not import `vx-services`, `StoreClient`, `CacheIndexClient`,
    or CAS cache-record service types to do that wiring; use a daemon/orchestrator
    adapter or a typed strand park path for async cache RPC.
@@ -210,6 +216,10 @@ Latest focused verification:
   unresolved arguments or captures are not demanded to build a call memo key.
 - `cargo nextest run -p vx-runtime -E 'test(function_output_cache_backend) | test(function_output_l2_reuses_scalar_result)' --no-fail-fast`:
   2/2 passed.
+- `cargo nextest list -p vx-daemon -E 'test(cache_index_store_backend)'`:
+  selected `runtime_cache::tests::cache_index_store_backend_reuses_function_output_through_strand_parking`.
+- `cargo nextest run -p vx-daemon -E 'test(cache_index_store_backend)' --no-fail-fast`:
+  1/1 passed.
 - `cargo nextest run -p vx-runtime --no-fail-fast`: 145 run, 145 passed,
   0 failed, 0 skipped.
 - `cargo nextest run -p vx-runner --no-fail-fast`: 6 run, 6 passed, 12 skipped
@@ -255,8 +265,8 @@ Latest focused verification:
   3/3 passed.
 - `cargo nextest run -p vx-cache-index --no-fail-fast`: 2/2 passed.
 - `cargo nextest run -p vx-cache-index -p vx-exec-protocol -p vx-services -p vx-store -p vx-runtime-graph -p vx-runtime-core -p vx-runtime-driver -p vx-runtime -p vx-runner -p vx-daemon --no-fail-fast`:
-  184 run, 184 passed, 12 skipped.
-- `cargo nextest run -p vx-daemon --no-fail-fast`: 4/4 passed.
+  185 run, 185 passed, 12 skipped.
+- `cargo nextest run -p vx-daemon --no-fail-fast`: 5/5 passed.
 - `vx-runner::tests::strand_observe_reaches_runner_backed_service` drives a
   `vx-runtime` strand against a runner-backed `Observe` service and reaches the
   explicit no-CAS-VFS poison without importing `vx-runner` into `vx-runtime`.

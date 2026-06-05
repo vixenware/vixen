@@ -44,6 +44,7 @@ use futures_util::stream::{FuturesUnordered, StreamExt};
 use tokio::sync::mpsc::{UnboundedReceiver, UnboundedSender};
 use vx_exec_protocol::{ObserveClient, ObserveRequest, Observed, WireValue};
 
+use crate::cache::{RuntimeCacheRecordKey, RuntimeCacheService};
 use crate::remote::{Part, PartKey, ProducingClient, RemoteHandle};
 
 /// What a strand yields when it parks: the typed reason **plus** a backtrace
@@ -90,6 +91,9 @@ pub enum ParkReason {
     /// Blocked on an `observe` RPC the boss is driving over vox — the orchestrator
     /// shipped an observer to an executor and awaits its result.
     AwaitingObserve { req: ObserveReqId },
+    /// Blocked on a persistent-cache request the boss is driving through the
+    /// orchestrator-owned cache service.
+    AwaitingCache { req: CacheReqId },
 }
 
 /// A firehose event — the scheduler's history. Tests assert over the stream; a
@@ -181,6 +185,9 @@ struct Registry {
     /// In-flight `observe` demands, keyed by a monotonically-allocated id.
     observes: HashMap<ObserveReqId, ObserveSlot>,
     next_observe: ObserveReqId,
+    /// In-flight persistent cache demands, keyed by a monotonically-allocated id.
+    cache: HashMap<CacheReqId, CacheSlot>,
+    next_cache: CacheReqId,
 }
 
 enum PartSlot {
@@ -200,6 +207,10 @@ type ObserveReqId = u32;
 /// [`dispatch_observe`]; executor *selection* among several is later (§4 routing).
 pub type ObserveClientId = u32;
 
+/// Identifies a registered persistent-cache service. eval holds only this id; the
+/// boss owns the service object and drives its async lookup/write futures.
+pub type CacheClientId = u32;
+
 /// The rendezvous slot for one `observe` demand: the request (read by the boss to
 /// drive the call) until it resolves to the executor's [`Observed`] result. The
 /// request is boxed — it carries the observer's whole bundle, dwarfing the resolved
@@ -211,6 +222,46 @@ enum ObserveSlot {
         signal: Signal,
     },
     Resolved(Arc<ObserveOutcome>),
+}
+
+/// Identifies one in-flight persistent cache request. Cache requests are
+/// one-shot: cache identity lives in the request key and the persistent backend,
+/// not in scheduler deduplication.
+type CacheReqId = u32;
+
+#[derive(Clone)]
+enum CacheRequest {
+    Get {
+        client: CacheClientId,
+        key: RuntimeCacheRecordKey,
+    },
+    Put {
+        client: CacheClientId,
+        key: RuntimeCacheRecordKey,
+        record: String,
+    },
+}
+
+impl CacheRequest {
+    fn client(&self) -> CacheClientId {
+        match self {
+            CacheRequest::Get { client, .. } | CacheRequest::Put { client, .. } => *client,
+        }
+    }
+}
+
+enum CacheSlot {
+    Pending {
+        request: Box<CacheRequest>,
+        signal: Signal,
+    },
+    Resolved(Arc<CacheOutcome>),
+}
+
+#[derive(Debug)]
+enum CacheOutcome {
+    Get(Result<Option<String>, String>),
+    Put(Result<(), String>),
 }
 
 /// What an `observe` resolves to **after the boss has crossed any handles** — what
@@ -251,6 +302,9 @@ struct Inner {
     /// Live observe clients (vox clients to executors), indexed by [`ObserveClientId`].
     /// Boss-only, same reasoning as `handles`.
     observe_clients: Vec<Arc<ObserveClient>>,
+    /// Live persistent cache services, indexed by [`CacheClientId`]. Boss-only:
+    /// workers park and the boss drives the async service futures.
+    cache_clients: Vec<Arc<dyn RuntimeCacheService>>,
 }
 
 /// A boss→worker command on a worker's private channel. Carries only `Send` data —
@@ -367,6 +421,7 @@ impl Scheduler {
             registry,
             handles: Vec::new(),
             observe_clients: Vec::new(),
+            cache_clients: Vec::new(),
         }));
         Scheduler(
             inner,
@@ -436,6 +491,16 @@ impl Scheduler {
         id
     }
 
+    /// Register an orchestrator-owned persistent-cache service, returning the id
+    /// used by [`crate::cache::StrandCacheBackend`]. The worker strand parks while
+    /// the boss drives the service's async lookup/write future.
+    pub fn register_cache_service(&self, service: impl RuntimeCacheService) -> CacheClientId {
+        let mut inner = self.0.borrow_mut();
+        let id = inner.cache_clients.len() as CacheClientId;
+        inner.cache_clients.push(Arc::new(service));
+        id
+    }
+
     /// Run a future on the boss's runtime — for async setup (e.g. establishing a vox
     /// client) that must share the runtime that later drives it. Not callable while
     /// `run()` is on the stack (it would nest `block_on`).
@@ -497,6 +562,9 @@ impl Scheduler {
         // In-flight observe RPCs, driven on the boss thread (one-shot per `exec`).
         let mut observe_drives = FuturesUnordered::new();
         let mut observe_driving: HashSet<ObserveReqId> = HashSet::new();
+        // In-flight persistent-cache requests, driven on the boss thread.
+        let mut cache_drives = FuturesUnordered::new();
+        let mut cache_driving: HashSet<CacheReqId> = HashSet::new();
         loop {
             // Dispatch every admittable strand (permit-gated) to its worker. Dispatch
             // *all* of them before blocking, so peers that must run at the same time
@@ -511,8 +579,12 @@ impl Scheduler {
                     }
                 }
             }
-            // Quiescent when nothing is running and no remote force or observe is in flight.
-            if self.0.borrow().in_flight == 0 && drives.is_empty() && observe_drives.is_empty() {
+            // Quiescent when nothing is running and no async boundary is in flight.
+            if self.0.borrow().in_flight == 0
+                && drives.is_empty()
+                && observe_drives.is_empty()
+                && cache_drives.is_empty()
+            {
                 break;
             }
             tokio::select! {
@@ -548,6 +620,24 @@ impl Scheduler {
                         };
                         let client = self.0.borrow().observe_clients[client_id as usize].clone();
                         observe_drives.push(drive_observe(client, *req, request));
+                    }
+                    if let WorkerMsg::Parked {
+                        reason: ParkReason::AwaitingCache { req },
+                        ..
+                    } = &msg
+                        && cache_driving.insert(*req)
+                    {
+                        let request = {
+                            let reg = registry.lock().unwrap();
+                            match reg.cache.get(req) {
+                                Some(CacheSlot::Pending { request, .. }) => {
+                                    request.as_ref().clone()
+                                }
+                                _ => unreachable!("a cache park without a pending slot"),
+                            }
+                        };
+                        let client = self.0.borrow().cache_clients[request.client() as usize].clone();
+                        cache_drives.push(drive_cache(client, *req, request));
                     }
                     self.complete(msg);
                 }
@@ -599,6 +689,24 @@ impl Scheduler {
                         self.fire(&sig);
                     }
                     observe_driving.remove(&req);
+                }
+                // A persistent-cache request landed: resolve its slot and wake the strand.
+                Some((req, outcome)) = cache_drives.next(), if !cache_drives.is_empty() => {
+                    let sig = {
+                        let mut reg = registry.lock().unwrap();
+                        match reg.cache.get(&req) {
+                            Some(CacheSlot::Pending { signal, .. }) => {
+                                let sig = signal.clone();
+                                reg.cache.insert(req, CacheSlot::Resolved(Arc::new(outcome)));
+                                Some(sig)
+                            }
+                            _ => None,
+                        }
+                    };
+                    if let Some(sig) = sig {
+                        self.fire(&sig);
+                    }
+                    cache_driving.remove(&req);
                 }
             }
         }
@@ -766,6 +874,20 @@ async fn drive_observe(
         None
     };
     (req, observed, producing)
+}
+
+async fn drive_cache(
+    client: Arc<dyn RuntimeCacheService>,
+    req: CacheReqId,
+    request: CacheRequest,
+) -> (CacheReqId, CacheOutcome) {
+    let outcome = match request {
+        CacheRequest::Get { key, .. } => CacheOutcome::Get(client.get_record(key).await),
+        CacheRequest::Put { key, record, .. } => {
+            CacheOutcome::Put(client.put_record(key, record).await)
+        }
+    };
+    (req, outcome)
 }
 
 /// The least-loaded worker (fewest outstanding commands); ties go to the lowest
@@ -986,6 +1108,62 @@ pub fn dispatch_observe(client: ObserveClientId, request: ObserveRequest) -> Arc
         }
         if register_waiter(&signal) {
             park(ParkReason::AwaitingObserve { req });
+        }
+    }
+}
+
+pub fn dispatch_cache_get(
+    client: CacheClientId,
+    key: RuntimeCacheRecordKey,
+) -> Result<Option<String>, String> {
+    match &*dispatch_cache(CacheRequest::Get { client, key }) {
+        CacheOutcome::Get(result) => result.clone(),
+        CacheOutcome::Put(_) => unreachable!("cache get resolved as a put"),
+    }
+}
+
+pub fn dispatch_cache_put(
+    client: CacheClientId,
+    key: RuntimeCacheRecordKey,
+    record: String,
+) -> Result<(), String> {
+    match &*dispatch_cache(CacheRequest::Put {
+        client,
+        key,
+        record,
+    }) {
+        CacheOutcome::Put(result) => result.clone(),
+        CacheOutcome::Get(_) => unreachable!("cache put resolved as a get"),
+    }
+}
+
+fn dispatch_cache(request: CacheRequest) -> Arc<CacheOutcome> {
+    let registry = REGISTRY
+        .with(|r| r.borrow().clone())
+        .expect("dispatch_cache outside a worker");
+    let (req, signal) = {
+        let mut reg = registry.lock().unwrap();
+        let req = reg.next_cache;
+        reg.next_cache += 1;
+        let signal = Signal::new();
+        reg.cache.insert(
+            req,
+            CacheSlot::Pending {
+                request: Box::new(request),
+                signal: signal.clone(),
+            },
+        );
+        (req, signal)
+    };
+    loop {
+        {
+            let reg = registry.lock().unwrap();
+            if let Some(CacheSlot::Resolved(outcome)) = reg.cache.get(&req) {
+                return Arc::clone(outcome);
+            }
+        }
+        if register_waiter(&signal) {
+            park(ParkReason::AwaitingCache { req });
         }
     }
 }

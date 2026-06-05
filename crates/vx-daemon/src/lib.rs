@@ -18,9 +18,11 @@ use vx_store::StoreService;
 use vx_vfsd::{VfsdDispatcher, VfsdService};
 
 mod cache_index;
+mod runtime_cache;
 mod service;
 mod test_runner;
 pub use cache_index::CacheIndexService;
+pub use runtime_cache::CacheIndexRuntimeCacheService;
 pub use service::DaemonService;
 pub use test_runner::TestRunnerService;
 

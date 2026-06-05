@@ -359,12 +359,9 @@ Current checkpoint:
   `(namespace, pre-run input-key digest)` to candidate cache-record `NodeHash`
   values. `vx-daemon` hosts an in-process `CacheIndex` service when the
   orchestrator slot is configured.
-- `RuntimeCache` is not yet wired through `CacheIndex`; the new service/store
-  seam exists so the next cut can replace the local owner without inventing a
-  runtime-local fallback.
-- `RuntimeCache` now owns a `PersistentCacheLayer` adapter slot rather than a
-  direct `Option<LocalCacheIndex>` field. The temporary local file index is one
-  adapter; a daemon `CacheIndex` + `Store` adapter is the next cut.
+- `RuntimeCache` now owns a `RuntimeCacheBackend` adapter slot rather than a
+  direct `Option<LocalCacheIndex>` field. The temporary local file index and
+  strand-backed service path are both adapters.
 - `RuntimeCache` now derives the pre-run input-key digest and serializes the
   cache record before calling that adapter. The adapter is addressed by
   `(namespace, input_key_digest)` and stores opaque record text; the temporary
@@ -372,10 +369,18 @@ Current checkpoint:
 - `RuntimeCacheBackend` is the public caller-owned backend hook. The public
   `eval_body_with_cache_backend` and `eval_body_with_exec_and_cache_backend`
   entry points install it while keeping `graph_exec` service-blind.
-- That next adapter must not be implemented by importing daemon cache service
-  clients into `vx-runtime`. `vx-runtime` remains the graph/front-end runtime
-  library; async cache RPC belongs behind a daemon/orchestrator adapter or a
-  typed strand park path, not in `graph_exec`.
+- `RuntimeCacheService` is the runtime-owned async cache service trait, and
+  `StrandCacheBackend` bridges it into the sync backend hook by parking on
+  `ParkReason::AwaitingCache`. The strand boss drives service futures just like
+  it drives observe and remote-part futures.
+- `vx-daemon::CacheIndexRuntimeCacheService` implements the service with
+  `CacheIndexClient` plus `StoreClient`, storing opaque runtime records as
+  `vx-store` `CacheRecord` nodes and indexing the record hash by the pre-run
+  input digest.
+- This adapter must not be implemented by importing daemon cache service clients
+  into `vx-runtime`. `vx-runtime` remains the graph/front-end runtime library;
+  async cache RPC belongs behind a daemon/orchestrator adapter or a typed strand
+  park path, not in `graph_exec`.
 - `RuntimeBoundaries::default()` is cacheless. The old ambient
   `VX_RUNTIME_L2_DIR` lookup no longer participates in default graph execution.
 - `eval_body_with_cache_dir`, `eval_body_with_exec_and_cache_dir`, and internal
@@ -438,6 +443,10 @@ Current checkpoint:
 - `cargo nextest run -p vx-cache-index --no-fail-fast`: 2/2 passed.
 - `cargo nextest run -p vx-runtime -E 'test(function_output_cache_backend) | test(function_output_l2_reuses_scalar_result)' --no-fail-fast`:
   2/2 passed.
+- `cargo nextest list -p vx-daemon -E 'test(cache_index_store_backend)'`
+  selected `runtime_cache::tests::cache_index_store_backend_reuses_function_output_through_strand_parking`.
+- `cargo nextest run -p vx-daemon -E 'test(cache_index_store_backend)' --no-fail-fast`:
+  1/1 passed.
 - `cargo nextest run -p vx-runtime --no-fail-fast`: 145/145 passed.
 - `cargo nextest list -p vx-runner --run-ignored all` selected
   `output_tree::tests::reads_declared_output_root_from_cas`,
@@ -495,8 +504,8 @@ Current checkpoint:
 - `cargo nextest run -p vx-runner --no-fail-fast`: 6/6 passed, 12 skipped
   (the live-VFS proof targets).
 - `cargo nextest run -p vx-cache-index -p vx-exec-protocol -p vx-services -p vx-store -p vx-runtime-graph -p vx-runtime-core -p vx-runtime-driver -p vx-runtime -p vx-runner -p vx-daemon --no-fail-fast`:
-  184/184 passed, 12 skipped.
-- `cargo nextest run -p vx-daemon --no-fail-fast`: 4/4 passed.
+  185/185 passed, 12 skipped.
+- `cargo nextest run -p vx-daemon --no-fail-fast`: 5/5 passed.
 - The forbidden-symbol scans over `vx-runtime-core`, `vx-runtime-driver`, the
   deleted tree-walker affordance scan over `vx-runtime/src`, and the
   runtime-owned exec/observe protocol and cache file-index scans over
@@ -517,7 +526,9 @@ Finish M6:
    the result. If the host cannot supply CAS-VFS, the proof should fail at the
    explicit VFS boot/runner-backed boundary, never by switching to scratch
    execution.
-2. Wire `RuntimeCache` through a `CacheIndex` client and `Store` client so
-   persistent lookup/write goes through daemon/orchestrator cache-index state and
-   `vx-store` `CacheRecord` bodies. `vx-cache-index` is still only the temporary
-   local compatibility substrate.
+2. On that same live-CAS-VFS host, port the ignored runner-backed exec L2 proof
+   from `eval_body_with_exec_and_cache_dir` to
+   `eval_body_with_exec_and_cache_backend` plus `StrandCacheBackend` and
+   `CacheIndexRuntimeCacheService`, then retire the explicit cache-dir path from
+   production-shaped exec cache proofs. `vx-cache-index` remains only the
+   temporary local compatibility substrate.
