@@ -50,6 +50,9 @@ source-expression tree-walker plus `dispatch.rs` scalar planner are deleted.
    `vx-services::CasNode::CacheRecord` and `vx-services::CacheIndex` are the
    new store/index seam; `vx-daemon` hosts the index when the orchestrator slot
    is configured, but runtime cache lookup is not wired through it yet.
+   `RuntimeCache` has a `PersistentCacheLayer` adapter slot; the current adapter
+   is the temporary local file index, and the next cut should add a daemon
+   `CacheIndex` + `Store` adapter rather than touching `graph_exec`.
 7. Commit the known state before switching tasks.
 
 ## Verification layers
@@ -166,9 +169,10 @@ Latest focused verification:
 - `cargo check -p vx-cache-index -p vx-exec-protocol -p vx-services -p vx-store -p vx-runtime-graph -p vx-runtime-core -p vx-runtime-driver -p vx-runtime -p vx-runner -p vx-daemon`
   passes with no old-evaluator dead-code warnings.
 - `cargo nextest run -p vx-runtime -E 'binary(source_blind_guardrails) | binary(exec_on_strands)' --no-fail-fast`:
-  6/6 passed, including cold exec non-demand,
-  `runtime_cache_file_index_stays_out_of_graph_exec`, and
-  `graph_exec_does_not_own_cache_index_details`. The basic `run.ok`
+  7/7 passed, including cold exec non-demand,
+  `runtime_cache_file_index_stays_out_of_graph_exec`,
+  `graph_exec_does_not_own_cache_index_details`, and
+  `runtime_cache_uses_a_persistent_layer_adapter`. The basic `run.ok`
   success/failure value-crossing tests, identical-demanded-backtick L1 reuse,
   writable-root disambiguation, observer-identity disambiguation,
   declared-tool-fingerprint disambiguation, executable-fingerprint
@@ -237,7 +241,7 @@ Latest focused verification:
 - `cargo nextest run -p vx-daemon -p vx-store -E 'test(cache_index) | test(cache_record)' --no-fail-fast`:
   3/3 passed.
 - `cargo nextest run -p vx-cache-index -p vx-exec-protocol -p vx-services -p vx-store -p vx-runtime-graph -p vx-runtime-core -p vx-runtime-driver -p vx-runtime -p vx-runner -p vx-daemon --no-fail-fast`:
-  179 run, 179 passed, 12 skipped.
+  180 run, 180 passed, 12 skipped.
 - `cargo nextest run -p vx-daemon --no-fail-fast`: 4/4 passed.
 - `vx-runner::tests::strand_observe_reaches_runner_backed_service` drives a
   `vx-runtime` strand against a runner-backed `Observe` service and reaches the

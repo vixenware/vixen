@@ -160,6 +160,10 @@ Expected latest structural checkpoint:
   record `NodeHash` values. `vx-daemon` hosts an in-process `CacheIndex` service
   whenever the orchestrator slot is configured. Runtime cache lookup is not yet
   wired through this service.
+- `vx-runtime::cache::RuntimeCache` no longer owns an
+  `Option<LocalCacheIndex>` field. It talks to a narrow persistent-layer adapter;
+  the current adapter is still the temporary explicit local file index, and the
+  next adapter should target daemon `CacheIndex` plus `Store`.
 - `vx-runner` now implements the runtime `Observe` service and routes `"Observe"`
   through `RunnerAcceptor`; `vx-daemon` also advertises and routes `"Observe"` to
   its hosted `RunnerService` when a runner is configured. The implementation
@@ -202,9 +206,10 @@ Latest verified red/green shape:
 - `cargo check -p vx-cache-index -p vx-exec-protocol -p vx-services -p vx-store -p vx-runtime-graph -p vx-runtime-core -p vx-runtime-driver -p vx-runtime -p vx-runner -p vx-daemon`
   passes with no old-evaluator dead-code warnings.
 - `cargo nextest run -p vx-runtime -E 'binary(source_blind_guardrails) | binary(exec_on_strands)' --no-fail-fast`:
-  6/6 passed, including `undemanded_exec_in_tuple_does_not_dispatch`,
+  7/7 passed, including `undemanded_exec_in_tuple_does_not_dispatch`,
   `runtime_cache_file_index_stays_out_of_graph_exec`, and
-  `graph_exec_does_not_own_cache_index_details`. The basic `run.ok`
+  `graph_exec_does_not_own_cache_index_details`, and
+  `runtime_cache_uses_a_persistent_layer_adapter`. The basic `run.ok`
   success/failure value-crossing tests, identical-demanded-backtick L1 reuse,
   writable-root disambiguation, observer-identity disambiguation,
   declared-tool-fingerprint disambiguation, executable-fingerprint
@@ -274,7 +279,7 @@ Latest verified red/green shape:
 - `cargo nextest run -p vx-daemon -p vx-store -E 'test(cache_index) | test(cache_record)' --no-fail-fast`:
   3/3 passed.
 - `cargo nextest run -p vx-cache-index -p vx-exec-protocol -p vx-services -p vx-store -p vx-runtime-graph -p vx-runtime-core -p vx-runtime-driver -p vx-runtime -p vx-runner -p vx-daemon --no-fail-fast`:
-  179 run, 179 passed, 12 skipped.
+  180 run, 180 passed, 12 skipped.
 - `cargo nextest run -p vx-daemon --no-fail-fast`: 4/4 passed.
 - The raw forbidden-symbol scans over `vx-runtime-core`, `vx-runtime-driver`,
   the deleted tree-walker affordance scan over `vx-runtime/src`, and the

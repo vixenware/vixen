@@ -79,6 +79,11 @@ const GRAPH_EXEC_CACHE_INDEX_NEEDLES: &[&str] = &[
     "function-output-v1",
 ];
 
+const RUNTIME_CACHE_DIRECT_LOCAL_INDEX_NEEDLES: &[&str] = &[
+    "local_index: Option<LocalCacheIndex>",
+    "local_index: Some(LocalCacheIndex::new",
+];
+
 #[test]
 fn execution_crates_stay_source_blind() {
     let root = workspace_root();
@@ -165,6 +170,20 @@ fn graph_exec_does_not_own_cache_index_details() {
         GRAPH_EXEC_CACHE_INDEX_NEEDLES,
         "graph_exec must not own L1 maps or temporary cache-index layout",
         "graph_exec-owned cache detail",
+    );
+}
+
+#[test]
+fn runtime_cache_uses_a_persistent_layer_adapter() {
+    let root = workspace_root();
+    let cache_rs = root.join("crates/vx-runtime/src/cache.rs");
+
+    assert_no_forbidden_needles(
+        &root,
+        vec![cache_rs],
+        RUNTIME_CACHE_DIRECT_LOCAL_INDEX_NEEDLES,
+        "RuntimeCache must not directly own the temporary LocalCacheIndex",
+        "direct local-index field",
     );
 }
 

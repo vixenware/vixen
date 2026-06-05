@@ -98,10 +98,57 @@ pub(crate) enum CachedExecOutcome {
     Tree(HandleId),
 }
 
+trait PersistentCacheLayer {
+    fn get_exec_invocation(&self, key: &ExecInvocationCacheKey) -> Option<WireValue>;
+    fn put_exec_invocation(&self, key: &ExecInvocationCacheKey, value: &WireValue);
+    fn get_host_exec(&self, key: &HostExecCacheKey) -> Option<crate::host::HostExec>;
+    fn put_host_exec(&self, key: &HostExecCacheKey, value: &crate::host::HostExec);
+    fn get_function_output(&self, key: &FunctionOutputCacheKey) -> Option<CacheableNodeOutput>;
+    fn put_function_output(&self, key: &FunctionOutputCacheKey, value: &CacheableNodeOutput);
+}
+
+struct LocalIndexCacheLayer {
+    index: LocalCacheIndex,
+}
+
+impl LocalIndexCacheLayer {
+    fn new(cache_dir: PathBuf) -> Self {
+        Self {
+            index: LocalCacheIndex::new(cache_dir),
+        }
+    }
+}
+
+impl PersistentCacheLayer for LocalIndexCacheLayer {
+    fn get_exec_invocation(&self, key: &ExecInvocationCacheKey) -> Option<WireValue> {
+        self.index.read("exec-value-v1", key)
+    }
+
+    fn put_exec_invocation(&self, key: &ExecInvocationCacheKey, value: &WireValue) {
+        self.index.write("exec-value-v1", key, value);
+    }
+
+    fn get_host_exec(&self, key: &HostExecCacheKey) -> Option<crate::host::HostExec> {
+        self.index.read("host-exec-v1", key)
+    }
+
+    fn put_host_exec(&self, key: &HostExecCacheKey, value: &crate::host::HostExec) {
+        self.index.write("host-exec-v1", key, value);
+    }
+
+    fn get_function_output(&self, key: &FunctionOutputCacheKey) -> Option<CacheableNodeOutput> {
+        self.index.read("function-output-v1", key)
+    }
+
+    fn put_function_output(&self, key: &FunctionOutputCacheKey, value: &CacheableNodeOutput) {
+        self.index.write("function-output-v1", key, value);
+    }
+}
+
 pub(crate) struct RuntimeCache {
     host_exec_l1: RefCell<HashMap<HostExecCacheKey, crate::host::HostExec>>,
     exec_invocation_l1: RefCell<HashMap<ExecInvocationCacheKey, CachedExecOutcome>>,
-    local_index: Option<LocalCacheIndex>,
+    persistent: Option<Box<dyn PersistentCacheLayer>>,
 }
 
 impl RuntimeCache {
@@ -109,19 +156,19 @@ impl RuntimeCache {
         Self {
             host_exec_l1: RefCell::new(HashMap::new()),
             exec_invocation_l1: RefCell::new(HashMap::new()),
-            local_index: None,
+            persistent: None,
         }
     }
 
     pub(crate) fn with_local_index_dir(cache_dir: PathBuf) -> Self {
         Self {
-            local_index: Some(LocalCacheIndex::new(cache_dir)),
+            persistent: Some(Box::new(LocalIndexCacheLayer::new(cache_dir))),
             ..Self::new()
         }
     }
 
     pub(crate) fn has_persistent_layer(&self) -> bool {
-        self.local_index.is_some()
+        self.persistent.is_some()
     }
 
     pub(crate) fn function_output_call_cache(self: Rc<Self>) -> FunctionOutputCallCache {
@@ -135,9 +182,10 @@ impl RuntimeCache {
         if let Some(cached) = self.exec_invocation_l1.borrow().get(key).cloned() {
             return Some(cached);
         }
-        let wire = self.local_index.as_ref().and_then(|cache| {
-            cache.read::<ExecInvocationCacheKey, WireValue>("exec-value-v1", key)
-        })?;
+        let wire = self
+            .persistent
+            .as_ref()
+            .and_then(|cache| cache.get_exec_invocation(key))?;
         let cached = CachedExecOutcome::Value(wire);
         self.exec_invocation_l1
             .borrow_mut()
@@ -150,8 +198,8 @@ impl RuntimeCache {
         key: ExecInvocationCacheKey,
         outcome: CachedExecOutcome,
     ) {
-        if let (Some(cache), CachedExecOutcome::Value(wire)) = (&self.local_index, &outcome) {
-            cache.write("exec-value-v1", &key, wire);
+        if let (Some(cache), CachedExecOutcome::Value(wire)) = (&self.persistent, &outcome) {
+            cache.put_exec_invocation(&key, wire);
         }
         self.exec_invocation_l1.borrow_mut().insert(key, outcome);
     }
@@ -160,9 +208,10 @@ impl RuntimeCache {
         if let Some(cached) = self.host_exec_l1.borrow().get(key).cloned() {
             return Some(cached);
         }
-        let cached = self.local_index.as_ref().and_then(|cache| {
-            cache.read::<HostExecCacheKey, crate::host::HostExec>("host-exec-v1", key)
-        })?;
+        let cached = self
+            .persistent
+            .as_ref()
+            .and_then(|cache| cache.get_host_exec(key))?;
         self.host_exec_l1
             .borrow_mut()
             .insert(key.clone(), cached.clone());
@@ -170,22 +219,22 @@ impl RuntimeCache {
     }
 
     pub(crate) fn put_host_exec(&self, key: HostExecCacheKey, value: crate::host::HostExec) {
-        if let Some(cache) = &self.local_index {
-            cache.write("host-exec-v1", &key, &value);
+        if let Some(cache) = &self.persistent {
+            cache.put_host_exec(&key, &value);
         }
         self.host_exec_l1.borrow_mut().insert(key, value);
     }
 
     fn get_function_output(&self, key: &CallCacheKey) -> Option<NodeOutput> {
         let key = FunctionOutputCacheKey::from_call_key(key)?;
-        self.local_index
+        self.persistent
             .as_ref()?
-            .read::<FunctionOutputCacheKey, CacheableNodeOutput>("function-output-v1", &key)
+            .get_function_output(&key)
             .map(|value| value.into_output())
     }
 
     fn put_function_output(&self, key: &CallCacheKey, output: &NodeOutput) {
-        let Some(cache) = &self.local_index else {
+        let Some(cache) = &self.persistent else {
             return;
         };
         let Some(key) = FunctionOutputCacheKey::from_call_key(key) else {
@@ -194,7 +243,7 @@ impl RuntimeCache {
         let Some(value) = CacheableNodeOutput::from_output(output) else {
             return;
         };
-        cache.write("function-output-v1", &key, &value);
+        cache.put_function_output(&key, &value);
     }
 }
 

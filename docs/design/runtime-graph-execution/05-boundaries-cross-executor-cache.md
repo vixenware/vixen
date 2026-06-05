@@ -398,6 +398,11 @@ Current slice:
   `vx-daemon` currently hosts an in-process implementation when the orchestrator
   slot is configured. Runtime cache lookup still uses `RuntimeCache`; wiring it
   through `CacheIndex` is the next cut.
+- `RuntimeCache` now talks to a `PersistentCacheLayer` adapter instead of owning
+  an `Option<LocalCacheIndex>` directly. The only current persistent-layer
+  implementation is the explicit local file index; the adapter shape exists so a
+  daemon `CacheIndex` + `Store` implementation can replace it without changing
+  `graph_exec`.
 - This is not the final CAS-backed L2 and it does not record read-set witnesses.
 
 Final cache/store shape:
