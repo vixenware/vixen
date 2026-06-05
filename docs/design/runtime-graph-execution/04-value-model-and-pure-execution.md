@@ -376,6 +376,10 @@ Current API-edge adapter:
   cannot smuggle arbitrary Rust callbacks into public values.
 - Executor-local output trees use a graph `OutputTree` marker and cross to
   `WireValue::Tree` during observer wire crossing.
+- When graph execution reconstructs a public value for a node that has a
+  registered producing-tree handle, `NodeOutput::OutputTree` becomes
+  `Value::Tree(handle)`. `Value::OutputTree` remains only the executor-local
+  marker used before wire crossing, or an honest fallback when no handle exists.
 
 Vixen tests targeted:
 

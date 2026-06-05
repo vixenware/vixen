@@ -51,6 +51,46 @@ fn force_out(s: &Scheduler, hid: HandleId, want: &'static str) -> StrandId {
     })
 }
 
+#[test]
+fn graph_returned_remote_tree_stays_a_handle() {
+    let s = Scheduler::new(&[4]);
+    let (handle, producer) = s.block_on(remote::channel());
+    let hid = s.register_handle(handle);
+
+    let fe = compile_source("fn id(tree: Tree) -> Tree ( tree )", "id")
+        .expect("tree identity program compiles");
+    let entry = fe
+        .program
+        .arena
+        .items
+        .iter()
+        .find_map(|it| match &it.kind {
+            ItemKind::Function(f) if f.name == "id" => Some(f.body),
+            _ => None,
+        })
+        .expect("fn id");
+    let program = fe.program;
+    let env = fe.env;
+    let strand = s.spawn(ResourceId(0), move || {
+        match eval_body(
+            &program,
+            &env,
+            entry,
+            vec![Value::Tree(hid)],
+            KernelMode::GraphOnly,
+        ) {
+            EvalOutcome::Clean(Value::Tree(returned)) if returned == hid => Outcome::Clean,
+            other => Outcome::Poisoned(format!(
+                "expected graph-returned Tree to stay a remote handle, got {other:?}"
+            )),
+        }
+    });
+    s.demand(strand);
+    s.run();
+    assert_eq!(s.outcome(strand), Some(Outcome::Clean));
+    drop(producer);
+}
+
 /// The path is already produced → `tree.file("out")` forces it on the first try,
 /// over vox, and `exec`/eval evaluates to its bytes.
 #[test]

@@ -1250,13 +1250,14 @@ fn value_from_resolved(
     externals: ExternalThunks,
     runtime: RuntimeBoundaries,
 ) -> Result<Value, String> {
+    let node = resolved.node();
     let output = resolved.output().clone();
     match output {
         NodeOutput::U64(n) => Ok(Value::U64(n)),
         NodeOutput::Bool(b) => Ok(Value::Bool(b)),
         NodeOutput::Str(s) => Ok(Value::Str(Rc::from(s))),
         NodeOutput::Unit => Ok(Value::Unit),
-        NodeOutput::OutputTree => Ok(Value::OutputTree),
+        NodeOutput::OutputTree => Ok(output_tree_value(node, &runtime)),
         NodeOutput::LazyData { label, fields } => {
             let fields = fields
                 .into_iter()
@@ -1360,6 +1361,16 @@ fn value_from_resolved(
             failure_context_from_core(context),
         ))),
     }
+}
+
+fn output_tree_value(node: NodeId, runtime: &RuntimeBoundaries) -> Value {
+    runtime
+        .remote_trees
+        .borrow()
+        .get(&node)
+        .copied()
+        .map(Value::Tree)
+        .unwrap_or(Value::OutputTree)
 }
 
 fn value_from_ready_output(

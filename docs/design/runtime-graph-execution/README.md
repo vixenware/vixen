@@ -211,6 +211,9 @@ Expected latest structural checkpoint:
 - Top-level producing trees returned by observe cross as remote handles attached
   to graph `OutputTree` nodes. Demanding `tree.file(path)` is a separate graph
   boundary that materializes only that path through strand remote-part demand.
+  Public value reconstruction preserves those handles: a graph node with
+  `NodeOutput::OutputTree` plus a registered producing handle becomes
+  `Value::Tree(handle)`, not the executor-local `Value::OutputTree` marker.
 - Grammar-package imports lower to graph lazy records whose fields are grammar
   coordinate graph values. Named projection follows graph projection resolution
   before choosing field slots, so chained import/tool projections stay typed by
@@ -244,6 +247,8 @@ Expected latest structural checkpoint:
 
 Latest verified red/green shape:
 
+- `cargo check -p vx-runtime -p vx-runner -p vx-daemon`: passed after making
+  graph public-value reconstruction preserve registered producing-tree handles.
 - `cargo check -p vx-runtime -p vx-runner -p vx-daemon`: passed after making
   `Thunk::native` crate-private and moving native-boundary laziness coverage
   into `eval` unit tests.
@@ -282,8 +287,8 @@ Latest verified red/green shape:
   163/163 passed, including `boundary_payload_field_is_bound_to_resolved_payload_output`,
   source-blind guardrails, and `lang_suite`.
 - `cargo nextest run -p vx-runtime -p vx-runner -p vx-daemon --no-fail-fast`:
-  157/157 passed, 12 skipped, after making `Thunk::native` crate-private and
-  moving the old public `intrinsic` integration coverage into `eval` unit tests.
+  158/158 passed, 12 skipped, after preserving producing-tree handles during
+  public graph value reconstruction.
 - `cargo check -p vx-cache-index -p vx-exec-protocol -p vx-services -p vx-store -p vx-runtime-graph -p vx-runtime-core -p vx-runtime-driver -p vx-runtime -p vx-runner -p vx-daemon`
   passes with no old-evaluator dead-code warnings.
 - `cargo nextest run -p vx-runtime -E 'binary(source_blind_guardrails) | binary(exec_on_strands)' --no-fail-fast`:
@@ -304,7 +309,8 @@ Latest verified red/green shape:
 - `cargo nextest run -p vx-runtime -E 'binary(bundle)' --no-fail-fast`:
   3/3 passed, including stable, content-sensitive observer bundle identity.
 - `cargo nextest run -p vx-runtime -E 'binary(remote_tree_via_eval)' --no-fail-fast`:
-  3/3 passed.
+  4/4 passed, including `graph_returned_remote_tree_stays_a_handle`, proving a
+  graph-returned remote tree reconstructs as `Value::Tree(handle)`.
 - `cargo nextest run -p vx-runtime -E 'binary(lang_suite)' --no-fail-fast`:
   1/1 passed; the `.vx` cases include `exec_boundaries.vx`, where an undemanded
   backtick exec in a lazy tuple slot stays cold with no observe client.
