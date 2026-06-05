@@ -213,6 +213,11 @@ Current checkpoint:
   `exec_on_strands` `run.ok` success/failure tests. It runs real `.vx` backticks
   for `/bin/true` and `/bin/false` through runner-backed CAS-VFS and proves both
   the crossed `Exit` value and the gate poison.
+- `vx-runner::tests::identical_backtick_exec_boundaries_share_runner_backed_l1_entry`
+  is the ignored live-VFS proof formerly covered by the scratch-backed
+  `exec_on_strands` identical-backtick L1 test. It counts actual `Observe` RPCs
+  at the Vox service boundary while delegating to `RunnerService::with_vfsd`; two
+  identical demanded invocations must dispatch observe once.
 - `vx-runner::tests::hello_world_uses_runner_backed_live_vfs_and_where_injection`
   is the ignored live-VFS proof formerly covered by the scratch-backed
   `hello_world` runtime integration. It exercises `where` provider injection, a
@@ -297,10 +302,10 @@ Once exec runs through the runner-backed path:
 - `cargo nextest run -p vx-runtime -E 'test(observer_evaluation_accepts) | test(observe_runs_a_real_command) | test(observe_crosses_the_output_tree) | test(the_executor_serves_run_outputs)' --no-fail-fast`:
   4/4 passed.
 - `cargo nextest list -p vx-runtime -E 'binary(source_blind_guardrails) | binary(exec_on_strands)'`
-  selected 10 tests.
+  selected 9 tests.
 - `cargo nextest run -p vx-runtime -E 'binary(source_blind_guardrails) | binary(exec_on_strands)' --no-fail-fast`:
-  10/10 passed.
-- `cargo nextest run -p vx-runtime --no-fail-fast`: 149/149 passed.
+  9/9 passed.
+- `cargo nextest run -p vx-runtime --no-fail-fast`: 148/148 passed.
 - `cargo nextest list -p vx-runner --run-ignored all` selected
   `tests::bare_invocation_failure_poisons_through_runner_backed_live_vfs`,
   `output_tree::tests::reads_declared_output_root_from_cas`,
@@ -309,6 +314,7 @@ Once exec runs through the runner-backed path:
   `tests::demanded_vixen_exec_runs_through_runner_backed_live_vfs_and_serves_output_tree`,
   `tests::explicit_stream_observer_returns_runner_backed_live_output_tree`,
   `tests::hello_world_uses_runner_backed_live_vfs_and_where_injection`,
+  `tests::identical_backtick_exec_boundaries_share_runner_backed_l1_entry`,
   `tests::producing_vconn_serves_runner_output_tree_from_cas`,
   `tests::run_ok_observer_crosses_runner_backed_live_vfs_for_success_and_failure`,
   `tests::strand_observe_reaches_runner_backed_service`,
@@ -320,12 +326,18 @@ Once exec runs through the runner-backed path:
   `tests::demanded_vixen_exec_runs_through_runner_backed_live_vfs_and_serves_output_tree`,
   `tests::explicit_stream_observer_returns_runner_backed_live_output_tree`,
   `tests::hello_world_uses_runner_backed_live_vfs_and_where_injection`,
+  `tests::identical_backtick_exec_boundaries_share_runner_backed_l1_entry`,
   `tests::run_ok_observer_crosses_runner_backed_live_vfs_for_success_and_failure`, and
   `tests::strand_observe_uses_runner_backed_live_vfs_for_success_and_failure`.
-- `cargo nextest run -p vx-runner --no-fail-fast`: 6/6 passed, 6 skipped
+- `cargo nextest run -p vx-runner --run-ignored only -E 'test(=tests::identical_backtick_exec_boundaries_share_runner_backed_l1_entry)' --no-fail-fast`:
+  failed at live CAS-VFS boot because this host does not have the Vixen
+  Management mount trigger installed (`/Library/Application Support/Vixen/management/queue/mount`
+  was missing). This is the expected environmental boundary for ignored
+  live-VFS proofs; do not replace it with scratch execution.
+- `cargo nextest run -p vx-runner --no-fail-fast`: 6/6 passed, 7 skipped
   (the live-VFS proof targets).
 - `cargo nextest run -p vx-services -p vx-runtime-graph -p vx-runtime-core -p vx-runtime-driver -p vx-runtime -p vx-runner --no-fail-fast`:
-  181/181 passed, 6 skipped.
+  180/180 passed, 7 skipped.
 - `cargo nextest run -p vx-daemon --no-fail-fast`: 2/2 passed.
 - The forbidden-symbol scans over `vx-runtime-core`, `vx-runtime-driver`, and the
   deleted tree-walker affordance scan over `vx-runtime/src` returned no matches.

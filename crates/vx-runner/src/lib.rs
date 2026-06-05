@@ -120,6 +120,7 @@ impl vox::ConnectionAcceptor for RunnerAcceptor {
 mod tests {
     use std::rc::Rc;
     use std::sync::Arc;
+    use std::sync::atomic::{AtomicUsize, Ordering};
 
     use vx_ir::item::ItemKind;
     use vx_ir::reachable;
@@ -129,7 +130,9 @@ mod tests {
         KernelMode, Outcome as EvalOutcome, Thunk, Value, eval_body_with_exec,
         eval_body_with_exec_and_providers, grammar_coord_value, tool_value,
     };
-    use vx_runtime::observe::{ExecCommand, ObserveClient, ObserveRequest};
+    use vx_runtime::observe::{
+        ExecCommand, Observe, ObserveClient, ObserveDispatcher, ObserveRequest, Observed,
+    };
     use vx_runtime::remote::{Part, PartKey, ProducingClient};
     use vx_runtime::strand::{ObserveOutcome, Outcome, ResourceId, Scheduler, dispatch_observe};
     use vx_services::cas_tree::{MerkleTreeFile, build_merkle_tree};
@@ -166,6 +169,66 @@ mod tests {
             .establish::<ObserveClient>()
             .await
             .expect("establish runner-backed Observe client")
+    }
+
+    #[derive(Clone)]
+    struct CountingObserveService {
+        inner: RunnerService,
+        observes: Arc<AtomicUsize>,
+    }
+
+    impl Observe for CountingObserveService {
+        async fn observe(&self, request: ObserveRequest) -> Observed {
+            self.observes.fetch_add(1, Ordering::SeqCst);
+            <RunnerService as Observe>::observe(&self.inner, request).await
+        }
+    }
+
+    #[derive(Clone)]
+    struct CountingRunnerAcceptor {
+        service: CountingObserveService,
+    }
+
+    impl vox::ConnectionAcceptor for CountingRunnerAcceptor {
+        fn accept(
+            &self,
+            request: &vox::ConnectionRequest,
+            connection: vox::PendingConnection,
+        ) -> std::result::Result<(), vox::Metadata<'static>> {
+            match request.service() {
+                "Observe" => {
+                    connection.handle_with(ObserveDispatcher::new(self.service.clone()));
+                    Ok(())
+                }
+                "Producing" => self.service.inner.handle_producing_connection(connection),
+                _ => Err(vec![]),
+            }
+        }
+    }
+
+    async fn counting_observe_client_for(
+        service: RunnerService,
+    ) -> (ObserveClient, Arc<AtomicUsize>) {
+        let observes = Arc::new(AtomicUsize::new(0));
+        let counting = CountingObserveService {
+            inner: service,
+            observes: Arc::clone(&observes),
+        };
+        let (client_link, server_link) = vox::memory_link_pair(64);
+        tokio::spawn(async move {
+            if let Ok(client) = vox::acceptor_on(server_link)
+                .on_connection(CountingRunnerAcceptor { service: counting })
+                .establish::<vox::NoopClient>()
+                .await
+            {
+                client.caller.closed().await;
+            }
+        });
+        let client = vox::initiator_on(client_link, vox::TransportMode::Bare)
+            .establish::<ObserveClient>()
+            .await
+            .expect("establish counting runner-backed Observe client");
+        (client, observes)
     }
 
     async fn store_client() -> (tempfile::TempDir, StoreClient) {
@@ -450,6 +513,52 @@ mod tests {
         scheduler.demand(strand);
         scheduler.run();
         assert_eq!(scheduler.outcome(strand), Some(Outcome::Clean));
+    }
+
+    #[test]
+    #[ignore = "needs the live CAS-VFS mount; run with --ignored on a host with the Vixen VFS"]
+    fn identical_backtick_exec_boundaries_share_runner_backed_l1_entry() {
+        let fe = compile_source(
+            "fn t(cmd: Command, script: String) ( \
+               let first = `$cmd -c ${script}` with { writable: [\"out\"] }; \
+               let second = `$cmd -c ${script}` with { writable: [\"out\"] }; \
+               assert_eq(first.file(\"out/y.txt\"), second.file(\"out/y.txt\")) )",
+            "t",
+        )
+        .expect("exec cache program compiles");
+        let entry = entry_body(&fe, "t");
+
+        let scheduler = Scheduler::new(&[1]);
+        let (_temp, service) = scheduler.block_on(live_vfs_runner_service());
+        let (client, observes) = scheduler.block_on(counting_observe_client_for(service));
+        let cid = scheduler.register_observe_client(client);
+        let program = fe.program;
+        let env = fe.env;
+        let strand = scheduler.spawn(ResourceId(0), move || {
+            let cmd = tool_value("@vixen/grammar-cc", "cc", "/bin/sh");
+            let script = Value::Str(Rc::from("printf runner-cache > out/y.txt"));
+            match eval_body_with_exec(
+                &program,
+                &env,
+                entry,
+                vec![cmd, script],
+                KernelMode::Off,
+                cid,
+            ) {
+                EvalOutcome::Clean(Value::Unit) => Outcome::Clean,
+                other => Outcome::Poisoned(format!(
+                    "expected identical runner-backed execs to share output, got {other:?}"
+                )),
+            }
+        });
+        scheduler.demand(strand);
+        scheduler.run();
+        assert_eq!(scheduler.outcome(strand), Some(Outcome::Clean));
+        assert_eq!(
+            observes.load(Ordering::SeqCst),
+            1,
+            "the second identical backtick exec must reuse the L1 observe result"
+        );
     }
 
     #[test]
