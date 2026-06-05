@@ -31,19 +31,29 @@ targets:
       - name: Embed Vixen Management
         inputFiles:
           - "$(SRCROOT)/build/RustLibs/vixen-management"
+          - "$(SRCROOT)/../installer/eu.bearcove.vixen.management.bundle.plist"
         outputFiles:
           - "$(TARGET_BUILD_DIR)/$(CONTENTS_FOLDER_PATH)/MacOS/vixen-management"
+          - "$(TARGET_BUILD_DIR)/$(CONTENTS_FOLDER_PATH)/Library/LaunchDaemons/eu.bearcove.vixen.management.plist"
         script: |
           set -euo pipefail
           helper_src="$SRCROOT/build/RustLibs/vixen-management"
+          daemon_plist_src="$SRCROOT/../installer/eu.bearcove.vixen.management.bundle.plist"
           contents="$TARGET_BUILD_DIR/$CONTENTS_FOLDER_PATH"
           helper_dst="$contents/MacOS/vixen-management"
+          daemon_plist_dst="$contents/Library/LaunchDaemons/eu.bearcove.vixen.management.plist"
           if [[ ! -f "$helper_src" ]]; then
             echo "missing staged vixen-management helper at $helper_src" >&2
             exit 1
           fi
+          if [[ ! -f "$daemon_plist_src" ]]; then
+            echo "missing bundled LaunchDaemon plist at $daemon_plist_src" >&2
+            exit 1
+          fi
           install -d "$contents/MacOS"
           install -m 755 "$helper_src" "$helper_dst"
+          install -d "$contents/Library/LaunchDaemons"
+          install -m 644 "$daemon_plist_src" "$daemon_plist_dst"
           if [[ "${CODE_SIGNING_ALLOWED:-NO}" != "NO" ]]; then
             identity="${EXPANDED_CODE_SIGN_IDENTITY:-}"
             if [[ -n "$identity" && "$identity" != "-" ]]; then
@@ -79,6 +89,7 @@ targets:
       - package: Sparkle
         product: Sparkle
       - sdk: FSKit.framework
+      - sdk: ServiceManagement.framework
 
   VixenFS:
     type: extensionkit-extension

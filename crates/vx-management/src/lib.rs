@@ -2,10 +2,11 @@
 //!
 //! macOS 15's only FSKit resource type is a **block device**, and `mount(2)` of one
 //! needs root. So the CAS-VFS is mounted on a mock raw disk image (see [`mount`]), and
-//! the user-level vixen daemon can no longer establish or tear down its own volume —
-//! per `unmount(2)`'s ownership rule, only the mounter (now root) or the super-user
-//! may unmount. Those privileged operations — plus terminating a wedged `fskitd`
-//! (the kill-switch) — live here.
+//! the user-level vixen daemon can no longer establish its own volume. Recovery is
+//! different from ordinary unmounting: once FSKit is wedged, the unmount caller can
+//! wedge too. So the privileged recovery button tries ordinary unmount in a sacrificial
+//! child, escalates to terminating `fskitd` only if that fails to clear the mount, and
+//! only then cleans up the backing image.
 //!
 //! The discipline from the wiki ("The FSKit doctor & kill-switch") is preserved: each
 //! capability is a **fixed, payload-less [`Button`]**. A caller fires one by dropping a
@@ -24,9 +25,9 @@ pub mod queue;
 pub enum Button {
     /// Establish the block-backed VixenFS mount (provision device + mount).
     Mount,
-    /// Unmount the VixenFS mount and detach its mock backing image.
+    /// Recover the VixenFS mount by unwinding FSKit, then detach its mock backing image.
     Unmount,
-    /// Unmount/detach, then re-establish.
+    /// Recover/detach, then re-establish.
     Remount,
     /// Terminate the system `fskitd` — the wedge kill-switch.
     KillFskitd,

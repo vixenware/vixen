@@ -1,11 +1,11 @@
 import AppKit
 @preconcurrency import FSKit
+import ServiceManagement
 import Sparkle
 import SwiftUI
 
 @main
 struct VixenApp: App {
-    private static let extensionBundleIdentifier = "eu.bearcove.vixenfs"
     private let updaterController = SparkleBootstrap.makeUpdaterController()
 
     init() {
@@ -36,8 +36,17 @@ struct ContentView: View {
     @Environment(\.colorScheme) private var colorScheme
     @State private var isExtensionEnabled = false
     @State private var extensionError: String? = nil
+    @State private var managementStatus: SMAppService.Status = .notFound
+    @State private var legacyManagementStatus: SMAppService.Status = .notFound
+    @State private var managementError: String? = nil
+    @State private var isConfiguringManagement = false
     @State private var demoToggleOn = false
     @State private var cursorBob = false
+
+    private let managementService = SMAppService.daemon(
+        plistName: "eu.bearcove.vixen.management.plist")
+    private let legacyManagementPlistURL = URL(
+        fileURLWithPath: "/Library/LaunchDaemons/eu.bearcove.vixen.management.plist")
 
     private let requiredMajorVersion = 15
     private let foxSize: CGFloat = 96
@@ -49,8 +58,11 @@ struct ContentView: View {
     private var isSupportedOS: Bool {
         ProcessInfo.processInfo.operatingSystemVersion.majorVersion >= requiredMajorVersion
     }
+    private var isManagementConfigured: Bool {
+        managementStatus == .enabled || legacyManagementStatus == .enabled
+    }
     private var allComplete: Bool {
-        isSupportedOS && isExtensionEnabled
+        isSupportedOS && isExtensionEnabled && isManagementConfigured
     }
 
     var body: some View {
@@ -81,7 +93,10 @@ struct ContentView: View {
             NotificationCenter.default.publisher(for: NSApplication.didBecomeActiveNotification)
         ) { _ in
             guard isSupportedOS else { return }
-            Task { await checkExtensionOnce() }
+            Task {
+                await checkExtensionOnce()
+                refreshManagementStatus()
+            }
         }
     }
 
@@ -135,7 +150,7 @@ struct ContentView: View {
                     .font(.system(size: 24, weight: .bold))
 
                 Text(
-                    "Vixen uses a virtual file system to give your builds a hermetic, reproducible view of the world. Enable the VixenFS extension in System Settings to get started."
+                    "Vixen uses a virtual file system to give your builds a hermetic, reproducible view of the world. Enable VixenFS and configure the management daemon to get started."
                 )
                 .font(.system(size: 14))
                 .foregroundStyle(.secondary)
@@ -161,6 +176,8 @@ struct ContentView: View {
                             .foregroundStyle(.secondary)
                     }
                 }
+
+                managementSetupPanel
 
                 Button(action: openExtensionSettings) {
                     Text("Open Settings")
@@ -203,6 +220,7 @@ struct ContentView: View {
     private func pollExtensionStatus() async {
         while !Task.isCancelled {
             await checkExtensionOnce()
+            refreshManagementStatus()
             try? await Task.sleep(for: .seconds(4))
         }
     }
@@ -220,6 +238,128 @@ struct ContentView: View {
         let targets = [
             "x-apple.systempreferences:com.apple.ExtensionsPreferences?extensionPointIdentifier=com.apple.fskit.fsmodule",
             "x-apple.systempreferences:com.apple.LoginItems-Settings.extension",
+        ]
+        for target in targets {
+            if let url = URL(string: target), NSWorkspace.shared.open(url) {
+                return
+            }
+        }
+        NSWorkspace.shared.open(URL(fileURLWithPath: "/System/Applications/System Settings.app"))
+    }
+
+    // MARK: - Management daemon
+
+    private var managementStatusText: String {
+        if legacyManagementStatus == .enabled {
+            return "Installed by package"
+        }
+        switch managementStatus {
+        case .enabled:
+            return "Ready"
+        case .requiresApproval:
+            return "Needs approval"
+        case .notRegistered:
+            return "Not installed"
+        case .notFound:
+            return "Missing from app bundle"
+        @unknown default:
+            return "Unknown"
+        }
+    }
+
+    private var managementButtonTitle: String {
+        if isManagementConfigured {
+            return "Configured"
+        }
+        switch managementStatus {
+        case .requiresApproval:
+            return "Open Settings"
+        default:
+            return "Configure"
+        }
+    }
+
+    private var managementSetupPanel: some View {
+        HStack(alignment: .center, spacing: 12) {
+            Image(systemName: isManagementConfigured ? "checkmark.shield.fill" : "lock.shield")
+                .font(.system(size: 18, weight: .semibold))
+                .foregroundStyle(isManagementConfigured ? Color.green : brandOrange)
+                .frame(width: 28)
+
+            VStack(alignment: .leading, spacing: 3) {
+                Text("Management Daemon")
+                    .font(.system(size: 13, weight: .semibold))
+                Text(managementStatusText)
+                    .font(.system(size: 12))
+                    .foregroundStyle(.secondary)
+                if let managementError {
+                    Text(managementError)
+                        .font(.system(size: 11))
+                        .foregroundStyle(.secondary)
+                        .fixedSize(horizontal: false, vertical: true)
+                }
+            }
+
+            Spacer()
+
+            Button(action: managementButtonAction) {
+                Text(managementButtonTitle)
+                    .font(.system(size: 13, weight: .semibold))
+                    .foregroundStyle(.white)
+                    .padding(.horizontal, 16)
+                    .padding(.vertical, 8)
+                    .background(
+                        (isManagementConfigured ? Color.gray : brandOrange),
+                        in: RoundedRectangle(cornerRadius: 8, style: .continuous)
+                    )
+            }
+            .buttonStyle(.plain)
+            .disabled(isConfiguringManagement || isManagementConfigured)
+        }
+        .padding(12)
+        .background(
+            RoundedRectangle(cornerRadius: 10, style: .continuous)
+                .fill(sectionBg)
+        )
+    }
+
+    private func managementButtonAction() {
+        if managementStatus == .requiresApproval {
+            openLoginItemsSettings()
+        } else {
+            configureManagementDaemon()
+        }
+    }
+
+    private func refreshManagementStatus() {
+        managementStatus = managementService.status
+        legacyManagementStatus = SMAppService.statusForLegacyPlist(at: legacyManagementPlistURL)
+    }
+
+    private func configureManagementDaemon() {
+        isConfiguringManagement = true
+        defer {
+            isConfiguringManagement = false
+            refreshManagementStatus()
+        }
+
+        do {
+            try managementService.register()
+            managementError = nil
+        } catch {
+            refreshManagementStatus()
+            if isManagementConfigured || managementStatus == .requiresApproval {
+                managementError = nil
+            } else {
+                managementError = error.localizedDescription
+            }
+        }
+    }
+
+    private func openLoginItemsSettings() {
+        let targets = [
+            "x-apple.systempreferences:com.apple.LoginItems-Settings.extension",
+            "x-apple.systempreferences:com.apple.ExtensionsPreferences",
         ]
         for target in targets {
             if let url = URL(string: target), NSWorkspace.shared.open(url) {
@@ -346,7 +486,7 @@ struct ContentView: View {
                     .font(.system(size: 24, weight: .bold))
 
                 Text(
-                    "VixenFS is enabled. Head to the docs to install the CLI and run your first build."
+                    "VixenFS and the management daemon are ready. Head to the docs to install the CLI and run your first build."
                 )
                 .font(.system(size: 14))
                 .foregroundStyle(.secondary)

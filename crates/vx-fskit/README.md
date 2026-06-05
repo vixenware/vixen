@@ -196,19 +196,25 @@ Probe mount point
   ├─ some kind of mount exists
   │
   ▼
-KILL OPEN FILE HOLDERS
+SACRIFICIAL UNMOUNT
   │
-  lsof — find processes with files open under mount
-  SIGKILL each one, wait up to 2s for exit
+  spawn child: umount <mount_path>
+  poll child without blocking the management daemon
   │
-  ├─ all exited ──→ proceed to UNMOUNT
-  ├─ survivors ──→ FAIL: uninterruptible sleep, reboot required
+  ├─ exited success ──→ proceed to DETACH
+  ├─ exited failure / stuck ──→ proceed to UNWIND FSKIT
   │
   ▼
-UNMOUNT
+UNWIND FSKIT
   │
-  umount <mount_path>
-  wait up to 1s
+  launchctl kill SIGTERM system/com.apple.filesystems.fskitd
+  launchctl kill SIGKILL system/com.apple.filesystems.fskitd if needed
+  │
+  ▼
+CHECK MOUNT TABLE
+  │
+  ├─ still mounted ──→ FAIL: reboot may be required
+  ├─ gone ──→ proceed to DETACH
   │
   ▼
 DETACH BACKING IMAGE
@@ -219,7 +225,7 @@ DETACH BACKING IMAGE
 Probe again
   │
   ├─ clean ──→ SUCCESS
-  ├─ still mounted ──→ FAIL: "sudo killall fskitd fskit_agent"
+  ├─ still mounted ──→ FAIL: reboot may be required
   │
   ▼
 ```

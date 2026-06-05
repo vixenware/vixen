@@ -12,10 +12,13 @@
 //! image + `hdiutil attach` is unprivileged, but the daemon owns the whole sequence so
 //! its trigger stays payload-less (no caller names the device or path).
 
-use std::process::Command;
+use std::process::{Command, Stdio};
+use std::time::{Duration, Instant};
 
 use eyre::{Result, WrapErr, bail};
 use vx_vfs_types::MACOS_VFS_MOUNT_PARENT;
+
+use crate::killswitch;
 
 /// Where the block volume mounts — a real `/Volumes` descendant, not an arbitrary path.
 pub use vx_vfs_types::MACOS_VFS_MOUNT_POINT as MOUNT_POINT;
@@ -26,6 +29,7 @@ pub const IMAGE_PATH: &str = "/Library/Application Support/Vixen/vixen-volume.im
 /// Size of the mock image in bytes. Created sparse (`set_len`), so it costs ~0 real
 /// bytes; the volume's reported size comes from the extension's statfs, not from this.
 pub const IMAGE_SIZE_BYTES: u64 = 100 * 1024 * 1024;
+const SACRIFICIAL_UNMOUNT_DEADLINE: Duration = Duration::from_secs(2);
 
 /// Establish the mount if it isn't already up: provision the device, then mount it.
 /// Idempotent — a healthy existing mount is a no-op. **Requires root** (the mount).
@@ -34,7 +38,7 @@ pub fn establish() -> Result<()> {
         tracing::info!("{MOUNT_POINT} already mounted");
         return Ok(());
     }
-    detach_backing_devices()?;
+    recover_existing_state()?;
     let device = provision_device()?;
     if let Err(err) = mount_volume(&device) {
         if let Err(detach_err) = detach_device(&device) {
@@ -46,23 +50,84 @@ pub fn establish() -> Result<()> {
     Ok(())
 }
 
-/// Unmount the volume if it is up, then detach any Vixen mock backing devices.
-/// Idempotent. **Requires root.**
+/// Recover from an active or wedged VixenFS mount, then detach any mock backing devices.
+///
+/// A normal unmount is the first choice, but it runs in a sacrificial child. Once FSKit
+/// is wedged, the unmount caller can become part of the wedge; that must never be the
+/// management daemon itself. Killing `fskitd` is the last-resort escalation when the
+/// sacrificial unmount does not clear the mount.
 pub fn unmount() -> Result<()> {
+    recover_existing_state()
+}
+
+fn recover_existing_state() -> Result<()> {
+    let unmount = try_sacrificial_unmount()?;
+    if unmount.needs_fskitd_kill() || is_mounted()? {
+        tracing::warn!(
+            outcome = ?unmount,
+            "sacrificial unmount did not clear VixenFS; terminating fskitd"
+        );
+        killswitch::terminate_fskitd()?;
+    }
     if is_mounted()? {
-        let out = Command::new("/sbin/umount")
-            .arg(MOUNT_POINT)
-            .output()
-            .wrap_err("running umount")?;
-        if !out.status.success() {
-            bail!(
-                "unmount {MOUNT_POINT} failed: {}",
-                String::from_utf8_lossy(&out.stderr).trim()
-            );
-        }
-        tracing::info!("unmounted {MOUNT_POINT}");
+        bail!("{MOUNT_POINT} is still mounted after terminating fskitd");
     }
     detach_backing_devices()
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum SacrificialUnmount {
+    NotMounted,
+    Succeeded,
+    Failed,
+    TimedOut,
+}
+
+impl SacrificialUnmount {
+    fn needs_fskitd_kill(self) -> bool {
+        matches!(
+            self,
+            SacrificialUnmount::Failed | SacrificialUnmount::TimedOut
+        )
+    }
+}
+
+fn try_sacrificial_unmount() -> Result<SacrificialUnmount> {
+    if !is_mounted()? {
+        return Ok(SacrificialUnmount::NotMounted);
+    }
+
+    tracing::info!("{MOUNT_POINT} is mounted; spawning sacrificial umount child");
+    let mut child = Command::new("/sbin/umount")
+        .arg(MOUNT_POINT)
+        .stdin(Stdio::null())
+        .stdout(Stdio::null())
+        .stderr(Stdio::null())
+        .spawn()
+        .wrap_err("spawning sacrificial umount")?;
+
+    let deadline = Instant::now() + SACRIFICIAL_UNMOUNT_DEADLINE;
+    loop {
+        if let Some(status) = child.try_wait().wrap_err("polling sacrificial umount")? {
+            if status.success() {
+                tracing::info!("sacrificial umount cleared {MOUNT_POINT}");
+                return Ok(SacrificialUnmount::Succeeded);
+            }
+            tracing::warn!(?status, "sacrificial umount exited unsuccessfully");
+            return Ok(SacrificialUnmount::Failed);
+        }
+
+        if Instant::now() >= deadline {
+            tracing::warn!(
+                pid = child.id(),
+                "sacrificial umount did not exit; leaving recovery to FSKit kill-switch"
+            );
+            let _ = child.kill();
+            return Ok(SacrificialUnmount::TimedOut);
+        }
+
+        std::thread::sleep(Duration::from_millis(50));
+    }
 }
 
 /// Provision the mock raw block device: create the sparse image if absent, attach it
@@ -292,5 +357,13 @@ image-alias     : /Library/Application Support/Vixen/vixen-volume.img
     fn mount_point_is_nested_below_volumes_parent() {
         assert_eq!(MOUNT_POINT, format!("{MACOS_VFS_MOUNT_PARENT}/vfs"));
         assert_ne!(MOUNT_POINT, MACOS_VFS_MOUNT_PARENT);
+    }
+
+    #[test]
+    fn recovery_path_keeps_unmount_sacrificial() {
+        let source = include_str!("mount.rs");
+        assert!(source.contains("spawning sacrificial umount"));
+        assert!(source.contains(".spawn()"));
+        assert!(!source.contains(&["disk", "util"].concat()));
     }
 }

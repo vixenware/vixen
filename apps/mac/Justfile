@@ -49,7 +49,6 @@ build-rust profile='Debug':
 build profile='Debug' version='': (build-rust profile)
     #!/bin/bash -eux -o pipefail
     just validate-profile "{{ profile }}"
-    node scripts/ensure-no-mounts.js
     if [[ "{{ version }}" == "" ]]; then
       just bump-version
       VERSION=$(cat dev-version.txt)
@@ -78,7 +77,6 @@ build profile='Debug' version='': (build-rust profile)
 build-timing profile='Debug' version='': (build-rust profile)
     #!/bin/bash -eux -o pipefail
     just validate-profile "{{ profile }}"
-    node scripts/ensure-no-mounts.js
     if [[ "{{ version }}" == "" ]]; then
       just bump-version
       VERSION=$(cat dev-version.txt)
