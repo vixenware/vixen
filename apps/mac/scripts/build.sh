@@ -56,6 +56,7 @@ if [[ ! -f "$MANAGEMENT_HELPER" ]]; then
   exit 1
 fi
 codesign --force --options runtime --timestamp --sign "$RESOLVED_SIGNING_IDENTITY" \
+  --identifier "eu.bearcove.vixen" \
   "$MANAGEMENT_HELPER"
 
 # FSKit extension

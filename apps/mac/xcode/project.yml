@@ -56,6 +56,7 @@ targets:
           install -m 644 "$daemon_plist_src" "$daemon_plist_dst"
           if [[ "${CODE_SIGNING_ALLOWED:-NO}" != "NO" ]]; then
             identity="${EXPANDED_CODE_SIGN_IDENTITY:-}"
+            helper_identifier="${PRODUCT_BUNDLE_IDENTIFIER:-eu.bearcove.vixen}"
             code_sign_flags=()
             if [[ "${ENABLE_HARDENED_RUNTIME:-NO}" == "YES" ]]; then
               code_sign_flags+=(--options runtime)
@@ -67,9 +68,9 @@ targets:
               code_sign_flags+=(--timestamp=none)
             fi
             if [[ -n "$identity" && "$identity" != "-" ]]; then
-              codesign --force --sign "$identity" "${code_sign_flags[@]}" "$helper_dst"
+              codesign --force --sign "$identity" --identifier "$helper_identifier" "${code_sign_flags[@]}" "$helper_dst"
             else
-              codesign --force --sign - "$helper_dst"
+              codesign --force --sign - --identifier "$helper_identifier" "$helper_dst"
             fi
           fi
     entitlements:
