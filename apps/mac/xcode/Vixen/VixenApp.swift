@@ -40,7 +40,7 @@ struct VixenApp: App {
 
 }
 
-private enum ManagementService {
+enum ManagementService {
     private static let label = "eu.bearcove.vixen.management"
     private static let plistName = "eu.bearcove.vixen.management.plist"
     private static let queueRoot = URL(
@@ -435,6 +435,8 @@ struct ContentView: View {
     )
     @State private var managementError: String? = nil
     @State private var isConfiguringManagement = false
+    @State private var doctorSnapshot = DoctorSnapshot.pending
+    @State private var isCheckingDoctor = false
     @State private var demoToggleOn = false
     @State private var cursorBob = false
 
@@ -490,6 +492,9 @@ struct ContentView: View {
                 await checkExtensionOnce()
                 if isExtensionEnabled {
                     refreshManagementStatus()
+                    if isManagementConfigured {
+                        await refreshDoctorStatus()
+                    }
                 }
             }
         }
@@ -752,6 +757,23 @@ struct ContentView: View {
         managementSnapshot = ManagementService.snapshot()
     }
 
+    @MainActor
+    private func refreshDoctorStatus() async {
+        guard !isCheckingDoctor else { return }
+        isCheckingDoctor = true
+        defer { isCheckingDoctor = false }
+        doctorSnapshot = DoctorSnapshot(
+            rows: DoctorSnapshot.pending.rows.map {
+                DoctorRow(id: $0.id, title: $0.title, state: .checking, detail: nil)
+            }
+        )
+        doctorSnapshot = await DoctorService.check(
+            extensionEnabled: isExtensionEnabled,
+            extensionError: extensionError
+        )
+        refreshManagementStatus()
+    }
+
     private func pollManagementStatus() async {
         while !Task.isCancelled {
             refreshManagementStatus()
@@ -942,6 +964,96 @@ struct ContentView: View {
         )
     }
 
+    // MARK: - Doctor
+
+    private var doctorPanel: some View {
+        VStack(alignment: .leading, spacing: 12) {
+            HStack(alignment: .center, spacing: 10) {
+                Image(systemName: doctorSnapshot.hasFailure ? "stethoscope" : "checkmark.shield.fill")
+                    .font(.system(size: 17, weight: .semibold))
+                    .foregroundStyle(doctorSnapshot.hasFailure ? brandOrange : Color.green)
+                    .frame(width: 28)
+
+                VStack(alignment: .leading, spacing: 2) {
+                    Text("System Check")
+                        .font(.system(size: 13, weight: .semibold))
+                    Text(isCheckingDoctor ? "Checking" : doctorSummaryText)
+                        .font(.system(size: 12))
+                        .foregroundStyle(.secondary)
+                }
+
+                Spacer()
+
+                Button(action: { Task { await refreshDoctorStatus() } }) {
+                    Image(systemName: "arrow.clockwise")
+                        .font(.system(size: 13, weight: .semibold))
+                        .foregroundStyle(.white)
+                        .frame(width: 32, height: 30)
+                        .background(
+                            brandOrange,
+                            in: RoundedRectangle(cornerRadius: 8, style: .continuous)
+                        )
+                }
+                .buttonStyle(.plain)
+                .disabled(isCheckingDoctor)
+
+                Button(action: requestManagementRecovery) {
+                    Text("Recover")
+                        .font(.system(size: 13, weight: .semibold))
+                        .foregroundStyle(.white)
+                        .padding(.horizontal, 16)
+                        .frame(height: 30)
+                        .background(
+                            brandOrange,
+                            in: RoundedRectangle(cornerRadius: 8, style: .continuous)
+                        )
+                }
+                .buttonStyle(.plain)
+                .disabled(isConfiguringManagement)
+            }
+
+            VStack(spacing: 8) {
+                ForEach(doctorSnapshot.rows) { row in
+                    DoctorRowView(row: row, brandOrange: brandOrange)
+                }
+            }
+        }
+        .padding(12)
+        .background(
+            RoundedRectangle(cornerRadius: 10, style: .continuous)
+                .fill(sectionBg)
+        )
+    }
+
+    private var doctorSummaryText: String {
+        let failed = doctorSnapshot.rows.filter { $0.state == .failed }.count
+        let warnings = doctorSnapshot.rows.filter { $0.state == .warning }.count
+        if failed > 0 {
+            return "\(failed) check\(failed == 1 ? "" : "s") failed"
+        }
+        if warnings > 0 {
+            return "\(warnings) warning\(warnings == 1 ? "" : "s")"
+        }
+        if doctorSnapshot.rows.allSatisfy({ $0.state == .ok }) {
+            return "Ready"
+        }
+        return "Not checked"
+    }
+
+    private var completeTitle: String {
+        if isCheckingDoctor {
+            return "Checking Vixen"
+        }
+        return doctorSnapshot.hasFailure ? "Needs attention" : "You're all set"
+    }
+
+    private var completeDescription: String {
+        if doctorSnapshot.hasFailure {
+            return "VixenFS is enabled, but one or more system checks need attention."
+        }
+        return "VixenFS is enabled. Head to the docs to install the CLI and run your first build."
+    }
+
     // MARK: - Complete view
 
     private var completeView: some View {
@@ -952,12 +1064,10 @@ struct ContentView: View {
                 .frame(width: foxSize, height: foxSize)
 
             VStack(spacing: 20) {
-                Text("You're all set")
+                Text(completeTitle)
                     .font(.system(size: 24, weight: .bold))
 
-                Text(
-                    "VixenFS is enabled. Head to the docs to install the CLI and run your first build."
-                )
+                Text(completeDescription)
                 .font(.system(size: 14))
                 .foregroundStyle(.secondary)
                 .multilineTextAlignment(.center)
@@ -978,7 +1088,7 @@ struct ContentView: View {
                 }
                 .buttonStyle(.plain)
 
-                managementSetupPanel
+                doctorPanel
             }
             .frame(maxWidth: .infinity)
 
@@ -987,6 +1097,65 @@ struct ContentView: View {
         }
         .onAppear {
             refreshManagementStatus()
+            Task { await refreshDoctorStatus() }
+        }
+    }
+}
+
+private struct DoctorRowView: View {
+    let row: DoctorRow
+    let brandOrange: Color
+
+    var body: some View {
+        HStack(alignment: .top, spacing: 9) {
+            Image(systemName: iconName)
+                .font(.system(size: 12, weight: .semibold))
+                .foregroundStyle(iconColor)
+                .frame(width: 18, height: 18)
+
+            VStack(alignment: .leading, spacing: 2) {
+                Text(row.title)
+                    .font(.system(size: 12, weight: .medium))
+                if let detail = row.detail, !detail.isEmpty {
+                    Text(detail)
+                        .font(.system(size: 10))
+                        .foregroundStyle(.secondary)
+                        .lineLimit(3)
+                        .fixedSize(horizontal: false, vertical: true)
+                }
+            }
+            Spacer(minLength: 0)
+        }
+        .frame(maxWidth: .infinity, alignment: .leading)
+    }
+
+    private var iconName: String {
+        switch row.state {
+        case .pending:
+            "circle"
+        case .checking:
+            "arrow.triangle.2.circlepath"
+        case .ok:
+            "checkmark.circle.fill"
+        case .warning:
+            "exclamationmark.triangle.fill"
+        case .failed:
+            "xmark.circle.fill"
+        }
+    }
+
+    private var iconColor: Color {
+        switch row.state {
+        case .pending:
+            Color.secondary
+        case .checking:
+            brandOrange
+        case .ok:
+            Color.green
+        case .warning:
+            Color.yellow
+        case .failed:
+            Color.red
         }
     }
 }
