@@ -9,6 +9,9 @@
 //!   LaunchServices/PlugInKit state, while `vixen-management <button>` runs one
 //!   privileged capability immediately for manual testing.
 
+use std::fs::OpenOptions;
+use std::path::Path;
+
 use eyre::{Result, bail};
 use tracing_subscriber::EnvFilter;
 use tracing_subscriber::layer::SubscriberExt;
@@ -52,23 +55,50 @@ fn main() -> Result<()> {
 }
 
 fn init_tracing() {
-    let filter = EnvFilter::new(
+    if unsafe { libc::geteuid() } == 0 && can_write_log_file() {
+        let file_appender = tracing_appender::rolling::never(LOG_DIR, LOG_FILE_NAME);
+        let fmt_layer = tracing_subscriber::fmt::layer()
+            .with_ansi(false)
+            .with_writer(file_appender)
+            .with_target(true)
+            .with_file(true)
+            .with_line_number(true);
+
+        tracing_subscriber::registry()
+            .with(env_filter())
+            .with(fmt_layer)
+            .init();
+    } else {
+        let fmt_layer = tracing_subscriber::fmt::layer()
+            .with_ansi(false)
+            .with_writer(std::io::stderr)
+            .with_target(true)
+            .with_file(true)
+            .with_line_number(true);
+
+        tracing_subscriber::registry()
+            .with(env_filter())
+            .with(fmt_layer)
+            .init();
+    }
+}
+
+fn env_filter() -> EnvFilter {
+    EnvFilter::new(
         std::env::var("VIXEN_MANAGEMENT_LOG")
             .unwrap_or_else(|_| "info,vx_management=debug,vixen_management=debug".to_string()),
-    );
-    let _ = std::fs::create_dir_all(LOG_DIR);
-    let file_appender = tracing_appender::rolling::never(LOG_DIR, LOG_FILE_NAME);
-    let fmt_layer = tracing_subscriber::fmt::layer()
-        .with_ansi(false)
-        .with_writer(file_appender)
-        .with_target(true)
-        .with_file(true)
-        .with_line_number(true);
+    )
+}
 
-    tracing_subscriber::registry()
-        .with(filter)
-        .with(fmt_layer)
-        .init();
+fn can_write_log_file() -> bool {
+    if std::fs::create_dir_all(LOG_DIR).is_err() {
+        return false;
+    }
+    OpenOptions::new()
+        .create(true)
+        .append(true)
+        .open(Path::new(LOG_DIR).join(LOG_FILE_NAME))
+        .is_ok()
 }
 
 /// launchd-invoked: repair the queue perms, then for each fired button run it once and
