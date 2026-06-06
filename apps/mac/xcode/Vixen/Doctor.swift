@@ -1,5 +1,6 @@
 import Darwin
 import Foundation
+import OSLog
 
 enum DoctorState: Sendable {
     case pending
@@ -66,6 +67,7 @@ struct DoctorSnapshot: Sendable {
 enum DoctorService {
     private static let mountPoint = "/Volumes/Vixen/vfs"
     private static let statusPath = "\(mountPoint)/.vixenfs/status.json"
+    private static let logger = Logger(subsystem: "eu.bearcove.vixen", category: "Doctor")
 
     static func check(extensionEnabled: Bool, extensionError: String?) async -> DoctorSnapshot {
         await Task.detached(priority: .utility) {
@@ -74,22 +76,54 @@ enum DoctorService {
     }
 
     private static func checkSync(extensionEnabled: Bool, extensionError: String?) -> DoctorSnapshot {
+        let started = DispatchTime.now().uptimeNanoseconds
         var rows: [DoctorRow] = []
+        defer {
+            let elapsedMs = elapsedMilliseconds(since: started)
+            let problemCount = rows.filter { $0.state == .failed || $0.state == .warning }.count
+            logger.info("doctor check finished in \(elapsedMs, privacy: .public)ms with \(problemCount, privacy: .public) problem rows")
+        }
 
-        rows.append(checkRegistration())
-        rows.append(checkExtension(extensionEnabled: extensionEnabled, extensionError: extensionError))
+        rows.append(timed("registration") {
+            checkRegistration()
+        })
+        rows.append(timed("extension") {
+            checkExtension(extensionEnabled: extensionEnabled, extensionError: extensionError)
+        })
 
-        let management = ManagementService.snapshot()
-        rows.append(checkManagement(management))
+        let management = timed("management snapshot") {
+            ManagementService.snapshot()
+        }
+        rows.append(timed("management row") {
+            checkManagement(management)
+        })
 
-        let mount = checkMount(lastAction: management.lastActionStatus)
+        let mount = timed("mount table") {
+            checkMount(lastAction: management.lastActionStatus)
+        }
         rows.append(mount.row)
 
-        let status = mount.isMounted ? readStatusPayload() : StatusProbe.skipped("Mount missing")
+        let status = timed("status payload") {
+            mount.isMounted ? readStatusPayload() : StatusProbe.skipped("Mount missing")
+        }
         rows.append(status.row)
-        rows.append(checkBackend(status))
+        rows.append(timed("backend row") {
+            checkBackend(status)
+        })
 
         return DoctorSnapshot(rows: rows)
+    }
+
+    private static func timed<T>(_ name: String, _ body: () -> T) -> T {
+        let started = DispatchTime.now().uptimeNanoseconds
+        let value = body()
+        logger.info("doctor step \(name, privacy: .public) finished in \(elapsedMilliseconds(since: started), privacy: .public)ms")
+        return value
+    }
+
+    private static func elapsedMilliseconds(since started: UInt64) -> Int {
+        let elapsed = DispatchTime.now().uptimeNanoseconds - started
+        return Int(elapsed / 1_000_000)
     }
 
     private static func checkRegistration() -> DoctorRow {
@@ -299,6 +333,7 @@ enum DoctorService {
         arguments: [String] = [],
         timeout: TimeInterval
     ) -> CommandResult {
+        let started = DispatchTime.now().uptimeNanoseconds
         let process = Process()
         process.executableURL = URL(fileURLWithPath: executable)
         process.arguments = arguments
@@ -316,6 +351,7 @@ enum DoctorService {
         do {
             try process.run()
         } catch {
+            logProcess(executable, started: started, status: 127, timedOut: false)
             return CommandResult(
                 status: 127,
                 stdout: "",
@@ -328,6 +364,7 @@ enum DoctorService {
             let pid = process.processIdentifier
             process.terminate()
             Darwin.kill(pid, SIGKILL)
+            logProcess(executable, started: started, status: nil, timedOut: true)
             return CommandResult(status: nil, stdout: "", stderr: "", timedOut: true)
         }
 
@@ -335,11 +372,22 @@ enum DoctorService {
             String(data: stdout.fileHandleForReading.readDataToEndOfFile(), encoding: .utf8) ?? ""
         let stderrText =
             String(data: stderr.fileHandleForReading.readDataToEndOfFile(), encoding: .utf8) ?? ""
+        logProcess(executable, started: started, status: process.terminationStatus, timedOut: false)
         return CommandResult(
             status: process.terminationStatus,
             stdout: stdoutText,
             stderr: stderrText,
             timedOut: false
         )
+    }
+
+    private static func logProcess(
+        _ executable: String,
+        started: UInt64,
+        status: Int32?,
+        timedOut: Bool
+    ) {
+        let statusText = status.map(String.init) ?? "none"
+        logger.info("doctor process \(executable, privacy: .public) finished in \(elapsedMilliseconds(since: started), privacy: .public)ms status=\(statusText, privacy: .public) timedOut=\(timedOut, privacy: .public)")
     }
 }

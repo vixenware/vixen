@@ -1,6 +1,7 @@
 import AppKit
 import Darwin
 @preconcurrency import FSKit
+import OSLog
 import ServiceManagement
 import Sparkle
 import SwiftUI
@@ -426,6 +427,7 @@ private enum ManagementCommand {
 
 struct ContentView: View {
     @Environment(\.colorScheme) private var colorScheme
+    private let logger = Logger(subsystem: "eu.bearcove.vixen", category: "DoctorUI")
     @State private var isExtensionEnabled = false
     @State private var extensionError: String? = nil
     @State private var managementSnapshot = ManagementService.StatusSnapshot(
@@ -784,19 +786,17 @@ struct ContentView: View {
     @MainActor
     private func refreshDoctorStatus(forceSafeRepair: Bool = false) async {
         guard !isCheckingDoctor else { return }
+        let started = DispatchTime.now().uptimeNanoseconds
         isCheckingDoctor = true
         defer { isCheckingDoctor = false }
-        doctorSnapshot = DoctorSnapshot(
-            rows: DoctorSnapshot.pending.rows.map {
-                DoctorRow(id: $0.id, title: $0.title, state: .checking, detail: nil)
-            }
-        )
         let firstSnapshot = await DoctorService.check(
             extensionEnabled: isExtensionEnabled,
             extensionError: extensionError
         )
 
-        if forceSafeRepair || firstSnapshot.canAttemptSafeMountRepair {
+        if (forceSafeRepair || firstSnapshot.canAttemptSafeMountRepair)
+            && !firstSnapshot.needsFskitRestart
+        {
             await performSafeDoctorRepair(force: forceSafeRepair)
             doctorSnapshot = await DoctorService.check(
                 extensionEnabled: isExtensionEnabled,
@@ -806,21 +806,22 @@ struct ContentView: View {
             doctorSnapshot = firstSnapshot
         }
         refreshManagementStatus()
+        logger.info("doctor ui refresh finished in \(elapsedMilliseconds(since: started), privacy: .public)ms forceSafeRepair=\(forceSafeRepair, privacy: .public)")
     }
 
     private func pollManagementStatus() async {
         while !Task.isCancelled {
             refreshManagementStatus()
-            try? await Task.sleep(for: .seconds(4))
+            try? await Task.sleep(for: .seconds(12))
         }
     }
 
     private func pollDoctorStatus() async {
         while !Task.isCancelled {
-            if isExtensionEnabled && isManagementConfigured {
+            if isExtensionEnabled && isManagementConfigured && !doctorSnapshot.needsFskitRestart {
                 await refreshDoctorStatus()
             }
-            try? await Task.sleep(for: .seconds(6))
+            try? await Task.sleep(for: .seconds(30))
         }
     }
 
@@ -842,6 +843,11 @@ struct ContentView: View {
             _ = try? ManagementService.fireQueue("mount")
         }.value
         try? await Task.sleep(for: .seconds(1))
+    }
+
+    private func elapsedMilliseconds(since started: UInt64) -> Int {
+        let elapsed = DispatchTime.now().uptimeNanoseconds - started
+        return Int(elapsed / 1_000_000)
     }
 
     private func configureManagementDaemon() {
@@ -1057,6 +1063,10 @@ struct ContentView: View {
                 }
 
                 Spacer()
+            }
+
+            HStack(spacing: 10) {
+                Spacer()
 
                 if doctorSnapshot.needsFskitRestart {
                     Button(action: { showFskitRestartConfirmation = true }) {
@@ -1064,14 +1074,14 @@ struct ContentView: View {
                             .font(.system(size: 13, weight: .semibold))
                             .foregroundStyle(.white)
                             .padding(.horizontal, 16)
-                            .frame(height: 30)
+                            .frame(minWidth: 128, minHeight: 30)
                             .background(
                                 brandOrange,
                                 in: RoundedRectangle(cornerRadius: 8, style: .continuous)
                             )
                     }
                     .buttonStyle(.plain)
-                    .disabled(isConfiguringManagement || isCheckingDoctor)
+                    .disabled(isConfiguringManagement)
                 }
 
                 Button(action: { Task { await refreshDoctorStatus(forceSafeRepair: true) } }) {
@@ -1079,7 +1089,7 @@ struct ContentView: View {
                         .font(.system(size: 13, weight: .semibold))
                         .foregroundStyle(brandOrange)
                         .padding(.horizontal, 16)
-                        .frame(height: 30)
+                        .frame(minWidth: 118, minHeight: 30)
                         .background(
                             brandOrange.opacity(0.12),
                             in: RoundedRectangle(cornerRadius: 8, style: .continuous)
@@ -1224,7 +1234,7 @@ private struct DoctorRowView: View {
                     Text(detail)
                         .font(.system(size: 10))
                         .foregroundStyle(.secondary)
-                        .lineLimit(3)
+                        .lineLimit(2)
                         .fixedSize(horizontal: false, vertical: true)
                 }
             }
