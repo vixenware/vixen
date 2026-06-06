@@ -19,9 +19,13 @@ libc.workspace = true
 eyre.workspace = true
 facet.workspace = true
 facet-json.workspace = true
+tokio = { workspace = true }
 tracing.workspace = true
 tracing-appender = "0.2.3"
 tracing-subscriber.workspace = true
+vox = { workspace = true }
+vx-fskit-types.workspace = true
+vx-services.workspace = true
 vx-vfs-types.workspace = true
 
 # The privileged daemon installed in the app bundle as `Contents/MacOS/vixen-management`.

@@ -19,6 +19,7 @@
 pub mod extension;
 pub mod killswitch;
 pub mod mount;
+pub mod probe;
 pub mod queue;
 pub mod status;
 

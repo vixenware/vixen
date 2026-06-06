@@ -65,6 +65,7 @@ vx-io = { path = "crates/vx-io" }
 vx-vfs = { path = "crates/vx-vfs" }
 vx-vfsd = { path = "crates/vx-vfsd" }
 vx-vfs-types = { path = "crates/vx-vfs-types" }
+vx-fskit-types = { path = "crates/vx-fskit-types" }
 vx-span = { path = "crates/vx-span" }
 vx-parser = { path = "crates/vx-parser" }
 vx-package = { path = "crates/vx-package" }

@@ -72,6 +72,13 @@ enum DoctorService {
     private static let installedExtensionPath =
         "/Applications/Vixen.app/Contents/Extensions/VixenFS.appex"
     private static let extensionBundleIdentifier = "eu.bearcove.vixenfs"
+    private static var managementHelperPath: String {
+        Bundle.main.bundleURL
+            .appendingPathComponent("Contents", isDirectory: true)
+            .appendingPathComponent("MacOS", isDirectory: true)
+            .appendingPathComponent("vixen-management", isDirectory: false)
+            .path
+    }
 
     static func check(extensionEnabled: Bool, extensionError: String?) async -> DoctorSnapshot {
         await Task.detached(priority: .utility) {
@@ -111,7 +118,7 @@ enum DoctorService {
             mount.isMounted ? readStatusPayload() : StatusProbe.skipped("Mount missing")
         }
         rows.append(status.row)
-        rows.append(timed("backend row") {
+        rows.append(timed("backend probe") {
             checkBackend(status)
         })
 
@@ -392,14 +399,29 @@ enum DoctorService {
         let everConnected = payload["ever_connected"] as? Bool ?? false
         let reason = (payload["disconnect_reason"] as? String)?
             .trimmingCharacters(in: .whitespacesAndNewlines)
-        logger.notice("doctor backend idle connected=false everConnected=\(everConnected, privacy: .public) reason=\(reason ?? "none", privacy: .public)")
+        logger.notice("doctor backend idle connected=false everConnected=\(everConnected, privacy: .public) reason=\(reason ?? "none", privacy: .public); running active probe")
+        let result = runProcess(
+            managementHelperPath,
+            arguments: ["probe-vfs"],
+            timeout: 6
+        )
+        guard result.status == 0 else {
+            logger.error("doctor backend probe failed timedOut=\(result.timedOut, privacy: .public) detail=\(result.failureDetail(defaultMessage: "VFS backend probe failed"), privacy: .public)")
+            return DoctorRow(
+                id: "backend",
+                title: "Backend Connection",
+                state: .failed,
+                detail: result.failureDetail(defaultMessage: "VFS backend probe failed")
+            )
+        }
+
+        let detail = result.stdout.trimmingCharacters(in: .whitespacesAndNewlines)
+        logger.notice("doctor backend probe ok stdout=\(detail, privacy: .public)")
         return DoctorRow(
             id: "backend",
             title: "Backend Connection",
             state: .ok,
-            detail: everConnected
-                ? "No VFS client is attached"
-                : "Ready for VFS clients"
+            detail: detail.isEmpty ? "VFS probe read through VixenFS" : detail
         )
     }
 

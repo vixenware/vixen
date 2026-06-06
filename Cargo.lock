@@ -4036,9 +4036,13 @@ dependencies = [
  "facet",
  "facet-json",
  "libc",
+ "tokio",
  "tracing",
  "tracing-appender",
  "tracing-subscriber",
+ "vox",
+ "vx-fskit-types",
+ "vx-services",
  "vx-vfs-types",
 ]
 

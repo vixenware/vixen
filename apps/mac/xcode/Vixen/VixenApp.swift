@@ -645,6 +645,7 @@ struct ContentView: View {
     @State private var isCheckingDoctor = false
     @State private var isAutoRepairingDoctor = false
     @State private var lastSafeRepairAt = Date.distantPast
+    @State private var didAttemptSafeRepairThisSession = false
     @State private var showFskitRestartConfirmation = false
     @State private var demoToggleOn = false
     @State private var cursorBob = false
@@ -661,6 +662,10 @@ struct ContentView: View {
     }
     private var isManagementConfigured: Bool {
         managementSnapshot.isReady
+    }
+
+    private var shouldOfferFskitRestart: Bool {
+        doctorSnapshot.needsFskitRestart && didAttemptSafeRepairThisSession
     }
 
     private var contentMinHeight: CGFloat {
@@ -1022,10 +1027,14 @@ struct ContentView: View {
         )
         logger.notice("doctor first snapshot ready=\(firstSnapshot.isReady, privacy: .public) failures=\(firstSnapshot.rows.filter { $0.state == .failed }.count, privacy: .public) warnings=\(firstSnapshot.rows.filter { $0.state == .warning }.count, privacy: .public) canSafeRepair=\(firstSnapshot.canAttemptSafeMountRepair, privacy: .public) needsFskitRestart=\(firstSnapshot.needsFskitRestart, privacy: .public)")
 
+        let restartEscalationAllowed =
+            firstSnapshot.needsFskitRestart && didAttemptSafeRepairThisSession
+        let mountRepairNeeded =
+            firstSnapshot.canAttemptSafeMountRepair
+            && (!didAttemptSafeRepairThisSession || forceSafeRepair)
         let shouldRunSafeRepair =
-            !firstSnapshot.needsFskitRestart
-            && (firstSnapshot.canAttemptSafeMountRepair
-                || (forceSafeRepair && firstSnapshot.hasFailure))
+            !restartEscalationAllowed
+            && (mountRepairNeeded || (forceSafeRepair && firstSnapshot.hasFailure))
 
         if shouldRunSafeRepair {
             logger.notice("doctor ui running safe repair force=\(forceSafeRepair, privacy: .public)")
@@ -1038,6 +1047,9 @@ struct ContentView: View {
         } else {
             doctorSnapshot = firstSnapshot
             logger.notice("doctor ui accepted first snapshot without safe repair")
+        }
+        if doctorSnapshot.isReady {
+            didAttemptSafeRepairThisSession = false
         }
         refreshManagementStatus()
         logger.notice("doctor ui refresh finished in \(elapsedMilliseconds(since: started), privacy: .public)ms forceSafeRepair=\(forceSafeRepair, privacy: .public)")
@@ -1055,11 +1067,11 @@ struct ContentView: View {
     private func pollDoctorStatus() async {
         logger.notice("doctor polling started")
         while !Task.isCancelled {
-            if isExtensionEnabled && isManagementConfigured && !doctorSnapshot.needsFskitRestart {
+            if isExtensionEnabled && isManagementConfigured && !shouldOfferFskitRestart {
                 logger.notice("doctor polling triggering refresh")
                 await refreshDoctorStatus()
             } else {
-                logger.notice("doctor polling skipped extensionEnabled=\(isExtensionEnabled, privacy: .public) managementReady=\(isManagementConfigured, privacy: .public) needsFskitRestart=\(doctorSnapshot.needsFskitRestart, privacy: .public)")
+                logger.notice("doctor polling skipped extensionEnabled=\(isExtensionEnabled, privacy: .public) managementReady=\(isManagementConfigured, privacy: .public) shouldOfferFskitRestart=\(shouldOfferFskitRestart, privacy: .public)")
             }
             try? await Task.sleep(for: .seconds(30))
         }
@@ -1079,6 +1091,7 @@ struct ContentView: View {
         }
 
         isAutoRepairingDoctor = true
+        didAttemptSafeRepairThisSession = true
         lastSafeRepairAt = now
         defer { isAutoRepairingDoctor = false }
         logger.notice("safe doctor repair started force=\(force, privacy: .public)")
@@ -1392,17 +1405,17 @@ struct ContentView: View {
     }
 
     private var doctorPrimaryActionTitle: String? {
-        if doctorSnapshot.needsFskitRestart {
+        if shouldOfferFskitRestart {
             return "Restart FSKit"
         }
         if doctorSnapshot.canAttemptSafeMountRepair {
-            return "Mount VixenFS"
+            return "Repair VixenFS"
         }
         return nil
     }
 
     private func doctorPrimaryAction() {
-        if doctorSnapshot.needsFskitRestart {
+        if shouldOfferFskitRestart {
             showFskitRestartConfirmation = true
         } else if doctorSnapshot.canAttemptSafeMountRepair {
             Task { await refreshDoctorStatus(forceSafeRepair: true) }
@@ -1419,7 +1432,7 @@ struct ContentView: View {
         let failed = doctorSnapshot.rows.filter { $0.state == .failed }.count
         let warnings = doctorSnapshot.rows.filter { $0.state == .warning }.count
         if failed > 0 {
-            if doctorSnapshot.needsFskitRestart {
+            if shouldOfferFskitRestart {
                 return "FSKit has stale state"
             }
             return "\(failed) issue\(failed == 1 ? "" : "s")"
@@ -1445,7 +1458,7 @@ struct ContentView: View {
             return "Vixen is checking the local filesystem setup and repairing safe state automatically."
         }
         if doctorSnapshot.hasFailure {
-            if doctorSnapshot.needsFskitRestart {
+            if shouldOfferFskitRestart {
                 return "Vixen repaired the safe state it can reach. macOS still reports stale FSKit state."
             }
             return "Vixen is checking the local filesystem setup and repairing safe state automatically."

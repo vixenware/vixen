@@ -44,10 +44,15 @@ fn main() -> Result<()> {
                 tracing::info!(ok = outcome.is_ok(), "repair-extension finished");
                 return outcome;
             }
+            if arg == "probe-vfs" {
+                let outcome = vx_management::probe::probe_vfs();
+                tracing::info!(ok = outcome.is_ok(), "probe-vfs finished");
+                return outcome;
+            }
             let Some(button) = Button::from_name(&arg) else {
                 tracing::warn!(arg, "unknown direct CLI command");
                 bail!(
-                    "unknown button {arg:?}; expected mount|unmount|remount|kill-fskitd|repair-extension"
+                    "unknown command {arg:?}; expected mount|unmount|remount|kill-fskitd|repair-extension|probe-vfs"
                 );
             };
             tracing::info!(button = ?button, "executing direct management button");
