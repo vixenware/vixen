@@ -136,11 +136,17 @@ release-pkg version='':
 
 # Optional argument: 'just release-open-installer 1.2.3'
 release-open-installer version='':
-    ./scripts/build.sh {{ version }}
-    ./scripts/dist-pkg.sh {{ version }}
-    VERSION="{{ version }}"
-    if [[ -z "$VERSION" ]]; then VERSION="$(tr -d '[:space:]' < VERSION)"; fi
-    open "dist/${VERSION}/Vixen-Installer.pkg"
+    #!/usr/bin/env bash
+    set -euo pipefail
+    ./scripts/build.sh "{{ version }}"
+    ./scripts/dist-pkg.sh "{{ version }}"
+    version="{{ version }}"
+    if [[ -z "$version" ]]; then
+      version="$(tr -d '[:space:]' < VERSION)"
+    fi
+    pkg="dist/${version}/Vixen-Installer.pkg"
+    [[ -f "$pkg" ]]
+    open "$pkg"
 
 # Notarize, generate appcast, and publish to R2.
 
