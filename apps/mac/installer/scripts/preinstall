@@ -1,0 +1,95 @@
+#!/bin/bash
+set -u
+
+bundle_id="eu.bearcove.vixen"
+app_name="Vixen"
+
+console_uid="$(/usr/bin/stat -f "%u" /dev/console 2>/dev/null || true)"
+console_user="$(/usr/bin/stat -f "%Su" /dev/console 2>/dev/null || true)"
+
+run_as_console_user() {
+  if [ -z "$console_uid" ] || [ -z "$console_user" ]; then
+    return 1
+  fi
+  if [ "$console_user" = "root" ] || [ "$console_user" = "loginwindow" ]; then
+    return 1
+  fi
+  /bin/launchctl asuser "$console_uid" /usr/bin/sudo -u "$console_user" "$@"
+}
+
+running_vixen_pids() {
+  run_as_console_user /usr/bin/osascript -l JavaScript - "$bundle_id" <<'JXA' 2>/dev/null || true
+ObjC.import('AppKit');
+const bundleId = $.NSProcessInfo.processInfo.arguments.objectAtIndex(4).js;
+const apps = $.NSRunningApplication.runningApplicationsWithBundleIdentifier(bundleId);
+for (let i = 0; i < apps.count; i++) {
+  console.log(apps.objectAtIndex(i).processIdentifier);
+}
+JXA
+}
+
+is_vixen_running() {
+  [ -n "$(running_vixen_pids)" ]
+}
+
+wait_for_vixen_to_exit() {
+  local attempt
+  for attempt in {1..25}; do
+    if ! is_vixen_running; then
+      return 0
+    fi
+    /bin/sleep 0.2
+  done
+  return 1
+}
+
+signal_running_vixen() {
+  local signal="$1"
+  local pid
+  while IFS= read -r pid; do
+    [ -n "$pid" ] || continue
+    /bin/kill "-$signal" "$pid" 2>/dev/null || true
+  done <<EOF
+$(running_vixen_pids)
+EOF
+}
+
+request_vixen_quit() {
+  run_as_console_user /usr/bin/osascript -l JavaScript - "$bundle_id" <<'JXA' >/dev/null 2>&1 || true
+ObjC.import('AppKit');
+const bundleId = $.NSProcessInfo.processInfo.arguments.objectAtIndex(4).js;
+const apps = $.NSRunningApplication.runningApplicationsWithBundleIdentifier(bundleId);
+for (let i = 0; i < apps.count; i++) {
+  apps.objectAtIndex(i).terminate();
+}
+JXA
+}
+
+if ! is_vixen_running; then
+  echo "preinstall: $app_name is not running"
+  exit 0
+fi
+
+echo "preinstall: asking running $app_name to quit"
+request_vixen_quit
+if wait_for_vixen_to_exit; then
+  echo "preinstall: $app_name quit"
+  exit 0
+fi
+
+echo "preinstall: $app_name did not quit; sending SIGTERM" >&2
+signal_running_vixen TERM
+if wait_for_vixen_to_exit; then
+  echo "preinstall: $app_name terminated"
+  exit 0
+fi
+
+echo "preinstall: $app_name survived SIGTERM; sending SIGKILL" >&2
+signal_running_vixen KILL
+if wait_for_vixen_to_exit; then
+  echo "preinstall: $app_name killed"
+  exit 0
+fi
+
+echo "preinstall: failed to stop running $app_name" >&2
+exit 1

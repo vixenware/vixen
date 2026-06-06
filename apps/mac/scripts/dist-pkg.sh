@@ -17,6 +17,7 @@ DIST_XML="$PKG_BUILD/Distribution.xml"
 UNSIGNED_PKG="$DIST_DIR/Vixen-Installer-unsigned.pkg"
 SIGNED_PKG="$DIST_DIR/Vixen-Installer.pkg"
 NOTARY_OUT="$DIST_DIR/notary-pkg.log"
+PREINSTALL_SRC="$APP_DIR/installer/scripts/preinstall"
 POSTINSTALL_SRC="$APP_DIR/installer/scripts/postinstall"
 
 fail() {
@@ -70,6 +71,7 @@ done
 
 [[ -d "$SOURCE_APP" ]] || fail "missing Vixen.app at $SOURCE_APP; run just release-build $RELEASE_VERSION first"
 [[ -x "$SOURCE_APP/Contents/MacOS/vixen-management" ]] || fail "missing bundled helper at $SOURCE_APP/Contents/MacOS/vixen-management"
+[[ -x "$PREINSTALL_SRC" ]] || fail "missing executable $PREINSTALL_SRC"
 [[ -x "$POSTINSTALL_SRC" ]] || fail "missing executable $POSTINSTALL_SRC"
 
 app_sig="$(codesign -dvvv "$SOURCE_APP" 2>&1 || true)"
@@ -94,6 +96,7 @@ rm -rf "$PKG_BUILD" "$UNSIGNED_PKG" "$SIGNED_PKG"
 mkdir -p "$PAYLOAD_ROOT/Applications" "$PKG_SCRIPTS"
 
 ditto "$SOURCE_APP" "$PAYLOAD_ROOT/Applications/Vixen.app"
+install -m 755 "$PREINSTALL_SRC" "$PKG_SCRIPTS/preinstall"
 install -m 755 "$POSTINSTALL_SRC" "$PKG_SCRIPTS/postinstall"
 
 pkgbuild --analyze --root "$PAYLOAD_ROOT" "$COMPONENT_PLIST"
