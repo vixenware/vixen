@@ -909,6 +909,7 @@ struct ContentView: View {
             }
 
             do {
+                try ManagementService.repairExtension()
                 _ = try ManagementService.fireQueue("kill-fskitd")
                 try? await Task.sleep(for: .seconds(2))
                 _ = try ManagementService.fireQueue("mount")
