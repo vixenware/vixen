@@ -31,6 +31,36 @@ struct DoctorSnapshot: Sendable {
     var hasFailure: Bool {
         rows.contains { $0.state == .failed || $0.state == .warning }
     }
+
+    var problemRows: [DoctorRow] {
+        rows.filter { $0.state == .failed || $0.state == .warning }
+    }
+
+    var isReady: Bool {
+        rows.allSatisfy { $0.state == .ok }
+    }
+
+    var canAttemptSafeMountRepair: Bool {
+        row(id: "extension")?.state == .ok
+            && row(id: "management")?.state == .ok
+            && row(id: "mount")?.state == .failed
+    }
+
+    var needsFskitRestart: Bool {
+        let staleFskitState = problemRows.contains { row in
+            guard let detail = row.detail else { return false }
+            return detail.localizedCaseInsensitiveContains("Module eu.bearcove.vixenfs is disabled")
+                || detail.localizedCaseInsensitiveContains("Unable to invoke task")
+        }
+        return staleFskitState
+            && row(id: "registration")?.state == .ok
+            && row(id: "extension")?.state == .ok
+            && row(id: "management")?.state == .ok
+    }
+
+    private func row(id: String) -> DoctorRow? {
+        rows.first { $0.id == id }
+    }
 }
 
 enum DoctorService {
@@ -52,7 +82,7 @@ enum DoctorService {
         let management = ManagementService.snapshot()
         rows.append(checkManagement(management))
 
-        let mount = checkMount()
+        let mount = checkMount(lastAction: management.lastActionStatus)
         rows.append(mount.row)
 
         let status = mount.isMounted ? readStatusPayload() : StatusProbe.skipped("Mount missing")
@@ -104,7 +134,7 @@ enum DoctorService {
             id: "management",
             title: "Management Service",
             state: snapshot.isReady ? .ok : .failed,
-            detail: snapshot.detail ?? snapshot.description
+            detail: snapshot.isReady ? "Ready" : snapshot.description
         )
     }
 
@@ -113,7 +143,7 @@ enum DoctorService {
         let isMounted: Bool
     }
 
-    private static func checkMount() -> MountProbe {
+    private static func checkMount(lastAction: ManagementService.LastActionStatus?) -> MountProbe {
         let result = runProcess("/sbin/mount", timeout: 2)
         guard result.status == 0 else {
             return MountProbe(
@@ -133,12 +163,22 @@ enum DoctorService {
                 line.contains(" on \(mountPoint) ") && line.localizedCaseInsensitiveContains("vixenfs")
             }
 
+        let failedMountDetail: String?
+        if let lastAction,
+            !lastAction.ok,
+            lastAction.button == "mount" || lastAction.button == "remount"
+        {
+            failedMountDetail = lastAction.failureDescription
+        } else {
+            failedMountDetail = nil
+        }
+
         return MountProbe(
             row: DoctorRow(
                 id: "mount",
                 title: "VixenFS Mount",
                 state: isMounted ? .ok : .failed,
-                detail: isMounted ? mountPoint : "No vixenfs mount at \(mountPoint)"
+                detail: isMounted ? mountPoint : failedMountDetail ?? "No vixenfs mount at \(mountPoint)"
             ),
             isMounted: isMounted
         )

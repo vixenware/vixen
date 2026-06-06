@@ -435,8 +435,13 @@ struct ContentView: View {
     )
     @State private var managementError: String? = nil
     @State private var isConfiguringManagement = false
+    @State private var didRequestManagementSetup = false
     @State private var doctorSnapshot = DoctorSnapshot.pending
     @State private var isCheckingDoctor = false
+    @State private var isAutoRepairingDoctor = false
+    @State private var lastSafeRepairAt = Date.distantPast
+    @State private var doctorDetailsExpanded = false
+    @State private var showFskitRestartConfirmation = false
     @State private var demoToggleOn = false
     @State private var cursorBob = false
 
@@ -480,6 +485,20 @@ struct ContentView: View {
         .task {
             guard isSupportedOS else { return }
             await animateToggleDemo()
+        }
+        .task {
+            guard isSupportedOS else { return }
+            await pollDoctorStatus()
+        }
+        .alert("Restart FSKit?", isPresented: $showFskitRestartConfirmation) {
+            Button("Restart FSKit", role: .destructive) {
+                restartFskit()
+            }
+            Button("Cancel", role: .cancel) {}
+        } message: {
+            Text(
+                "Vixen has already repaired the app registration and retried the mount. Restarting FSKit can clear stale macOS filesystem-extension state, but it may interrupt other FSKit volumes."
+            )
         }
         .onAppear {
             cursorBob = true
@@ -673,6 +692,11 @@ struct ContentView: View {
             Spacer()
                 .frame(width: foxSize)
         }
+        .task {
+            guard !didRequestManagementSetup else { return }
+            didRequestManagementSetup = true
+            configureManagementDaemon()
+        }
     }
 
     private var managementStatusText: String {
@@ -685,7 +709,7 @@ struct ContentView: View {
 
     private var managementButtonTitle: String {
         if isManagementConfigured {
-            return "Recover"
+            return "Check"
         }
         switch managementSnapshot.serviceStatus {
         case .enabled:
@@ -743,7 +767,7 @@ struct ContentView: View {
 
     private func managementButtonAction() {
         if isManagementConfigured {
-            requestManagementRecovery()
+            Task { await refreshDoctorStatus(forceSafeRepair: true) }
         } else if managementSnapshot.serviceStatus == .requiresApproval {
             openLoginItemsSettings()
         } else if managementSnapshot.serviceStatus == .enabled {
@@ -758,7 +782,7 @@ struct ContentView: View {
     }
 
     @MainActor
-    private func refreshDoctorStatus() async {
+    private func refreshDoctorStatus(forceSafeRepair: Bool = false) async {
         guard !isCheckingDoctor else { return }
         isCheckingDoctor = true
         defer { isCheckingDoctor = false }
@@ -767,10 +791,20 @@ struct ContentView: View {
                 DoctorRow(id: $0.id, title: $0.title, state: .checking, detail: nil)
             }
         )
-        doctorSnapshot = await DoctorService.check(
+        let firstSnapshot = await DoctorService.check(
             extensionEnabled: isExtensionEnabled,
             extensionError: extensionError
         )
+
+        if forceSafeRepair || firstSnapshot.canAttemptSafeMountRepair {
+            await performSafeDoctorRepair(force: forceSafeRepair)
+            doctorSnapshot = await DoctorService.check(
+                extensionEnabled: isExtensionEnabled,
+                extensionError: extensionError
+            )
+        } else {
+            doctorSnapshot = firstSnapshot
+        }
         refreshManagementStatus()
     }
 
@@ -779,6 +813,35 @@ struct ContentView: View {
             refreshManagementStatus()
             try? await Task.sleep(for: .seconds(4))
         }
+    }
+
+    private func pollDoctorStatus() async {
+        while !Task.isCancelled {
+            if isExtensionEnabled && isManagementConfigured {
+                await refreshDoctorStatus()
+            }
+            try? await Task.sleep(for: .seconds(6))
+        }
+    }
+
+    @MainActor
+    private func performSafeDoctorRepair(force: Bool) async {
+        guard !isAutoRepairingDoctor else { return }
+        let now = Date()
+        if !force && now.timeIntervalSince(lastSafeRepairAt) < 10 {
+            return
+        }
+
+        isAutoRepairingDoctor = true
+        lastSafeRepairAt = now
+        defer { isAutoRepairingDoctor = false }
+
+        await Task.detached(priority: .utility) {
+            try? ManagementService.repairExtension()
+            guard ManagementService.snapshot().isReady else { return }
+            _ = try? ManagementService.fireQueue("mount")
+        }.value
+        try? await Task.sleep(for: .seconds(1))
     }
 
     private func configureManagementDaemon() {
@@ -831,20 +894,23 @@ struct ContentView: View {
         }
     }
 
-    private func requestManagementRecovery() {
-        isConfiguringManagement = true
-        defer {
-            isConfiguringManagement = false
-            refreshManagementStatus()
-        }
+    private func restartFskit() {
+        Task {
+            isConfiguringManagement = true
+            defer {
+                isConfiguringManagement = false
+                refreshManagementStatus()
+            }
 
-        do {
-            try ManagementService.repairExtension()
-            _ = try ManagementService.fireQueue("remount")
-            managementError = nil
-            refreshManagementStatus()
-        } catch {
-            managementError = error.localizedDescription
+            do {
+                _ = try ManagementService.fireQueue("kill-fskitd")
+                try? await Task.sleep(for: .seconds(2))
+                _ = try ManagementService.fireQueue("mount")
+                managementError = nil
+                await refreshDoctorStatus(forceSafeRepair: true)
+            } catch {
+                managementError = error.localizedDescription
+            }
         }
     }
 
@@ -969,56 +1035,77 @@ struct ContentView: View {
     private var doctorPanel: some View {
         VStack(alignment: .leading, spacing: 12) {
             HStack(alignment: .center, spacing: 10) {
-                Image(systemName: doctorSnapshot.hasFailure ? "stethoscope" : "checkmark.shield.fill")
-                    .font(.system(size: 17, weight: .semibold))
-                    .foregroundStyle(doctorSnapshot.hasFailure ? brandOrange : Color.green)
-                    .frame(width: 28)
+                Group {
+                    if isCheckingDoctor || isAutoRepairingDoctor {
+                        ProgressView()
+                            .controlSize(.small)
+                            .tint(brandOrange)
+                    } else {
+                        Image(systemName: doctorSnapshot.hasFailure ? "stethoscope" : "checkmark.shield.fill")
+                            .font(.system(size: 17, weight: .semibold))
+                            .foregroundStyle(doctorSnapshot.hasFailure ? brandOrange : Color.green)
+                    }
+                }
+                .frame(width: 28, height: 28)
 
                 VStack(alignment: .leading, spacing: 2) {
                     Text("System Check")
                         .font(.system(size: 13, weight: .semibold))
-                    Text(isCheckingDoctor ? "Checking" : doctorSummaryText)
+                    Text(doctorSummaryText)
                         .font(.system(size: 12))
                         .foregroundStyle(.secondary)
                 }
 
                 Spacer()
 
-                Button(action: { Task { await refreshDoctorStatus() } }) {
-                    Image(systemName: "arrow.clockwise")
+                if doctorSnapshot.needsFskitRestart {
+                    Button(action: { showFskitRestartConfirmation = true }) {
+                        Text("Restart FSKit")
+                            .font(.system(size: 13, weight: .semibold))
+                            .foregroundStyle(.white)
+                            .padding(.horizontal, 16)
+                            .frame(height: 30)
+                            .background(
+                                brandOrange,
+                                in: RoundedRectangle(cornerRadius: 8, style: .continuous)
+                            )
+                    }
+                    .buttonStyle(.plain)
+                    .disabled(isConfiguringManagement || isCheckingDoctor)
+                }
+
+                Button(action: { Task { await refreshDoctorStatus(forceSafeRepair: true) } }) {
+                    Text("Check Again")
                         .font(.system(size: 13, weight: .semibold))
-                        .foregroundStyle(.white)
-                        .frame(width: 32, height: 30)
+                        .foregroundStyle(brandOrange)
+                        .padding(.horizontal, 16)
+                        .frame(height: 30)
                         .background(
-                            brandOrange,
+                            brandOrange.opacity(0.12),
                             in: RoundedRectangle(cornerRadius: 8, style: .continuous)
                         )
                 }
                 .buttonStyle(.plain)
                 .disabled(isCheckingDoctor)
-
-                Button(action: requestManagementRecovery) {
-                    Text("Recover")
-                        .font(.system(size: 13, weight: .semibold))
-                        .foregroundStyle(.white)
-                        .padding(.horizontal, 16)
-                        .frame(height: 30)
-                        .background(
-                            brandOrange,
-                            in: RoundedRectangle(cornerRadius: 8, style: .continuous)
-                        )
-                }
-                .buttonStyle(.plain)
-                .disabled(isConfiguringManagement)
             }
 
-            VStack(spacing: 8) {
-                ForEach(doctorSnapshot.rows) { row in
-                    DoctorRowView(row: row, brandOrange: brandOrange)
+            if doctorSnapshot.hasFailure {
+                DisclosureGroup(isExpanded: $doctorDetailsExpanded) {
+                    VStack(spacing: 8) {
+                        ForEach(doctorSnapshot.problemRows) { row in
+                            DoctorRowView(row: row, brandOrange: brandOrange)
+                        }
+                    }
+                    .padding(.top, 6)
+                } label: {
+                    Text("What needs attention")
+                        .font(.system(size: 12, weight: .medium))
+                        .foregroundStyle(.primary)
                 }
             }
         }
         .padding(12)
+        .frame(minHeight: 96, alignment: .top)
         .background(
             RoundedRectangle(cornerRadius: 10, style: .continuous)
                 .fill(sectionBg)
@@ -1026,30 +1113,45 @@ struct ContentView: View {
     }
 
     private var doctorSummaryText: String {
+        if isAutoRepairingDoctor {
+            return "Repairing safe state"
+        }
+        if isCheckingDoctor {
+            return "Checking"
+        }
         let failed = doctorSnapshot.rows.filter { $0.state == .failed }.count
         let warnings = doctorSnapshot.rows.filter { $0.state == .warning }.count
         if failed > 0 {
-            return "\(failed) check\(failed == 1 ? "" : "s") failed"
+            if doctorSnapshot.needsFskitRestart {
+                return "FSKit has stale state"
+            }
+            return "\(failed) issue\(failed == 1 ? "" : "s")"
         }
         if warnings > 0 {
             return "\(warnings) warning\(warnings == 1 ? "" : "s")"
         }
-        if doctorSnapshot.rows.allSatisfy({ $0.state == .ok }) {
+        if doctorSnapshot.isReady {
             return "Ready"
         }
         return "Not checked"
     }
 
     private var completeTitle: String {
-        if isCheckingDoctor {
+        if isCheckingDoctor || isAutoRepairingDoctor || (!doctorSnapshot.isReady && !doctorSnapshot.hasFailure) {
             return "Checking Vixen"
         }
         return doctorSnapshot.hasFailure ? "Needs attention" : "You're all set"
     }
 
     private var completeDescription: String {
+        if !doctorSnapshot.isReady && !doctorSnapshot.hasFailure {
+            return "Vixen is checking the local filesystem setup and repairing safe state automatically."
+        }
         if doctorSnapshot.hasFailure {
-            return "VixenFS is enabled, but one or more system checks need attention."
+            if doctorSnapshot.needsFskitRestart {
+                return "Vixen repaired the safe state it can reach. macOS still reports stale FSKit state."
+            }
+            return "Vixen is checking the local filesystem setup and repairing safe state automatically."
         }
         return "VixenFS is enabled. Head to the docs to install the CLI and run your first build."
     }
@@ -1073,20 +1175,22 @@ struct ContentView: View {
                 .multilineTextAlignment(.center)
                 .fixedSize(horizontal: false, vertical: true)
 
-                Button {
-                    if let url = URL(string: "https://app.vixen.rs/") {
-                        NSWorkspace.shared.open(url)
+                if doctorSnapshot.isReady {
+                    Button {
+                        if let url = URL(string: "https://app.vixen.rs/") {
+                            NSWorkspace.shared.open(url)
+                        }
+                    } label: {
+                        Label("Get Started", systemImage: "arrow.up.right")
+                            .font(.system(size: 15, weight: .semibold))
+                            .foregroundStyle(.white)
+                            .padding(.horizontal, 28)
+                            .padding(.vertical, 12)
+                            .background(
+                                brandOrange, in: RoundedRectangle(cornerRadius: 10, style: .continuous))
                     }
-                } label: {
-                    Label("Get Started", systemImage: "arrow.up.right")
-                        .font(.system(size: 15, weight: .semibold))
-                        .foregroundStyle(.white)
-                        .padding(.horizontal, 28)
-                        .padding(.vertical, 12)
-                        .background(
-                            brandOrange, in: RoundedRectangle(cornerRadius: 10, style: .continuous))
+                    .buttonStyle(.plain)
                 }
-                .buttonStyle(.plain)
 
                 doctorPanel
             }
