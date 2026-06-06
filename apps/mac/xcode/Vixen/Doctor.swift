@@ -81,7 +81,7 @@ enum DoctorService {
         defer {
             let elapsedMs = elapsedMilliseconds(since: started)
             let problemCount = rows.filter { $0.state == .failed || $0.state == .warning }.count
-            logger.info("doctor check finished in \(elapsedMs, privacy: .public)ms with \(problemCount, privacy: .public) problem rows")
+            logger.notice("doctor check finished in \(elapsedMs, privacy: .public)ms with \(problemCount, privacy: .public) problem rows")
         }
 
         rows.append(timed("registration") {
@@ -117,7 +117,7 @@ enum DoctorService {
     private static func timed<T>(_ name: String, _ body: () -> T) -> T {
         let started = DispatchTime.now().uptimeNanoseconds
         let value = body()
-        logger.info("doctor step \(name, privacy: .public) finished in \(elapsedMilliseconds(since: started), privacy: .public)ms")
+        logger.notice("doctor step \(name, privacy: .public) finished in \(elapsedMilliseconds(since: started), privacy: .public)ms")
         return value
     }
 
@@ -388,6 +388,6 @@ enum DoctorService {
         timedOut: Bool
     ) {
         let statusText = status.map(String.init) ?? "none"
-        logger.info("doctor process \(executable, privacy: .public) finished in \(elapsedMilliseconds(since: started), privacy: .public)ms status=\(statusText, privacy: .public) timedOut=\(timedOut, privacy: .public)")
+        logger.notice("doctor process \(executable, privacy: .public) finished in \(elapsedMilliseconds(since: started), privacy: .public)ms status=\(statusText, privacy: .public) timedOut=\(timedOut, privacy: .public)")
     }
 }

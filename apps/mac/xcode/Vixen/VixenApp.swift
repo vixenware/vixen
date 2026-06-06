@@ -806,7 +806,7 @@ struct ContentView: View {
             doctorSnapshot = firstSnapshot
         }
         refreshManagementStatus()
-        logger.info("doctor ui refresh finished in \(elapsedMilliseconds(since: started), privacy: .public)ms forceSafeRepair=\(forceSafeRepair, privacy: .public)")
+        logger.notice("doctor ui refresh finished in \(elapsedMilliseconds(since: started), privacy: .public)ms forceSafeRepair=\(forceSafeRepair, privacy: .public)")
     }
 
     private func pollManagementStatus() async {
@@ -1100,17 +1100,37 @@ struct ContentView: View {
             }
 
             if doctorSnapshot.hasFailure {
-                DisclosureGroup(isExpanded: $doctorDetailsExpanded) {
-                    VStack(spacing: 8) {
-                        ForEach(doctorSnapshot.problemRows) { row in
-                            DoctorRowView(row: row, brandOrange: brandOrange)
-                        }
+                Button {
+                    withAnimation(.easeInOut(duration: 0.18)) {
+                        doctorDetailsExpanded.toggle()
                     }
-                    .padding(.top, 6)
                 } label: {
-                    Text("What needs attention")
-                        .font(.system(size: 12, weight: .medium))
-                        .foregroundStyle(.primary)
+                    HStack(spacing: 6) {
+                        Image(systemName: doctorDetailsExpanded ? "chevron.down" : "chevron.right")
+                            .font(.system(size: 10, weight: .bold))
+                            .foregroundStyle(.secondary)
+
+                        Text("What needs attention")
+                            .font(.system(size: 12, weight: .medium))
+                            .foregroundStyle(.primary)
+
+                        Spacer()
+                    }
+                    .contentShape(Rectangle())
+                }
+                .buttonStyle(.plain)
+
+                if doctorDetailsExpanded {
+                    ScrollView {
+                        VStack(spacing: 8) {
+                            ForEach(doctorSnapshot.problemRows) { row in
+                                DoctorRowView(row: row, brandOrange: brandOrange)
+                            }
+                        }
+                        .padding(.vertical, 2)
+                    }
+                    .scrollIndicators(.visible)
+                    .frame(maxHeight: 118)
                 }
             }
         }
