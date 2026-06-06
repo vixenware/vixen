@@ -1,14 +1,14 @@
 //! Repair the installed VixenFS app-extension registration.
 //!
-//! This deliberately does not touch `/Volumes/Vixen`: it only reconciles
-//! LaunchServices and PlugInKit records for the installed app bundle.
+//! This deliberately does not touch `/Volumes/Vixen`: it only removes stale
+//! LaunchServices and PlugInKit records. It does not explicitly add/register
+//! VixenFS; manual registration creates fresh FSKit identities that have not
+//! been approved in System Settings.
 
 use std::collections::BTreeSet;
 use std::ffi::OsStr;
 use std::path::{Path, PathBuf};
 use std::process::Command;
-use std::thread;
-use std::time::Duration;
 
 use eyre::{Result, WrapErr, bail};
 
@@ -25,7 +25,6 @@ pub fn repair_installed_extension() -> Result<()> {
 
     repair_containing_app(app_path)?;
     repair_extension(&extension_path)?;
-    settle_containing_app(app_path)?;
     Ok(())
 }
 
@@ -44,12 +43,9 @@ fn bundled_extension_path(app_path: &Path) -> Result<PathBuf> {
 
 fn repair_containing_app(app_path: &Path) -> Result<()> {
     let registrations = registered_containing_apps()?;
-    let plan = registration_plan(&registrations, app_path);
+    let plan = registration_plan(&registrations, app_path, launch_services_mode());
 
     unregister_apps(&plan.stale_paths)?;
-    if plan.needs_register {
-        register_app(app_path)?;
-    }
     Ok(())
 }
 
@@ -61,53 +57,10 @@ fn repair_extension(extension_path: &Path) -> Result<()> {
         .filter(|path| normalize(path) != extension_key)
         .cloned()
         .collect();
-    let has_desired = registrations
-        .iter()
-        .any(|path| normalize(path) == extension_key);
 
     for stale_path in stale_paths {
         run(PLUGINKIT, [OsStr::new("-r"), stale_path.as_os_str()])
             .wrap_err_with(|| format!("unregistering stale VixenFS at {}", stale_path.display()))?;
-    }
-
-    if !has_desired {
-        run(PLUGINKIT, [OsStr::new("-a"), extension_path.as_os_str()])
-            .wrap_err_with(|| format!("registering VixenFS at {}", extension_path.display()))?;
-    }
-
-    Ok(())
-}
-
-fn settle_containing_app(app_path: &Path) -> Result<()> {
-    for attempt in 0..5 {
-        let registrations = registered_containing_apps()?;
-        let plan = registration_plan(&registrations, app_path);
-
-        if plan.is_clean() {
-            return Ok(());
-        }
-
-        unregister_apps(&plan.stale_paths)?;
-        if plan.needs_register {
-            register_app(&app_path)?;
-        }
-
-        if attempt < 4 {
-            thread::sleep(Duration::from_millis(200));
-        }
-    }
-
-    let registrations = registered_containing_apps()?;
-    let plan = registration_plan(&registrations, app_path);
-    if !plan.is_clean() {
-        bail!(
-            "LaunchServices still has stale Vixen.app registrations: {}",
-            registrations
-                .iter()
-                .map(|path| path.display().to_string())
-                .collect::<Vec<_>>()
-                .join(", ")
-        );
     }
 
     Ok(())
@@ -116,29 +69,34 @@ fn settle_containing_app(app_path: &Path) -> Result<()> {
 #[derive(Debug, PartialEq, Eq)]
 struct RegistrationPlan {
     stale_paths: Vec<PathBuf>,
-    needs_register: bool,
 }
 
-impl RegistrationPlan {
-    fn is_clean(&self) -> bool {
-        self.stale_paths.is_empty() && !self.needs_register
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum LaunchServicesMode {
+    User,
+    Root,
+}
+
+fn launch_services_mode() -> LaunchServicesMode {
+    if unsafe { libc::geteuid() } == 0 {
+        LaunchServicesMode::Root
+    } else {
+        LaunchServicesMode::User
     }
 }
 
-fn registration_plan(registrations: &[PathBuf], desired_path: &Path) -> RegistrationPlan {
+fn registration_plan(
+    registrations: &[PathBuf],
+    desired_path: &Path,
+    mode: LaunchServicesMode,
+) -> RegistrationPlan {
     let desired_key = normalize(desired_path);
     let stale_paths = registrations
         .iter()
-        .filter(|path| normalize(path) != desired_key)
+        .filter(|path| mode == LaunchServicesMode::Root || normalize(path) != desired_key)
         .cloned()
         .collect();
-    let has_desired = registrations
-        .iter()
-        .any(|path| normalize(path) == desired_key);
-    RegistrationPlan {
-        stale_paths,
-        needs_register: !has_desired,
-    }
+    RegistrationPlan { stale_paths }
 }
 
 fn unregister_apps(paths: &[PathBuf]) -> Result<()> {
@@ -147,19 +105,6 @@ fn unregister_apps(paths: &[PathBuf]) -> Result<()> {
             .wrap_err_with(|| format!("unregistering stale Vixen.app at {}", path.display()))?;
     }
     Ok(())
-}
-
-fn register_app(app_path: &Path) -> Result<()> {
-    run(
-        LSREGISTER,
-        [
-            OsStr::new("-f"),
-            OsStr::new("-R"),
-            OsStr::new("-trusted"),
-            app_path.as_os_str(),
-        ],
-    )
-    .wrap_err_with(|| format!("registering Vixen.app at {}", app_path.display()))
 }
 
 fn registered_extensions() -> Result<Vec<PathBuf>> {
@@ -271,23 +216,26 @@ fn normalize(path: &Path) -> PathBuf {
 mod tests {
     use std::path::{Path, PathBuf};
 
-    use super::registration_plan;
+    use super::{LaunchServicesMode, registration_plan};
 
     #[test]
     fn clean_registration_is_noop() {
         let desired = Path::new("/Applications/Vixen.app");
-        let plan = registration_plan(&[PathBuf::from("/Applications/Vixen.app")], desired);
+        let plan = registration_plan(
+            &[PathBuf::from("/Applications/Vixen.app")],
+            desired,
+            LaunchServicesMode::User,
+        );
 
-        assert!(plan.is_clean());
+        assert!(plan.stale_paths.is_empty());
     }
 
     #[test]
-    fn missing_registration_needs_register() {
+    fn missing_registration_is_left_to_automatic_discovery() {
         let desired = Path::new("/Applications/Vixen.app");
-        let plan = registration_plan(&[], desired);
+        let plan = registration_plan(&[], desired, LaunchServicesMode::User);
 
         assert!(plan.stale_paths.is_empty());
-        assert!(plan.needs_register);
     }
 
     #[test]
@@ -299,9 +247,24 @@ mod tests {
                 PathBuf::from("/Applications/Vixen.app"),
             ],
             desired,
+            LaunchServicesMode::User,
         );
 
         assert_eq!(plan.stale_paths, vec![PathBuf::from("/tmp/dmg/Vixen.app")]);
-        assert!(!plan.needs_register);
+    }
+
+    #[test]
+    fn root_registration_is_removed_even_when_it_points_at_installed_app() {
+        let desired = Path::new("/Applications/Vixen.app");
+        let plan = registration_plan(
+            &[PathBuf::from("/Applications/Vixen.app")],
+            desired,
+            LaunchServicesMode::Root,
+        );
+
+        assert_eq!(
+            plan.stale_paths,
+            vec![PathBuf::from("/Applications/Vixen.app")]
+        );
     }
 }

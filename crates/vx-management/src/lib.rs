@@ -63,9 +63,13 @@ impl Button {
     /// Execute the capability. **Requires root** (mount/unmount/kill).
     pub fn execute(self) -> eyre::Result<()> {
         match self {
-            Button::Mount => mount::establish(),
+            Button::Mount => {
+                extension::repair_installed_extension()?;
+                mount::establish()
+            }
             Button::Unmount => mount::unmount(),
             Button::Remount => {
+                extension::repair_installed_extension()?;
                 mount::unmount()?;
                 mount::establish()
             }

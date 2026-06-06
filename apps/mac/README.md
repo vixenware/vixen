@@ -120,11 +120,14 @@ Useful installed-app commands:
 - `/Applications/Vixen.app/Contents/MacOS/Vixen management remount`
 
 `repair-extension` runs the bundled management helper directly in the current
-user session, so it repairs the LaunchServices/PlugInKit state that System
-Settings and FSKit actually consult. The queue-trigger commands (`mount`,
-`unmount`, `remount`, `kill-fskitd`) only drop fixed trigger files into the
-root-owned management queues. The privileged work still runs inside
-`vixen-management` under launchd.
+effective user. As the logged-in user, it removes stale LaunchServices and
+PlugInKit records while preserving the installed `/Applications/Vixen.app`
+record. As root, it removes explicit Vixen LaunchServices records instead of
+creating one; a root-created FSKit identity is distinct from the identity the
+user approved in System Settings, and can make FSKit report the module as
+disabled. The queue-trigger commands (`mount`, `unmount`, `remount`,
+`kill-fskitd`) only drop fixed trigger files into the root-owned management
+queues. The privileged work still runs inside `vixen-management` under launchd.
 
 ## Install and activate
 
@@ -158,16 +161,21 @@ The old standalone executable-swap experiment has been retired. `install-rust-fs
 
 ### What actually registers the extension
 
-- The installed `Vixen.app` and its `management` CLI entrypoint call the bundled
-  management helper's `repair-extension` command. That repairs registration
-  toward `/Applications/Vixen.app`: unregister stale `eu.bearcove.vixen`
-  containing-app records, unregister stale `eu.bearcove.vixenfs` appex paths,
-  register the installed appex, then run `lsregister` on the app bundle.
-- Our explicit reload helper in [reload-vixen-fs-extension.sh](scripts/reload-vixen-fs-extension.sh) does:
-  - the same stale containing-app cleanup
-  - the same stale appex cleanup
-  - the same final `lsregister -f -R -trusted <app-bundle>`
-- `xcodebuild` itself also re-registers the built app with LaunchServices at the end of a build:
+The supported repair path is cleanup-only:
+
+- remove stale `eu.bearcove.vixen` containing-app records
+- remove stale `eu.bearcove.vixenfs` PlugInKit paths
+- leave discovery and user approval to macOS
+
+Do not manually add the extension with `pluginkit -a`, and do not manually
+register the app with `lsregister -f -R -trusted`. In particular, running those
+commands as root creates a fresh FSKit identity that has not been approved in
+System Settings. FSKit can then report `Module eu.bearcove.vixenfs is disabled`
+even though the user-facing File System Extensions UI shows VixenFS enabled.
+
+`xcodebuild` itself also registers the built app with LaunchServices at the end
+of a build:
+
   - `RegisterWithLaunchServices ... lsregister -f -R -trusted .../Vixen.app`
 
 That last point matters: a GUI/Xcode build under the global DerivedData folder can silently replace the active registration, even if you expected `/Applications/Vixen.app` or the repo-local `apps/mac/xcode/build/DerivedData/...` copy to be the one in use.
@@ -178,7 +186,10 @@ Ask PlugInKit, not your memory:
 
 - `pluginkit -mAvvv -i eu.bearcove.vixenfs`
 
-That prints the currently registered path and UUID for the active FSKit extension. During debugging, this is the source of truth.
+That prints the currently registered path and UUID for the active FSKit
+extension. During debugging, this is the first source of truth. Root
+LaunchServices state can still poison `fskitd`, so the privileged mount path
+also removes explicit root Vixen LaunchServices records before mounting.
 
 Typical paths we have seen:
 
@@ -216,12 +227,16 @@ For an installed app:
 - `/Applications/Vixen.app/Contents/MacOS/Vixen management repair-extension`
 - `just -f apps/mac/Justfile fix-registration`
 
-For a specific build product:
+Those commands are cleanup-only. After cleanup, open the installed app or
+System Settings and let macOS rediscover the extension.
 
-- `pluginkit -r <old-appex-path>`
-- `pluginkit -a <new-appex-path>`
-- `lsregister -f -R -trusted <new-app-bundle>`
-- `pluginkit -mAvvv -i eu.bearcove.vixenfs`
+For root-side diagnosis/recovery during development, batch the work into one
+sudo invocation:
+
+- `sudo bash apps/mac/scripts/debug-simple-fskit-reset.sh`
+
+Do not rely on `sudo -v` followed by separate root commands; the timestamp may
+not apply to the terminal/session that eventually runs the command.
 
 Do not trust a successful build alone. Always verify the active registration path afterward.
 
@@ -231,12 +246,11 @@ Before debugging a mount failure, check these in order:
 
 1. Confirm which experiment you mean to run.
    - Hybrid FSKit host: `just -f apps/mac/Justfile install`
-   - Standalone injected Rust executable: `just -f apps/mac/Justfile install-rust-fs`
 2. Verify the winning registration:
    - `pluginkit -mAvvv -i eu.bearcove.vixenfs`
-3. If FSKit host state looks stale, restart the daemons:
-   - `sudo killall fskitd fskit_agent`
-4. Re-register the installed app if needed:
+3. If FSKit host state looks stale, use the management kill switch:
+   - `/Applications/Vixen.app/Contents/MacOS/Vixen management kill-fskitd`
+4. Clean stale registrations if needed:
    - `/Applications/Vixen.app/Contents/MacOS/Vixen management repair-extension`
    - `just -f apps/mac/Justfile fix-registration`
 5. Only then retry the mount or `vx eval`.

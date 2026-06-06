@@ -59,7 +59,7 @@ From least to most alarming:
 
 4. **Extension enabled but mount fails** — the extension binary was rebuilt
    locally (signature/binary changed), and fskitd refuses to load it. Only
-   killing fskitd + fskit_agent forces it to pick up the new binary.
+   the management kill-switch forces FSKit to pick up the new binary.
 
 5. **Backend not connected, extension running** — vx-vfsd crashed or was
    killed. The extension stays running on purpose (exiting would cause hangs,
@@ -80,8 +80,9 @@ From least to most alarming:
 
 9. **Uninterruptible sleep** — the extension is not running, but processes
    that were exec'd from files *inside the VFS* are now in uninterruptible
-   sleep (state D), waiting on I/O that will never complete. `sudo killall
-   fskitd fskit_agent` will not help. **Only a reboot will.**
+   sleep (state D), waiting on I/O that will never complete. Ordinary process
+   cleanup will not help. Try the management kill-switch; reboot if the kernel
+   state still cannot be unwound.
 
 ## Probing
 
@@ -175,7 +176,7 @@ Read /.vixenfs/status.json (via /bin/cat, with retries + timeout)
   ├─ parse ok + app_group_path is non-empty ──→ SUCCESS
   ├─ parse ok + app_group_path missing/empty ──→ FAIL: extension not fully initialized
   ├─ timeout/hang ──→ FAIL: mount is zombied
-  ├─ cat failed ──→ FAIL: "sudo killall fskitd fskit_agent"
+  ├─ cat failed ──→ FAIL: try the management kill-switch
   │
   ▼
 ```
@@ -207,8 +208,8 @@ SACRIFICIAL UNMOUNT
   ▼
 UNWIND FSKIT
   │
-  launchctl kill SIGTERM system/com.apple.filesystems.fskitd
-  launchctl kill SIGKILL system/com.apple.filesystems.fskitd if needed
+  management helper resolves /usr/libexec/fskitd and calls kill(2)
+  SIGTERM first, SIGKILL if needed
   │
   ▼
 CHECK MOUNT TABLE

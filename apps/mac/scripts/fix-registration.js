@@ -56,7 +56,9 @@ if (!desiredPath) {
   process.exit(1);
 }
 
-console.log(`${emojis.bundle} Repairing VixenFS registration toward: ${colorize("cyan", desiredPath)}`);
+const runningAsRoot = process.geteuid?.() === 0;
+
+console.log(`${emojis.bundle} Cleaning VixenFS registration toward: ${colorize("cyan", desiredPath)}`);
 
 function runTool(cmd, args) {
   console.log(`${emojis.tool} ${cmd} ${colorize("cyan", args.join(" "))}`);
@@ -147,10 +149,6 @@ function currentRegisteredAppPaths() {
   return paths;
 }
 
-function sleep(milliseconds) {
-  Atomics.wait(new Int32Array(new SharedArrayBuffer(4)), 0, 0, milliseconds);
-}
-
 function unregisterStaleApps(paths) {
   for (const stalePath of paths) {
     console.log(`${emojis.warning} Unregistering stale app: ${colorize("cyan", stalePath)}`);
@@ -158,47 +156,13 @@ function unregisterStaleApps(paths) {
   }
 }
 
-function registerContainingApp() {
-  runTool(lsRegisterPath, ["-f", "-R", "-trusted", bundleURL]);
-}
-
-function settleContainingAppRegistration() {
-  if (!existsSync(lsRegisterPath)) return;
-
-  for (let attempt = 0; attempt < 5; attempt += 1) {
-    const paths = currentRegisteredAppPaths();
-    if (!paths) return;
-
-    const stalePaths = paths.filter((path) => resolve(path) !== bundleURL);
-    const hasDesiredApp = paths.some((path) => resolve(path) === bundleURL);
-    if (stalePaths.length === 0 && hasDesiredApp) {
-      return;
-    }
-
-    unregisterStaleApps(stalePaths);
-    if (!hasDesiredApp) {
-      registerContainingApp();
-    }
-    if (attempt < 4) {
-      sleep(200);
-    }
-  }
-
-  const paths = currentRegisteredAppPaths();
-  const stalePaths = paths?.filter((path) => resolve(path) !== bundleURL) ?? [];
-  const hasDesiredApp = paths?.some((path) => resolve(path) === bundleURL) ?? false;
-  if (stalePaths.length > 0 || !hasDesiredApp) {
-    console.warn(
-      `${emojis.warning} LaunchServices still has stale Vixen.app registrations: ${colorize("cyan", paths?.join(", ") ?? "(unknown)")}`
-    );
-  }
-}
-
 // 1. Unregister stale containing-app registrations. System Settings can rediscover
 // stale embedded appex copies from these app records even when PlugInKit looks clean.
+// When run as root, remove every explicit Vixen.app LaunchServices record. fskitd
+// uses root LaunchServices state, and a manually added root record gets a distinct
+// FSKit identity that has not been approved in System Settings.
 const appPaths = currentRegisteredAppPaths();
-const staleAppPaths = appPaths?.filter((path) => resolve(path) !== bundleURL) ?? [];
-const hasDesiredApp = appPaths?.some((path) => resolve(path) === bundleURL) ?? true;
+const staleAppPaths = appPaths?.filter((path) => runningAsRoot || resolve(path) !== bundleURL) ?? [];
 let changed = false;
 
 if (appPaths && appPaths.length > 0) {
@@ -224,32 +188,28 @@ for (const stalePath of before) {
   changed = true;
 }
 
-// 3. Register the correct extension
+// 3. Report whether automatic discovery has produced the desired extension record.
 if (before.some((path) => resolve(path) === desiredPath)) {
-  console.log(`${emojis.keep} Already registered: ${colorize("cyan", desiredPath)}`);
+  console.log(`${emojis.keep} Automatic registration present: ${colorize("cyan", desiredPath)}`);
 } else {
-  console.log(`${emojis.success} Registering: ${colorize("cyan", desiredPath)}`);
-  runTool("/usr/bin/pluginkit", ["-a", desiredPath]);
-  changed = true;
+  console.warn(`${emojis.warning} Desired VixenFS extension is not currently visible in PlugInKit.`);
+  console.warn(`${emojis.info} Leaving discovery to macOS instead of manually adding a fresh FSKit identity.`);
 }
 
-// 4. Run lsregister on the app bundle, same flags as VixenApp.swift
-if ((changed || !hasDesiredApp) && existsSync(lsRegisterPath)) {
-  registerContainingApp();
-  settleContainingAppRegistration();
-} else if (!changed) {
+// 4. Summarize. This helper intentionally does not call pluginkit -a or
+// lsregister -f/-R/-trusted; those create new identities that FSKit may treat as
+// disabled until the user approves them again.
+if (!changed) {
   console.log(`${emojis.keep} Registration already clean`);
-} else {
-  console.warn(`${emojis.warning} lsregister not found, skipping`);
 }
 
 // 5. Verify
 const after = currentRegisteredPaths();
 if (after.includes(desiredPath)) {
-  console.log(`\n${emojis.success} VixenFS registration complete: ${colorize("cyan", desiredPath)}`);
+  console.log(`\n${emojis.success} VixenFS registration clean: ${colorize("cyan", desiredPath)}`);
 } else {
-  console.error(`\n${emojis.error} VixenFS registration failed.`);
+  console.warn(`\n${emojis.warning} VixenFS registration is not visible yet.`);
   console.error(`  Desired: ${colorize("green", desiredPath)}`);
   console.error(`  Current: ${colorize("red", after.join(", ") || "(none)")}`);
-  process.exit(1);
+  console.warn(`  Open Vixen or System Settings and let macOS discover the installed app.`);
 }

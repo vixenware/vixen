@@ -5,9 +5,10 @@
 //!   started us. We repair the queue directories (`RunAtLoad`), run whichever button(s)
 //!   fired, drain their queues, and exit. No `KeepAlive`, so we stay down until the
 //!   next trigger.
-//! - **direct CLI**: `vixen-management repair-extension` repairs the current user's
-//!   LaunchServices/PlugInKit state, while `vixen-management <button>` runs one
-//!   privileged capability immediately for manual testing.
+//! - **direct CLI**: `vixen-management repair-extension` removes stale
+//!   LaunchServices/PlugInKit state for the current effective user, while
+//!   `vixen-management <button>` runs one privileged capability immediately for
+//!   manual testing.
 
 use std::fs::OpenOptions;
 use std::path::Path;
