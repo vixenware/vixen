@@ -645,7 +645,6 @@ struct ContentView: View {
     @State private var isCheckingDoctor = false
     @State private var isAutoRepairingDoctor = false
     @State private var lastSafeRepairAt = Date.distantPast
-    @State private var doctorDetailsExpanded = false
     @State private var showFskitRestartConfirmation = false
     @State private var demoToggleOn = false
     @State private var cursorBob = false
@@ -664,6 +663,13 @@ struct ContentView: View {
         managementSnapshot.isReady
     }
 
+    private var contentMinHeight: CGFloat {
+        if isExtensionEnabled && isManagementConfigured {
+            return doctorSnapshot.problemRows.isEmpty ? 500 : 560
+        }
+        return 500
+    }
+
     var body: some View {
         Group {
             if !isSupportedOS {
@@ -678,6 +684,7 @@ struct ContentView: View {
         }
         .padding(36)
         .frame(width: 720)
+        .frame(minHeight: contentMinHeight)
         .background(baseBg)
         .task {
             guard isSupportedOS else { return }
@@ -1015,9 +1022,12 @@ struct ContentView: View {
         )
         logger.notice("doctor first snapshot ready=\(firstSnapshot.isReady, privacy: .public) failures=\(firstSnapshot.rows.filter { $0.state == .failed }.count, privacy: .public) warnings=\(firstSnapshot.rows.filter { $0.state == .warning }.count, privacy: .public) canSafeRepair=\(firstSnapshot.canAttemptSafeMountRepair, privacy: .public) needsFskitRestart=\(firstSnapshot.needsFskitRestart, privacy: .public)")
 
-        if (forceSafeRepair || firstSnapshot.canAttemptSafeMountRepair)
-            && !firstSnapshot.needsFskitRestart
-        {
+        let shouldRunSafeRepair =
+            !firstSnapshot.needsFskitRestart
+            && (firstSnapshot.canAttemptSafeMountRepair
+                || (forceSafeRepair && firstSnapshot.hasFailure))
+
+        if shouldRunSafeRepair {
             logger.notice("doctor ui running safe repair force=\(forceSafeRepair, privacy: .public)")
             await performSafeDoctorRepair(force: forceSafeRepair)
             doctorSnapshot = await DoctorService.check(
@@ -1291,7 +1301,7 @@ struct ContentView: View {
     // MARK: - Doctor
 
     private var doctorPanel: some View {
-        VStack(alignment: .leading, spacing: 12) {
+        VStack(alignment: .leading, spacing: 14) {
             HStack(alignment: .center, spacing: 10) {
                 Group {
                     if isCheckingDoctor || isAutoRepairingDoctor {
@@ -1315,7 +1325,10 @@ struct ContentView: View {
                 }
 
                 Spacer()
+            }
 
+            HStack(spacing: 10) {
+                Spacer(minLength: 0)
                 if let doctorPrimaryActionTitle {
                     Button(action: doctorPrimaryAction) {
                         Text(doctorPrimaryActionTitle)
@@ -1332,7 +1345,7 @@ struct ContentView: View {
                     .disabled(isConfiguringManagement || isCheckingDoctor || isAutoRepairingDoctor)
                 }
 
-                Button(action: { Task { await refreshDoctorStatus(forceSafeRepair: true) } }) {
+                Button(action: { Task { await refreshDoctorStatus() } }) {
                     Text("Check Again")
                         .font(.system(size: 13, weight: .semibold))
                         .foregroundStyle(brandOrange)
@@ -1347,16 +1360,12 @@ struct ContentView: View {
                 .disabled(isCheckingDoctor || isAutoRepairingDoctor)
             }
 
-            if doctorSnapshot.hasFailure {
-                Button {
-                    withAnimation(.easeInOut(duration: 0.18)) {
-                        doctorDetailsExpanded.toggle()
-                    }
-                } label: {
-                    HStack(spacing: 6) {
-                        Image(systemName: doctorDetailsExpanded ? "chevron.down" : "chevron.right")
-                            .font(.system(size: 10, weight: .bold))
-                            .foregroundStyle(.secondary)
+            if !doctorSnapshot.problemRows.isEmpty {
+                VStack(alignment: .leading, spacing: 10) {
+                    HStack(spacing: 8) {
+                        Image(systemName: "exclamationmark.circle.fill")
+                            .font(.system(size: 11, weight: .semibold))
+                            .foregroundStyle(brandOrange)
 
                         Text("What needs attention")
                             .font(.system(size: 12, weight: .medium))
@@ -1364,26 +1373,18 @@ struct ContentView: View {
 
                         Spacer()
                     }
-                    .contentShape(Rectangle())
-                }
-                .buttonStyle(.plain)
 
-                if doctorDetailsExpanded {
-                    ScrollView {
-                        VStack(spacing: 8) {
-                            ForEach(doctorSnapshot.problemRows) { row in
-                                DoctorRowView(row: row, brandOrange: brandOrange)
-                            }
+                    VStack(spacing: 9) {
+                        ForEach(doctorSnapshot.problemRows) { row in
+                            DoctorRowView(row: row, brandOrange: brandOrange)
                         }
-                        .padding(.vertical, 2)
                     }
-                    .scrollIndicators(.visible)
-                    .frame(maxHeight: 118)
                 }
+                .padding(.top, 2)
             }
         }
-        .padding(12)
-        .frame(minHeight: 96, alignment: .top)
+        .padding(14)
+        .frame(maxWidth: .infinity, minHeight: 110, alignment: .top)
         .background(
             RoundedRectangle(cornerRadius: 10, style: .continuous)
                 .fill(sectionBg)
@@ -1520,7 +1521,7 @@ private struct DoctorRowView: View {
                     Text(detail)
                         .font(.system(size: 10))
                         .foregroundStyle(.secondary)
-                        .lineLimit(2)
+                        .lineLimit(nil)
                         .fixedSize(horizontal: false, vertical: true)
                 }
             }

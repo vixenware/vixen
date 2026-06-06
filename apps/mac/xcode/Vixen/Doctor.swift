@@ -389,14 +389,17 @@ enum DoctorService {
             )
         }
 
+        let everConnected = payload["ever_connected"] as? Bool ?? false
         let reason = (payload["disconnect_reason"] as? String)?
             .trimmingCharacters(in: .whitespacesAndNewlines)
-        logger.error("doctor backend failed connected=false reason=\(reason ?? "none", privacy: .public)")
+        logger.notice("doctor backend idle connected=false everConnected=\(everConnected, privacy: .public) reason=\(reason ?? "none", privacy: .public)")
         return DoctorRow(
             id: "backend",
             title: "Backend Connection",
-            state: .failed,
-            detail: reason?.isEmpty == false ? reason : "VFS backend is not connected"
+            state: .ok,
+            detail: everConnected
+                ? "No VFS client is attached"
+                : "Ready for VFS clients"
         )
     }
 
