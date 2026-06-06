@@ -72,6 +72,8 @@ build profile='Debug' version='': (build-rust profile)
       MARKETING_VERSION="${VERSION}" \
       CURRENT_PROJECT_VERSION="${VERSION}" \
       build | xcbeautify
+    cd ..
+    scripts/clean-build-registration.sh "xcode/build/DerivedData/Build/Products/{{ profile }}/Vixen.app" || true
 
 # Build with timing summary (no xcbeautify, raw output).
 build-timing profile='Debug' version='': (build-rust profile)
@@ -101,6 +103,8 @@ build-timing profile='Debug' version='': (build-rust profile)
       MARKETING_VERSION="${VERSION}" \
       CURRENT_PROJECT_VERSION="${VERSION}" \
       build
+    cd ..
+    scripts/clean-build-registration.sh "xcode/build/DerivedData/Build/Products/{{ profile }}/Vixen.app" || true
 
 # Install Vixen.app into /Applications and launch once.
 install profile='Debug': (build profile)

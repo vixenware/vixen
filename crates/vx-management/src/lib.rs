@@ -21,6 +21,8 @@ pub mod killswitch;
 pub mod mount;
 pub mod probe;
 pub mod queue;
+pub mod repair;
+pub mod repair_status;
 pub mod status;
 
 /// The fixed privileged capabilities. Each maps to one queue directory; a file
@@ -32,7 +34,8 @@ pub enum Button {
     Mount,
     /// Recover the VixenFS mount by unwinding FSKit, then detach its mock backing image.
     Unmount,
-    /// Recover/detach, then re-establish.
+    /// Run the full app-visible repair transaction: registration repair, mount,
+    /// and FSKit restart retry when macOS reports stale module state.
     Remount,
     /// Terminate the system `fskitd` — the wedge kill-switch.
     KillFskitd,
@@ -65,12 +68,9 @@ impl Button {
     /// Execute the capability. **Requires root** (mount/unmount/kill).
     pub fn execute(self) -> eyre::Result<()> {
         match self {
-            Button::Mount => mount::establish(),
+            Button::Mount => mount::establish_from_console_bootstrap(),
             Button::Unmount => mount::unmount(),
-            Button::Remount => {
-                mount::unmount()?;
-                mount::establish()
-            }
+            Button::Remount => repair::repair_vixenfs(),
             Button::KillFskitd => killswitch::terminate_fskitd().map(|_| ()),
         }
     }

@@ -1,4 +1,4 @@
-//! Repair the installed VixenFS app-extension registration.
+//! Clean stale VixenFS app-extension registration state.
 //!
 //! This deliberately does not touch `/Volumes/Vixen`: it only removes stale
 //! LaunchServices and PlugInKit records. It does not explicitly add/register
@@ -22,14 +22,14 @@ const INSTALLED_APP_PATH: &str = "/Applications/Vixen.app";
 const PLUGINKIT: &str = "/usr/bin/pluginkit";
 const LSREGISTER: &str = "/System/Library/Frameworks/CoreServices.framework/Versions/Current/Frameworks/LaunchServices.framework/Versions/Current/Support/lsregister";
 
-/// Repair registration toward `/Applications/Vixen.app`.
+/// Remove stale records that point away from `/Applications/Vixen.app`.
 pub fn repair_installed_extension() -> Result<()> {
     let app_path = Path::new(INSTALLED_APP_PATH);
     let mode = launch_services_mode();
     tracing::info!(
         mode = ?mode,
         app_path = %app_path.display(),
-        "repairing installed extension registration"
+        "cleaning installed extension registration state"
     );
 
     repair_containing_app(app_path, mode)?;
@@ -37,13 +37,13 @@ pub fn repair_installed_extension() -> Result<()> {
         let extension_path = bundled_extension_path(app_path)?;
         tracing::info!(
             extension_path = %extension_path.display(),
-            "repairing user-session PlugInKit state"
+            "cleaning user-session PlugInKit state"
         );
         repair_extension(&extension_path)?;
     } else {
         tracing::info!("skipping PlugInKit repair outside the user session");
     }
-    tracing::info!(mode = ?mode, "installed extension registration repair finished");
+    tracing::info!(mode = ?mode, "installed extension registration cleanup finished");
     Ok(())
 }
 

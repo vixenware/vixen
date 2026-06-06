@@ -24,12 +24,6 @@ enum VixenMain {
 struct VixenApp: App {
     private let updaterController = SparkleBootstrap.makeUpdaterController()
 
-    init() {
-        Logger(subsystem: "eu.bearcove.vixen", category: "App")
-            .notice("VixenApp init; scheduling user-session extension repair")
-        ManagementService.repairExtensionAsync()
-    }
-
     var body: some Scene {
         WindowGroup {
             ContentView()
@@ -57,6 +51,10 @@ enum ManagementService {
     )
     private static let lastActionURL = URL(
         fileURLWithPath: "/Library/Application Support/Vixen/management/last-action.json",
+        isDirectory: false
+    )
+    private static let repairStatusURL = URL(
+        fileURLWithPath: "/Library/Application Support/Vixen/management/repair-status.json",
         isDirectory: false
     )
     private static var helperURL: URL {
@@ -116,7 +114,30 @@ enum ManagementService {
 
         var failureDescription: String? {
             guard !ok else { return nil }
-            return "last \(button) failed: \(message)"
+            let action = button == "remount" ? "repair" : button
+            return "last \(action) failed: \(message)"
+        }
+    }
+
+    struct RepairStatus {
+        let active: Bool
+        let step: String
+        let state: String
+        let message: String
+        let updatedUnixMillis: UInt64
+
+        var displayText: String {
+            if !message.isEmpty {
+                return message
+            }
+            switch state {
+            case "ok":
+                return "Finished \(step)"
+            case "failed":
+                return "Failed \(step)"
+            default:
+                return "Running \(step)"
+            }
         }
     }
 
@@ -187,18 +208,6 @@ enum ManagementService {
         return (false, "Bundled helper missing from app bundle")
     }
 
-    static func repairExtensionAsync() {
-        logger.notice("scheduling async repair-extension")
-        DispatchQueue.global(qos: .utility).async {
-            do {
-                try repairExtension()
-                logger.notice("async repair-extension succeeded")
-            } catch {
-                logger.error("async repair-extension failed: \(error.localizedDescription, privacy: .public)")
-            }
-        }
-    }
-
     static func repairExtension() throws {
         logger.notice("repair-extension started helper=\(helperURL.path, privacy: .public)")
         let result = runHelper(arguments: ["repair-extension"])
@@ -220,45 +229,92 @@ enum ManagementService {
         logger.notice("repair-extension succeeded stdout=\(result.stdout.trimmingCharacters(in: .whitespacesAndNewlines), privacy: .public)")
     }
 
-    static func runPrivilegedButton(_ name: String) throws {
+    static func repairVixenFS(progress: @escaping @Sendable (String) -> Void) async throws {
         let started = DispatchTime.now().uptimeNanoseconds
-        logger.notice("privileged management button requested name=\(name, privacy: .public) euid=\(Darwin.geteuid(), privacy: .public)")
-        guard ["mount", "unmount", "remount", "kill-fskitd"].contains(name) else {
-            logger.error("privileged management button rejected unknown name=\(name, privacy: .public)")
+        logger.notice("VixenFS repair transaction requested from app")
+        progress("Starting VixenFS repair")
+        let status = try await runQueuedButton("remount") { repairStatus in
+            progress(repairStatus.displayText)
+        }
+        guard let status else {
             throw NSError(
                 domain: NSPOSIXErrorDomain,
-                code: Int(EINVAL),
-                userInfo: [NSLocalizedDescriptionKey: "Unknown management button \(name)"]
-            )
-        }
-
-        if Darwin.geteuid() == 0 {
-            logger.notice("running privileged management button directly because caller is already root")
-        } else {
-            try repairExtension()
-        }
-
-        let result =
-            Darwin.geteuid() == 0
-            ? runHelper(arguments: [name])
-            : runHelperWithAdministratorPrivileges(arguments: [name])
-        guard result.status == 0 else {
-            let detail =
-                result.stderr.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
-                ? result.stdout.trimmingCharacters(in: .whitespacesAndNewlines)
-                : result.stderr.trimmingCharacters(in: .whitespacesAndNewlines)
-            logger.error("privileged management button failed name=\(name, privacy: .public) status=\(result.status, privacy: .public) detail=\(detail, privacy: .public)")
-            throw NSError(
-                domain: NSPOSIXErrorDomain,
-                code: Int(result.status),
+                code: Int(EIO),
                 userInfo: [
-                    NSLocalizedDescriptionKey: detail.isEmpty
-                        ? "vixen-management \(name) exited \(result.status)"
-                        : detail
+                    NSLocalizedDescriptionKey:
+                        "Vixen Management did not publish a repair result"
                 ]
             )
         }
-        logger.notice("privileged management button finished in \(elapsedMilliseconds(since: started), privacy: .public)ms name=\(name, privacy: .public) stdout=\(result.stdout.trimmingCharacters(in: .whitespacesAndNewlines), privacy: .public)")
+        if !status.ok {
+            throw NSError(
+                domain: NSPOSIXErrorDomain,
+                code: Int(EIO),
+                userInfo: [NSLocalizedDescriptionKey: status.failureDescription ?? status.message]
+            )
+        }
+        progress("VixenFS repair finished")
+        logger.notice("VixenFS repair transaction finished in \(elapsedMilliseconds(since: started), privacy: .public)ms")
+    }
+
+    static func runQueuedButton(
+        _ name: String,
+        progress: (@Sendable (RepairStatus) -> Void)? = nil
+    ) async throws -> LastActionStatus? {
+        let requestedAfterMillis = unixMillis()
+        let trigger = try fireQueue(name)
+        let started = DispatchTime.now().uptimeNanoseconds
+        logger.notice("waiting for management queue name=\(name, privacy: .public) trigger=\(trigger.path, privacy: .public)")
+        while elapsedMilliseconds(since: started) < 90_000 {
+            if !FileManager.default.fileExists(atPath: trigger.path) {
+                let lastAction = readLastActionStatus()
+                logger.notice("management queue consumed name=\(name, privacy: .public) elapsedMs=\(elapsedMilliseconds(since: started), privacy: .public) lastActionOk=\(lastAction?.ok.description ?? "none", privacy: .public)")
+                return lastAction
+            }
+            if let repairStatus = readRepairStatus(),
+                repairStatus.updatedUnixMillis >= requestedAfterMillis
+            {
+                progress?(repairStatus)
+            }
+            try await Task.sleep(for: .milliseconds(250))
+        }
+
+        logger.error("management queue timed out name=\(name, privacy: .public) trigger=\(trigger.path, privacy: .public)")
+        throw NSError(
+            domain: NSPOSIXErrorDomain,
+            code: Int(ETIMEDOUT),
+            userInfo: [NSLocalizedDescriptionKey: "Timed out waiting for Vixen Management"]
+        )
+    }
+
+    static func runQueuedButtonSync(_ name: String) throws -> LastActionStatus? {
+        let trigger = try fireQueue(name)
+        let started = DispatchTime.now().uptimeNanoseconds
+        logger.notice("waiting synchronously for management queue name=\(name, privacy: .public) trigger=\(trigger.path, privacy: .public)")
+        while elapsedMilliseconds(since: started) < 90_000 {
+            if !FileManager.default.fileExists(atPath: trigger.path) {
+                let lastAction = readLastActionStatus()
+                logger.notice("synchronous management queue consumed name=\(name, privacy: .public) elapsedMs=\(elapsedMilliseconds(since: started), privacy: .public) lastActionOk=\(lastAction?.ok.description ?? "none", privacy: .public)")
+                if let lastAction, !lastAction.ok {
+                    throw NSError(
+                        domain: NSPOSIXErrorDomain,
+                        code: Int(EIO),
+                        userInfo: [
+                            NSLocalizedDescriptionKey: lastAction.failureDescription ?? lastAction.message
+                        ]
+                    )
+                }
+                return lastAction
+            }
+            Thread.sleep(forTimeInterval: 0.25)
+        }
+
+        logger.error("synchronous management queue timed out name=\(name, privacy: .public) trigger=\(trigger.path, privacy: .public)")
+        throw NSError(
+            domain: NSPOSIXErrorDomain,
+            code: Int(ETIMEDOUT),
+            userInfo: [NSLocalizedDescriptionKey: "Timed out waiting for Vixen Management"]
+        )
     }
 
     static func register() throws {
@@ -392,60 +448,6 @@ enum ManagementService {
         )
     }
 
-    private static func runHelperWithAdministratorPrivileges(arguments: [String]) -> (
-        status: Int32, stdout: String, stderr: String
-    ) {
-        let started = DispatchTime.now().uptimeNanoseconds
-        let commandArguments = [
-            "/usr/bin/env",
-            "VIXEN_MANAGEMENT_LOG=info,vx_management=debug,vixen_management=debug",
-            helperURL.path,
-        ] + arguments
-        logger.notice("requesting administrator privileges for helper command arguments=\(commandArguments.joined(separator: " "), privacy: .public)")
-
-        let script = """
-        on run argv
-            set commandParts to {}
-            repeat with rawArg in argv
-                set end of commandParts to quoted form of (rawArg as text)
-            end repeat
-            set oldDelimiters to AppleScript's text item delimiters
-            set AppleScript's text item delimiters to " "
-            set commandText to commandParts as text
-            set AppleScript's text item delimiters to oldDelimiters
-            do shell script commandText with administrator privileges
-        end run
-        """
-
-        let process = Process()
-        process.executableURL = URL(fileURLWithPath: "/usr/bin/osascript")
-        process.arguments = ["-e", script] + commandArguments
-
-        let stdout = Pipe()
-        let stderr = Pipe()
-        process.standardOutput = stdout
-        process.standardError = stderr
-
-        do {
-            try process.run()
-        } catch {
-            logger.error("administrator helper request failed to start arguments=\(commandArguments.joined(separator: " "), privacy: .public) error=\(error.localizedDescription, privacy: .public)")
-            return (127, "", error.localizedDescription)
-        }
-
-        process.waitUntilExit()
-        let stdoutText =
-            String(data: stdout.fileHandleForReading.readDataToEndOfFile(), encoding: .utf8) ?? ""
-        let stderrText =
-            String(data: stderr.fileHandleForReading.readDataToEndOfFile(), encoding: .utf8) ?? ""
-        logger.notice("administrator helper request finished in \(elapsedMilliseconds(since: started), privacy: .public)ms status=\(process.terminationStatus, privacy: .public) stdout=\(stdoutText.trimmingCharacters(in: .whitespacesAndNewlines), privacy: .public) stderr=\(stderrText.trimmingCharacters(in: .whitespacesAndNewlines), privacy: .public)")
-        return (
-            process.terminationStatus,
-            stdoutText,
-            stderrText
-        )
-    }
-
     private static func inspectLaunchd() -> LaunchdStatus {
         let started = DispatchTime.now().uptimeNanoseconds
         logger.notice("launchd inspection started label=\(label, privacy: .public)")
@@ -535,6 +537,33 @@ enum ManagementService {
         return LastActionStatus(button: button, ok: ok, message: message)
     }
 
+    private static func readRepairStatus() -> RepairStatus? {
+        guard let data = try? Data(contentsOf: repairStatusURL) else {
+            return nil
+        }
+        guard
+            let object = try? JSONSerialization.jsonObject(with: data),
+            let dictionary = object as? [String: Any],
+            let active = dictionary["active"] as? Bool,
+            let step = dictionary["step"] as? String,
+            let state = dictionary["state"] as? String
+        else {
+            logger.error("management repair-status unreadable path=\(repairStatusURL.path, privacy: .public)")
+            return nil
+        }
+        let message = dictionary["message"] as? String ?? ""
+        let updatedUnixMillis =
+            (dictionary["updated_unix_millis"] as? NSNumber)?.uint64Value ?? 0
+        logger.notice("management repair-status read active=\(active, privacy: .public) step=\(step, privacy: .public) state=\(state, privacy: .public) updatedUnixMillis=\(updatedUnixMillis, privacy: .public) message=\(message, privacy: .public)")
+        return RepairStatus(
+            active: active,
+            step: step,
+            state: state,
+            message: message,
+            updatedUnixMillis: updatedUnixMillis
+        )
+    }
+
     private static func statusName(_ status: SMAppService.Status) -> String {
         switch status {
         case .enabled:
@@ -553,6 +582,10 @@ enum ManagementService {
     private static func elapsedMilliseconds(since started: UInt64) -> Int {
         let elapsed = DispatchTime.now().uptimeNanoseconds - started
         return Int(elapsed / 1_000_000)
+    }
+
+    private static func unixMillis() -> UInt64 {
+        UInt64((Date().timeIntervalSince1970 * 1000).rounded(.down))
     }
 }
 
@@ -581,6 +614,10 @@ private enum ManagementCommand {
             case "repair-extension":
                 try ManagementService.repairExtension()
                 print("Vixen Management: repaired extension registration")
+            case "repair":
+                _ = try ManagementService.runQueuedButtonSync("remount")
+                print("Vixen Management: repaired VixenFS")
+                ManagementService.printSnapshot()
             case "status":
                 do {
                     try ManagementService.repairExtension()
@@ -592,12 +629,12 @@ private enum ManagementCommand {
                 }
                 ManagementService.printSnapshot()
             case "mount", "remount":
-                try ManagementService.runPrivilegedButton(command)
-                print("Vixen Management: ran \(command)")
+                _ = try ManagementService.runQueuedButtonSync(command)
+                print("Vixen Management: queued \(command)")
                 ManagementService.printSnapshot()
             case "unmount", "kill-fskitd":
-                try ManagementService.runPrivilegedButton(command)
-                print("Vixen Management: ran \(command)")
+                _ = try ManagementService.runQueuedButtonSync(command)
+                print("Vixen Management: queued \(command)")
                 ManagementService.printSnapshot()
             case "help", "--help", "-h":
                 printUsage(to: stdout)
@@ -618,7 +655,7 @@ private enum ManagementCommand {
     private static func printUsage(to stream: UnsafeMutablePointer<FILE>) {
         fputs(
             """
-            Usage: Vixen management register|refresh|status|unregister|repair-extension|mount|unmount|remount|kill-fskitd
+            Usage: Vixen management register|refresh|status|unregister|repair|repair-extension|mount|unmount|remount|kill-fskitd
 
             """,
             stream
@@ -644,9 +681,8 @@ struct ContentView: View {
     @State private var doctorSnapshot = DoctorSnapshot.pending
     @State private var isCheckingDoctor = false
     @State private var isAutoRepairingDoctor = false
-    @State private var lastSafeRepairAt = Date.distantPast
-    @State private var didAttemptSafeRepairThisSession = false
-    @State private var showFskitRestartConfirmation = false
+    @State private var doctorProgressText: String? = nil
+    @State private var repairProgressText: String? = nil
     @State private var demoToggleOn = false
     @State private var cursorBob = false
 
@@ -664,13 +700,10 @@ struct ContentView: View {
         managementSnapshot.isReady
     }
 
-    private var shouldOfferFskitRestart: Bool {
-        doctorSnapshot.needsFskitRestart && didAttemptSafeRepairThisSession
-    }
-
     private var contentMinHeight: CGFloat {
         if isExtensionEnabled && isManagementConfigured {
-            return doctorSnapshot.problemRows.isEmpty ? 500 : 560
+            let extraRows = max(0, doctorSnapshot.problemRows.count - 1)
+            return doctorSnapshot.problemRows.isEmpty ? 500 : 620 + CGFloat(extraRows * 56)
         }
         return 500
     }
@@ -706,16 +739,6 @@ struct ContentView: View {
         .task {
             guard isSupportedOS else { return }
             await pollDoctorStatus()
-        }
-        .alert("Restart FSKit?", isPresented: $showFskitRestartConfirmation) {
-            Button("Restart FSKit", role: .destructive) {
-                restartFskit()
-            }
-            Button("Cancel", role: .cancel) {}
-        } message: {
-            Text(
-                "Vixen has already repaired the app registration and retried the mount. Restarting FSKit can clear stale macOS filesystem-extension state, but it may interrupt other FSKit volumes."
-            )
         }
         .onAppear {
             cursorBob = true
@@ -995,7 +1018,7 @@ struct ContentView: View {
     private func managementButtonAction() {
         logger.notice("management button action configured=\(isManagementConfigured, privacy: .public) service=\(managementStatusText, privacy: .public)")
         if isManagementConfigured {
-            Task { await refreshDoctorStatus(forceSafeRepair: true) }
+            Task { await refreshDoctorStatus() }
         } else if managementSnapshot.serviceStatus == .requiresApproval {
             openLoginItemsSettings()
         } else if managementSnapshot.serviceStatus == .enabled {
@@ -1012,47 +1035,60 @@ struct ContentView: View {
     }
 
     @MainActor
-    private func refreshDoctorStatus(forceSafeRepair: Bool = false) async {
+    private func refreshDoctorStatus() async {
         guard !isCheckingDoctor else {
             logger.notice("doctor ui refresh skipped because a check is already running")
             return
         }
         let started = DispatchTime.now().uptimeNanoseconds
         isCheckingDoctor = true
-        defer { isCheckingDoctor = false }
-        logger.notice("doctor ui refresh started forceSafeRepair=\(forceSafeRepair, privacy: .public) extensionEnabled=\(isExtensionEnabled, privacy: .public) managementReady=\(isManagementConfigured, privacy: .public)")
+        doctorProgressText = "Checking local setup"
+        defer {
+            isCheckingDoctor = false
+            doctorProgressText = nil
+        }
+        logger.notice("doctor ui refresh started extensionEnabled=\(isExtensionEnabled, privacy: .public) managementReady=\(isManagementConfigured, privacy: .public)")
         let firstSnapshot = await DoctorService.check(
             extensionEnabled: isExtensionEnabled,
             extensionError: extensionError
         )
         logger.notice("doctor first snapshot ready=\(firstSnapshot.isReady, privacy: .public) failures=\(firstSnapshot.rows.filter { $0.state == .failed }.count, privacy: .public) warnings=\(firstSnapshot.rows.filter { $0.state == .warning }.count, privacy: .public) canSafeRepair=\(firstSnapshot.canAttemptSafeMountRepair, privacy: .public) needsFskitRestart=\(firstSnapshot.needsFskitRestart, privacy: .public)")
 
-        let restartEscalationAllowed =
-            firstSnapshot.needsFskitRestart && didAttemptSafeRepairThisSession
-        let mountRepairNeeded =
-            firstSnapshot.canAttemptSafeMountRepair
-            && (!didAttemptSafeRepairThisSession || forceSafeRepair)
-        let shouldRunSafeRepair =
-            !restartEscalationAllowed
-            && (mountRepairNeeded || (forceSafeRepair && firstSnapshot.hasFailure))
+        doctorSnapshot = firstSnapshot
+        if firstSnapshot.needsUserSessionRegistrationRepair {
+            logger.notice("doctor detected stale user-session registration; running safe cleanup")
+            doctorProgressText = "Cleaning stale app records"
+            if let repairError = await repairUserSessionRegistrationForDoctor() {
+                logger.error("doctor safe registration cleanup failed: \(repairError, privacy: .public)")
+                doctorSnapshot = firstSnapshot.withRegistrationRepairFailure(repairError)
+                refreshManagementStatus()
+                logger.notice("doctor ui refresh finished in \(elapsedMilliseconds(since: started), privacy: .public)ms after failed safe cleanup")
+                return
+            }
 
-        if shouldRunSafeRepair {
-            logger.notice("doctor ui running safe repair force=\(forceSafeRepair, privacy: .public)")
-            await performSafeDoctorRepair(force: forceSafeRepair)
-            doctorSnapshot = await DoctorService.check(
+            doctorProgressText = "Checking cleaned state"
+            let repairedSnapshot = await DoctorService.check(
                 extensionEnabled: isExtensionEnabled,
                 extensionError: extensionError
             )
-            logger.notice("doctor post-repair snapshot ready=\(doctorSnapshot.isReady, privacy: .public) failures=\(doctorSnapshot.rows.filter { $0.state == .failed }.count, privacy: .public) warnings=\(doctorSnapshot.rows.filter { $0.state == .warning }.count, privacy: .public) needsFskitRestart=\(doctorSnapshot.needsFskitRestart, privacy: .public)")
+            doctorSnapshot = repairedSnapshot
+            logger.notice("doctor ui accepted snapshot after safe registration cleanup ready=\(repairedSnapshot.isReady, privacy: .public) failures=\(repairedSnapshot.rows.filter { $0.state == .failed }.count, privacy: .public) warnings=\(repairedSnapshot.rows.filter { $0.state == .warning }.count, privacy: .public)")
         } else {
-            doctorSnapshot = firstSnapshot
-            logger.notice("doctor ui accepted first snapshot without safe repair")
-        }
-        if doctorSnapshot.isReady {
-            didAttemptSafeRepairThisSession = false
+            logger.notice("doctor ui accepted snapshot without mutation")
         }
         refreshManagementStatus()
-        logger.notice("doctor ui refresh finished in \(elapsedMilliseconds(since: started), privacy: .public)ms forceSafeRepair=\(forceSafeRepair, privacy: .public)")
+        logger.notice("doctor ui refresh finished in \(elapsedMilliseconds(since: started), privacy: .public)ms")
+    }
+
+    private func repairUserSessionRegistrationForDoctor() async -> String? {
+        await Task.detached(priority: .utility) {
+            do {
+                try ManagementService.repairExtension()
+                return nil
+            } catch {
+                return error.localizedDescription
+            }
+        }.value
     }
 
     private func pollManagementStatus() async {
@@ -1067,11 +1103,11 @@ struct ContentView: View {
     private func pollDoctorStatus() async {
         logger.notice("doctor polling started")
         while !Task.isCancelled {
-            if isExtensionEnabled && isManagementConfigured && !shouldOfferFskitRestart {
+            if isExtensionEnabled && isManagementConfigured && !isAutoRepairingDoctor {
                 logger.notice("doctor polling triggering refresh")
                 await refreshDoctorStatus()
             } else {
-                logger.notice("doctor polling skipped extensionEnabled=\(isExtensionEnabled, privacy: .public) managementReady=\(isManagementConfigured, privacy: .public) shouldOfferFskitRestart=\(shouldOfferFskitRestart, privacy: .public)")
+                logger.notice("doctor polling skipped extensionEnabled=\(isExtensionEnabled, privacy: .public) managementReady=\(isManagementConfigured, privacy: .public) repairing=\(isAutoRepairingDoctor, privacy: .public)")
             }
             try? await Task.sleep(for: .seconds(30))
         }
@@ -1079,32 +1115,39 @@ struct ContentView: View {
     }
 
     @MainActor
-    private func performSafeDoctorRepair(force: Bool) async {
+    private func performDoctorRepair() async {
         guard !isAutoRepairingDoctor else {
-            logger.notice("safe doctor repair skipped because repair is already running")
-            return
-        }
-        let now = Date()
-        if !force && now.timeIntervalSince(lastSafeRepairAt) < 10 {
-            logger.notice("safe doctor repair throttled force=\(force, privacy: .public)")
+            logger.notice("doctor repair skipped because repair is already running")
             return
         }
 
         isAutoRepairingDoctor = true
-        didAttemptSafeRepairThisSession = true
-        lastSafeRepairAt = now
-        defer { isAutoRepairingDoctor = false }
-        logger.notice("safe doctor repair started force=\(force, privacy: .public)")
+        repairProgressText = "Starting repair"
+        defer {
+            isAutoRepairingDoctor = false
+            repairProgressText = nil
+        }
+        logger.notice("doctor repair started")
 
-        await Task.detached(priority: .utility) {
-            do {
-                try ManagementService.runPrivilegedButton("mount")
-            } catch {
-                ManagementService.logger.error("safe doctor repair failed to run mount: \(error.localizedDescription, privacy: .public)")
+        do {
+            try await ManagementService.repairVixenFS { message in
+                Task { @MainActor in
+                    repairProgressText = message
+                }
             }
-        }.value
-        try? await Task.sleep(for: .seconds(1))
-        logger.notice("safe doctor repair finished")
+            managementError = nil
+        } catch {
+            managementError = error.localizedDescription
+            logger.error("doctor repair failed: \(error.localizedDescription, privacy: .public)")
+        }
+
+        try? await Task.sleep(for: .milliseconds(750))
+        doctorSnapshot = await DoctorService.check(
+            extensionEnabled: isExtensionEnabled,
+            extensionError: extensionError
+        )
+        refreshManagementStatus()
+        logger.notice("doctor repair finished ready=\(doctorSnapshot.isReady, privacy: .public) failures=\(doctorSnapshot.rows.filter { $0.state == .failed }.count, privacy: .public) warnings=\(doctorSnapshot.rows.filter { $0.state == .warning }.count, privacy: .public)")
     }
 
     private func elapsedMilliseconds(since started: UInt64) -> Int {
@@ -1167,31 +1210,6 @@ struct ContentView: View {
                 managementError = error.localizedDescription
             }
             logger.error("refresh management daemon failed: \(error.localizedDescription, privacy: .public)")
-        }
-    }
-
-    private func restartFskit() {
-        logger.notice("restart FSKit requested")
-        Task {
-            isConfiguringManagement = true
-            defer {
-                isConfiguringManagement = false
-                refreshManagementStatus()
-                logger.notice("restart FSKit task finished error=\(managementError ?? "none", privacy: .public)")
-            }
-
-            do {
-                try ManagementService.runPrivilegedButton("kill-fskitd")
-                logger.notice("restart FSKit ran kill-fskitd")
-                try? await Task.sleep(for: .seconds(2))
-                try ManagementService.runPrivilegedButton("mount")
-                logger.notice("restart FSKit ran mount")
-                managementError = nil
-                await refreshDoctorStatus(forceSafeRepair: true)
-            } catch {
-                managementError = error.localizedDescription
-                logger.error("restart FSKit failed: \(error.localizedDescription, privacy: .public)")
-            }
         }
     }
 
@@ -1315,7 +1333,7 @@ struct ContentView: View {
 
     private var doctorPanel: some View {
         VStack(alignment: .leading, spacing: 14) {
-            HStack(alignment: .center, spacing: 10) {
+            HStack(alignment: .top, spacing: 10) {
                 Group {
                     if isCheckingDoctor || isAutoRepairingDoctor {
                         ProgressView()
@@ -1332,23 +1350,29 @@ struct ContentView: View {
                 VStack(alignment: .leading, spacing: 2) {
                     Text("System Check")
                         .font(.system(size: 13, weight: .semibold))
+                        .lineLimit(1)
                     Text(doctorSummaryText)
                         .font(.system(size: 12))
                         .foregroundStyle(.secondary)
+                        .lineLimit(2)
+                        .fixedSize(horizontal: false, vertical: true)
                 }
+                .frame(maxWidth: .infinity, alignment: .leading)
 
-                Spacer()
+                Spacer(minLength: 0)
             }
 
             HStack(spacing: 10) {
                 Spacer(minLength: 0)
+
                 if let doctorPrimaryActionTitle {
                     Button(action: doctorPrimaryAction) {
-                        Text(doctorPrimaryActionTitle)
+                        Label(doctorPrimaryActionTitle, systemImage: "wrench.and.screwdriver.fill")
                             .font(.system(size: 13, weight: .semibold))
                             .foregroundStyle(.white)
-                            .padding(.horizontal, 14)
-                            .frame(minWidth: 118, minHeight: 30)
+                            .lineLimit(1)
+                            .padding(.horizontal, 12)
+                            .frame(minWidth: 150, minHeight: 30)
                             .background(
                                 brandOrange,
                                 in: RoundedRectangle(cornerRadius: 8, style: .continuous)
@@ -1359,11 +1383,12 @@ struct ContentView: View {
                 }
 
                 Button(action: { Task { await refreshDoctorStatus() } }) {
-                    Text("Check Again")
+                    Label("Check Again", systemImage: "arrow.clockwise")
                         .font(.system(size: 13, weight: .semibold))
                         .foregroundStyle(brandOrange)
-                        .padding(.horizontal, 14)
-                        .frame(minWidth: 118, minHeight: 30)
+                        .lineLimit(1)
+                        .padding(.horizontal, 12)
+                        .frame(minWidth: 132, minHeight: 30)
                         .background(
                             brandOrange.opacity(0.12),
                             in: RoundedRectangle(cornerRadius: 8, style: .continuous)
@@ -1371,6 +1396,14 @@ struct ContentView: View {
                 }
                 .buttonStyle(.plain)
                 .disabled(isCheckingDoctor || isAutoRepairingDoctor)
+            }
+
+            if let activeProgressText {
+                Text(activeProgressText)
+                    .font(.system(size: 11))
+                    .foregroundStyle(.secondary)
+                    .lineLimit(3)
+                    .fixedSize(horizontal: false, vertical: true)
             }
 
             if !doctorSnapshot.problemRows.isEmpty {
@@ -1397,7 +1430,7 @@ struct ContentView: View {
             }
         }
         .padding(14)
-        .frame(maxWidth: .infinity, minHeight: 110, alignment: .top)
+        .frame(maxWidth: .infinity, minHeight: 132, alignment: .top)
         .background(
             RoundedRectangle(cornerRadius: 10, style: .continuous)
                 .fill(sectionBg)
@@ -1405,26 +1438,19 @@ struct ContentView: View {
     }
 
     private var doctorPrimaryActionTitle: String? {
-        if shouldOfferFskitRestart {
-            return "Restart FSKit"
-        }
-        if doctorSnapshot.canAttemptSafeMountRepair {
+        if doctorSnapshot.hasFailure {
             return "Repair VixenFS"
         }
         return nil
     }
 
     private func doctorPrimaryAction() {
-        if shouldOfferFskitRestart {
-            showFskitRestartConfirmation = true
-        } else if doctorSnapshot.canAttemptSafeMountRepair {
-            Task { await refreshDoctorStatus(forceSafeRepair: true) }
-        }
+        Task { await performDoctorRepair() }
     }
 
     private var doctorSummaryText: String {
         if isAutoRepairingDoctor {
-            return "Repairing safe state"
+            return "Repairing VixenFS"
         }
         if isCheckingDoctor {
             return "Checking"
@@ -1432,9 +1458,6 @@ struct ContentView: View {
         let failed = doctorSnapshot.rows.filter { $0.state == .failed }.count
         let warnings = doctorSnapshot.rows.filter { $0.state == .warning }.count
         if failed > 0 {
-            if shouldOfferFskitRestart {
-                return "FSKit has stale state"
-            }
             return "\(failed) issue\(failed == 1 ? "" : "s")"
         }
         if warnings > 0 {
@@ -1446,6 +1469,16 @@ struct ContentView: View {
         return "Not checked"
     }
 
+    private var activeProgressText: String? {
+        if isAutoRepairingDoctor {
+            return repairProgressText
+        }
+        if isCheckingDoctor {
+            return doctorProgressText
+        }
+        return nil
+    }
+
     private var completeTitle: String {
         if isCheckingDoctor || isAutoRepairingDoctor || (!doctorSnapshot.isReady && !doctorSnapshot.hasFailure) {
             return "Checking Vixen"
@@ -1455,13 +1488,10 @@ struct ContentView: View {
 
     private var completeDescription: String {
         if !doctorSnapshot.isReady && !doctorSnapshot.hasFailure {
-            return "Vixen is checking the local filesystem setup and repairing safe state automatically."
+            return "Vixen is checking the local filesystem setup."
         }
         if doctorSnapshot.hasFailure {
-            if shouldOfferFskitRestart {
-                return "Vixen repaired the safe state it can reach. macOS still reports stale FSKit state."
-            }
-            return "Vixen is checking the local filesystem setup and repairing safe state automatically."
+            return "Vixen found local filesystem setup issues. Repair VixenFS runs the approved management helper once and reports progress here."
         }
         return "VixenFS is enabled. Head to the docs to install the CLI and run your first build."
     }

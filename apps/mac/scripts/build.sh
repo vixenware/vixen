@@ -65,6 +65,10 @@ echo "Archiving Vixen.app (Release)..."
     archive
 )
 
+"$SCRIPT_DIR/clean-build-registration.sh" "$PRODUCTS_APP_BUNDLE_PATH" || true
+"$SCRIPT_DIR/clean-build-registration.sh" "$ARCHIVE_PATH/Products/Applications/Vixen.app" || true
+"$SCRIPT_DIR/clean-build-registration.sh" "$XCODE_DIR/build/DerivedData/Build/Intermediates.noindex/ArchiveIntermediates/Vixen/InstallationBuildProductsLocation/Applications/Vixen.app" || true
+
 echo "Exporting Vixen.app with Xcode-managed Developer ID signing..."
 (
   cd "$XCODE_DIR"
@@ -115,6 +119,7 @@ if codesign -d --entitlements :- "$VIXENFS_APPEX" 2>/dev/null | grep -q "com.app
 fi
 
 codesign --verify --deep --strict --verbose=2 "$APP_BUNDLE_PATH"
+"$SCRIPT_DIR/clean-build-registration.sh" "$APP_BUNDLE_PATH" || true
 
 APP_STAGING_PATH="$STAGING_DIR/Vixen.app"
 ditto "$APP_BUNDLE_PATH" "$APP_STAGING_PATH"

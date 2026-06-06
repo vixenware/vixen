@@ -59,6 +59,35 @@ struct DoctorSnapshot: Sendable {
             && row(id: "management")?.state == .ok
     }
 
+    var needsUserSessionRegistrationRepair: Bool {
+        guard let registration = row(id: "registration") else { return false }
+        guard registration.state == .warning || registration.state == .failed else { return false }
+        let detail = registration.detail ?? ""
+        return detail.localizedCaseInsensitiveContains("Stale VixenFS registrations")
+            || detail.localizedCaseInsensitiveContains("PlugInKit points at")
+    }
+
+    func withRegistrationRepairFailure(_ error: String) -> DoctorSnapshot {
+        DoctorSnapshot(
+            rows: rows.map { row in
+                guard row.id == "registration" else { return row }
+                let existing = row.detail?.trimmingCharacters(in: .whitespacesAndNewlines)
+                let detail: String
+                if let existing, !existing.isEmpty {
+                    detail = "\(existing)\nAutomatic cleanup failed: \(error)"
+                } else {
+                    detail = "Automatic cleanup failed: \(error)"
+                }
+                return DoctorRow(
+                    id: row.id,
+                    title: row.title,
+                    state: .warning,
+                    detail: detail
+                )
+            }
+        )
+    }
+
     private func row(id: String) -> DoctorRow? {
         rows.first { $0.id == id }
     }

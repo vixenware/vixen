@@ -31,10 +31,9 @@ define_class!(
         ) {
             root_peer_state();
             log_event("info", "vixen-fskit probeResource");
-            // Block-resource FSes return a *recognized* result carrying a name + a
-            // stable container identity (name/containerID must be non-nil). The mock
-            // device's bytes are never read — `mount -F -t vixenfs <dev>` selects us
-            // explicitly, so the probe unconditionally claims it (cf. KhaosT/FSKitSample).
+            // Block-resource FSes return a *usable* result carrying a name + a stable
+            // container identity (name/containerID must be non-nil). Returning only a
+            // recognized result leaves the FSKit mount path without a usable match.
             let result = unsafe {
                 let name = NSString::from_str(VOLUME_NAME);
                 let uuid = NSUUID::initWithUUIDString(
@@ -44,8 +43,9 @@ define_class!(
                 .expect("CONTAINER_UUID is a valid UUID string");
                 let container_id =
                     FSContainerIdentifier::initWithUUID(FSContainerIdentifier::alloc(), &uuid);
-                FSProbeResult::recognizedProbeResultWithName_containerID(&name, &container_id)
+                FSProbeResult::usableProbeResultWithName_containerID(&name, &container_id)
             };
+            log_event("info", "vixen-fskit probeResource returning usable result");
             reply.call((Retained::into_raw(result), ptr::null_mut()));
         }
 
