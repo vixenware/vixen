@@ -122,10 +122,12 @@ Useful installed-app commands:
 `repair-extension` runs the bundled management helper directly in the current
 effective user. As the logged-in user, it removes stale LaunchServices and
 PlugInKit records while preserving the installed `/Applications/Vixen.app`
-record. As root, it removes explicit Vixen LaunchServices records instead of
-creating one; a root-created FSKit identity is distinct from the identity the
-user approved in System Settings, and can make FSKit report the module as
-disabled. The queue-trigger commands (`mount`, `unmount`, `remount`,
+record. As root, it removes only non-installed Vixen LaunchServices records and
+also preserves `/Applications/Vixen.app`; removing that installed root-visible
+record can leave `fskitd` reporting the module as disabled. The repair path does
+not create registrations, because a manually added FSKit identity can be
+distinct from the identity the user approved in System Settings. The
+queue-trigger commands (`mount`, `unmount`, `remount`,
 `kill-fskitd`) only drop fixed trigger files into the root-owned management
 queues. The privileged work still runs inside `vixen-management` under launchd.
 
@@ -188,8 +190,9 @@ Ask PlugInKit, not your memory:
 
 That prints the currently registered path and UUID for the active FSKit
 extension. During debugging, this is the first source of truth. Root
-LaunchServices state can still poison `fskitd`, so the privileged mount path
-also removes explicit root Vixen LaunchServices records before mounting.
+LaunchServices state can still poison `fskitd`, so root-side repair removes
+non-installed root Vixen LaunchServices records while keeping
+`/Applications/Vixen.app`.
 
 Typical paths we have seen:
 

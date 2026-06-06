@@ -79,17 +79,17 @@ while IFS= read -r path; do
   run_as_console_user "$LSREGISTER" -u "$path" || true
 done < <(run_as_console_user bash -c "$(declare -f list_vixen_app_records); list_vixen_app_records '$LSREGISTER'")
 
-section "remove root Vixen.app records"
+section "remove non-installed root Vixen.app records"
 while IFS= read -r path; do
   [[ -n "$path" ]] || continue
+  [[ "$path" == "$APP" ]] && continue
   printf 'root lsregister -u %s\n' "$path"
   "$LSREGISTER" -u "$path" || true
 done < <(list_vixen_app_records "$LSREGISTER")
 
-section "remove root VixenFS appex record"
+section "keep installed root VixenFS appex record"
 if [[ -d "$EXT" ]]; then
-  printf 'root lsregister -u %s\n' "$EXT"
-  "$LSREGISTER" -u "$EXT" || true
+  printf 'keeping %s\n' "$EXT"
 else
   printf 'missing %s\n' "$EXT"
 fi

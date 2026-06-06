@@ -56,8 +56,6 @@ if (!desiredPath) {
   process.exit(1);
 }
 
-const runningAsRoot = process.geteuid?.() === 0;
-
 console.log(`${emojis.bundle} Cleaning VixenFS registration toward: ${colorize("cyan", desiredPath)}`);
 
 function runTool(cmd, args) {
@@ -156,13 +154,13 @@ function unregisterStaleApps(paths) {
   }
 }
 
-// 1. Unregister stale containing-app registrations. System Settings can rediscover
-// stale embedded appex copies from these app records even when PlugInKit looks clean.
-// When run as root, remove every explicit Vixen.app LaunchServices record. fskitd
-// uses root LaunchServices state, and a manually added root record gets a distinct
-// FSKit identity that has not been approved in System Settings.
+// 1. Unregister stale containing-app registrations. System Settings and FSKit can
+// rediscover stale embedded appex copies from these app records even when
+// PlugInKit looks clean. Keep the installed app record in every execution
+// context; removing it from root LaunchServices can leave fskitd without the
+// installed, approved module.
 const appPaths = currentRegisteredAppPaths();
-const staleAppPaths = appPaths?.filter((path) => runningAsRoot || resolve(path) !== bundleURL) ?? [];
+const staleAppPaths = appPaths?.filter((path) => resolve(path) !== bundleURL) ?? [];
 let changed = false;
 
 if (appPaths && appPaths.length > 0) {
