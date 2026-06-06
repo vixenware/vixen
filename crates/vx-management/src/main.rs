@@ -5,9 +5,9 @@
 //!   started us. We repair the queue directories (`RunAtLoad`), run whichever button(s)
 //!   fired, drain their queues, and exit. No `KeepAlive`, so we stay down until the
 //!   next trigger.
-//! - **direct CLI** (testing, under `sudo`): `vixen-management <button>` runs one
-//!   capability immediately — e.g. `sudo vixen-management mount` to bring up
-//!   the VixenFS volume before the launchd plumbing is installed.
+//! - **direct CLI**: `vixen-management repair-extension` repairs the current user's
+//!   LaunchServices/PlugInKit state, while `vixen-management <button>` runs one
+//!   privileged capability immediately for manual testing.
 
 use eyre::{Result, bail};
 use tracing_subscriber::EnvFilter;
@@ -27,13 +27,18 @@ fn main() -> Result<()> {
     );
 
     match std::env::args().nth(1) {
-        // Direct CLI: run one button now (manual / sudo testing).
+        // Direct CLI: repair user-session registration or run one button now.
         Some(arg) => {
             if arg == "ensure-queues" {
                 return queue::ensure_queues();
             }
+            if arg == "repair-extension" {
+                return vx_management::extension::repair_installed_extension();
+            }
             let Some(button) = Button::from_name(&arg) else {
-                bail!("unknown button {arg:?}; expected mount|unmount|remount|kill-fskitd");
+                bail!(
+                    "unknown button {arg:?}; expected mount|unmount|remount|kill-fskitd|repair-extension"
+                );
             };
             let outcome = button.execute();
             if let Err(err) = status::record(button, &outcome) {

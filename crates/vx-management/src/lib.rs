@@ -9,11 +9,13 @@
 //! only then cleans up the backing image.
 //!
 //! The discipline from the wiki ("The FSKit doctor & kill-switch") is preserved: each
-//! capability is a **fixed, payload-less [`Button`]**. A caller fires one by dropping a
-//! file into its launchd `QueueDirectories` queue ([`queue`]); nothing the caller
-//! supplies decides *what* runs. There is no general "run as root" surface — only this
-//! fixed set of buttons, each gated by filesystem permission on its queue directory.
+//! privileged capability is a **fixed, payload-less [`Button`]**. A caller fires one by
+//! dropping a file into its launchd `QueueDirectories` queue ([`queue`]); nothing the
+//! caller supplies decides *what* runs. There is no general "run as root" surface —
+//! only this fixed set of buttons, each gated by filesystem permission on its queue
+//! directory.
 
+pub mod extension;
 pub mod killswitch;
 pub mod mount;
 pub mod queue;

@@ -116,11 +116,15 @@ Useful installed-app commands:
 - `/Applications/Vixen.app/Contents/MacOS/Vixen management register`
 - `/Applications/Vixen.app/Contents/MacOS/Vixen management refresh`
 - `/Applications/Vixen.app/Contents/MacOS/Vixen management unregister`
+- `/Applications/Vixen.app/Contents/MacOS/Vixen management repair-extension`
 - `/Applications/Vixen.app/Contents/MacOS/Vixen management remount`
 
-The queue-trigger commands (`mount`, `unmount`, `remount`, `kill-fskitd`) only
-drop fixed trigger files into the root-owned management queues. The privileged
-work still runs inside `vixen-management` under launchd.
+`repair-extension` runs the bundled management helper directly in the current
+user session, so it repairs the LaunchServices/PlugInKit state that System
+Settings and FSKit actually consult. The queue-trigger commands (`mount`,
+`unmount`, `remount`, `kill-fskitd`) only drop fixed trigger files into the
+root-owned management queues. The privileged work still runs inside
+`vixen-management` under launchd.
 
 ## Install and activate
 
@@ -154,14 +158,15 @@ The old standalone executable-swap experiment has been retired. `install-rust-fs
 
 ### What actually registers the extension
 
-- The installed `Vixen.app` and its `management` CLI entrypoint repair registration
-  toward `/Applications/Vixen.app`: unregister stale `eu.bearcove.vixenfs`
-  appex paths, register the installed appex, then run `lsregister` on the app
-  bundle.
+- The installed `Vixen.app` and its `management` CLI entrypoint call the bundled
+  management helper's `repair-extension` command. That repairs registration
+  toward `/Applications/Vixen.app`: unregister stale `eu.bearcove.vixen`
+  containing-app records, unregister stale `eu.bearcove.vixenfs` appex paths,
+  register the installed appex, then run `lsregister` on the app bundle.
 - Our explicit reload helper in [reload-vixen-fs-extension.sh](scripts/reload-vixen-fs-extension.sh) does:
-  - `pluginkit -r <appex-path>`
-  - `pluginkit -a <appex-path>`
-  - `lsregister -f -R -trusted <app-bundle>`
+  - the same stale containing-app cleanup
+  - the same stale appex cleanup
+  - the same final `lsregister -f -R -trusted <app-bundle>`
 - `xcodebuild` itself also re-registers the built app with LaunchServices at the end of a build:
   - `RegisterWithLaunchServices ... lsregister -f -R -trusted .../Vixen.app`
 
@@ -208,7 +213,8 @@ If registration gets poisoned, first decide which app copy should win, then rese
 
 For an installed app:
 
-- `just apps/mac/reload-fs-extension-registration /Applications/Vixen.app`
+- `/Applications/Vixen.app/Contents/MacOS/Vixen management repair-extension`
+- `just -f apps/mac/Justfile fix-registration`
 
 For a specific build product:
 
@@ -231,7 +237,8 @@ Before debugging a mount failure, check these in order:
 3. If FSKit host state looks stale, restart the daemons:
    - `sudo killall fskitd fskit_agent`
 4. Re-register the installed app if needed:
-   - `just apps/mac/reload-fs-extension-registration /Applications/Vixen.app`
+   - `/Applications/Vixen.app/Contents/MacOS/Vixen management repair-extension`
+   - `just -f apps/mac/Justfile fix-registration`
 5. Only then retry the mount or `vx eval`.
 
 If step 2 shows a path other than the app copy you intend to test, stop there and fix registration

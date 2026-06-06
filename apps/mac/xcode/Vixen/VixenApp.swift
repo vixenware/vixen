@@ -1,7 +1,6 @@
 import AppKit
 import Darwin
 @preconcurrency import FSKit
-import os
 import ServiceManagement
 import Sparkle
 import SwiftUI
@@ -11,7 +10,6 @@ enum VixenMain {
     static func main() {
         let arguments = Array(CommandLine.arguments.dropFirst())
         if arguments.first == "management" {
-            ExtensionRegistration.repairInstalledAppIfNeeded()
             Darwin.exit(ManagementCommand.run(Array(arguments.dropFirst())))
         }
         VixenApp.main()
@@ -22,7 +20,7 @@ struct VixenApp: App {
     private let updaterController = SparkleBootstrap.makeUpdaterController()
 
     init() {
-        ExtensionRegistration.repairInstalledAppIfNeededAsync()
+        ManagementService.repairExtensionAsync()
     }
 
     var body: some Scene {
@@ -42,132 +40,6 @@ struct VixenApp: App {
 
 }
 
-private enum ExtensionRegistration {
-    private static let log = Logger(
-        subsystem: "eu.bearcove.vixen",
-        category: "ExtensionRegistration"
-    )
-    private static let bundleIdentifier = "eu.bearcove.vixenfs"
-    private static let installedAppPath = "/Applications/Vixen.app"
-    private static let pluginkitPath = "/usr/bin/pluginkit"
-    private static let lsregisterPath =
-        "/System/Library/Frameworks/CoreServices.framework/Versions/Current/Frameworks/LaunchServices.framework/Versions/Current/Support/lsregister"
-
-    static func repairInstalledAppIfNeededAsync() {
-        DispatchQueue.global(qos: .utility).async {
-            repairInstalledAppIfNeeded()
-        }
-    }
-
-    static func repairInstalledAppIfNeeded() {
-        let appURL = Bundle.main.bundleURL.standardizedFileURL
-        guard appURL.path == installedAppPath else { return }
-        repair(appURL: appURL)
-    }
-
-    private static func repair(appURL: URL) {
-        guard let extensionURL = bundledExtensionURL(in: appURL) else {
-            log.error("bundled VixenFS extension not found in \(appURL.path, privacy: .public)")
-            return
-        }
-
-        let desiredPath = extensionURL.standardizedFileURL.path
-        let registeredPaths = registeredExtensionPaths()
-        let stalePaths = registeredPaths.filter { normalized($0) != desiredPath }
-        let hasDesiredPath = registeredPaths.contains { normalized($0) == desiredPath }
-        guard !stalePaths.isEmpty || !hasDesiredPath else { return }
-
-        for path in stalePaths {
-            let result = run(pluginkitPath, ["-r", path])
-            if result.status != 0 {
-                log.warning(
-                    "failed to unregister stale VixenFS extension at \(path, privacy: .public): \(result.stderr, privacy: .public)"
-                )
-            }
-        }
-
-        let addResult = run(pluginkitPath, ["-a", desiredPath])
-        if addResult.status != 0 {
-            log.warning(
-                "failed to register VixenFS extension at \(desiredPath, privacy: .public): \(addResult.stderr, privacy: .public)"
-            )
-        }
-
-        if FileManager.default.isExecutableFile(atPath: lsregisterPath) {
-            let lsResult = run(lsregisterPath, ["-f", "-R", "-trusted", appURL.path])
-            if lsResult.status != 0 {
-                log.warning(
-                    "failed to register Vixen.app with LaunchServices: \(lsResult.stderr, privacy: .public)"
-                )
-            }
-        }
-    }
-
-    private static func bundledExtensionURL(in appURL: URL) -> URL? {
-        for directory in ["Extensions", "PlugIns"] {
-            let url = appURL
-                .appendingPathComponent("Contents", isDirectory: true)
-                .appendingPathComponent(directory, isDirectory: true)
-                .appendingPathComponent("VixenFS.appex", isDirectory: true)
-            if FileManager.default.fileExists(atPath: url.path) {
-                return url
-            }
-        }
-        return nil
-    }
-
-    private static func registeredExtensionPaths() -> [String] {
-        let result = run(pluginkitPath, ["-mAvvv", "-i", bundleIdentifier])
-        guard result.status == 0 else {
-            log.warning("failed to query VixenFS registrations: \(result.stderr, privacy: .public)")
-            return []
-        }
-
-        var paths = [String]()
-        var seen = Set<String>()
-        for rawLine in result.stdout.split(whereSeparator: \.isNewline) {
-            let line = rawLine.trimmingCharacters(in: .whitespaces)
-            guard line.hasPrefix("Path = ") else { continue }
-            let path = String(line.dropFirst("Path = ".count))
-            let key = normalized(path)
-            if seen.insert(key).inserted {
-                paths.append(path)
-            }
-        }
-        return paths
-    }
-
-    private static func normalized(_ path: String) -> String {
-        URL(fileURLWithPath: path).standardizedFileURL.path
-    }
-
-    private static func run(_ executable: String, _ arguments: [String]) -> (
-        status: Int32, stdout: String, stderr: String
-    ) {
-        let process = Process()
-        process.executableURL = URL(fileURLWithPath: executable)
-        process.arguments = arguments
-
-        let stdout = Pipe()
-        let stderr = Pipe()
-        process.standardOutput = stdout
-        process.standardError = stderr
-
-        do {
-            try process.run()
-        } catch {
-            return (127, "", error.localizedDescription)
-        }
-
-        process.waitUntilExit()
-        return (
-            process.terminationStatus,
-            String(data: stdout.fileHandleForReading.readDataToEndOfFile(), encoding: .utf8) ?? "",
-            String(data: stderr.fileHandleForReading.readDataToEndOfFile(), encoding: .utf8) ?? ""
-        )
-    }
-}
-
 private enum ManagementService {
     private static let label = "eu.bearcove.vixen.management"
     private static let plistName = "eu.bearcove.vixen.management.plist"
@@ -179,6 +51,12 @@ private enum ManagementService {
         fileURLWithPath: "/Library/Application Support/Vixen/management/last-action.json",
         isDirectory: false
     )
+    private static var helperURL: URL {
+        Bundle.main.bundleURL
+            .appendingPathComponent("Contents", isDirectory: true)
+            .appendingPathComponent("MacOS", isDirectory: true)
+            .appendingPathComponent("vixen-management", isDirectory: false)
+    }
 
     struct StatusSnapshot {
         let serviceStatus: SMAppService.Status
@@ -270,6 +148,35 @@ private enum ManagementService {
         )
     }
 
+    static func repairExtensionAsync() {
+        DispatchQueue.global(qos: .utility).async {
+            do {
+                try repairExtension()
+            } catch {
+                NSLog("Vixen Management repair-extension failed: \(error.localizedDescription)")
+            }
+        }
+    }
+
+    static func repairExtension() throws {
+        let result = runHelper(arguments: ["repair-extension"])
+        guard result.status == 0 else {
+            let detail =
+                result.stderr.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
+                ? result.stdout.trimmingCharacters(in: .whitespacesAndNewlines)
+                : result.stderr.trimmingCharacters(in: .whitespacesAndNewlines)
+            throw NSError(
+                domain: NSPOSIXErrorDomain,
+                code: Int(result.status),
+                userInfo: [
+                    NSLocalizedDescriptionKey: detail.isEmpty
+                        ? "vixen-management repair-extension exited \(result.status)"
+                        : detail
+                ]
+            )
+        }
+    }
+
     static func register() throws {
         let daemon = service
         switch daemon.status {
@@ -343,6 +250,32 @@ private enum ManagementService {
         }
         Darwin.close(fd)
         return trigger
+    }
+
+    private static func runHelper(arguments: [String]) -> (
+        status: Int32, stdout: String, stderr: String
+    ) {
+        let process = Process()
+        process.executableURL = helperURL
+        process.arguments = arguments
+
+        let stdout = Pipe()
+        let stderr = Pipe()
+        process.standardOutput = stdout
+        process.standardError = stderr
+
+        do {
+            try process.run()
+        } catch {
+            return (127, "", error.localizedDescription)
+        }
+
+        process.waitUntilExit()
+        return (
+            process.terminationStatus,
+            String(data: stdout.fileHandleForReading.readDataToEndOfFile(), encoding: .utf8) ?? "",
+            String(data: stderr.fileHandleForReading.readDataToEndOfFile(), encoding: .utf8) ?? ""
+        )
     }
 
     private static func inspectLaunchd() -> LaunchdStatus {
@@ -435,17 +368,35 @@ private enum ManagementCommand {
         do {
             switch command {
             case "register":
+                try ManagementService.repairExtension()
                 try ManagementService.register()
                 ManagementService.printSnapshot()
             case "refresh":
+                try ManagementService.repairExtension()
                 try ManagementService.refreshRegistration()
                 ManagementService.printSnapshot()
             case "unregister":
                 try ManagementService.unregister()
                 ManagementService.printSnapshot()
+            case "repair-extension":
+                try ManagementService.repairExtension()
+                print("Vixen Management: repaired extension registration")
             case "status":
+                do {
+                    try ManagementService.repairExtension()
+                } catch {
+                    fputs(
+                        "Vixen Management: extension repair failed: \(error.localizedDescription)\n",
+                        stderr
+                    )
+                }
                 ManagementService.printSnapshot()
-            case "mount", "unmount", "remount", "kill-fskitd":
+            case "mount", "remount":
+                try ManagementService.repairExtension()
+                let trigger = try ManagementService.fireQueue(command)
+                print("Vixen Management: queued \(command) via \(trigger.path)")
+                ManagementService.printSnapshot()
+            case "unmount", "kill-fskitd":
                 let trigger = try ManagementService.fireQueue(command)
                 print("Vixen Management: queued \(command) via \(trigger.path)")
                 ManagementService.printSnapshot()
@@ -465,7 +416,7 @@ private enum ManagementCommand {
     private static func printUsage(to stream: UnsafeMutablePointer<FILE>) {
         fputs(
             """
-            Usage: Vixen management register|refresh|status|unregister|mount|unmount|remount|kill-fskitd
+            Usage: Vixen management register|refresh|status|unregister|repair-extension|mount|unmount|remount|kill-fskitd
 
             """,
             stream
@@ -676,6 +627,7 @@ struct ContentView: View {
     }
 
     private func openExtensionSettings() {
+        try? ManagementService.repairExtension()
         let targets = [
             "x-apple.systempreferences:com.apple.ExtensionsPreferences?extensionPointIdentifier=com.apple.fskit.fsmodule",
             "x-apple.systempreferences:com.apple.LoginItems-Settings.extension",
@@ -815,6 +767,7 @@ struct ContentView: View {
         }
 
         do {
+            try ManagementService.repairExtension()
             try ManagementService.register()
             managementError = nil
             refreshManagementStatus()
@@ -839,6 +792,7 @@ struct ContentView: View {
         }
 
         do {
+            try ManagementService.repairExtension()
             try ManagementService.refreshRegistration()
             managementError = nil
             refreshManagementStatus()
@@ -863,6 +817,7 @@ struct ContentView: View {
         }
 
         do {
+            try ManagementService.repairExtension()
             _ = try ManagementService.fireQueue("remount")
             managementError = nil
             refreshManagementStatus()
