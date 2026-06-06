@@ -2,11 +2,12 @@
 //!
 //! macOS 15's only FSKit resource type is a **block device**, and `mount(2)` of one
 //! needs root. So the CAS-VFS is mounted on a mock raw disk image (see [`mount`]), and
-//! the user-level vixen daemon can no longer establish its own volume. Recovery is
-//! different from ordinary unmounting: once FSKit is wedged, the unmount caller can
-//! wedge too. So the privileged recovery button tries ordinary unmount in a sacrificial
-//! child, escalates to terminating `fskitd` only if that fails to clear the mount, and
-//! only then cleans up the backing image.
+//! the user-level vixen daemon can no longer establish its own volume. Registration
+//! repair stays in the logged-in user session; these privileged buttons only touch the
+//! fixed mount/recovery surface. Recovery is different from ordinary unmounting: once
+//! FSKit is wedged, the unmount caller can wedge too. So the privileged recovery button
+//! tries ordinary unmount in a sacrificial child, escalates to terminating `fskitd` only
+//! if that fails to clear the mount, and only then cleans up the backing image.
 //!
 //! The discipline from the wiki ("The FSKit doctor & kill-switch") is preserved: each
 //! privileged capability is a **fixed, payload-less [`Button`]**. A caller fires one by
@@ -63,13 +64,9 @@ impl Button {
     /// Execute the capability. **Requires root** (mount/unmount/kill).
     pub fn execute(self) -> eyre::Result<()> {
         match self {
-            Button::Mount => {
-                extension::repair_installed_extension()?;
-                mount::establish()
-            }
+            Button::Mount => mount::establish(),
             Button::Unmount => mount::unmount(),
             Button::Remount => {
-                extension::repair_installed_extension()?;
                 mount::unmount()?;
                 mount::establish()
             }

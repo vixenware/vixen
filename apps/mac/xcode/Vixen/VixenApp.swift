@@ -67,35 +67,45 @@ enum ManagementService {
     }
 
     struct StatusSnapshot {
+        let helperAvailable: Bool
+        let helperDetail: String?
         let serviceStatus: SMAppService.Status
         let launchdStatus: LaunchdStatus?
         let lastActionStatus: LastActionStatus?
 
         var isReady: Bool {
-            serviceStatus == .enabled && launchdStatus?.failureDescription == nil
+            helperAvailable
         }
 
         var description: String {
+            guard helperAvailable else {
+                return helperDetail ?? "Helper missing from app bundle"
+            }
+            return "Ready"
+        }
+
+        var backgroundItemDescription: String? {
+            guard helperAvailable else { return nil }
             switch serviceStatus {
             case .enabled:
                 if launchdStatus?.failureDescription != nil {
-                    return "Launch failed"
+                    return "Background item launch failed"
                 }
-                return "Ready"
+                return "Background item allowed"
             case .requiresApproval:
-                return "Needs approval"
+                return "Background item needs approval"
             case .notRegistered:
-                return "Not registered"
+                return "Background item not registered"
             case .notFound:
-                return "Missing from app bundle"
+                return "Background item missing from app bundle"
             @unknown default:
-                return "Unknown"
+                return "Background item status unknown"
             }
         }
 
         var detail: String? {
-            guard serviceStatus == .enabled else { return nil }
-            return launchdStatus?.failureDescription ?? lastActionStatus?.failureDescription
+            guard helperAvailable else { return helperDetail }
+            return launchdStatus?.failureDescription ?? backgroundItemDescription
         }
     }
 
@@ -148,16 +158,33 @@ enum ManagementService {
     static func snapshot() -> StatusSnapshot {
         let started = DispatchTime.now().uptimeNanoseconds
         logger.notice("management snapshot started")
+        let helper = helperStatus()
         let serviceStatus = status
         let launchdStatus = serviceStatus == .enabled ? inspectLaunchd() : nil
-        let lastActionStatus = serviceStatus == .enabled ? readLastActionStatus() : nil
+        let lastActionStatus = helper.available ? readLastActionStatus() : nil
         let snapshot = StatusSnapshot(
+            helperAvailable: helper.available,
+            helperDetail: helper.detail,
             serviceStatus: serviceStatus,
             launchdStatus: launchdStatus,
             lastActionStatus: lastActionStatus
         )
-        logger.notice("management snapshot finished in \(elapsedMilliseconds(since: started), privacy: .public)ms service=\(statusName(serviceStatus), privacy: .public) ready=\(snapshot.isReady, privacy: .public) detail=\(snapshot.detail ?? "none", privacy: .public)")
+        logger.notice("management snapshot finished in \(elapsedMilliseconds(since: started), privacy: .public)ms helperAvailable=\(helper.available, privacy: .public) helperDetail=\(helper.detail ?? "none", privacy: .public) service=\(statusName(serviceStatus), privacy: .public) ready=\(snapshot.isReady, privacy: .public) detail=\(snapshot.detail ?? "none", privacy: .public)")
         return snapshot
+    }
+
+    private static func helperStatus() -> (available: Bool, detail: String?) {
+        let path = helperURL.path
+        let exists = FileManager.default.fileExists(atPath: path)
+        let executable = FileManager.default.isExecutableFile(atPath: path)
+        logger.notice("bundled helper availability checked path=\(path, privacy: .public) exists=\(exists, privacy: .public) executable=\(executable, privacy: .public)")
+        if executable {
+            return (true, nil)
+        }
+        if exists {
+            return (false, "Bundled helper is not executable")
+        }
+        return (false, "Bundled helper missing from app bundle")
     }
 
     static func repairExtensionAsync() {
@@ -191,6 +218,47 @@ enum ManagementService {
             )
         }
         logger.notice("repair-extension succeeded stdout=\(result.stdout.trimmingCharacters(in: .whitespacesAndNewlines), privacy: .public)")
+    }
+
+    static func runPrivilegedButton(_ name: String) throws {
+        let started = DispatchTime.now().uptimeNanoseconds
+        logger.notice("privileged management button requested name=\(name, privacy: .public) euid=\(Darwin.geteuid(), privacy: .public)")
+        guard ["mount", "unmount", "remount", "kill-fskitd"].contains(name) else {
+            logger.error("privileged management button rejected unknown name=\(name, privacy: .public)")
+            throw NSError(
+                domain: NSPOSIXErrorDomain,
+                code: Int(EINVAL),
+                userInfo: [NSLocalizedDescriptionKey: "Unknown management button \(name)"]
+            )
+        }
+
+        if Darwin.geteuid() == 0 {
+            logger.notice("running privileged management button directly because caller is already root")
+        } else {
+            try repairExtension()
+        }
+
+        let result =
+            Darwin.geteuid() == 0
+            ? runHelper(arguments: [name])
+            : runHelperWithAdministratorPrivileges(arguments: [name])
+        guard result.status == 0 else {
+            let detail =
+                result.stderr.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
+                ? result.stdout.trimmingCharacters(in: .whitespacesAndNewlines)
+                : result.stderr.trimmingCharacters(in: .whitespacesAndNewlines)
+            logger.error("privileged management button failed name=\(name, privacy: .public) status=\(result.status, privacy: .public) detail=\(detail, privacy: .public)")
+            throw NSError(
+                domain: NSPOSIXErrorDomain,
+                code: Int(result.status),
+                userInfo: [
+                    NSLocalizedDescriptionKey: detail.isEmpty
+                        ? "vixen-management \(name) exited \(result.status)"
+                        : detail
+                ]
+            )
+        }
+        logger.notice("privileged management button finished in \(elapsedMilliseconds(since: started), privacy: .public)ms name=\(name, privacy: .public) stdout=\(result.stdout.trimmingCharacters(in: .whitespacesAndNewlines), privacy: .public)")
     }
 
     static func register() throws {
@@ -260,6 +328,12 @@ enum ManagementService {
         if let detail = snapshot.detail {
             print("  \(detail)")
         }
+        if let lastAction = snapshot.lastActionStatus {
+            print("  last \(lastAction.button): \(lastAction.ok ? "ok" : "failed")")
+            if !lastAction.message.isEmpty {
+                print("    \(lastAction.message)")
+            }
+        }
     }
 
     static func fireQueue(_ name: String) throws -> URL {
@@ -311,6 +385,60 @@ enum ManagementService {
         let stderrText =
             String(data: stderr.fileHandleForReading.readDataToEndOfFile(), encoding: .utf8) ?? ""
         logger.notice("bundled helper finished in \(elapsedMilliseconds(since: started), privacy: .public)ms status=\(process.terminationStatus, privacy: .public) stdout=\(stdoutText.trimmingCharacters(in: .whitespacesAndNewlines), privacy: .public) stderr=\(stderrText.trimmingCharacters(in: .whitespacesAndNewlines), privacy: .public)")
+        return (
+            process.terminationStatus,
+            stdoutText,
+            stderrText
+        )
+    }
+
+    private static func runHelperWithAdministratorPrivileges(arguments: [String]) -> (
+        status: Int32, stdout: String, stderr: String
+    ) {
+        let started = DispatchTime.now().uptimeNanoseconds
+        let commandArguments = [
+            "/usr/bin/env",
+            "VIXEN_MANAGEMENT_LOG=info,vx_management=debug,vixen_management=debug",
+            helperURL.path,
+        ] + arguments
+        logger.notice("requesting administrator privileges for helper command arguments=\(commandArguments.joined(separator: " "), privacy: .public)")
+
+        let script = """
+        on run argv
+            set commandParts to {}
+            repeat with rawArg in argv
+                set end of commandParts to quoted form of (rawArg as text)
+            end repeat
+            set oldDelimiters to AppleScript's text item delimiters
+            set AppleScript's text item delimiters to " "
+            set commandText to commandParts as text
+            set AppleScript's text item delimiters to oldDelimiters
+            do shell script commandText with administrator privileges
+        end run
+        """
+
+        let process = Process()
+        process.executableURL = URL(fileURLWithPath: "/usr/bin/osascript")
+        process.arguments = ["-e", script] + commandArguments
+
+        let stdout = Pipe()
+        let stderr = Pipe()
+        process.standardOutput = stdout
+        process.standardError = stderr
+
+        do {
+            try process.run()
+        } catch {
+            logger.error("administrator helper request failed to start arguments=\(commandArguments.joined(separator: " "), privacy: .public) error=\(error.localizedDescription, privacy: .public)")
+            return (127, "", error.localizedDescription)
+        }
+
+        process.waitUntilExit()
+        let stdoutText =
+            String(data: stdout.fileHandleForReading.readDataToEndOfFile(), encoding: .utf8) ?? ""
+        let stderrText =
+            String(data: stderr.fileHandleForReading.readDataToEndOfFile(), encoding: .utf8) ?? ""
+        logger.notice("administrator helper request finished in \(elapsedMilliseconds(since: started), privacy: .public)ms status=\(process.terminationStatus, privacy: .public) stdout=\(stdoutText.trimmingCharacters(in: .whitespacesAndNewlines), privacy: .public) stderr=\(stderrText.trimmingCharacters(in: .whitespacesAndNewlines), privacy: .public)")
         return (
             process.terminationStatus,
             stdoutText,
@@ -464,13 +592,12 @@ private enum ManagementCommand {
                 }
                 ManagementService.printSnapshot()
             case "mount", "remount":
-                try ManagementService.repairExtension()
-                let trigger = try ManagementService.fireQueue(command)
-                print("Vixen Management: queued \(command) via \(trigger.path)")
+                try ManagementService.runPrivilegedButton(command)
+                print("Vixen Management: ran \(command)")
                 ManagementService.printSnapshot()
             case "unmount", "kill-fskitd":
-                let trigger = try ManagementService.fireQueue(command)
-                print("Vixen Management: queued \(command) via \(trigger.path)")
+                try ManagementService.runPrivilegedButton(command)
+                print("Vixen Management: ran \(command)")
                 ManagementService.printSnapshot()
             case "help", "--help", "-h":
                 printUsage(to: stdout)
@@ -505,6 +632,8 @@ struct ContentView: View {
     @State private var isExtensionEnabled = false
     @State private var extensionError: String? = nil
     @State private var managementSnapshot = ManagementService.StatusSnapshot(
+        helperAvailable: false,
+        helperDetail: "Not checked",
         serviceStatus: .notFound,
         launchdStatus: nil,
         lastActionStatus: nil
@@ -946,20 +1075,9 @@ struct ContentView: View {
 
         await Task.detached(priority: .utility) {
             do {
-                try ManagementService.repairExtension()
+                try ManagementService.runPrivilegedButton("mount")
             } catch {
-                ManagementService.logger.error("safe doctor repair extension repair failed: \(error.localizedDescription, privacy: .public)")
-            }
-            let snapshot = ManagementService.snapshot()
-            guard snapshot.isReady else {
-                ManagementService.logger.error("safe doctor repair did not fire mount because management is not ready description=\(snapshot.description, privacy: .public) detail=\(snapshot.detail ?? "none", privacy: .public)")
-                return
-            }
-            do {
-                let trigger = try ManagementService.fireQueue("mount")
-                ManagementService.logger.notice("safe doctor repair queued mount trigger=\(trigger.path, privacy: .public)")
-            } catch {
-                ManagementService.logger.error("safe doctor repair failed to queue mount: \(error.localizedDescription, privacy: .public)")
+                ManagementService.logger.error("safe doctor repair failed to run mount: \(error.localizedDescription, privacy: .public)")
             }
         }.value
         try? await Task.sleep(for: .seconds(1))
@@ -1040,12 +1158,11 @@ struct ContentView: View {
             }
 
             do {
-                try ManagementService.repairExtension()
-                let killTrigger = try ManagementService.fireQueue("kill-fskitd")
-                logger.notice("restart FSKit queued kill trigger=\(killTrigger.path, privacy: .public)")
+                try ManagementService.runPrivilegedButton("kill-fskitd")
+                logger.notice("restart FSKit ran kill-fskitd")
                 try? await Task.sleep(for: .seconds(2))
-                let mountTrigger = try ManagementService.fireQueue("mount")
-                logger.notice("restart FSKit queued mount trigger=\(mountTrigger.path, privacy: .public)")
+                try ManagementService.runPrivilegedButton("mount")
+                logger.notice("restart FSKit ran mount")
                 managementError = nil
                 await refreshDoctorStatus(forceSafeRepair: true)
             } catch {

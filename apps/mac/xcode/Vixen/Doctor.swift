@@ -23,7 +23,7 @@ struct DoctorSnapshot: Sendable {
     static let pending = DoctorSnapshot(rows: [
         DoctorRow(id: "registration", title: "App Registration", state: .pending, detail: nil),
         DoctorRow(id: "extension", title: "File System Extension", state: .pending, detail: nil),
-        DoctorRow(id: "management", title: "Management Service", state: .pending, detail: nil),
+        DoctorRow(id: "management", title: "Management Helper", state: .pending, detail: nil),
         DoctorRow(id: "mount", title: "VixenFS Mount", state: .pending, detail: nil),
         DoctorRow(id: "status", title: "Status File", state: .pending, detail: nil),
         DoctorRow(id: "backend", title: "Backend Connection", state: .pending, detail: nil),
@@ -247,12 +247,14 @@ enum DoctorService {
     }
 
     private static func checkManagement(_ snapshot: ManagementService.StatusSnapshot) -> DoctorRow {
-        logger.notice("doctor management snapshot ready=\(snapshot.isReady, privacy: .public) description=\(snapshot.description, privacy: .public) detail=\(snapshot.detail ?? "none", privacy: .public)")
+        logger.notice("doctor management snapshot ready=\(snapshot.isReady, privacy: .public) description=\(snapshot.description, privacy: .public) detail=\(snapshot.detail ?? "none", privacy: .public) background=\(snapshot.backgroundItemDescription ?? "none", privacy: .public)")
         return DoctorRow(
             id: "management",
-            title: "Management Service",
+            title: "Management Helper",
             state: snapshot.isReady ? .ok : .failed,
-            detail: snapshot.isReady ? "Ready" : snapshot.description
+            detail: snapshot.isReady
+                ? snapshot.backgroundItemDescription ?? "Bundled helper is ready"
+                : snapshot.description
         )
     }
 
