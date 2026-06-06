@@ -43,16 +43,14 @@ fn bundled_extension_path(app_path: &Path) -> Result<PathBuf> {
 }
 
 fn repair_containing_app(app_path: &Path) -> Result<()> {
-    let app_key = normalize(app_path);
     let registrations = registered_containing_apps()?;
-    let stale_paths: Vec<_> = registrations
-        .iter()
-        .filter(|path| normalize(path) != app_key)
-        .cloned()
-        .collect();
+    let plan = registration_plan(&registrations, app_path);
 
-    unregister_apps(&stale_paths)?;
-    register_app(app_path)
+    unregister_apps(&plan.stale_paths)?;
+    if plan.needs_register {
+        register_app(app_path)?;
+    }
+    Ok(())
 }
 
 fn repair_extension(extension_path: &Path) -> Result<()> {
@@ -81,22 +79,16 @@ fn repair_extension(extension_path: &Path) -> Result<()> {
 }
 
 fn settle_containing_app(app_path: &Path) -> Result<()> {
-    let app_key = normalize(app_path);
     for attempt in 0..5 {
         let registrations = registered_containing_apps()?;
-        let stale_paths: Vec<_> = registrations
-            .iter()
-            .filter(|path| normalize(path) != app_key)
-            .cloned()
-            .collect();
-        let has_desired = registrations.iter().any(|path| normalize(path) == app_key);
+        let plan = registration_plan(&registrations, app_path);
 
-        if stale_paths.is_empty() && has_desired {
+        if plan.is_clean() {
             return Ok(());
         }
 
-        unregister_apps(&stale_paths)?;
-        if !has_desired {
+        unregister_apps(&plan.stale_paths)?;
+        if plan.needs_register {
             register_app(&app_path)?;
         }
 
@@ -106,12 +98,8 @@ fn settle_containing_app(app_path: &Path) -> Result<()> {
     }
 
     let registrations = registered_containing_apps()?;
-    let stale_paths: Vec<_> = registrations
-        .iter()
-        .filter(|path| normalize(path) != app_key)
-        .collect();
-    let has_desired = registrations.iter().any(|path| normalize(path) == app_key);
-    if !stale_paths.is_empty() || !has_desired {
+    let plan = registration_plan(&registrations, app_path);
+    if !plan.is_clean() {
         bail!(
             "LaunchServices still has stale Vixen.app registrations: {}",
             registrations
@@ -123,6 +111,34 @@ fn settle_containing_app(app_path: &Path) -> Result<()> {
     }
 
     Ok(())
+}
+
+#[derive(Debug, PartialEq, Eq)]
+struct RegistrationPlan {
+    stale_paths: Vec<PathBuf>,
+    needs_register: bool,
+}
+
+impl RegistrationPlan {
+    fn is_clean(&self) -> bool {
+        self.stale_paths.is_empty() && !self.needs_register
+    }
+}
+
+fn registration_plan(registrations: &[PathBuf], desired_path: &Path) -> RegistrationPlan {
+    let desired_key = normalize(desired_path);
+    let stale_paths = registrations
+        .iter()
+        .filter(|path| normalize(path) != desired_key)
+        .cloned()
+        .collect();
+    let has_desired = registrations
+        .iter()
+        .any(|path| normalize(path) == desired_key);
+    RegistrationPlan {
+        stale_paths,
+        needs_register: !has_desired,
+    }
 }
 
 fn unregister_apps(paths: &[PathBuf]) -> Result<()> {
@@ -248,5 +264,44 @@ fn normalize(path: &Path) -> PathBuf {
         canonical
     } else {
         path.to_path_buf()
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use std::path::{Path, PathBuf};
+
+    use super::registration_plan;
+
+    #[test]
+    fn clean_registration_is_noop() {
+        let desired = Path::new("/Applications/Vixen.app");
+        let plan = registration_plan(&[PathBuf::from("/Applications/Vixen.app")], desired);
+
+        assert!(plan.is_clean());
+    }
+
+    #[test]
+    fn missing_registration_needs_register() {
+        let desired = Path::new("/Applications/Vixen.app");
+        let plan = registration_plan(&[], desired);
+
+        assert!(plan.stale_paths.is_empty());
+        assert!(plan.needs_register);
+    }
+
+    #[test]
+    fn stale_registration_is_removed_without_duplicate_desired_register() {
+        let desired = Path::new("/Applications/Vixen.app");
+        let plan = registration_plan(
+            &[
+                PathBuf::from("/tmp/dmg/Vixen.app"),
+                PathBuf::from("/Applications/Vixen.app"),
+            ],
+            desired,
+        );
+
+        assert_eq!(plan.stale_paths, vec![PathBuf::from("/tmp/dmg/Vixen.app")]);
+        assert!(!plan.needs_register);
     }
 }
