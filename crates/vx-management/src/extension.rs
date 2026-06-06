@@ -129,12 +129,12 @@ fn should_repair_pluginkit(mode: LaunchServicesMode) -> bool {
 fn registration_plan(
     registrations: &[PathBuf],
     desired_path: &Path,
-    mode: LaunchServicesMode,
+    _mode: LaunchServicesMode,
 ) -> RegistrationPlan {
     let desired_key = normalize(desired_path);
     let stale_paths = registrations
         .iter()
-        .filter(|path| mode == LaunchServicesMode::Root || normalize(path) != desired_key)
+        .filter(|path| normalize(path) != desired_key)
         .cloned()
         .collect();
     RegistrationPlan { stale_paths }
@@ -328,7 +328,7 @@ mod tests {
     }
 
     #[test]
-    fn root_registration_is_removed_even_when_it_points_at_installed_app() {
+    fn root_registration_keeps_installed_app_record() {
         let desired = Path::new("/Applications/Vixen.app");
         let plan = registration_plan(
             &[PathBuf::from("/Applications/Vixen.app")],
@@ -336,10 +336,7 @@ mod tests {
             LaunchServicesMode::Root,
         );
 
-        assert_eq!(
-            plan.stale_paths,
-            vec![PathBuf::from("/Applications/Vixen.app")]
-        );
+        assert!(plan.stale_paths.is_empty());
     }
 
     #[test]
