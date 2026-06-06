@@ -1064,32 +1064,28 @@ struct ContentView: View {
                 }
 
                 Spacer()
-            }
 
-            HStack(spacing: 10) {
-                Spacer()
-
-                if doctorSnapshot.needsFskitRestart {
-                    Button(action: { showFskitRestartConfirmation = true }) {
-                        Text("Restart FSKit")
+                if let doctorPrimaryActionTitle {
+                    Button(action: doctorPrimaryAction) {
+                        Text(doctorPrimaryActionTitle)
                             .font(.system(size: 13, weight: .semibold))
                             .foregroundStyle(.white)
-                            .padding(.horizontal, 16)
-                            .frame(minWidth: 128, minHeight: 30)
+                            .padding(.horizontal, 14)
+                            .frame(minWidth: 118, minHeight: 30)
                             .background(
                                 brandOrange,
                                 in: RoundedRectangle(cornerRadius: 8, style: .continuous)
                             )
                     }
                     .buttonStyle(.plain)
-                    .disabled(isConfiguringManagement)
+                    .disabled(isConfiguringManagement || isCheckingDoctor || isAutoRepairingDoctor)
                 }
 
                 Button(action: { Task { await refreshDoctorStatus(forceSafeRepair: true) } }) {
                     Text("Check Again")
                         .font(.system(size: 13, weight: .semibold))
                         .foregroundStyle(brandOrange)
-                        .padding(.horizontal, 16)
+                        .padding(.horizontal, 14)
                         .frame(minWidth: 118, minHeight: 30)
                         .background(
                             brandOrange.opacity(0.12),
@@ -1097,7 +1093,7 @@ struct ContentView: View {
                         )
                 }
                 .buttonStyle(.plain)
-                .disabled(isCheckingDoctor)
+                .disabled(isCheckingDoctor || isAutoRepairingDoctor)
             }
 
             if doctorSnapshot.hasFailure {
@@ -1141,6 +1137,24 @@ struct ContentView: View {
             RoundedRectangle(cornerRadius: 10, style: .continuous)
                 .fill(sectionBg)
         )
+    }
+
+    private var doctorPrimaryActionTitle: String? {
+        if doctorSnapshot.needsFskitRestart {
+            return "Restart FSKit"
+        }
+        if doctorSnapshot.canAttemptSafeMountRepair {
+            return "Mount VixenFS"
+        }
+        return nil
+    }
+
+    private func doctorPrimaryAction() {
+        if doctorSnapshot.needsFskitRestart {
+            showFskitRestartConfirmation = true
+        } else if doctorSnapshot.canAttemptSafeMountRepair {
+            Task { await refreshDoctorStatus(forceSafeRepair: true) }
+        }
     }
 
     private var doctorSummaryText: String {

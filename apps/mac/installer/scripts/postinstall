@@ -3,8 +3,10 @@ set -u
 
 label="eu.bearcove.vixen.management"
 plist="/Library/LaunchDaemons/${label}.plist"
-app="/Applications/Vixen.app/Contents/MacOS/Vixen"
-helper="/Applications/Vixen.app/Contents/MacOS/vixen-management"
+app_bundle="/Applications/Vixen.app"
+app="$app_bundle/Contents/MacOS/Vixen"
+helper="$app_bundle/Contents/MacOS/vixen-management"
+reopen_marker="/Library/Application Support/Vixen/install/reopen-after-install"
 
 if [ ! -x "$app" ]; then
   echo "postinstall: missing app executable at $app" >&2
@@ -33,6 +35,19 @@ fi
 "$app" management register || {
   echo "postinstall: could not register Vixen Management; the app will prompt for setup" >&2
 }
+
+if [ -e "$reopen_marker" ]; then
+  /bin/rm -f "$reopen_marker" || true
+  console_uid="$(/usr/bin/stat -f "%u" /dev/console 2>/dev/null || true)"
+  console_user="$(/usr/bin/stat -f "%Su" /dev/console 2>/dev/null || true)"
+  if [ -n "$console_uid" ] && [ -n "$console_user" ] &&
+    [ "$console_user" != "root" ] && [ "$console_user" != "loginwindow" ]; then
+    /bin/launchctl asuser "$console_uid" /usr/bin/sudo -u "$console_user" \
+      /usr/bin/open "$app_bundle" || {
+      echo "postinstall: could not reopen Vixen" >&2
+    }
+  fi
+fi
 
 echo "postinstall: Vixen Management setup requested"
 exit 0

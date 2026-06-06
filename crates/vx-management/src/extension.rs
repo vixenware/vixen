@@ -4,6 +4,10 @@
 //! LaunchServices and PlugInKit records. It does not explicitly add/register
 //! VixenFS; manual registration creates fresh FSKit identities that have not
 //! been approved in System Settings.
+//!
+//! The root/launchd path only touches root LaunchServices state. PlugInKit is
+//! session-facing and can fail from the management service context with
+//! `match: Connection invalid`; the logged-in app process owns that cleanup.
 
 use std::collections::BTreeSet;
 use std::ffi::OsStr;
@@ -21,10 +25,13 @@ const LSREGISTER: &str = "/System/Library/Frameworks/CoreServices.framework/Vers
 /// Repair registration toward `/Applications/Vixen.app`.
 pub fn repair_installed_extension() -> Result<()> {
     let app_path = Path::new(INSTALLED_APP_PATH);
-    let extension_path = bundled_extension_path(app_path)?;
+    let mode = launch_services_mode();
 
-    repair_containing_app(app_path)?;
-    repair_extension(&extension_path)?;
+    repair_containing_app(app_path, mode)?;
+    if should_repair_pluginkit(mode) {
+        let extension_path = bundled_extension_path(app_path)?;
+        repair_extension(&extension_path)?;
+    }
     Ok(())
 }
 
@@ -41,9 +48,9 @@ fn bundled_extension_path(app_path: &Path) -> Result<PathBuf> {
     bail!("VixenFS extension not found in {}", app_path.display())
 }
 
-fn repair_containing_app(app_path: &Path) -> Result<()> {
+fn repair_containing_app(app_path: &Path, mode: LaunchServicesMode) -> Result<()> {
     let registrations = registered_containing_apps()?;
-    let plan = registration_plan(&registrations, app_path, launch_services_mode());
+    let plan = registration_plan(&registrations, app_path, mode);
 
     unregister_apps(&plan.stale_paths)?;
     Ok(())
@@ -83,6 +90,10 @@ fn launch_services_mode() -> LaunchServicesMode {
     } else {
         LaunchServicesMode::User
     }
+}
+
+fn should_repair_pluginkit(mode: LaunchServicesMode) -> bool {
+    mode == LaunchServicesMode::User
 }
 
 fn registration_plan(
@@ -216,7 +227,7 @@ fn normalize(path: &Path) -> PathBuf {
 mod tests {
     use std::path::{Path, PathBuf};
 
-    use super::{LaunchServicesMode, registration_plan};
+    use super::{LaunchServicesMode, registration_plan, should_repair_pluginkit};
 
     #[test]
     fn clean_registration_is_noop() {
@@ -266,5 +277,11 @@ mod tests {
             plan.stale_paths,
             vec![PathBuf::from("/Applications/Vixen.app")]
         );
+    }
+
+    #[test]
+    fn pluginkit_cleanup_is_user_session_only() {
+        assert!(should_repair_pluginkit(LaunchServicesMode::User));
+        assert!(!should_repair_pluginkit(LaunchServicesMode::Root));
     }
 }

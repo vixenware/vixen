@@ -3,6 +3,8 @@ set -u
 
 bundle_id="eu.bearcove.vixen"
 app_name="Vixen"
+app_path="/Applications/Vixen.app"
+reopen_marker="/Library/Application Support/Vixen/install/reopen-after-install"
 
 console_uid="$(/usr/bin/stat -f "%u" /dev/console 2>/dev/null || true)"
 console_user="$(/usr/bin/stat -f "%Su" /dev/console 2>/dev/null || true)"
@@ -18,12 +20,35 @@ run_as_console_user() {
 }
 
 running_vixen_pids() {
-  run_as_console_user /usr/bin/osascript -l JavaScript - "$bundle_id" <<'JXA' 2>/dev/null || true
+  run_as_console_user /usr/bin/osascript -l JavaScript - "$bundle_id" "$app_path" <<'JXA' 2>/dev/null || true
 ObjC.import('AppKit');
 const bundleId = $.NSProcessInfo.processInfo.arguments.objectAtIndex(4).js;
-const apps = $.NSRunningApplication.runningApplicationsWithBundleIdentifier(bundleId);
+const appPath = $.NSProcessInfo.processInfo.arguments.objectAtIndex(5).js;
+const seen = new Set();
+
+function emit(app) {
+  const pid = Number(app.processIdentifier);
+  if (pid > 0 && !seen.has(pid)) {
+    seen.add(pid);
+    console.log(pid);
+  }
+}
+
+let apps = $.NSRunningApplication.runningApplicationsWithBundleIdentifier(bundleId);
 for (let i = 0; i < apps.count; i++) {
-  console.log(apps.objectAtIndex(i).processIdentifier);
+  emit(apps.objectAtIndex(i));
+}
+
+apps = $.NSWorkspace.sharedWorkspace.runningApplications;
+for (let i = 0; i < apps.count; i++) {
+  const app = apps.objectAtIndex(i);
+  const identifier = app.bundleIdentifier ? app.bundleIdentifier.js : "";
+  const url = app.bundleURL;
+  const path = url ? url.path.js : "";
+  const name = app.localizedName ? app.localizedName.js : "";
+  if (identifier === bundleId || path === appPath || name === "Vixen") {
+    emit(app);
+  }
 }
 JXA
 }
@@ -67,10 +92,13 @@ JXA
 
 if ! is_vixen_running; then
   echo "preinstall: $app_name is not running"
+  /bin/rm -f "$reopen_marker" 2>/dev/null || true
   exit 0
 fi
 
 echo "preinstall: asking running $app_name to quit"
+/bin/mkdir -p "$(/usr/bin/dirname "$reopen_marker")"
+/usr/bin/touch "$reopen_marker" 2>/dev/null || true
 request_vixen_quit
 if wait_for_vixen_to_exit; then
   echo "preinstall: $app_name quit"
