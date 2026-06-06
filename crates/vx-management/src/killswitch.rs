@@ -1,117 +1,162 @@
 //! The wedge kill-switch: terminate the system `fskitd`.
 //!
-//! When `fskitd` itself wedges (holding a mount no unprivileged unmount can clear),
-//! the only fix is to terminate it. It is launch-on-demand with **no `KeepAlive`**, so
-//! killing it is recoverable by design — it stays down until the next mount demand
-//! relaunches it cleanly. The target is resolved **here**, never from caller input.
+//! When `fskitd` itself wedges (holding stale FSKit module state or a mount no
+//! ordinary unmount can clear), the practical fix is to terminate the daemon process.
+//! Do not ask launchd to do it: this path intentionally resolves `/usr/libexec/fskitd`
+//! and calls `kill(2)` on that PID directly.
 
-use std::process::Command;
 use std::time::{Duration, Instant};
 
 use eyre::{Result, WrapErr, bail};
 
-/// The launchd service target for `/usr/libexec/fskitd`.
-const FSKITD_SERVICE: &str = "system/com.apple.filesystems.fskitd";
-
-/// The non-enumerating control program for launchd jobs.
-const LAUNCHCTL: &str = "/bin/launchctl";
+const FSKITD_PATH: &str = "/usr/libexec/fskitd";
+const PROC_ALL_PIDS: u32 = 1;
 
 /// Terminate `fskitd`: `SIGTERM`, escalating to `SIGKILL` if it doesn't exit within a
-/// bounded wait. Returns whether a process was found and signalled. At most one
-/// terminate per call.
+/// bounded wait. Returns whether a process was found and signalled.
 pub fn terminate_fskitd() -> Result<bool> {
-    if !fskitd_service_running()? {
+    let pids = fskitd_pids()?;
+    if pids.is_empty() {
         tracing::info!("fskitd not running; nothing to terminate");
         return Ok(false);
     }
 
-    tracing::warn!("terminating fskitd service={FSKITD_SERVICE} (SIGTERM)");
-    signal_fskitd("SIGTERM")?;
+    tracing::warn!(?pids, "terminating fskitd with kill(2) SIGTERM");
+    signal_pids(&pids, libc::SIGTERM)?;
 
     let deadline = Instant::now() + Duration::from_secs(3);
     while Instant::now() < deadline {
-        if !fskitd_service_running()? {
-            tracing::info!("fskitd service={FSKITD_SERVICE} exited after SIGTERM");
+        let remaining = live_pids(&pids);
+        if remaining.is_empty() {
+            tracing::info!(?pids, "fskitd exited after SIGTERM");
             return Ok(true);
         }
         std::thread::sleep(Duration::from_millis(100));
     }
 
-    tracing::warn!("fskitd service={FSKITD_SERVICE} survived SIGTERM; escalating to SIGKILL");
-    signal_fskitd("SIGKILL")?;
+    let remaining = live_pids(&pids);
+    if !remaining.is_empty() {
+        tracing::warn!(
+            ?remaining,
+            "fskitd survived SIGTERM; escalating to kill(2) SIGKILL"
+        );
+        signal_pids(&remaining, libc::SIGKILL)?;
+    }
     Ok(true)
 }
 
-fn signal_fskitd(signal: &str) -> Result<()> {
-    let output = Command::new(LAUNCHCTL)
-        .args(["kill", signal, FSKITD_SERVICE])
-        .output()
-        .wrap_err_with(|| format!("running {LAUNCHCTL} kill {signal} {FSKITD_SERVICE}"))?;
-    if output.status.success() {
+fn signal_pids(pids: &[libc::pid_t], signal: libc::c_int) -> Result<()> {
+    for &pid in pids {
+        signal_pid(pid, signal)?;
+    }
+    Ok(())
+}
+
+fn signal_pid(pid: libc::pid_t, signal: libc::c_int) -> Result<()> {
+    if unsafe { libc::kill(pid, signal) } == 0 {
         return Ok(());
     }
 
-    let stderr = String::from_utf8_lossy(&output.stderr);
-    bail!(
-        "{LAUNCHCTL} kill {signal} {FSKITD_SERVICE} failed: {}",
-        stderr.trim()
-    );
+    let error = std::io::Error::last_os_error();
+    if error.raw_os_error() == Some(libc::ESRCH) {
+        return Ok(());
+    }
+    Err(error).wrap_err_with(|| format!("kill({pid}, {signal})"))
 }
 
-fn fskitd_service_running() -> Result<bool> {
-    let output = Command::new(LAUNCHCTL)
-        .args(["print", FSKITD_SERVICE])
-        .output()
-        .wrap_err_with(|| format!("running {LAUNCHCTL} print {FSKITD_SERVICE}"))?;
-    if !output.status.success() {
-        let stderr = String::from_utf8_lossy(&output.stderr);
-        if stderr.contains("Could not find service") || stderr.contains("No such process") {
-            return Ok(false);
+fn live_pids(pids: &[libc::pid_t]) -> Vec<libc::pid_t> {
+    pids.iter()
+        .copied()
+        .filter(|&pid| unsafe { libc::kill(pid, 0) } == 0)
+        .collect()
+}
+
+fn fskitd_pids() -> Result<Vec<libc::pid_t>> {
+    let pids = all_pids()?;
+    let mut matches = Vec::new();
+    for pid in pids {
+        if let Some(path) = pid_path(pid)
+            && path_matches_fskitd(&path)
+        {
+            matches.push(pid);
         }
-        bail!(
-            "{LAUNCHCTL} print {FSKITD_SERVICE} failed: {}",
-            stderr.trim()
-        );
+    }
+    Ok(matches)
+}
+
+fn all_pids() -> Result<Vec<libc::pid_t>> {
+    let byte_count = unsafe { libc::proc_listpids(PROC_ALL_PIDS, 0, std::ptr::null_mut(), 0) };
+    if byte_count < 0 {
+        return Err(std::io::Error::last_os_error()).wrap_err("proc_listpids size query");
     }
 
-    Ok(launchctl_print_reports_running(&String::from_utf8_lossy(
-        &output.stdout,
-    )))
+    let mut capacity = (byte_count as usize / std::mem::size_of::<libc::pid_t>()).max(64) + 64;
+    loop {
+        let mut pids = vec![0 as libc::pid_t; capacity];
+        let buffer_size = (pids.len() * std::mem::size_of::<libc::pid_t>())
+            .try_into()
+            .wrap_err("pid buffer too large")?;
+        let written =
+            unsafe { libc::proc_listpids(PROC_ALL_PIDS, 0, pids.as_mut_ptr().cast(), buffer_size) };
+        if written < 0 {
+            return Err(std::io::Error::last_os_error()).wrap_err("proc_listpids");
+        }
+
+        let count = written as usize / std::mem::size_of::<libc::pid_t>();
+        if count < pids.len() {
+            pids.truncate(count);
+            pids.retain(|pid| *pid > 0);
+            return Ok(pids);
+        }
+
+        capacity *= 2;
+        if capacity > 1_000_000 {
+            bail!("proc_listpids result kept growing past {capacity} entries");
+        }
+    }
 }
 
-fn launchctl_print_reports_running(output: &str) -> bool {
-    output
-        .lines()
-        .any(|line| line.trim() == "state = running" || line.trim() == "job state = running")
+fn pid_path(pid: libc::pid_t) -> Option<String> {
+    let mut buffer = [0u8; libc::PROC_PIDPATHINFO_MAXSIZE as usize];
+    let written = unsafe {
+        libc::proc_pidpath(
+            pid,
+            buffer.as_mut_ptr().cast(),
+            libc::PROC_PIDPATHINFO_MAXSIZE as u32,
+        )
+    };
+    if written <= 0 {
+        return None;
+    }
+
+    let max_len = (written as usize).min(buffer.len());
+    let len = buffer[..max_len]
+        .iter()
+        .position(|byte| *byte == 0)
+        .unwrap_or(max_len);
+    Some(String::from_utf8_lossy(&buffer[..len]).into_owned())
+}
+
+fn path_matches_fskitd(path: &str) -> bool {
+    path == FSKITD_PATH
 }
 
 #[cfg(test)]
 mod tests {
-    use super::launchctl_print_reports_running;
+    use super::path_matches_fskitd;
 
     #[test]
-    fn detects_running_launchd_service() {
-        assert!(launchctl_print_reports_running(
-            "system/com.apple.filesystems.fskitd = {\n\tstate = running\n\tpid = 411\n}\n"
-        ));
-        assert!(launchctl_print_reports_running(
-            "system/com.apple.filesystems.fskitd = {\n\tjob state = running\n}\n"
-        ));
+    fn matches_exact_fskitd_path() {
+        assert!(path_matches_fskitd("/usr/libexec/fskitd"));
+        assert!(!path_matches_fskitd("/usr/libexec/fskit_agent"));
+        assert!(!path_matches_fskitd("/tmp/fskitd"));
     }
 
     #[test]
-    fn non_running_launchd_service_is_not_running() {
-        assert!(!launchctl_print_reports_running(
-            "system/com.apple.filesystems.fskitd = {\n\tstate = waiting\n}\n"
-        ));
-        assert!(!launchctl_print_reports_running(""));
-    }
-
-    #[test]
-    fn kill_switch_stays_launchd_targeted() {
+    fn kill_switch_uses_direct_pid_signals() {
         let source = include_str!("killswitch.rs");
-        assert!(source.contains("system/com.apple.filesystems.fskitd"));
         let forbidden = [
+            ["launch", "ctl"].concat(),
             concat!("pg", "rep").to_string(),
             concat!("kill", "all").to_string(),
             ["/bin/", "ps"].concat(),
@@ -120,7 +165,7 @@ mod tests {
         for forbidden in forbidden {
             assert!(
                 !source.contains(&forbidden),
-                "kill-switch must not use process-name lookup tool `{forbidden}`"
+                "kill-switch must not use `{forbidden}`"
             );
         }
     }

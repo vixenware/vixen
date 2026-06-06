@@ -68,6 +68,10 @@ enum DoctorService {
     private static let mountPoint = "/Volumes/Vixen/vfs"
     private static let statusPath = "\(mountPoint)/.vixenfs/status.json"
     private static let logger = Logger(subsystem: "eu.bearcove.vixen", category: "Doctor")
+    private static let installedAppPath = "/Applications/Vixen.app"
+    private static let installedExtensionPath =
+        "/Applications/Vixen.app/Contents/Extensions/VixenFS.appex"
+    private static let extensionBundleIdentifier = "eu.bearcove.vixenfs"
 
     static func check(extensionEnabled: Bool, extensionError: String?) async -> DoctorSnapshot {
         await Task.detached(priority: .utility) {
@@ -127,22 +131,95 @@ enum DoctorService {
     }
 
     private static func checkRegistration() -> DoctorRow {
-        do {
-            try ManagementService.repairExtension()
-            return DoctorRow(
-                id: "registration",
-                title: "App Registration",
-                state: .ok,
-                detail: "LaunchServices and PlugInKit point at /Applications/Vixen.app"
-            )
-        } catch {
+        let result = runProcess(
+            "/usr/bin/pluginkit",
+            arguments: ["-mAvvv", "-i", extensionBundleIdentifier],
+            timeout: 2
+        )
+        guard result.status == 0 else {
             return DoctorRow(
                 id: "registration",
                 title: "App Registration",
                 state: .failed,
-                detail: error.localizedDescription
+                detail: result.failureDetail(defaultMessage: "PlugInKit registration unavailable")
             )
         }
+
+        let records = parsePlugInKitRecords(result.stdout)
+        let hasInstalledRegistration = records.contains { record in
+            record.path == installedExtensionPath && record.parentBundle == installedAppPath
+        }
+        guard hasInstalledRegistration else {
+            let registeredPaths = records.compactMap(\.path)
+            return DoctorRow(
+                id: "registration",
+                title: "App Registration",
+                state: .failed,
+                detail: registeredPaths.isEmpty
+                    ? "PlugInKit has no VixenFS registration"
+                    : "PlugInKit points at \(registeredPaths.joined(separator: ", "))"
+            )
+        }
+
+        let stalePaths = records
+            .compactMap(\.path)
+            .filter { $0 != installedExtensionPath }
+        if !stalePaths.isEmpty {
+            return DoctorRow(
+                id: "registration",
+                title: "App Registration",
+                state: .warning,
+                detail: "Stale VixenFS registrations: \(stalePaths.joined(separator: ", "))"
+            )
+        }
+
+        return DoctorRow(
+            id: "registration",
+            title: "App Registration",
+            state: .ok,
+            detail: "PlugInKit points at /Applications/Vixen.app"
+        )
+    }
+
+    private struct PlugInKitRecord {
+        var path: String?
+        var parentBundle: String?
+    }
+
+    private static func parsePlugInKitRecords(_ output: String) -> [PlugInKitRecord] {
+        var records: [PlugInKitRecord] = []
+        var current: PlugInKitRecord?
+
+        func finishCurrent() {
+            if let current {
+                records.append(current)
+            }
+            current = nil
+        }
+
+        for rawLine in output.split(whereSeparator: \.isNewline) {
+            let line = rawLine.trimmingCharacters(in: .whitespaces)
+            if line.contains("\(extensionBundleIdentifier)(") {
+                finishCurrent()
+                current = PlugInKitRecord()
+                continue
+            }
+
+            guard current != nil else { continue }
+            if let value = value(in: line, after: "Path = ") {
+                current?.path = value
+            } else if let value = value(in: line, after: "Parent Bundle = ") {
+                current?.parentBundle = value
+            }
+        }
+        finishCurrent()
+
+        return records
+    }
+
+    private static func value(in line: String, after prefix: String) -> String? {
+        guard line.hasPrefix(prefix) else { return nil }
+        return String(line.dropFirst(prefix.count)).trimmingCharacters(in: .whitespaces)
     }
 
     private static func checkExtension(extensionEnabled: Bool, extensionError: String?) -> DoctorRow {
