@@ -33,25 +33,36 @@ fn main() -> Result<()> {
     match std::env::args().nth(1) {
         // Direct CLI: repair user-session registration or run one button now.
         Some(arg) => {
+            tracing::info!(arg, "vixen-management direct CLI command received");
             if arg == "ensure-queues" {
-                return queue::ensure_queues();
+                let outcome = queue::ensure_queues();
+                tracing::info!(ok = outcome.is_ok(), "ensure-queues finished");
+                return outcome;
             }
             if arg == "repair-extension" {
-                return vx_management::extension::repair_installed_extension();
+                let outcome = vx_management::extension::repair_installed_extension();
+                tracing::info!(ok = outcome.is_ok(), "repair-extension finished");
+                return outcome;
             }
             let Some(button) = Button::from_name(&arg) else {
+                tracing::warn!(arg, "unknown direct CLI command");
                 bail!(
                     "unknown button {arg:?}; expected mount|unmount|remount|kill-fskitd|repair-extension"
                 );
             };
+            tracing::info!(button = ?button, "executing direct management button");
             let outcome = button.execute();
             if let Err(err) = status::record(button, &outcome) {
                 tracing::warn!(button = ?button, "failed to record direct action status: {err:#}");
             }
+            tracing::info!(button = ?button, ok = outcome.is_ok(), "direct management button finished");
             outcome
         }
         // launchd mode: a queue fired (or RunAtLoad).
-        None => run_launchd(),
+        None => {
+            tracing::info!("vixen-management entered launchd queue mode");
+            run_launchd()
+        }
     }
 }
 
@@ -107,6 +118,7 @@ fn can_write_log_file() -> bool {
 /// removal acks completion to the firing doctor, while still guaranteeing launchd won't
 /// relaunch us in a loop.
 fn run_launchd() -> Result<()> {
+    tracing::info!("launchd queue processing started");
     queue::ensure_queues()?;
     let mut fired_any = false;
     for button in Button::ALL {
@@ -130,5 +142,6 @@ fn run_launchd() -> Result<()> {
     if !fired_any {
         tracing::info!("launched with no fired queue (RunAtLoad perm-repair only)");
     }
+    tracing::info!(fired_any, "launchd queue processing finished");
     Ok(())
 }

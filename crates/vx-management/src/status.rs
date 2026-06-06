@@ -19,6 +19,7 @@ pub struct LastActionStatus {
 }
 
 pub fn record(button: Button, outcome: &Result<()>) -> Result<()> {
+    tracing::info!(button = ?button, ok = outcome.is_ok(), "recording management action outcome");
     let status = match outcome {
         Ok(()) => LastActionStatus {
             button: button.queue_name().to_string(),
@@ -43,6 +44,14 @@ fn write(status: &LastActionStatus) -> Result<()> {
     let tmp = path.with_extension("json.tmp");
     std::fs::write(&tmp, json).wrap_err("writing last action status")?;
     std::fs::rename(&tmp, path).wrap_err("publishing last action status")?;
+    tracing::info!(
+        path = STATUS_PATH,
+        button = status.button,
+        ok = status.ok,
+        finished_unix_seconds = status.finished_unix_seconds,
+        message = %status.message,
+        "published management last-action status"
+    );
     Ok(())
 }
 

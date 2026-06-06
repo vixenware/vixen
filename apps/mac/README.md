@@ -238,6 +238,22 @@ sudo invocation:
 Do not rely on `sudo -v` followed by separate root commands; the timestamp may
 not apply to the terminal/session that eventually runs the command.
 
+### Forensics
+
+Every install and management path should leave a trail before anything goes
+wrong. Useful places to look:
+
+- PackageKit script output:
+  - `/usr/bin/tail -n 200 /var/log/install.log`
+- Vixen installer script timeline:
+  - `/bin/cat "/Library/Application Support/Vixen/install/install.log"`
+- Vixen app / doctor / management UI unified logs:
+  - `/usr/bin/log show --style compact --last 30m --predicate 'subsystem == "eu.bearcove.vixen"'`
+- Privileged management helper log:
+  - `/bin/cat "/Library/Application Support/Vixen/management/logs/vixen-management.log"`
+- Live app logs while testing:
+  - `/usr/bin/log stream --style compact --predicate 'subsystem == "eu.bearcove.vixen"'`
+
 Do not trust a successful build alone. Always verify the active registration path afterward.
 
 ### Minimal debugging checklist

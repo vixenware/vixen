@@ -30,9 +30,17 @@ pub fn queue_dir(button: Button) -> PathBuf {
 
 /// Does this button's queue hold at least one trigger file?
 pub fn is_fired(button: Button) -> bool {
-    match fs::read_dir(queue_dir(button)) {
-        Ok(mut entries) => entries.any(|e| e.is_ok()),
-        Err(_) => false,
+    let dir = queue_dir(button);
+    match fs::read_dir(&dir) {
+        Ok(mut entries) => {
+            let fired = entries.any(|e| e.is_ok());
+            tracing::debug!(button = ?button, dir = %dir.display(), fired, "checked trigger queue");
+            fired
+        }
+        Err(err) => {
+            tracing::debug!(button = ?button, dir = %dir.display(), error = %err, "could not read trigger queue");
+            false
+        }
     }
 }
 
@@ -51,12 +59,15 @@ pub fn fire(button: Button) -> Result<PathBuf> {
     fs::write(&trigger, b"").wrap_err_with(|| {
         format!("dropping trigger in {dir:?} (is Vixen Management installed?)")
     })?;
+    tracing::info!(button = ?button, trigger = %trigger.display(), "dropped management trigger");
     Ok(trigger)
 }
 
 /// Has a fired trigger been consumed (removed) by the daemon? The ack-by-drain signal.
 pub fn is_consumed(trigger: &Path) -> bool {
-    !trigger.exists()
+    let consumed = !trigger.exists();
+    tracing::debug!(trigger = %trigger.display(), consumed, "checked management trigger consumption");
+    consumed
 }
 
 /// Remove all trigger files from a button's queue (required so launchd stops
@@ -65,12 +76,26 @@ pub fn drain(button: Button) -> Result<()> {
     let dir = queue_dir(button);
     let entries = match fs::read_dir(&dir) {
         Ok(entries) => entries,
-        Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(()),
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => {
+            tracing::info!(button = ?button, dir = %dir.display(), "queue missing while draining");
+            return Ok(());
+        }
         Err(e) => return Err(e).wrap_err_with(|| format!("reading queue {dir:?}")),
     };
+    let mut drained = 0usize;
     for entry in entries.flatten() {
-        let _ = fs::remove_file(entry.path());
+        let path = entry.path();
+        match fs::remove_file(&path) {
+            Ok(()) => {
+                drained += 1;
+                tracing::info!(button = ?button, trigger = %path.display(), "drained management trigger");
+            }
+            Err(err) => {
+                tracing::warn!(button = ?button, trigger = %path.display(), error = %err, "failed to drain management trigger");
+            }
+        }
     }
+    tracing::info!(button = ?button, dir = %dir.display(), drained, "finished draining queue");
     Ok(())
 }
 
@@ -79,12 +104,21 @@ pub fn drain(button: Button) -> Result<()> {
 /// so a misconfigured queue never silently widens who may press a button.
 pub fn ensure_queues() -> Result<()> {
     let queue_root = Path::new(SUPPORT_DIR).join("queue");
+    tracing::info!(queue_root = %queue_root.display(), "ensuring management queues");
     fs::create_dir_all(&queue_root).wrap_err("creating queue root")?;
     let gid = admin_gid();
     for button in Button::ALL {
         let dir = queue_dir(button);
         fs::create_dir_all(&dir).wrap_err_with(|| format!("creating {dir:?}"))?;
         set_owner_mode(&dir, 0, gid, 0o1730).wrap_err_with(|| format!("hardening {dir:?}"))?;
+        tracing::info!(
+            button = ?button,
+            dir = %dir.display(),
+            uid = 0,
+            gid,
+            mode = "1730",
+            "management queue ready"
+        );
     }
     Ok(())
 }

@@ -9,10 +9,14 @@ import SwiftUI
 @main
 enum VixenMain {
     static func main() {
+        let logger = Logger(subsystem: "eu.bearcove.vixen", category: "App")
         let arguments = Array(CommandLine.arguments.dropFirst())
+        logger.notice("Vixen process starting pid=\(getpid(), privacy: .public) arguments=\(arguments.joined(separator: " "), privacy: .public)")
         if arguments.first == "management" {
+            logger.notice("Vixen entering management CLI mode")
             Darwin.exit(ManagementCommand.run(Array(arguments.dropFirst())))
         }
+        logger.notice("Vixen entering GUI app mode")
         VixenApp.main()
     }
 }
@@ -21,6 +25,8 @@ struct VixenApp: App {
     private let updaterController = SparkleBootstrap.makeUpdaterController()
 
     init() {
+        Logger(subsystem: "eu.bearcove.vixen", category: "App")
+            .notice("VixenApp init; scheduling user-session extension repair")
         ManagementService.repairExtensionAsync()
     }
 
@@ -42,6 +48,7 @@ struct VixenApp: App {
 }
 
 enum ManagementService {
+    fileprivate static let logger = Logger(subsystem: "eu.bearcove.vixen", category: "Management")
     private static let label = "eu.bearcove.vixen.management"
     private static let plistName = "eu.bearcove.vixen.management.plist"
     private static let queueRoot = URL(
@@ -139,27 +146,34 @@ enum ManagementService {
     }
 
     static func snapshot() -> StatusSnapshot {
+        let started = DispatchTime.now().uptimeNanoseconds
+        logger.notice("management snapshot started")
         let serviceStatus = status
         let launchdStatus = serviceStatus == .enabled ? inspectLaunchd() : nil
         let lastActionStatus = serviceStatus == .enabled ? readLastActionStatus() : nil
-        return StatusSnapshot(
+        let snapshot = StatusSnapshot(
             serviceStatus: serviceStatus,
             launchdStatus: launchdStatus,
             lastActionStatus: lastActionStatus
         )
+        logger.notice("management snapshot finished in \(elapsedMilliseconds(since: started), privacy: .public)ms service=\(statusName(serviceStatus), privacy: .public) ready=\(snapshot.isReady, privacy: .public) detail=\(snapshot.detail ?? "none", privacy: .public)")
+        return snapshot
     }
 
     static func repairExtensionAsync() {
+        logger.notice("scheduling async repair-extension")
         DispatchQueue.global(qos: .utility).async {
             do {
                 try repairExtension()
+                logger.notice("async repair-extension succeeded")
             } catch {
-                NSLog("Vixen Management repair-extension failed: \(error.localizedDescription)")
+                logger.error("async repair-extension failed: \(error.localizedDescription, privacy: .public)")
             }
         }
     }
 
     static func repairExtension() throws {
+        logger.notice("repair-extension started helper=\(helperURL.path, privacy: .public)")
         let result = runHelper(arguments: ["repair-extension"])
         guard result.status == 0 else {
             let detail =
@@ -176,12 +190,15 @@ enum ManagementService {
                 ]
             )
         }
+        logger.notice("repair-extension succeeded stdout=\(result.stdout.trimmingCharacters(in: .whitespacesAndNewlines), privacy: .public)")
     }
 
     static func register() throws {
         let daemon = service
+        logger.notice("management register requested currentStatus=\(statusName(daemon.status), privacy: .public)")
         switch daemon.status {
         case .enabled, .requiresApproval:
+            logger.notice("management register skipped currentStatus=\(statusName(daemon.status), privacy: .public)")
             return
         default:
             break
@@ -192,10 +209,14 @@ enum ManagementService {
 
     private static func registerService() throws {
         do {
+            logger.notice("SMAppService.register starting plist=\(plistName, privacy: .public)")
             try service.register()
+            logger.notice("SMAppService.register returned status=\(statusName(service.status), privacy: .public)")
         } catch {
+            logger.error("SMAppService.register threw status=\(statusName(service.status), privacy: .public) error=\(error.localizedDescription, privacy: .public)")
             switch service.status {
             case .enabled, .requiresApproval:
+                logger.notice("SMAppService.register error treated as acceptable status=\(statusName(service.status), privacy: .public)")
                 return
             default:
                 throw error
@@ -205,10 +226,14 @@ enum ManagementService {
 
     static func refreshRegistration() throws {
         let daemon = service
+        logger.notice("management refresh requested currentStatus=\(statusName(daemon.status), privacy: .public)")
         switch daemon.status {
         case .enabled:
+            logger.notice("SMAppService.unregister before refresh starting")
             try daemon.unregister()
+            logger.notice("SMAppService.unregister before refresh returned status=\(statusName(service.status), privacy: .public)")
         case .requiresApproval:
+            logger.notice("management refresh skipped because approval is pending")
             return
         default:
             break
@@ -219,11 +244,14 @@ enum ManagementService {
 
     static func unregister() throws {
         let daemon = service
+        logger.notice("management unregister requested currentStatus=\(statusName(daemon.status), privacy: .public)")
         switch daemon.status {
         case .notFound, .notRegistered:
+            logger.notice("management unregister skipped currentStatus=\(statusName(daemon.status), privacy: .public)")
             return
         default:
             try daemon.unregister()
+            logger.notice("management unregister returned status=\(statusName(service.status), privacy: .public)")
         }
     }
 
@@ -235,6 +263,7 @@ enum ManagementService {
     }
 
     static func fireQueue(_ name: String) throws -> URL {
+        logger.notice("firing management queue name=\(name, privacy: .public)")
         let trigger = queueRoot
             .appendingPathComponent(name, isDirectory: true)
             .appendingPathComponent("trigger-\(getpid())-\(UUID().uuidString)")
@@ -243,6 +272,7 @@ enum ManagementService {
         }
         guard fd >= 0 else {
             let code = Int(errno)
+            logger.error("failed to create management trigger name=\(name, privacy: .public) path=\(trigger.path, privacy: .public) errno=\(code, privacy: .public) message=\(String(cString: strerror(Int32(code))), privacy: .public)")
             throw NSError(
                 domain: NSPOSIXErrorDomain,
                 code: code,
@@ -250,12 +280,15 @@ enum ManagementService {
             )
         }
         Darwin.close(fd)
+        logger.notice("created management trigger name=\(name, privacy: .public) path=\(trigger.path, privacy: .public)")
         return trigger
     }
 
     private static func runHelper(arguments: [String]) -> (
         status: Int32, stdout: String, stderr: String
     ) {
+        let started = DispatchTime.now().uptimeNanoseconds
+        logger.notice("running bundled helper path=\(helperURL.path, privacy: .public) arguments=\(arguments.joined(separator: " "), privacy: .public)")
         let process = Process()
         process.executableURL = helperURL
         process.arguments = arguments
@@ -268,18 +301,26 @@ enum ManagementService {
         do {
             try process.run()
         } catch {
+            logger.error("bundled helper failed to start arguments=\(arguments.joined(separator: " "), privacy: .public) error=\(error.localizedDescription, privacy: .public)")
             return (127, "", error.localizedDescription)
         }
 
         process.waitUntilExit()
+        let stdoutText =
+            String(data: stdout.fileHandleForReading.readDataToEndOfFile(), encoding: .utf8) ?? ""
+        let stderrText =
+            String(data: stderr.fileHandleForReading.readDataToEndOfFile(), encoding: .utf8) ?? ""
+        logger.notice("bundled helper finished in \(elapsedMilliseconds(since: started), privacy: .public)ms status=\(process.terminationStatus, privacy: .public) stdout=\(stdoutText.trimmingCharacters(in: .whitespacesAndNewlines), privacy: .public) stderr=\(stderrText.trimmingCharacters(in: .whitespacesAndNewlines), privacy: .public)")
         return (
             process.terminationStatus,
-            String(data: stdout.fileHandleForReading.readDataToEndOfFile(), encoding: .utf8) ?? "",
-            String(data: stderr.fileHandleForReading.readDataToEndOfFile(), encoding: .utf8) ?? ""
+            stdoutText,
+            stderrText
         )
     }
 
     private static func inspectLaunchd() -> LaunchdStatus {
+        let started = DispatchTime.now().uptimeNanoseconds
+        logger.notice("launchd inspection started label=\(label, privacy: .public)")
         let process = Process()
         process.executableURL = URL(fileURLWithPath: "/bin/launchctl")
         process.arguments = ["print", "system/\(label)"]
@@ -292,6 +333,7 @@ enum ManagementService {
         do {
             try process.run()
         } catch {
+            logger.error("launchd inspection failed to start: \(error.localizedDescription, privacy: .public)")
             return LaunchdStatus(
                 jobState: nil,
                 lastExitCode: nil,
@@ -314,6 +356,7 @@ enum ManagementService {
         if process.terminationStatus != 0 {
             let detail =
                 errorOutput?.isEmpty == false ? errorOutput! : "exit \(process.terminationStatus)"
+            logger.error("launchd inspection failed in \(elapsedMilliseconds(since: started), privacy: .public)ms detail=\(detail, privacy: .public)")
             return LaunchdStatus(
                 jobState: nil,
                 lastExitCode: nil,
@@ -332,6 +375,7 @@ enum ManagementService {
             }
         }
 
+        logger.notice("launchd inspection finished in \(elapsedMilliseconds(since: started), privacy: .public)ms jobState=\(jobState ?? "none", privacy: .public) lastExitCode=\(lastExitCode ?? "none", privacy: .public)")
         return LaunchdStatus(
             jobState: jobState,
             lastExitCode: lastExitCode,
@@ -345,26 +389,53 @@ enum ManagementService {
     }
 
     private static func readLastActionStatus() -> LastActionStatus? {
-        guard let data = try? Data(contentsOf: lastActionURL) else { return nil }
+        guard let data = try? Data(contentsOf: lastActionURL) else {
+            logger.notice("management last-action missing path=\(lastActionURL.path, privacy: .public)")
+            return nil
+        }
         guard
             let object = try? JSONSerialization.jsonObject(with: data),
             let dictionary = object as? [String: Any],
             let button = dictionary["button"] as? String,
             let ok = dictionary["ok"] as? Bool
         else {
+            logger.error("management last-action unreadable path=\(lastActionURL.path, privacy: .public)")
             return nil
         }
         let message = dictionary["message"] as? String ?? ""
+        logger.notice("management last-action read button=\(button, privacy: .public) ok=\(ok, privacy: .public) message=\(message, privacy: .public)")
         return LastActionStatus(button: button, ok: ok, message: message)
+    }
+
+    private static func statusName(_ status: SMAppService.Status) -> String {
+        switch status {
+        case .enabled:
+            "enabled"
+        case .requiresApproval:
+            "requiresApproval"
+        case .notRegistered:
+            "notRegistered"
+        case .notFound:
+            "notFound"
+        @unknown default:
+            "unknown"
+        }
+    }
+
+    private static func elapsedMilliseconds(since started: UInt64) -> Int {
+        let elapsed = DispatchTime.now().uptimeNanoseconds - started
+        return Int(elapsed / 1_000_000)
     }
 }
 
 private enum ManagementCommand {
     static func run(_ arguments: [String]) -> Int32 {
         guard let command = arguments.first else {
+            ManagementService.logger.error("management CLI invoked without command")
             printUsage(to: stderr)
             return 64
         }
+        ManagementService.logger.notice("management CLI command started command=\(command, privacy: .public) arguments=\(arguments.joined(separator: " "), privacy: .public)")
 
         do {
             switch command {
@@ -404,11 +475,14 @@ private enum ManagementCommand {
             case "help", "--help", "-h":
                 printUsage(to: stdout)
             default:
+                ManagementService.logger.error("management CLI unknown command=\(command, privacy: .public)")
                 printUsage(to: stderr)
                 return 64
             }
+            ManagementService.logger.notice("management CLI command succeeded command=\(command, privacy: .public)")
             return 0
         } catch {
+            ManagementService.logger.error("management CLI command failed command=\(command, privacy: .public) error=\(error.localizedDescription, privacy: .public)")
             fputs("Vixen Management \(command) failed: \(error.localizedDescription)\n", stderr)
             return 1
         }
@@ -620,9 +694,11 @@ struct ContentView: View {
     // MARK: - Extension status
 
     private func checkExtensionOnce() async {
+        logger.notice("extension status check started")
         guard #available(macOS 15.4, *) else {
             isExtensionEnabled = false
             extensionError = "VixenFS extension status requires macOS 15.4 or later."
+            logger.error("extension status check unavailable on this macOS version")
             return
         }
 
@@ -631,16 +707,20 @@ struct ContentView: View {
             let found = extensions.first { $0.bundleIdentifier == "eu.bearcove.vixenfs" }
             isExtensionEnabled = found?.isEnabled ?? false
             extensionError = nil
+            logger.notice("extension status check finished found=\(found != nil, privacy: .public) enabled=\(isExtensionEnabled, privacy: .public)")
         } catch {
             extensionError = error.localizedDescription
+            logger.error("extension status check failed: \(error.localizedDescription, privacy: .public)")
         }
     }
 
     private func pollExtensionStatus() async {
+        logger.notice("extension status polling started")
         while !Task.isCancelled {
             await checkExtensionOnce()
             try? await Task.sleep(for: .seconds(4))
         }
+        logger.notice("extension status polling stopped")
     }
 
     private func animateToggleDemo() async {
@@ -653,6 +733,7 @@ struct ContentView: View {
     }
 
     private func openExtensionSettings() {
+        logger.notice("opening extension settings")
         try? ManagementService.repairExtension()
         let targets = [
             "x-apple.systempreferences:com.apple.ExtensionsPreferences?extensionPointIdentifier=com.apple.fskit.fsmodule",
@@ -660,9 +741,11 @@ struct ContentView: View {
         ]
         for target in targets {
             if let url = URL(string: target), NSWorkspace.shared.open(url) {
+                logger.notice("opened extension settings target=\(target, privacy: .public)")
                 return
             }
         }
+        logger.notice("falling back to opening System Settings app")
         NSWorkspace.shared.open(URL(fileURLWithPath: "/System/Applications/System Settings.app"))
     }
 
@@ -697,6 +780,7 @@ struct ContentView: View {
         .task {
             guard !didRequestManagementSetup else { return }
             didRequestManagementSetup = true
+            logger.notice("management setup view appeared; configuring management daemon")
             configureManagementDaemon()
         }
     }
@@ -768,6 +852,7 @@ struct ContentView: View {
     }
 
     private func managementButtonAction() {
+        logger.notice("management button action configured=\(isManagementConfigured, privacy: .public) service=\(managementStatusText, privacy: .public)")
         if isManagementConfigured {
             Task { await refreshDoctorStatus(forceSafeRepair: true) }
         } else if managementSnapshot.serviceStatus == .requiresApproval {
@@ -780,69 +865,105 @@ struct ContentView: View {
     }
 
     private func refreshManagementStatus() {
-        managementSnapshot = ManagementService.snapshot()
+        let snapshot = ManagementService.snapshot()
+        managementSnapshot = snapshot
+        logger.notice("management status refreshed ready=\(snapshot.isReady, privacy: .public) description=\(snapshot.description, privacy: .public) detail=\(snapshot.detail ?? "none", privacy: .public)")
     }
 
     @MainActor
     private func refreshDoctorStatus(forceSafeRepair: Bool = false) async {
-        guard !isCheckingDoctor else { return }
+        guard !isCheckingDoctor else {
+            logger.notice("doctor ui refresh skipped because a check is already running")
+            return
+        }
         let started = DispatchTime.now().uptimeNanoseconds
         isCheckingDoctor = true
         defer { isCheckingDoctor = false }
+        logger.notice("doctor ui refresh started forceSafeRepair=\(forceSafeRepair, privacy: .public) extensionEnabled=\(isExtensionEnabled, privacy: .public) managementReady=\(isManagementConfigured, privacy: .public)")
         let firstSnapshot = await DoctorService.check(
             extensionEnabled: isExtensionEnabled,
             extensionError: extensionError
         )
+        logger.notice("doctor first snapshot ready=\(firstSnapshot.isReady, privacy: .public) failures=\(firstSnapshot.rows.filter { $0.state == .failed }.count, privacy: .public) warnings=\(firstSnapshot.rows.filter { $0.state == .warning }.count, privacy: .public) canSafeRepair=\(firstSnapshot.canAttemptSafeMountRepair, privacy: .public) needsFskitRestart=\(firstSnapshot.needsFskitRestart, privacy: .public)")
 
         if (forceSafeRepair || firstSnapshot.canAttemptSafeMountRepair)
             && !firstSnapshot.needsFskitRestart
         {
+            logger.notice("doctor ui running safe repair force=\(forceSafeRepair, privacy: .public)")
             await performSafeDoctorRepair(force: forceSafeRepair)
             doctorSnapshot = await DoctorService.check(
                 extensionEnabled: isExtensionEnabled,
                 extensionError: extensionError
             )
+            logger.notice("doctor post-repair snapshot ready=\(doctorSnapshot.isReady, privacy: .public) failures=\(doctorSnapshot.rows.filter { $0.state == .failed }.count, privacy: .public) warnings=\(doctorSnapshot.rows.filter { $0.state == .warning }.count, privacy: .public) needsFskitRestart=\(doctorSnapshot.needsFskitRestart, privacy: .public)")
         } else {
             doctorSnapshot = firstSnapshot
+            logger.notice("doctor ui accepted first snapshot without safe repair")
         }
         refreshManagementStatus()
         logger.notice("doctor ui refresh finished in \(elapsedMilliseconds(since: started), privacy: .public)ms forceSafeRepair=\(forceSafeRepair, privacy: .public)")
     }
 
     private func pollManagementStatus() async {
+        logger.notice("management status polling started")
         while !Task.isCancelled {
             refreshManagementStatus()
             try? await Task.sleep(for: .seconds(12))
         }
+        logger.notice("management status polling stopped")
     }
 
     private func pollDoctorStatus() async {
+        logger.notice("doctor polling started")
         while !Task.isCancelled {
             if isExtensionEnabled && isManagementConfigured && !doctorSnapshot.needsFskitRestart {
+                logger.notice("doctor polling triggering refresh")
                 await refreshDoctorStatus()
+            } else {
+                logger.notice("doctor polling skipped extensionEnabled=\(isExtensionEnabled, privacy: .public) managementReady=\(isManagementConfigured, privacy: .public) needsFskitRestart=\(doctorSnapshot.needsFskitRestart, privacy: .public)")
             }
             try? await Task.sleep(for: .seconds(30))
         }
+        logger.notice("doctor polling stopped")
     }
 
     @MainActor
     private func performSafeDoctorRepair(force: Bool) async {
-        guard !isAutoRepairingDoctor else { return }
+        guard !isAutoRepairingDoctor else {
+            logger.notice("safe doctor repair skipped because repair is already running")
+            return
+        }
         let now = Date()
         if !force && now.timeIntervalSince(lastSafeRepairAt) < 10 {
+            logger.notice("safe doctor repair throttled force=\(force, privacy: .public)")
             return
         }
 
         isAutoRepairingDoctor = true
         lastSafeRepairAt = now
         defer { isAutoRepairingDoctor = false }
+        logger.notice("safe doctor repair started force=\(force, privacy: .public)")
 
         await Task.detached(priority: .utility) {
-            try? ManagementService.repairExtension()
-            guard ManagementService.snapshot().isReady else { return }
-            _ = try? ManagementService.fireQueue("mount")
+            do {
+                try ManagementService.repairExtension()
+            } catch {
+                ManagementService.logger.error("safe doctor repair extension repair failed: \(error.localizedDescription, privacy: .public)")
+            }
+            let snapshot = ManagementService.snapshot()
+            guard snapshot.isReady else {
+                ManagementService.logger.error("safe doctor repair did not fire mount because management is not ready description=\(snapshot.description, privacy: .public) detail=\(snapshot.detail ?? "none", privacy: .public)")
+                return
+            }
+            do {
+                let trigger = try ManagementService.fireQueue("mount")
+                ManagementService.logger.notice("safe doctor repair queued mount trigger=\(trigger.path, privacy: .public)")
+            } catch {
+                ManagementService.logger.error("safe doctor repair failed to queue mount: \(error.localizedDescription, privacy: .public)")
+            }
         }.value
         try? await Task.sleep(for: .seconds(1))
+        logger.notice("safe doctor repair finished")
     }
 
     private func elapsedMilliseconds(since started: UInt64) -> Int {
@@ -851,10 +972,12 @@ struct ContentView: View {
     }
 
     private func configureManagementDaemon() {
+        logger.notice("configure management daemon started")
         isConfiguringManagement = true
         defer {
             isConfiguringManagement = false
             refreshManagementStatus()
+            logger.notice("configure management daemon finished configured=\(isManagementConfigured, privacy: .public) error=\(managementError ?? "none", privacy: .public)")
         }
 
         do {
@@ -863,6 +986,7 @@ struct ContentView: View {
             managementError = nil
             refreshManagementStatus()
             if managementSnapshot.serviceStatus == .requiresApproval {
+                logger.notice("configure management daemon requires approval; opening settings")
                 openLoginItemsSettings()
             }
         } catch {
@@ -872,14 +996,17 @@ struct ContentView: View {
             } else {
                 managementError = error.localizedDescription
             }
+            logger.error("configure management daemon failed: \(error.localizedDescription, privacy: .public)")
         }
     }
 
     private func refreshManagementDaemon() {
+        logger.notice("refresh management daemon started")
         isConfiguringManagement = true
         defer {
             isConfiguringManagement = false
             refreshManagementStatus()
+            logger.notice("refresh management daemon finished configured=\(isManagementConfigured, privacy: .public) error=\(managementError ?? "none", privacy: .public)")
         }
 
         do {
@@ -888,6 +1015,7 @@ struct ContentView: View {
             managementError = nil
             refreshManagementStatus()
             if managementSnapshot.serviceStatus == .requiresApproval {
+                logger.notice("refresh management daemon requires approval; opening settings")
                 openLoginItemsSettings()
             }
         } catch {
@@ -897,26 +1025,32 @@ struct ContentView: View {
             } else {
                 managementError = error.localizedDescription
             }
+            logger.error("refresh management daemon failed: \(error.localizedDescription, privacy: .public)")
         }
     }
 
     private func restartFskit() {
+        logger.notice("restart FSKit requested")
         Task {
             isConfiguringManagement = true
             defer {
                 isConfiguringManagement = false
                 refreshManagementStatus()
+                logger.notice("restart FSKit task finished error=\(managementError ?? "none", privacy: .public)")
             }
 
             do {
                 try ManagementService.repairExtension()
-                _ = try ManagementService.fireQueue("kill-fskitd")
+                let killTrigger = try ManagementService.fireQueue("kill-fskitd")
+                logger.notice("restart FSKit queued kill trigger=\(killTrigger.path, privacy: .public)")
                 try? await Task.sleep(for: .seconds(2))
-                _ = try ManagementService.fireQueue("mount")
+                let mountTrigger = try ManagementService.fireQueue("mount")
+                logger.notice("restart FSKit queued mount trigger=\(mountTrigger.path, privacy: .public)")
                 managementError = nil
                 await refreshDoctorStatus(forceSafeRepair: true)
             } catch {
                 managementError = error.localizedDescription
+                logger.error("restart FSKit failed: \(error.localizedDescription, privacy: .public)")
             }
         }
     }

@@ -146,11 +146,13 @@ enum DoctorService {
         }
 
         let records = parsePlugInKitRecords(result.stdout)
+        logger.notice("doctor registration records count=\(records.count, privacy: .public) paths=\(records.compactMap(\.path).joined(separator: ", "), privacy: .public)")
         let hasInstalledRegistration = records.contains { record in
             record.path == installedExtensionPath && record.parentBundle == installedAppPath
         }
         guard hasInstalledRegistration else {
             let registeredPaths = records.compactMap(\.path)
+            logger.error("doctor registration failed installedRegistration=false paths=\(registeredPaths.joined(separator: ", "), privacy: .public)")
             return DoctorRow(
                 id: "registration",
                 title: "App Registration",
@@ -165,6 +167,7 @@ enum DoctorService {
             .compactMap(\.path)
             .filter { $0 != installedExtensionPath }
         if !stalePaths.isEmpty {
+            logger.warning("doctor registration warning stalePaths=\(stalePaths.joined(separator: ", "), privacy: .public)")
             return DoctorRow(
                 id: "registration",
                 title: "App Registration",
@@ -173,6 +176,7 @@ enum DoctorService {
             )
         }
 
+        logger.notice("doctor registration ok installedPath=\(installedExtensionPath, privacy: .public)")
         return DoctorRow(
             id: "registration",
             title: "App Registration",
@@ -224,6 +228,7 @@ enum DoctorService {
 
     private static func checkExtension(extensionEnabled: Bool, extensionError: String?) -> DoctorRow {
         if let extensionError {
+            logger.error("doctor extension failed error=\(extensionError, privacy: .public)")
             return DoctorRow(
                 id: "extension",
                 title: "File System Extension",
@@ -232,6 +237,7 @@ enum DoctorService {
             )
         }
 
+        logger.notice("doctor extension verdict enabled=\(extensionEnabled, privacy: .public)")
         return DoctorRow(
             id: "extension",
             title: "File System Extension",
@@ -241,7 +247,8 @@ enum DoctorService {
     }
 
     private static func checkManagement(_ snapshot: ManagementService.StatusSnapshot) -> DoctorRow {
-        DoctorRow(
+        logger.notice("doctor management snapshot ready=\(snapshot.isReady, privacy: .public) description=\(snapshot.description, privacy: .public) detail=\(snapshot.detail ?? "none", privacy: .public)")
+        return DoctorRow(
             id: "management",
             title: "Management Service",
             state: snapshot.isReady ? .ok : .failed,
@@ -283,6 +290,7 @@ enum DoctorService {
         } else {
             failedMountDetail = nil
         }
+        logger.notice("doctor mount check mounted=\(isMounted, privacy: .public) lastActionButton=\(lastAction?.button ?? "none", privacy: .public) lastActionOk=\(lastAction?.ok.description ?? "none", privacy: .public) failedDetail=\(failedMountDetail ?? "none", privacy: .public)")
 
         return MountProbe(
             row: DoctorRow(
@@ -310,6 +318,7 @@ enum DoctorService {
     private static func readStatusPayload() -> StatusProbe {
         let result = runProcess("/bin/cat", arguments: [statusPath], timeout: 1)
         guard result.status == 0 else {
+            logger.error("doctor status read failed timedOut=\(result.timedOut, privacy: .public) detail=\(result.failureDetail(defaultMessage: "Could not read \(statusPath)"), privacy: .public)")
             return StatusProbe(
                 row: DoctorRow(
                     id: "status",
@@ -328,6 +337,7 @@ enum DoctorService {
             let object = try? JSONSerialization.jsonObject(with: data),
             let payload = object as? [String: Any]
         else {
+            logger.error("doctor status read failed invalid JSON payload=\(result.stdout, privacy: .public)")
             return StatusProbe(
                 row: DoctorRow(
                     id: "status",
@@ -342,6 +352,7 @@ enum DoctorService {
         let appGroupPath = (payload["app_group_path"] as? String)?
             .trimmingCharacters(in: .whitespacesAndNewlines)
         let hasAppGroup = appGroupPath?.isEmpty == false
+        logger.notice("doctor status payload parsed hasAppGroup=\(hasAppGroup, privacy: .public) appGroupPath=\(appGroupPath ?? "none", privacy: .public) keys=\(payload.keys.sorted().joined(separator: ", "), privacy: .public)")
 
         return StatusProbe(
             row: DoctorRow(
@@ -356,6 +367,7 @@ enum DoctorService {
 
     private static func checkBackend(_ status: StatusProbe) -> DoctorRow {
         guard let payload = status.payload else {
+            logger.error("doctor backend failed because status payload is missing")
             return DoctorRow(
                 id: "backend",
                 title: "Backend Connection",
@@ -366,6 +378,7 @@ enum DoctorService {
 
         let connected = payload["connected"] as? Bool ?? false
         if connected {
+            logger.notice("doctor backend ok connected=true")
             return DoctorRow(
                 id: "backend",
                 title: "Backend Connection",
@@ -376,6 +389,7 @@ enum DoctorService {
 
         let reason = (payload["disconnect_reason"] as? String)?
             .trimmingCharacters(in: .whitespacesAndNewlines)
+        logger.error("doctor backend failed connected=false reason=\(reason ?? "none", privacy: .public)")
         return DoctorRow(
             id: "backend",
             title: "Backend Connection",

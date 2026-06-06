@@ -34,6 +34,7 @@ const SACRIFICIAL_UNMOUNT_DEADLINE: Duration = Duration::from_secs(2);
 /// Establish the mount if it isn't already up: provision the device, then mount it.
 /// Idempotent — a healthy existing mount is a no-op. **Requires root** (the mount).
 pub fn establish() -> Result<()> {
+    tracing::info!(mount_point = MOUNT_POINT, "establishing VixenFS mount");
     if is_mounted()? {
         tracing::info!("{MOUNT_POINT} already mounted");
         return Ok(());
@@ -57,11 +58,17 @@ pub fn establish() -> Result<()> {
 /// management daemon itself. Killing `fskitd` is the last-resort escalation when the
 /// sacrificial unmount does not clear the mount.
 pub fn unmount() -> Result<()> {
+    tracing::info!(mount_point = MOUNT_POINT, "unmount requested");
     recover_existing_state()
 }
 
 fn recover_existing_state() -> Result<()> {
+    tracing::info!(
+        mount_point = MOUNT_POINT,
+        "recovering existing VixenFS state"
+    );
     let unmount = try_sacrificial_unmount()?;
+    tracing::info!(outcome = ?unmount, "sacrificial unmount attempt finished");
     if unmount.needs_fskitd_kill() || is_mounted()? {
         tracing::warn!(
             outcome = ?unmount,
@@ -72,7 +79,12 @@ fn recover_existing_state() -> Result<()> {
     if is_mounted()? {
         bail!("{MOUNT_POINT} is still mounted after terminating fskitd");
     }
-    detach_backing_devices()
+    let result = detach_backing_devices();
+    tracing::info!(
+        ok = result.is_ok(),
+        "existing VixenFS state recovery finished"
+    );
+    result
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -94,6 +106,10 @@ impl SacrificialUnmount {
 
 fn try_sacrificial_unmount() -> Result<SacrificialUnmount> {
     if !is_mounted()? {
+        tracing::info!(
+            mount_point = MOUNT_POINT,
+            "sacrificial unmount skipped; not mounted"
+        );
         return Ok(SacrificialUnmount::NotMounted);
     }
 
@@ -133,6 +149,7 @@ fn try_sacrificial_unmount() -> Result<SacrificialUnmount> {
 /// Provision the mock raw block device: create the sparse image if absent, attach it
 /// raw with no filesystem mounted, and return its whole-disk BSD name (e.g. `disk18`).
 pub fn provision_device() -> Result<String> {
+    tracing::info!(image_path = IMAGE_PATH, "provisioning Vixen backing device");
     ensure_image()?;
     let out = Command::new("/usr/bin/hdiutil")
         .args([
@@ -144,6 +161,12 @@ pub fn provision_device() -> Result<String> {
         ])
         .output()
         .wrap_err("running hdiutil attach")?;
+    tracing::info!(
+        status = ?out.status.code(),
+        stdout = %String::from_utf8_lossy(&out.stdout).trim(),
+        stderr = %String::from_utf8_lossy(&out.stderr).trim(),
+        "hdiutil attach finished"
+    );
     if !out.status.success() {
         bail!(
             "hdiutil attach failed: {}",
@@ -151,8 +174,10 @@ pub fn provision_device() -> Result<String> {
         );
     }
     let stdout = String::from_utf8_lossy(&out.stdout);
-    parse_attached_device(&stdout)
-        .ok_or_else(|| eyre::eyre!("no whole-disk /dev/disk node in hdiutil output: {stdout:?}"))
+    let device = parse_attached_device(&stdout)
+        .ok_or_else(|| eyre::eyre!("no whole-disk /dev/disk node in hdiutil output: {stdout:?}"))?;
+    tracing::info!(device, "provisioned Vixen backing device");
+    Ok(device)
 }
 
 /// Create the sparse mock image if it doesn't exist yet. `set_len` extends the file
@@ -161,6 +186,7 @@ pub fn provision_device() -> Result<String> {
 fn ensure_image() -> Result<()> {
     let path = std::path::Path::new(IMAGE_PATH);
     if path.exists() {
+        tracing::info!(image_path = IMAGE_PATH, "mock backing image already exists");
         return Ok(());
     }
     if let Some(parent) = path.parent() {
@@ -169,18 +195,38 @@ fn ensure_image() -> Result<()> {
     let file = std::fs::File::create(path).wrap_err("creating mock image file")?;
     file.set_len(IMAGE_SIZE_BYTES)
         .wrap_err("sizing mock image (sparse)")?;
+    tracing::info!(
+        image_path = IMAGE_PATH,
+        size_bytes = IMAGE_SIZE_BYTES,
+        "created sparse mock backing image"
+    );
     Ok(())
 }
 
 /// Mount the block device as `vixenfs` at [`MOUNT_POINT`]. **Requires root.**
 fn mount_volume(device: &str) -> Result<()> {
     // Keep `/Volumes/Vixen` itself plain APFS; FSKit owns only the nested child.
-    std::fs::create_dir_all(MACOS_VFS_MOUNT_PARENT).ok();
-    std::fs::create_dir_all(MOUNT_POINT).ok();
+    tracing::info!(
+        device,
+        parent = MACOS_VFS_MOUNT_PARENT,
+        mount_point = MOUNT_POINT,
+        fs_type = FS_TYPE,
+        "mounting VixenFS volume"
+    );
+    std::fs::create_dir_all(MACOS_VFS_MOUNT_PARENT).wrap_err("creating Vixen mount parent")?;
+    std::fs::create_dir_all(MOUNT_POINT).wrap_err("creating Vixen mount point")?;
     let out = Command::new("/sbin/mount")
         .args(["-F", "-t", FS_TYPE, device, MOUNT_POINT])
         .output()
         .wrap_err("running mount")?;
+    tracing::info!(
+        device,
+        mount_point = MOUNT_POINT,
+        status = ?out.status.code(),
+        stdout = %String::from_utf8_lossy(&out.stdout).trim(),
+        stderr = %String::from_utf8_lossy(&out.stderr).trim(),
+        "mount command finished"
+    );
     if !out.status.success() {
         bail!(
             "mount {device} -> {MOUNT_POINT} failed: {}",
@@ -192,7 +238,9 @@ fn mount_volume(device: &str) -> Result<()> {
 
 /// Detach any raw disk-image devices currently attached for [`IMAGE_PATH`].
 fn detach_backing_devices() -> Result<()> {
-    for device in attached_image_devices()? {
+    let devices = attached_image_devices()?;
+    tracing::info!(?devices, "detaching Vixen backing devices");
+    for device in devices {
         detach_device(&device)?;
     }
     Ok(())
@@ -204,6 +252,13 @@ fn detach_device(device: &str) -> Result<()> {
         .args(["detach", &devnode])
         .output()
         .wrap_err_with(|| format!("running hdiutil detach {devnode}"))?;
+    tracing::info!(
+        device,
+        status = ?out.status.code(),
+        stdout = %String::from_utf8_lossy(&out.stdout).trim(),
+        stderr = %String::from_utf8_lossy(&out.stderr).trim(),
+        "hdiutil detach finished"
+    );
     if !out.status.success() {
         bail!(
             "hdiutil detach {devnode} failed: {}",
@@ -219,16 +274,25 @@ fn attached_image_devices() -> Result<Vec<String>> {
         .arg("info")
         .output()
         .wrap_err("running hdiutil info")?;
+    tracing::info!(
+        status = ?out.status.code(),
+        stdout_len = out.stdout.len(),
+        stderr = %String::from_utf8_lossy(&out.stderr).trim(),
+        "hdiutil info finished"
+    );
     if !out.status.success() {
         bail!(
             "hdiutil info failed: {}",
             String::from_utf8_lossy(&out.stderr).trim()
         );
     }
-    Ok(parse_attached_image_devices(
-        &String::from_utf8_lossy(&out.stdout),
-        IMAGE_PATH,
-    ))
+    let devices = parse_attached_image_devices(&String::from_utf8_lossy(&out.stdout), IMAGE_PATH);
+    tracing::info!(
+        ?devices,
+        image_path = IMAGE_PATH,
+        "parsed attached Vixen image devices"
+    );
+    Ok(devices)
 }
 
 /// Is the vixenfs volume currently mounted at [`MOUNT_POINT`]?
@@ -236,9 +300,15 @@ pub fn is_mounted() -> Result<bool> {
     let out = Command::new("/sbin/mount")
         .output()
         .wrap_err("running mount")?;
-    Ok(mount_table_has_volume(&String::from_utf8_lossy(
-        &out.stdout,
-    )))
+    let mounted = mount_table_has_volume(&String::from_utf8_lossy(&out.stdout));
+    tracing::debug!(
+        mounted,
+        status = ?out.status.code(),
+        stdout_len = out.stdout.len(),
+        stderr = %String::from_utf8_lossy(&out.stderr).trim(),
+        "checked mount table for VixenFS"
+    );
+    Ok(mounted)
 }
 
 /// Extract the whole-disk BSD names attached for a specific `hdiutil info` image block.

@@ -5,15 +5,38 @@ bundle_id="eu.bearcove.vixen"
 app_name="Vixen"
 app_path="/Applications/Vixen.app"
 reopen_marker="/Library/Application Support/Vixen/install/reopen-after-install"
+install_log_dir="/Library/Application Support/Vixen/install"
+install_log="$install_log_dir/install.log"
+
+timestamp() {
+  /bin/date -u "+%Y-%m-%dT%H:%M:%SZ"
+}
+
+log() {
+  local message="preinstall: $*"
+  echo "$message"
+  /bin/mkdir -p "$install_log_dir" 2>/dev/null || true
+  /bin/printf '%s %s\n' "$(timestamp)" "$message" >>"$install_log" 2>/dev/null || true
+}
+
+log_error() {
+  local message="preinstall: $*"
+  echo "$message" >&2
+  /bin/mkdir -p "$install_log_dir" 2>/dev/null || true
+  /bin/printf '%s %s\n' "$(timestamp)" "$message" >>"$install_log" 2>/dev/null || true
+}
 
 console_uid="$(/usr/bin/stat -f "%u" /dev/console 2>/dev/null || true)"
 console_user="$(/usr/bin/stat -f "%Su" /dev/console 2>/dev/null || true)"
+log "started pid=$$ ppid=$PPID bundle_id=$bundle_id app_path=$app_path console_uid=${console_uid:-<empty>} console_user=${console_user:-<empty>}"
 
 run_as_console_user() {
   if [ -z "$console_uid" ] || [ -z "$console_user" ]; then
+    log_error "cannot run as console user: empty console uid/user"
     return 1
   fi
   if [ "$console_user" = "root" ] || [ "$console_user" = "loginwindow" ]; then
+    log_error "cannot run as console user: console_user=$console_user"
     return 1
   fi
   /bin/launchctl asuser "$console_uid" /usr/bin/sudo -u "$console_user" "$@"
@@ -60,9 +83,13 @@ is_vixen_running() {
 wait_for_vixen_to_exit() {
   local attempt
   for attempt in {1..25}; do
-    if ! is_vixen_running; then
+    local pids
+    pids="$(running_vixen_pids)"
+    if [ -z "$pids" ]; then
+      log "wait attempt $attempt: Vixen is no longer running"
       return 0
     fi
+    log "wait attempt $attempt: Vixen still running pids=$(echo "$pids" | /usr/bin/tr '\n' ' ')"
     /bin/sleep 0.2
   done
   return 1
@@ -73,6 +100,7 @@ signal_running_vixen() {
   local pid
   while IFS= read -r pid; do
     [ -n "$pid" ] || continue
+    log "sending SIG$signal to pid=$pid"
     /bin/kill "-$signal" "$pid" 2>/dev/null || true
   done <<EOF
 $(running_vixen_pids)
@@ -80,6 +108,7 @@ EOF
 }
 
 request_vixen_quit() {
+  log "requesting graceful Vixen termination through NSRunningApplication"
   run_as_console_user /usr/bin/osascript -l JavaScript - "$bundle_id" <<'JXA' >/dev/null 2>&1 || true
 ObjC.import('AppKit');
 const bundleId = $.NSProcessInfo.processInfo.arguments.objectAtIndex(4).js;
@@ -90,34 +119,41 @@ for (let i = 0; i < apps.count; i++) {
 JXA
 }
 
-if ! is_vixen_running; then
-  echo "preinstall: $app_name is not running"
+initial_pids="$(running_vixen_pids)"
+log "initial running pid query result=$(echo "${initial_pids:-<none>}" | /usr/bin/tr '\n' ' ')"
+
+if [ -z "$initial_pids" ]; then
+  log "$app_name is not running"
   /bin/rm -f "$reopen_marker" 2>/dev/null || true
   exit 0
 fi
 
-echo "preinstall: asking running $app_name to quit"
+log "asking running $app_name to quit pids=$(echo "$initial_pids" | /usr/bin/tr '\n' ' ')"
 /bin/mkdir -p "$(/usr/bin/dirname "$reopen_marker")"
-/usr/bin/touch "$reopen_marker" 2>/dev/null || true
+if /usr/bin/touch "$reopen_marker" 2>/dev/null; then
+  log "wrote reopen marker $reopen_marker"
+else
+  log_error "failed to write reopen marker $reopen_marker"
+fi
 request_vixen_quit
 if wait_for_vixen_to_exit; then
-  echo "preinstall: $app_name quit"
+  log "$app_name quit"
   exit 0
 fi
 
-echo "preinstall: $app_name did not quit; sending SIGTERM" >&2
+log_error "$app_name did not quit; sending SIGTERM"
 signal_running_vixen TERM
 if wait_for_vixen_to_exit; then
-  echo "preinstall: $app_name terminated"
+  log "$app_name terminated"
   exit 0
 fi
 
-echo "preinstall: $app_name survived SIGTERM; sending SIGKILL" >&2
+log_error "$app_name survived SIGTERM; sending SIGKILL"
 signal_running_vixen KILL
 if wait_for_vixen_to_exit; then
-  echo "preinstall: $app_name killed"
+  log "$app_name killed"
   exit 0
 fi
 
-echo "preinstall: failed to stop running $app_name" >&2
+log_error "failed to stop running $app_name"
 exit 1
