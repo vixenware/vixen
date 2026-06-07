@@ -1,8 +1,8 @@
 //! End-to-end VixenFS repair transaction.
 //!
 //! This is the app's single "fix it" path. It intentionally mirrors the manual reset
-//! path that proved useful: clean stale per-login-session app records, mount, and only
-//! restart FSKit if macOS reports stale module state.
+//! path that proved useful: clean stale app records, restart FSKit before it can bind
+//! stale module state, then mount once from a fresh helper process.
 
 use std::ffi::{CStr, CString};
 use std::process::Command;
@@ -10,7 +10,7 @@ use std::time::Duration;
 
 use eyre::{Result, WrapErr, bail};
 
-use crate::{killswitch, mount, repair_status};
+use crate::{extension, killswitch, repair_status};
 
 #[derive(Debug)]
 struct ConsoleUser {
@@ -38,37 +38,28 @@ pub fn repair_vixenfs() -> Result<()> {
 
 fn repair_vixenfs_inner() -> Result<()> {
     run_step(
+        "root-registration",
+        "Cleaning stale app records for root",
+        extension::repair_installed_app_records,
+    )?;
+    run_step(
         "user-registration",
         "Cleaning stale app records for the logged-in user",
         repair_user_session_app_records,
     )?;
-
-    let first_mount = run_step("mount", "Mounting VixenFS", mount::establish);
-    match first_mount {
-        Ok(()) => Ok(()),
-        Err(err) if is_stale_fskit_error(&format!("{err:#}")) => {
-            tracing::warn!(
-                error = %format!("{err:#}"),
-                "mount failed with stale FSKit state; restarting fskitd and retrying"
-            );
-            run_step(
-                "restart-fskit",
-                "Restarting FSKit to clear stale macOS state",
-                || killswitch::terminate_fskitd().map(|_| ()),
-            )?;
-            run_step(
-                "wait-for-fskit",
-                "Waiting for FSKit to restart",
-                wait_for_fskit_restart,
-            )?;
-            run_step(
-                "mount-after-restart",
-                "Mounting VixenFS after FSKit restart",
-                mount_in_fresh_helper,
-            )
-        }
-        Err(err) => Err(err),
-    }
+    run_step("restart-fskit", "Restarting FSKit before mounting", || {
+        killswitch::terminate_fskitd().map(|_| ())
+    })?;
+    run_step(
+        "wait-for-fskit",
+        "Waiting for FSKit to restart",
+        wait_for_fskit_restart,
+    )?;
+    run_step(
+        "mount",
+        "Mounting VixenFS from the installed helper",
+        mount_in_fresh_helper,
+    )
 }
 
 fn run_step<F>(step: &str, message: &str, body: F) -> Result<()>
@@ -197,12 +188,6 @@ fn console_user() -> Result<Option<ConsoleUser>> {
     Ok(Some(ConsoleUser { uid, name }))
 }
 
-fn is_stale_fskit_error(message: &str) -> bool {
-    message.contains("Module eu.bearcove.vixenfs is disabled")
-        || message.contains("Unable to invoke task")
-        || message.contains("Connection invalid")
-}
-
 fn child_failure_detail(stdout: &str, stderr: &str) -> String {
     let raw = if stderr.trim().is_empty() {
         stdout.trim()
@@ -243,18 +228,7 @@ fn trim_failure_detail(detail: &str) -> String {
 
 #[cfg(test)]
 mod tests {
-    use super::{child_failure_detail, is_stale_fskit_error};
-
-    #[test]
-    fn recognizes_stale_fskit_errors() {
-        assert!(is_stale_fskit_error(
-            "mount disk4 -> /Volumes/Vixen/vfs failed: Module eu.bearcove.vixenfs is disabled!\nmount: Unable to invoke task"
-        ));
-        assert!(is_stale_fskit_error(
-            "/usr/bin/pluginkit failed: match: Connection invalid"
-        ));
-        assert!(!is_stale_fskit_error("hdiutil attach failed"));
-    }
+    use super::child_failure_detail;
 
     #[test]
     fn child_failure_detail_prefers_error_block_over_traces() {
