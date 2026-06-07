@@ -37,11 +37,6 @@
 		</dict>
 		<key>FSFileSystemType</key>
 		<string>vixenfs</string>
-		<key>FSFormatOptionSyntax</key>
-		<dict>
-			<key>shortOptions</key>
-			<string>v</string>
-		</dict>
 		<key>FSMediaTypes</key>
 		<dict>
 			<!-- The mock backing is a raw, partitionless whole disk (mkfile + hdiutil

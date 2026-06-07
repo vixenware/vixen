@@ -4,10 +4,11 @@ use std::ptr;
 
 use objc2::rc::Retained;
 use objc2::{AnyThread, ClassType, define_class, msg_send};
-use objc2_foundation::{NSObjectProtocol, NSString, NSUUID};
+use objc2_foundation::{NSError, NSObjectProtocol, NSProgress, NSString, NSUUID};
 use objc2_fs_kit::{
-    FSContainerIdentifier, FSContainerStatus, FSFileSystemBase, FSProbeResult, FSResource,
-    FSTaskOptions, FSUnaryFileSystem, FSUnaryFileSystemOperations, FSVolume,
+    FSContainerIdentifier, FSContainerStatus, FSFileSystemBase,
+    FSManageableResourceMaintenanceOperations, FSProbeResult, FSResource, FSTask, FSTaskOptions,
+    FSUnaryFileSystem, FSUnaryFileSystemOperations, FSVolume,
 };
 
 use super::log_event;
@@ -89,6 +90,45 @@ define_class!(
         fn didFinishLoading(&self) {
             root_peer_state();
             log_event("info", "vixen-fskit didFinishLoading");
+        }
+    }
+
+    unsafe impl FSManageableResourceMaintenanceOperations for RustUnaryFileSystem {
+        #[unsafe(method_id(startCheckWithTask:options:error:))]
+        fn startCheckWithTask_options_error(
+            &self,
+            task: &FSTask,
+            _options: &FSTaskOptions,
+            _error: Option<&mut *mut NSError>,
+        ) -> Option<Retained<NSProgress>> {
+            root_peer_state();
+            log_event("info", "vixen-fskit startCheckWithTask");
+            let progress = NSProgress::progressWithTotalUnitCount(1);
+            progress.setCompletedUnitCount(1);
+            unsafe {
+                task.logMessage(&NSString::from_str("VixenFS check completed"));
+                task.didCompleteWithError(None);
+            }
+            log_event("info", "vixen-fskit startCheckWithTask completed");
+            Some(progress)
+        }
+
+        #[unsafe(method_id(startFormatWithTask:options:error:))]
+        fn startFormatWithTask_options_error(
+            &self,
+            task: &FSTask,
+            _options: &FSTaskOptions,
+            error: Option<&mut *mut NSError>,
+        ) -> Option<Retained<NSProgress>> {
+            root_peer_state();
+            log_event("warn", "vixen-fskit startFormatWithTask unsupported");
+            unsafe {
+                task.logMessage(&NSString::from_str("VixenFS format is not supported"));
+            }
+            if let Some(error) = error {
+                *error = Retained::autorelease_ptr(posix_error(libc::ENOTSUP));
+            }
+            None
         }
     }
 );
