@@ -229,6 +229,27 @@ enum ManagementService {
         logger.notice("repair-extension succeeded stdout=\(result.stdout.trimmingCharacters(in: .whitespacesAndNewlines), privacy: .public)")
     }
 
+    static func repairAppRecords() throws {
+        logger.notice("repair-app-records started helper=\(helperURL.path, privacy: .public)")
+        let result = runHelper(arguments: ["repair-app-records"])
+        guard result.status == 0 else {
+            let detail =
+                result.stderr.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
+                ? result.stdout.trimmingCharacters(in: .whitespacesAndNewlines)
+                : result.stderr.trimmingCharacters(in: .whitespacesAndNewlines)
+            throw NSError(
+                domain: NSPOSIXErrorDomain,
+                code: Int(result.status),
+                userInfo: [
+                    NSLocalizedDescriptionKey: detail.isEmpty
+                        ? "vixen-management repair-app-records exited \(result.status)"
+                        : detail
+                ]
+            )
+        }
+        logger.notice("repair-app-records succeeded stdout=\(result.stdout.trimmingCharacters(in: .whitespacesAndNewlines), privacy: .public)")
+    }
+
     static func repairVixenFS(progress: @escaping @Sendable (String) -> Void) async throws {
         let started = DispatchTime.now().uptimeNanoseconds
         logger.notice("VixenFS repair transaction requested from app")
@@ -601,16 +622,19 @@ private enum ManagementCommand {
         do {
             switch command {
             case "register":
-                try ManagementService.repairExtension()
+                try ManagementService.repairAppRecords()
                 try ManagementService.register()
                 ManagementService.printSnapshot()
             case "refresh":
-                try ManagementService.repairExtension()
+                try ManagementService.repairAppRecords()
                 try ManagementService.refreshRegistration()
                 ManagementService.printSnapshot()
             case "unregister":
                 try ManagementService.unregister()
                 ManagementService.printSnapshot()
+            case "repair-app-records":
+                try ManagementService.repairAppRecords()
+                print("Vixen Management: repaired app registration")
             case "repair-extension":
                 try ManagementService.repairExtension()
                 print("Vixen Management: repaired extension registration")
@@ -619,14 +643,6 @@ private enum ManagementCommand {
                 print("Vixen Management: repaired VixenFS")
                 ManagementService.printSnapshot()
             case "status":
-                do {
-                    try ManagementService.repairExtension()
-                } catch {
-                    fputs(
-                        "Vixen Management: extension repair failed: \(error.localizedDescription)\n",
-                        stderr
-                    )
-                }
                 ManagementService.printSnapshot()
             case "mount", "remount":
                 _ = try ManagementService.runQueuedButtonSync(command)
@@ -655,7 +671,7 @@ private enum ManagementCommand {
     private static func printUsage(to stream: UnsafeMutablePointer<FILE>) {
         fputs(
             """
-            Usage: Vixen management register|refresh|status|unregister|repair|repair-extension|mount|unmount|remount|kill-fskitd
+            Usage: Vixen management register|refresh|status|unregister|repair|repair-app-records|repair-extension|mount|unmount|remount|kill-fskitd
 
             """,
             stream
@@ -1098,7 +1114,7 @@ struct ContentView: View {
     private func repairUserSessionRegistrationForDoctor() async -> String? {
         await Task.detached(priority: .utility) {
             do {
-                try ManagementService.repairExtension()
+                try ManagementService.repairAppRecords()
                 return nil
             } catch {
                 return error.localizedDescription

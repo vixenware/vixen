@@ -1,8 +1,8 @@
 //! End-to-end VixenFS repair transaction.
 //!
-//! This is the app's single "fix it" path. It keeps the privileged work inside one
-//! fixed management capability, while still removing stale per-login-session
-//! PlugInKit state by re-entering the bundled helper as the console user.
+//! This is the app's single "fix it" path. It intentionally mirrors the manual reset
+//! path that proved useful: clean stale per-login-session app records, mount, and only
+//! restart FSKit if macOS reports stale module state.
 
 use std::ffi::{CStr, CString};
 use std::process::Command;
@@ -10,7 +10,7 @@ use std::time::Duration;
 
 use eyre::{Result, WrapErr, bail};
 
-use crate::{extension, killswitch, mount, repair_status};
+use crate::{killswitch, mount, repair_status};
 
 #[derive(Debug)]
 struct ConsoleUser {
@@ -40,20 +40,7 @@ fn repair_vixenfs_inner() -> Result<()> {
     run_step(
         "user-registration",
         "Cleaning stale app records for the logged-in user",
-        repair_user_session_extension,
-    )?;
-    run_step(
-        "root-registration",
-        "Cleaning stale root app records",
-        extension::repair_installed_extension,
-    )?;
-    run_step(
-        "extension-diagnostics",
-        "Recording FSKit registration state",
-        || {
-            extension::log_installed_extension_diagnostics();
-            Ok(())
-        },
+        repair_user_session_app_records,
     )?;
 
     let first_mount = run_step("mount", "Mounting VixenFS", mount::establish);
@@ -73,14 +60,6 @@ fn repair_vixenfs_inner() -> Result<()> {
                 "wait-for-fskit",
                 "Waiting for FSKit to restart",
                 wait_for_fskit_restart,
-            )?;
-            run_step(
-                "extension-diagnostics-after-restart",
-                "Recording FSKit registration state after restart",
-                || {
-                    extension::log_installed_extension_diagnostics();
-                    Ok(())
-                },
             )?;
             run_step(
                 "mount-after-restart",
@@ -147,9 +126,9 @@ fn mount_in_fresh_helper() -> Result<()> {
     Ok(())
 }
 
-fn repair_user_session_extension() -> Result<()> {
+fn repair_user_session_app_records() -> Result<()> {
     let Some(user) = console_user()? else {
-        tracing::warn!("no logged-in console user; skipping user-session extension repair");
+        tracing::warn!("no logged-in console user; skipping user-session app registration repair");
         return Ok(());
     };
     let exe = std::env::current_exe().wrap_err("resolving current helper path")?;
@@ -157,7 +136,7 @@ fn repair_user_session_extension() -> Result<()> {
         uid = user.uid,
         user = user.name,
         helper = %exe.display(),
-        "running user-session extension repair"
+        "running user-session app registration repair"
     );
 
     let output = Command::new("/bin/launchctl")
@@ -166,24 +145,24 @@ fn repair_user_session_extension() -> Result<()> {
         .arg("-u")
         .arg(&user.name)
         .arg(&exe)
-        .arg("repair-extension")
+        .arg("repair-app-records")
         .env(
             "VIXEN_MANAGEMENT_LOG",
             "info,vx_management=debug,vixen_management=debug",
         )
         .output()
-        .wrap_err("running user-session repair-extension")?;
+        .wrap_err("running user-session repair-app-records")?;
     let stdout = String::from_utf8_lossy(&output.stdout);
     let stderr = String::from_utf8_lossy(&output.stderr);
     tracing::info!(
         status = ?output.status.code(),
         stdout = %stdout.trim(),
         stderr = %stderr.trim(),
-        "user-session extension repair finished"
+        "user-session app registration repair finished"
     );
     if !output.status.success() {
         let detail = child_failure_detail(&stdout, &stderr);
-        bail!("user-session repair-extension failed: {detail}");
+        bail!("user-session repair-app-records failed: {detail}");
     }
     Ok(())
 }

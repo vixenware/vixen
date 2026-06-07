@@ -5,10 +5,11 @@
 //!   started us. We repair the queue directories (`RunAtLoad`), run whichever button(s)
 //!   fired, drain their queues, and exit. No `KeepAlive`, so we stay down until the
 //!   next trigger.
-//! - **direct CLI**: `vixen-management repair-extension` removes stale
-//!   LaunchServices/PlugInKit state for the current effective user, while
-//!   `vixen-management <button>` runs one privileged capability immediately for
-//!   manual testing.
+//! - **direct CLI**: `vixen-management repair-app-records` removes stale
+//!   LaunchServices app state for the current effective user,
+//!   `vixen-management repair-extension` records/repairs deeper extension state for
+//!   diagnostics, and `vixen-management <button>` runs one privileged capability
+//!   immediately for manual testing.
 
 use std::fs::OpenOptions;
 use std::path::Path;
@@ -39,6 +40,11 @@ fn main() -> Result<()> {
                 tracing::info!(ok = outcome.is_ok(), "ensure-queues finished");
                 return outcome;
             }
+            if arg == "repair-app-records" {
+                let outcome = vx_management::extension::repair_installed_app_records();
+                tracing::info!(ok = outcome.is_ok(), "repair-app-records finished");
+                return outcome;
+            }
             if arg == "repair-extension" {
                 let outcome = vx_management::extension::repair_installed_extension();
                 tracing::info!(ok = outcome.is_ok(), "repair-extension finished");
@@ -57,7 +63,7 @@ fn main() -> Result<()> {
             let Some(button) = Button::from_name(&arg) else {
                 tracing::warn!(arg, "unknown direct CLI command");
                 bail!(
-                    "unknown command {arg:?}; expected mount|unmount|remount|kill-fskitd|repair|repair-extension|probe-vfs"
+                    "unknown command {arg:?}; expected mount|unmount|remount|kill-fskitd|repair|repair-app-records|repair-extension|probe-vfs"
                 );
             };
             tracing::info!(button = ?button, "executing direct management button");

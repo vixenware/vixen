@@ -24,6 +24,21 @@ const PLUGINKIT: &str = "/usr/bin/pluginkit";
 const LSREGISTER: &str = "/System/Library/Frameworks/CoreServices.framework/Versions/Current/Frameworks/LaunchServices.framework/Versions/Current/Support/lsregister";
 
 /// Remove stale records that point away from `/Applications/Vixen.app`.
+pub fn repair_installed_app_records() -> Result<()> {
+    let app_path = Path::new(INSTALLED_APP_PATH);
+    let mode = launch_services_mode();
+    tracing::info!(
+        mode = ?mode,
+        app_path = %app_path.display(),
+        "cleaning installed app registration state"
+    );
+
+    repair_containing_app(app_path, mode)?;
+    tracing::info!(mode = ?mode, "installed app registration cleanup finished");
+    Ok(())
+}
+
+/// Remove stale records that point away from `/Applications/Vixen.app`.
 pub fn repair_installed_extension() -> Result<()> {
     let app_path = Path::new(INSTALLED_APP_PATH);
     let mode = launch_services_mode();
