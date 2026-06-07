@@ -31,11 +31,9 @@ define_class!(
         ) {
             root_peer_state();
             log_event("info", "vixen-fskit probeResource");
-            // For our explicit `/sbin/mount -F -t vixenfs ...` path, returning
-            // `recognized` is the working contract: Disk Arbitration records the
-            // FSKit match, then the actual mount activation reaches `mountWithOptions`.
-            // Returning `usable` makes Disk Arbitration stage the module first and
-            // can produce a pre-activation "Module ... is disabled" failure instead.
+            // Block-resource FSes return a usable result carrying a name + a stable
+            // container identity (name/containerID must be non-nil). Returning only a
+            // recognized result leaves the FSKit mount path without a usable match.
             let result = unsafe {
                 let name = NSString::from_str(VOLUME_NAME);
                 let uuid = NSUUID::initWithUUIDString(
@@ -45,12 +43,9 @@ define_class!(
                 .expect("CONTAINER_UUID is a valid UUID string");
                 let container_id =
                     FSContainerIdentifier::initWithUUID(FSContainerIdentifier::alloc(), &uuid);
-                FSProbeResult::recognizedProbeResultWithName_containerID(&name, &container_id)
+                FSProbeResult::usableProbeResultWithName_containerID(&name, &container_id)
             };
-            log_event(
-                "info",
-                "vixen-fskit probeResource returning recognized result",
-            );
+            log_event("info", "vixen-fskit probeResource returning usable result");
             reply.call((Retained::into_raw(result), ptr::null_mut()));
         }
 
