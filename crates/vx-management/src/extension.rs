@@ -142,33 +142,30 @@ fn repair_containing_app(app_path: &Path, mode: LaunchServicesMode) -> Result<()
 fn repair_launch_services_extension(extension_path: &Path, mode: LaunchServicesMode) -> Result<()> {
     let records = registered_launch_services_extension_records()?;
     let stale_paths = launch_services_extension_stale_paths(&records, extension_path);
+    let stale_apps = launch_services_containing_app_paths(&stale_paths);
     let disabled_desired = launch_services_disabled_desired_extensions(&records, extension_path);
     tracing::info!(
         mode = ?mode,
         extension_path = %extension_path.display(),
         record_count = records.len(),
         stale_count = stale_paths.len(),
+        stale_app_count = stale_apps.len(),
         disabled_desired_count = disabled_desired.len(),
         records = ?records,
         stale_paths = ?stale_paths,
+        stale_apps = ?stale_apps,
         disabled_desired = ?disabled_desired,
         "computed LaunchServices VixenFS plugin repair plan"
     );
 
-    unregister_launch_services_paths(&stale_paths, "stale VixenFS LaunchServices plugin record")?;
-    let disabled_paths = launch_services_record_paths(&disabled_desired);
-    if !disabled_paths.is_empty() {
+    unregister_launch_services_paths(&stale_apps, "stale Vixen LaunchServices app record")?;
+    if !disabled_desired.is_empty() {
         tracing::warn!(
             mode = ?mode,
             extension_path = %extension_path.display(),
             disabled_desired = ?disabled_desired,
-            disabled_paths = ?disabled_paths,
-            "unregistering link-disabled installed VixenFS LaunchServices plugin record"
+            "installed VixenFS LaunchServices plugin record is link-disabled"
         );
-        unregister_launch_services_paths(
-            &disabled_paths,
-            "link-disabled VixenFS LaunchServices plugin record",
-        )?;
     }
 
     Ok(())
@@ -435,14 +432,28 @@ fn launch_services_disabled_desired_extensions(
         .collect()
 }
 
-fn launch_services_record_paths(records: &[LaunchServicesPluginRecord]) -> Vec<PathBuf> {
-    let mut paths = BTreeSet::new();
-    for record in records {
-        if let Some(path) = record.path.as_ref() {
-            paths.insert(path.clone());
+fn launch_services_containing_app_paths(paths: &[PathBuf]) -> Vec<PathBuf> {
+    let mut apps = BTreeSet::new();
+    for path in paths {
+        if let Some(app) = containing_vixen_app(path) {
+            apps.insert(app);
+        } else {
+            tracing::warn!(
+                path = %path.display(),
+                "stale VixenFS LaunchServices plugin record has no containing Vixen.app"
+            );
         }
     }
-    paths.into_iter().collect()
+    apps.into_iter().collect()
+}
+
+fn containing_vixen_app(path: &Path) -> Option<PathBuf> {
+    for ancestor in path.ancestors() {
+        if ancestor.file_name().and_then(|name| name.to_str()) == Some("Vixen.app") {
+            return Some(ancestor.to_path_buf());
+        }
+    }
+    None
 }
 
 fn version_from_pluginkit_header(line: &str) -> Option<String> {
@@ -578,8 +589,8 @@ mod tests {
     use std::path::{Path, PathBuf};
 
     use super::{
-        LaunchServicesMode, launch_services_disabled_desired_extensions,
-        launch_services_extension_stale_paths, launch_services_record_paths,
+        LaunchServicesMode, launch_services_containing_app_paths,
+        launch_services_disabled_desired_extensions, launch_services_extension_stale_paths,
         parse_launch_services_extension_records, registration_plan, should_repair_pluginkit,
     };
 
@@ -671,7 +682,7 @@ identifier:                 eu.bearcove.vixen (0x11c14)
     }
 
     #[test]
-    fn stale_launch_services_plugin_paths_are_removed() {
+    fn stale_launch_services_plugin_records_remove_containing_app_records() {
         let records = parse_launch_services_extension_records(
             r#"
 --------------------------------------------------------------------------------
@@ -694,10 +705,14 @@ pluginIdentifier:           eu.bearcove.vixenfs
                 "/Volumes/dmg.Old/Vixen.app/Contents/Extensions/VixenFS.appex"
             )]
         );
+        assert_eq!(
+            launch_services_containing_app_paths(&stale_paths),
+            vec![PathBuf::from("/Volumes/dmg.Old/Vixen.app")]
+        );
     }
 
     #[test]
-    fn disabled_installed_launch_services_plugin_record_is_selected_for_cleanup() {
+    fn disabled_installed_launch_services_plugin_record_is_diagnostic_only() {
         let records = parse_launch_services_extension_records(
             r#"
 --------------------------------------------------------------------------------
@@ -716,11 +731,5 @@ infoDictionary: {
 
         assert_eq!(disabled.len(), 1);
         assert_eq!(disabled[0].link_enabled, Some(false));
-        assert_eq!(
-            launch_services_record_paths(&disabled),
-            vec![PathBuf::from(
-                "/Applications/Vixen.app/Contents/Extensions/VixenFS.appex"
-            )]
-        );
     }
 }

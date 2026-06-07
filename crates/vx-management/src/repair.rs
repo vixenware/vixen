@@ -141,11 +141,7 @@ fn mount_in_fresh_helper() -> Result<()> {
         "fresh helper mount finished"
     );
     if !output.status.success() {
-        let detail = if stderr.trim().is_empty() {
-            stdout.trim()
-        } else {
-            stderr.trim()
-        };
+        let detail = child_failure_detail(&stdout, &stderr);
         bail!("fresh helper mount failed: {detail}");
     }
     Ok(())
@@ -186,11 +182,7 @@ fn repair_user_session_extension() -> Result<()> {
         "user-session extension repair finished"
     );
     if !output.status.success() {
-        let detail = if stderr.trim().is_empty() {
-            stdout.trim()
-        } else {
-            stderr.trim()
-        };
+        let detail = child_failure_detail(&stdout, &stderr);
         bail!("user-session repair-extension failed: {detail}");
     }
     Ok(())
@@ -232,9 +224,47 @@ fn is_stale_fskit_error(message: &str) -> bool {
         || message.contains("Connection invalid")
 }
 
+fn child_failure_detail(stdout: &str, stderr: &str) -> String {
+    let raw = if stderr.trim().is_empty() {
+        stdout.trim()
+    } else {
+        stderr.trim()
+    };
+    if raw.is_empty() {
+        return "command failed without output".to_string();
+    }
+
+    if let Some(error_start) = raw.rfind("\nError: ") {
+        return trim_failure_detail(&raw[error_start + 1..]);
+    }
+    if raw.starts_with("Error: ") {
+        return trim_failure_detail(raw);
+    }
+
+    let lines = raw
+        .lines()
+        .map(str::trim_end)
+        .filter(|line| !line.trim().is_empty())
+        .collect::<Vec<_>>();
+    let start = lines.len().saturating_sub(12);
+    trim_failure_detail(&lines[start..].join("\n"))
+}
+
+fn trim_failure_detail(detail: &str) -> String {
+    const MAX_CHARS: usize = 1_600;
+
+    let detail = detail.trim();
+    let mut chars = detail.chars();
+    let mut trimmed = chars.by_ref().take(MAX_CHARS).collect::<String>();
+    if chars.next().is_some() {
+        trimmed.push_str("...");
+    }
+    trimmed
+}
+
 #[cfg(test)]
 mod tests {
-    use super::is_stale_fskit_error;
+    use super::{child_failure_detail, is_stale_fskit_error};
 
     #[test]
     fn recognizes_stale_fskit_errors() {
@@ -245,5 +275,37 @@ mod tests {
             "/usr/bin/pluginkit failed: match: Connection invalid"
         ));
         assert!(!is_stale_fskit_error("hdiutil attach failed"));
+    }
+
+    #[test]
+    fn child_failure_detail_prefers_error_block_over_traces() {
+        let stderr = "\
+2026-06-07T15:45:07Z INFO vixen_management: starting
+2026-06-07T15:45:09Z DEBUG vx_management::extension: running lsregister
+Error: /System/Library/.../lsregister failed: failed to scan VixenFS.appex: -10814
+
+Location:
+    crates/vx-management/src/extension.rs:267:9";
+
+        assert_eq!(
+            child_failure_detail("", stderr),
+            "Error: /System/Library/.../lsregister failed: failed to scan VixenFS.appex: -10814\n\nLocation:\n    crates/vx-management/src/extension.rs:267:9"
+        );
+    }
+
+    #[test]
+    fn child_failure_detail_uses_log_tail_without_error_block() {
+        let stderr = (0..16)
+            .map(|index| format!("line {index}"))
+            .collect::<Vec<_>>()
+            .join("\n");
+
+        assert_eq!(
+            child_failure_detail("", &stderr),
+            (4..16)
+                .map(|index| format!("line {index}"))
+                .collect::<Vec<_>>()
+                .join("\n")
+        );
     }
 }
