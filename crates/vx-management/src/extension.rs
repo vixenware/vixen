@@ -47,6 +47,45 @@ pub fn repair_installed_extension() -> Result<()> {
     Ok(())
 }
 
+/// Record the registration state visible to the current effective user.
+///
+/// This is intentionally diagnostic-only: it does not add/register anything, and it
+/// does not unregister the installed `/Applications/Vixen.app` copy.
+pub fn log_installed_extension_diagnostics() {
+    let app_path = Path::new(INSTALLED_APP_PATH);
+    let mode = launch_services_mode();
+    let desired_extension = bundled_extension_path(app_path).ok();
+    tracing::info!(
+        mode = ?mode,
+        uid = unsafe { libc::geteuid() },
+        app_path = %app_path.display(),
+        desired_extension = %desired_extension
+            .as_deref()
+            .map(Path::display)
+            .map(|display| display.to_string())
+            .unwrap_or_else(|| "<missing>".to_string()),
+        "recording installed extension diagnostics"
+    );
+
+    match registered_extension_records() {
+        Ok(records) => {
+            tracing::info!(
+                mode = ?mode,
+                record_count = records.len(),
+                records = ?records,
+                "PlugInKit VixenFS diagnostic records"
+            );
+        }
+        Err(err) => {
+            tracing::warn!(
+                mode = ?mode,
+                error = %format!("{err:#}"),
+                "PlugInKit VixenFS diagnostics unavailable"
+            );
+        }
+    }
+}
+
 fn bundled_extension_path(app_path: &Path) -> Result<PathBuf> {
     for directory in ["Extensions", "PlugIns"] {
         let path = app_path
@@ -150,18 +189,69 @@ fn unregister_apps(paths: &[PathBuf]) -> Result<()> {
 }
 
 fn registered_extensions() -> Result<Vec<PathBuf>> {
-    tracing::debug!("querying PlugInKit for VixenFS records");
-    let output = command_output(PLUGINKIT, ["-mAvvv", "-i", EXTENSION_BUNDLE_IDENTIFIER])?;
+    let records = registered_extension_records()?;
     let mut paths = BTreeSet::new();
-    for line in output.lines().map(str::trim) {
-        let Some(path) = line.strip_prefix("Path = ") else {
-            continue;
-        };
-        paths.insert(PathBuf::from(path));
+    for record in records {
+        if let Some(path) = record.path {
+            paths.insert(path);
+        }
     }
     let paths = paths.into_iter().collect::<Vec<_>>();
     tracing::info!(paths = ?paths, "PlugInKit VixenFS records");
     Ok(paths)
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct PlugInKitRecord {
+    version: Option<String>,
+    uuid: Option<String>,
+    path: Option<PathBuf>,
+    parent_bundle: Option<PathBuf>,
+}
+
+fn registered_extension_records() -> Result<Vec<PlugInKitRecord>> {
+    tracing::debug!("querying PlugInKit for VixenFS records");
+    let output = command_output(PLUGINKIT, ["-mAvvv", "-i", EXTENSION_BUNDLE_IDENTIFIER])?;
+    let mut records = Vec::new();
+    let mut current: Option<PlugInKitRecord> = None;
+
+    for line in output.lines().map(str::trim) {
+        if line.contains(&format!("{EXTENSION_BUNDLE_IDENTIFIER}(")) {
+            if let Some(record) = current.take() {
+                records.push(record);
+            }
+            current = Some(PlugInKitRecord {
+                version: version_from_pluginkit_header(line),
+                uuid: None,
+                path: None,
+                parent_bundle: None,
+            });
+            continue;
+        }
+
+        let Some(record) = current.as_mut() else {
+            continue;
+        };
+        if let Some(path) = line.strip_prefix("Path = ") {
+            record.path = Some(PathBuf::from(path));
+        } else if let Some(uuid) = line.strip_prefix("UUID = ") {
+            record.uuid = Some(uuid.to_string());
+        } else if let Some(parent_bundle) = line.strip_prefix("Parent Bundle = ") {
+            record.parent_bundle = Some(PathBuf::from(parent_bundle));
+        }
+    }
+    if let Some(record) = current {
+        records.push(record);
+    }
+
+    tracing::info!(records = ?records, "PlugInKit VixenFS records");
+    Ok(records)
+}
+
+fn version_from_pluginkit_header(line: &str) -> Option<String> {
+    let (_, rest) = line.split_once(&format!("{EXTENSION_BUNDLE_IDENTIFIER}("))?;
+    let (version, _) = rest.split_once(')')?;
+    Some(version.to_string())
 }
 
 fn registered_containing_apps() -> Result<Vec<PathBuf>> {

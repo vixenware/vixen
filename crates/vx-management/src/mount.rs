@@ -12,7 +12,6 @@
 //! image + `hdiutil attach` is unprivileged, but the daemon owns the whole sequence so
 //! its trigger stays payload-less (no caller names the device or path).
 
-use std::ffi::CString;
 use std::process::{Command, Stdio};
 use std::time::{Duration, Instant};
 
@@ -31,12 +30,6 @@ pub const IMAGE_PATH: &str = "/Library/Application Support/Vixen/vixen-volume.im
 /// bytes; the volume's reported size comes from the extension's statfs, not from this.
 pub const IMAGE_SIZE_BYTES: u64 = 100 * 1024 * 1024;
 const SACRIFICIAL_UNMOUNT_DEADLINE: Duration = Duration::from_secs(2);
-const CONSOLE_BOOTSTRAP_ENV: &str = "VIXEN_MANAGEMENT_CONSOLE_BOOTSTRAP";
-
-#[derive(Debug)]
-struct ConsoleUser {
-    uid: u32,
-}
 
 /// Establish the mount if it isn't already up: provision the device, then mount it.
 /// Idempotent — a healthy existing mount is a no-op. **Requires root** (the mount).
@@ -55,57 +48,6 @@ pub fn establish() -> Result<()> {
         return Err(err);
     }
     tracing::info!("mounted {device} at {MOUNT_POINT}");
-    Ok(())
-}
-
-/// Establish the mount from the logged-in user's bootstrap namespace, while preserving
-/// root privileges for `/sbin/mount`.
-///
-/// FSKit enablement is session-facing: the module can be enabled for the GUI/login
-/// session while a system LaunchDaemon still sees it as disabled. A direct `sudo`
-/// invocation from Terminal naturally inherits the login bootstrap; launchd queue
-/// invocations do not, so they re-enter that bootstrap explicitly.
-pub fn establish_from_console_bootstrap() -> Result<()> {
-    if std::env::var_os(CONSOLE_BOOTSTRAP_ENV).is_some() {
-        tracing::info!("already in console bootstrap mount trampoline");
-        return establish();
-    }
-
-    let Some(user) = console_user()? else {
-        tracing::warn!("no console user; falling back to system bootstrap mount");
-        return establish();
-    };
-    let exe = std::env::current_exe().wrap_err("resolving current helper path")?;
-    tracing::info!(
-        uid = user.uid,
-        helper = %exe.display(),
-        "running VixenFS mount in console bootstrap"
-    );
-    let output = Command::new("/bin/launchctl")
-        .args(["asuser", &user.uid.to_string(), "/usr/bin/env"])
-        .arg(format!("{CONSOLE_BOOTSTRAP_ENV}=1"))
-        .arg("VIXEN_MANAGEMENT_LOG=info,vx_management=debug,vixen_management=debug")
-        .arg(&exe)
-        .arg("mount")
-        .output()
-        .wrap_err("running mount in console bootstrap")?;
-    let stdout = String::from_utf8_lossy(&output.stdout);
-    let stderr = String::from_utf8_lossy(&output.stderr);
-    tracing::info!(
-        uid = user.uid,
-        status = ?output.status.code(),
-        stdout = %stdout.trim(),
-        stderr = %stderr.trim(),
-        "console bootstrap mount finished"
-    );
-    if !output.status.success() {
-        let detail = if stderr.trim().is_empty() {
-            stdout.trim()
-        } else {
-            stderr.trim()
-        };
-        bail!("console bootstrap mount failed: {detail}");
-    }
     Ok(())
 }
 
@@ -418,20 +360,6 @@ fn mount_table_has_volume(mount_output: &str) -> bool {
     })
 }
 
-fn console_user() -> Result<Option<ConsoleUser>> {
-    let path = CString::new("/dev/console").expect("static path has no NUL");
-    let mut stat = std::mem::MaybeUninit::<libc::stat>::zeroed();
-    if unsafe { libc::stat(path.as_ptr(), stat.as_mut_ptr()) } != 0 {
-        return Err(std::io::Error::last_os_error()).wrap_err("stat /dev/console");
-    }
-    let stat = unsafe { stat.assume_init() };
-    let uid = stat.st_uid;
-    if uid == 0 {
-        return Ok(None);
-    }
-    Ok(Some(ConsoleUser { uid }))
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -510,10 +438,9 @@ image-alias     : /Library/Application Support/Vixen/vixen-volume.img
     }
 
     #[test]
-    fn mount_can_reenter_console_bootstrap_without_sudo_user_switch() {
+    fn mount_path_does_not_reenter_launchctl_bootstrap() {
         let source = include_str!("mount.rs");
-        assert!(source.contains("/bin/launchctl"));
-        assert!(source.contains("asuser"));
-        assert!(!source.contains(&["sudo", " -u"].concat()));
+        assert!(!source.contains(&["/bin", "/launchctl"].concat()));
+        assert!(!source.contains(&["as", "user"].concat()));
     }
 }

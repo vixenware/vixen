@@ -47,12 +47,16 @@ fn repair_vixenfs_inner() -> Result<()> {
         "Cleaning stale root app records",
         || extension::repair_installed_extension(),
     )?;
+    run_step(
+        "extension-diagnostics",
+        "Recording FSKit registration state",
+        || {
+            extension::log_installed_extension_diagnostics();
+            Ok(())
+        },
+    )?;
 
-    let first_mount = run_step(
-        "mount",
-        "Mounting VixenFS from the login session",
-        mount::establish_from_console_bootstrap,
-    );
+    let first_mount = run_step("mount", "Mounting VixenFS", mount::establish);
     match first_mount {
         Ok(()) => Ok(()),
         Err(err) if is_stale_fskit_error(&format!("{err:#}")) => {
@@ -69,6 +73,14 @@ fn repair_vixenfs_inner() -> Result<()> {
                 "wait-for-fskit",
                 "Waiting for FSKit to restart",
                 wait_for_fskit_restart,
+            )?;
+            run_step(
+                "extension-diagnostics-after-restart",
+                "Recording FSKit registration state after restart",
+                || {
+                    extension::log_installed_extension_diagnostics();
+                    Ok(())
+                },
             )?;
             run_step(
                 "mount-after-restart",

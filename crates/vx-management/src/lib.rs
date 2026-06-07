@@ -68,7 +68,7 @@ impl Button {
     /// Execute the capability. **Requires root** (mount/unmount/kill).
     pub fn execute(self) -> eyre::Result<()> {
         match self {
-            Button::Mount => mount::establish_from_console_bootstrap(),
+            Button::Mount => mount::establish(),
             Button::Unmount => mount::unmount(),
             Button::Remount => repair::repair_vixenfs(),
             Button::KillFskitd => killswitch::terminate_fskitd().map(|_| ()),
