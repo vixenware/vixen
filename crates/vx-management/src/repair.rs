@@ -38,14 +38,14 @@ pub fn repair_vixenfs() -> Result<()> {
 
 fn repair_vixenfs_inner() -> Result<()> {
     run_step(
-        "root-registration",
-        "Cleaning stale app records for root",
-        extension::repair_installed_app_records,
+        "root-extension",
+        "Cleaning stale extension records for root",
+        extension::repair_installed_extension,
     )?;
     run_step(
-        "user-registration",
-        "Cleaning stale app records for the logged-in user",
-        repair_user_session_app_records,
+        "user-extension",
+        "Repairing VixenFS for the logged-in user",
+        repair_user_session_extension,
     )?;
     run_step("restart-fskit", "Restarting FSKit before mounting", || {
         killswitch::terminate_fskitd().map(|_| ())
@@ -117,9 +117,9 @@ fn mount_in_fresh_helper() -> Result<()> {
     Ok(())
 }
 
-fn repair_user_session_app_records() -> Result<()> {
+fn repair_user_session_extension() -> Result<()> {
     let Some(user) = console_user()? else {
-        tracing::warn!("no logged-in console user; skipping user-session app registration repair");
+        tracing::warn!("no logged-in console user; skipping user-session extension repair");
         return Ok(());
     };
     let exe = std::env::current_exe().wrap_err("resolving current helper path")?;
@@ -127,7 +127,7 @@ fn repair_user_session_app_records() -> Result<()> {
         uid = user.uid,
         user = user.name,
         helper = %exe.display(),
-        "running user-session app registration repair"
+        "running user-session VixenFS extension repair"
     );
 
     let output = Command::new("/bin/launchctl")
@@ -136,24 +136,24 @@ fn repair_user_session_app_records() -> Result<()> {
         .arg("-u")
         .arg(&user.name)
         .arg(&exe)
-        .arg("repair-app-records")
+        .arg("repair-extension")
         .env(
             "VIXEN_MANAGEMENT_LOG",
             "info,vx_management=debug,vixen_management=debug",
         )
         .output()
-        .wrap_err("running user-session repair-app-records")?;
+        .wrap_err("running user-session repair-extension")?;
     let stdout = String::from_utf8_lossy(&output.stdout);
     let stderr = String::from_utf8_lossy(&output.stderr);
     tracing::info!(
         status = ?output.status.code(),
         stdout = %stdout.trim(),
         stderr = %stderr.trim(),
-        "user-session app registration repair finished"
+        "user-session VixenFS extension repair finished"
     );
     if !output.status.success() {
         let detail = child_failure_detail(&stdout, &stderr);
-        bail!("user-session repair-app-records failed: {detail}");
+        bail!("user-session repair-extension failed: {detail}");
     }
     Ok(())
 }
