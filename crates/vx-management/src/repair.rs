@@ -40,12 +40,12 @@ fn repair_vixenfs_inner() -> Result<()> {
     run_step(
         "user-registration",
         "Cleaning stale app records for the logged-in user",
-        || repair_user_session_extension(),
+        repair_user_session_extension,
     )?;
     run_step(
         "root-registration",
         "Cleaning stale root app records",
-        || extension::repair_installed_extension(),
+        extension::repair_installed_extension,
     )?;
     run_step(
         "extension-diagnostics",
