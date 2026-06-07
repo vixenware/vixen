@@ -717,9 +717,15 @@ struct ContentView: View {
     private var isExtensionEnabled: Bool {
         extensionSnapshot.enabled
     }
+    private var needsExtensionEnablement: Bool {
+        extensionSnapshot.found && !extensionSnapshot.enabled
+    }
+    private var shouldUseDoctorFlow: Bool {
+        isManagementConfigured && !needsExtensionEnablement
+    }
 
     private var contentMinHeight: CGFloat {
-        if isExtensionEnabled && isManagementConfigured {
+        if shouldUseDoctorFlow {
             let extraRows = max(0, doctorSnapshot.problemRows.count - 1)
             return doctorSnapshot.problemRows.isEmpty ? 500 : 620 + CGFloat(extraRows * 56)
         }
@@ -730,7 +736,7 @@ struct ContentView: View {
         Group {
             if !isSupportedOS {
                 unsupportedOSView
-            } else if !isExtensionEnabled {
+            } else if needsExtensionEnablement {
                 setupView
             } else if !isManagementConfigured {
                 managementSetupView
@@ -767,11 +773,9 @@ struct ContentView: View {
             guard isSupportedOS else { return }
             Task {
                 await checkExtensionOnce()
-                if isExtensionEnabled {
-                    refreshManagementStatus()
-                    if isManagementConfigured {
-                        await refreshDoctorStatus()
-                    }
+                refreshManagementStatus()
+                if shouldUseDoctorFlow {
+                    await refreshDoctorStatus()
                 }
             }
         }
@@ -1134,11 +1138,11 @@ struct ContentView: View {
     private func pollDoctorStatus() async {
         logger.notice("doctor polling started")
         while !Task.isCancelled {
-            if isExtensionEnabled && isManagementConfigured && !isAutoRepairingDoctor {
+            if shouldUseDoctorFlow && !isAutoRepairingDoctor {
                 logger.notice("doctor polling triggering refresh")
                 await refreshDoctorStatus()
             } else {
-                logger.notice("doctor polling skipped extensionEnabled=\(isExtensionEnabled, privacy: .public) managementReady=\(isManagementConfigured, privacy: .public) repairing=\(isAutoRepairingDoctor, privacy: .public)")
+                logger.notice("doctor polling skipped found=\(extensionSnapshot.found, privacy: .public) extensionEnabled=\(isExtensionEnabled, privacy: .public) managementReady=\(isManagementConfigured, privacy: .public) repairing=\(isAutoRepairingDoctor, privacy: .public)")
             }
             try? await Task.sleep(for: .seconds(30))
         }
