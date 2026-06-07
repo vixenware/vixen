@@ -666,8 +666,7 @@ private enum ManagementCommand {
 struct ContentView: View {
     @Environment(\.colorScheme) private var colorScheme
     private let logger = Logger(subsystem: "eu.bearcove.vixen", category: "DoctorUI")
-    @State private var isExtensionEnabled = false
-    @State private var extensionError: String? = nil
+    @State private var extensionSnapshot = FSKitModuleSnapshot.pending
     @State private var managementSnapshot = ManagementService.StatusSnapshot(
         helperAvailable: false,
         helperDetail: "Not checked",
@@ -698,6 +697,9 @@ struct ContentView: View {
     }
     private var isManagementConfigured: Bool {
         managementSnapshot.isReady
+    }
+    private var isExtensionEnabled: Bool {
+        extensionSnapshot.enabled
     }
 
     private var contentMinHeight: CGFloat {
@@ -826,7 +828,7 @@ struct ContentView: View {
                         }
                     }
 
-                if let error = extensionError {
+                if let error = extensionSnapshot.error {
                     HStack(spacing: 8) {
                         Image(systemName: "exclamationmark.triangle.fill")
                             .foregroundStyle(.yellow)
@@ -860,8 +862,12 @@ struct ContentView: View {
     private func checkExtensionOnce() async {
         logger.notice("extension status check started")
         guard #available(macOS 15.4, *) else {
-            isExtensionEnabled = false
-            extensionError = "VixenFS extension status requires macOS 15.4 or later."
+            extensionSnapshot = FSKitModuleSnapshot(
+                found: false,
+                enabled: false,
+                urlPath: nil,
+                error: "VixenFS extension status requires macOS 15.4 or later."
+            )
             logger.error("extension status check unavailable on this macOS version")
             return
         }
@@ -869,11 +875,21 @@ struct ContentView: View {
         do {
             let extensions = try await FSClient.shared.installedExtensions
             let found = extensions.first { $0.bundleIdentifier == "eu.bearcove.vixenfs" }
-            isExtensionEnabled = found?.isEnabled ?? false
-            extensionError = nil
-            logger.notice("extension status check finished found=\(found != nil, privacy: .public) enabled=\(isExtensionEnabled, privacy: .public)")
+            let urlPath = found?.url.path
+            extensionSnapshot = FSKitModuleSnapshot(
+                found: found != nil,
+                enabled: found?.isEnabled ?? false,
+                urlPath: urlPath,
+                error: nil
+            )
+            logger.notice("extension status check finished found=\(found != nil, privacy: .public) enabled=\(extensionSnapshot.enabled, privacy: .public) url=\(urlPath ?? "none", privacy: .public)")
         } catch {
-            extensionError = error.localizedDescription
+            extensionSnapshot = FSKitModuleSnapshot(
+                found: false,
+                enabled: false,
+                urlPath: nil,
+                error: error.localizedDescription
+            )
             logger.error("extension status check failed: \(error.localizedDescription, privacy: .public)")
         }
     }
@@ -1047,10 +1063,10 @@ struct ContentView: View {
             isCheckingDoctor = false
             doctorProgressText = nil
         }
+        await checkExtensionOnce()
         logger.notice("doctor ui refresh started extensionEnabled=\(isExtensionEnabled, privacy: .public) managementReady=\(isManagementConfigured, privacy: .public)")
         let firstSnapshot = await DoctorService.check(
-            extensionEnabled: isExtensionEnabled,
-            extensionError: extensionError
+            extensionSnapshot: extensionSnapshot
         )
         logger.notice("doctor first snapshot ready=\(firstSnapshot.isReady, privacy: .public) failures=\(firstSnapshot.rows.filter { $0.state == .failed }.count, privacy: .public) warnings=\(firstSnapshot.rows.filter { $0.state == .warning }.count, privacy: .public) canSafeRepair=\(firstSnapshot.canAttemptSafeMountRepair, privacy: .public) needsFskitRestart=\(firstSnapshot.needsFskitRestart, privacy: .public)")
 
@@ -1068,8 +1084,7 @@ struct ContentView: View {
 
             doctorProgressText = "Checking cleaned state"
             let repairedSnapshot = await DoctorService.check(
-                extensionEnabled: isExtensionEnabled,
-                extensionError: extensionError
+                extensionSnapshot: extensionSnapshot
             )
             doctorSnapshot = repairedSnapshot
             logger.notice("doctor ui accepted snapshot after safe registration cleanup ready=\(repairedSnapshot.isReady, privacy: .public) failures=\(repairedSnapshot.rows.filter { $0.state == .failed }.count, privacy: .public) warnings=\(repairedSnapshot.rows.filter { $0.state == .warning }.count, privacy: .public)")
@@ -1142,9 +1157,9 @@ struct ContentView: View {
         }
 
         try? await Task.sleep(for: .milliseconds(750))
+        await checkExtensionOnce()
         doctorSnapshot = await DoctorService.check(
-            extensionEnabled: isExtensionEnabled,
-            extensionError: extensionError
+            extensionSnapshot: extensionSnapshot
         )
         refreshManagementStatus()
         logger.notice("doctor repair finished ready=\(doctorSnapshot.isReady, privacy: .public) failures=\(doctorSnapshot.rows.filter { $0.state == .failed }.count, privacy: .public) warnings=\(doctorSnapshot.rows.filter { $0.state == .warning }.count, privacy: .public)")

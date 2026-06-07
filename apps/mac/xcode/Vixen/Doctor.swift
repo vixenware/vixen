@@ -17,6 +17,20 @@ struct DoctorRow: Identifiable, Sendable {
     let detail: String?
 }
 
+struct FSKitModuleSnapshot: Sendable {
+    let found: Bool
+    let enabled: Bool
+    let urlPath: String?
+    let error: String?
+
+    static let pending = FSKitModuleSnapshot(
+        found: false,
+        enabled: false,
+        urlPath: nil,
+        error: nil
+    )
+}
+
 struct DoctorSnapshot: Sendable {
     let rows: [DoctorRow]
 
@@ -109,13 +123,13 @@ enum DoctorService {
             .path
     }
 
-    static func check(extensionEnabled: Bool, extensionError: String?) async -> DoctorSnapshot {
+    static func check(extensionSnapshot: FSKitModuleSnapshot) async -> DoctorSnapshot {
         await Task.detached(priority: .utility) {
-            checkSync(extensionEnabled: extensionEnabled, extensionError: extensionError)
+            checkSync(extensionSnapshot: extensionSnapshot)
         }.value
     }
 
-    private static func checkSync(extensionEnabled: Bool, extensionError: String?) -> DoctorSnapshot {
+    private static func checkSync(extensionSnapshot: FSKitModuleSnapshot) -> DoctorSnapshot {
         let started = DispatchTime.now().uptimeNanoseconds
         var rows: [DoctorRow] = []
         defer {
@@ -128,7 +142,7 @@ enum DoctorService {
             checkRegistration()
         })
         rows.append(timed("extension") {
-            checkExtension(extensionEnabled: extensionEnabled, extensionError: extensionError)
+            checkExtension(extensionSnapshot)
         })
 
         let management = timed("management snapshot") {
@@ -262,23 +276,53 @@ enum DoctorService {
         return String(line.dropFirst(prefix.count)).trimmingCharacters(in: .whitespaces)
     }
 
-    private static func checkExtension(extensionEnabled: Bool, extensionError: String?) -> DoctorRow {
-        if let extensionError {
-            logger.error("doctor extension failed error=\(extensionError, privacy: .public)")
+    private static func checkExtension(_ snapshot: FSKitModuleSnapshot) -> DoctorRow {
+        if let error = snapshot.error {
+            logger.error("doctor extension failed error=\(error, privacy: .public)")
             return DoctorRow(
                 id: "extension",
                 title: "File System Extension",
                 state: .failed,
-                detail: extensionError
+                detail: error
             )
         }
 
-        logger.notice("doctor extension verdict enabled=\(extensionEnabled, privacy: .public)")
+        guard snapshot.found else {
+            logger.error("doctor extension failed found=false")
+            return DoctorRow(
+                id: "extension",
+                title: "File System Extension",
+                state: .failed,
+                detail: "FSKit does not list VixenFS as an installed module"
+            )
+        }
+
+        guard snapshot.enabled else {
+            logger.notice("doctor extension verdict found=true enabled=false url=\(snapshot.urlPath ?? "none", privacy: .public)")
+            return DoctorRow(
+                id: "extension",
+                title: "File System Extension",
+                state: .failed,
+                detail: "VixenFS is installed but disabled"
+            )
+        }
+
+        if let urlPath = snapshot.urlPath, urlPath != installedExtensionPath {
+            logger.warning("doctor extension warning url=\(urlPath, privacy: .public) expected=\(installedExtensionPath, privacy: .public)")
+            return DoctorRow(
+                id: "extension",
+                title: "File System Extension",
+                state: .warning,
+                detail: "FSKit installed module points at \(urlPath)"
+            )
+        }
+
+        logger.notice("doctor extension verdict found=true enabled=true url=\(snapshot.urlPath ?? "none", privacy: .public)")
         return DoctorRow(
             id: "extension",
             title: "File System Extension",
-            state: extensionEnabled ? .ok : .failed,
-            detail: extensionEnabled ? "VixenFS is enabled" : "VixenFS is disabled"
+            state: .ok,
+            detail: "FSKit lists VixenFS as installed and enabled"
         )
     }
 
