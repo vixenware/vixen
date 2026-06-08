@@ -5,7 +5,7 @@ use objc2::AnyThread;
 use objc2::encode::{Encode, Encoding, RefEncode};
 use objc2::msg_send;
 use objc2::rc::Retained;
-use objc2_foundation::{NSError, NSPOSIXErrorDomain, NSString, NSUUID};
+use objc2_foundation::{NSError, NSPOSIXErrorDomain, NSString};
 use objc2_fs_kit::{
     FSFileName, FSItemAttribute, FSItemAttributes, FSItemGetAttributesRequest, FSItemID, FSItemType,
 };
@@ -19,22 +19,11 @@ pub(super) const VIXENFS_DIR_ID: u64 = 0xFFFF_FFFF_FFFE_0001;
 pub(super) const STATUS_JSON_ID: u64 = 0xFFFF_FFFF_FFFE_0002;
 pub(super) const ROUTED_ITEM_ID_START: u64 = ROOT_LOCAL_ID + 1;
 pub(super) const VOLUME_NAME: &str = "Vixen";
+/// Stable container/volume identity for the block-backed volume. A usable FSKit
+/// probe result must carry a non-nil `containerID` (`FSResource` probe docs); a
+/// fixed UUID gives the volume a durable identity across remounts.
+pub(super) const CONTAINER_UUID: &str = "F1A5B0C0-1234-4567-89AB-CDEF01234567";
 pub(super) const VIXENFS_DIR_NAME: &str = ".vixenfs";
-
-/// Per-process container identity for the block-backed volume. A usable FSKit probe
-/// result must carry a non-nil `containerID` (`FSResource` probe docs).
-///
-/// This used to be a hardcoded constant for "durable identity across remounts", but that
-/// is exactly what broke remounting: FSKit registers the container under this UUID at
-/// mount, and the *next* mount's final step then fails with "the file couldn't be saved
-/// because a file with the same name already exists" because the prior registration is
-/// still present. A fresh UUID per extension process (each mount spawns a new process)
-/// sidesteps the collision; the volume *name* stays "Vixen" so it still presents
-/// consistently to the user. All probe calls within one process share this value.
-pub(super) fn container_uuid() -> &'static str {
-    static CONTAINER_UUID: OnceLock<String> = OnceLock::new();
-    CONTAINER_UUID.get_or_init(|| NSUUID::new().UUIDString().to_string())
-}
 pub(super) const STATUS_JSON_NAME: &str = "status.json";
 
 static TOKIO_RUNTIME: OnceLock<Runtime> = OnceLock::new();

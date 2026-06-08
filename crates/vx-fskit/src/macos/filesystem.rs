@@ -12,7 +12,7 @@ use objc2_fs_kit::{
 
 use super::log_event;
 use super::root_peer::root_peer_state;
-use super::support::{VOLUME_NAME, container_uuid, posix_error};
+use super::support::{CONTAINER_UUID, VOLUME_NAME, posix_error};
 use super::volume::RustVolume;
 
 define_class!(
@@ -38,9 +38,9 @@ define_class!(
                 let name = NSString::from_str(VOLUME_NAME);
                 let uuid = NSUUID::initWithUUIDString(
                     NSUUID::alloc(),
-                    &NSString::from_str(container_uuid()),
+                    &NSString::from_str(CONTAINER_UUID),
                 )
-                .expect("container_uuid() is a valid UUID string");
+                .expect("CONTAINER_UUID is a valid UUID string");
                 let container_id =
                     FSContainerIdentifier::initWithUUID(FSContainerIdentifier::alloc(), &uuid);
                 FSProbeResult::usableProbeResultWithName_containerID(&name, &container_id)
