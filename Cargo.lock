@@ -225,17 +225,6 @@ dependencies = [
 ]
 
 [[package]]
-name = "async-recursion"
-version = "1.1.1"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "3b43422f69d8ff38f95f1b2bb76517c91589a924d1559a0e935d7c8ce0274c11"
-dependencies = [
- "proc-macro2",
- "quote",
- "syn",
-]
-
-[[package]]
 name = "async-stream"
 version = "0.3.6"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -3886,7 +3875,6 @@ dependencies = [
 name = "vx-daemon"
 version = "0.1.0"
 dependencies = [
- "async-recursion",
  "blake3",
  "camino",
  "eyre",
@@ -3896,11 +3884,9 @@ dependencies = [
  "margin",
  "moire",
  "tempfile",
- "thiserror 2.0.18",
  "tokio",
  "tracing",
  "vox",
- "vx-diagnostics",
  "vx-exec-protocol",
  "vx-ir",
  "vx-parser",
@@ -3908,7 +3894,6 @@ dependencies = [
  "vx-runtime",
  "vx-services",
  "vx-store",
- "vx-types",
  "vx-vfsd",
 ]
 
@@ -4005,7 +3990,6 @@ dependencies = [
  "facet",
  "facet-json",
  "margin",
- "rowan",
  "vx-package",
  "vx-parser",
  "vx-stdlib",

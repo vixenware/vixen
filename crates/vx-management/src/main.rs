@@ -192,7 +192,12 @@ fn run_launchd() -> Result<()> {
         }
         fired_any = true;
         let caller_pid = queue::caller_pid(button);
-        tracing::info!(button = ?button, caller_pid, "trigger fired");
+        match caller_pid {
+            Some(pid) => tracing::info!(button = ?button, pid, "trigger fired"),
+            None => {
+                tracing::warn!(button = ?button, "trigger fired but no caller PID found in queue")
+            }
+        }
         let outcome = button.execute_from_launchd(caller_pid);
         if button == Button::Uninstall && outcome.is_ok() {
             tracing::info!(button = ?button, "uninstall completed; management support removed");

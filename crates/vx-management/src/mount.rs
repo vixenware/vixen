@@ -266,20 +266,32 @@ fn run_mount_command(devnode: &str, caller_pid: Option<u32>) -> Result<Output> {
         // in the GUI session. When invoked directly via sudo (no caller_pid), `asuser`
         // still works because the calling process is already in the GUI session.
         if let Some(pid) = caller_pid {
-            tracing::info!(
+            let alive = unsafe { libc::kill(pid as libc::pid_t, 0) } == 0;
+            if alive {
+                tracing::info!(
+                    pid,
+                    devnode,
+                    fs_type = FS_TYPE,
+                    mount_point = MOUNT_POINT,
+                    "running VixenFS mount via bsexec into caller bootstrap"
+                );
+                return Command::new("/bin/launchctl")
+                    .arg("bsexec")
+                    .arg(pid.to_string())
+                    .arg("/sbin/mount")
+                    .args(["-F", "-t", FS_TYPE, devnode, MOUNT_POINT])
+                    .output()
+                    .wrap_err("running launchctl bsexec mount");
+            }
+            tracing::warn!(
                 pid,
-                devnode,
-                fs_type = FS_TYPE,
-                mount_point = MOUNT_POINT,
-                "running VixenFS mount via bsexec into caller bootstrap"
+                "caller PID is no longer alive; falling back to launchctl asuser"
             );
-            return Command::new("/bin/launchctl")
-                .arg("bsexec")
-                .arg(pid.to_string())
-                .arg("/sbin/mount")
-                .args(["-F", "-t", FS_TYPE, devnode, MOUNT_POINT])
-                .output()
-                .wrap_err("running launchctl bsexec mount");
+        } else {
+            tracing::warn!(
+                devnode,
+                "no caller PID found in trigger queue; falling back to launchctl asuser"
+            );
         }
         let Some(user) = session::console_user()? else {
             bail!("no logged-in console user for VixenFS mount");
