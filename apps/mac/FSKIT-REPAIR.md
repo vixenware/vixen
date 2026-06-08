@@ -27,6 +27,11 @@ flow.
 - Use `/sbin/mount -F -t vixenfs ...` for mounting. Do not route FSKit mounting
   through DiskArbitration or `diskutil`; Apple DTS guidance has repeatedly said
   the higher-level DiskArbitration paths do not cover the FSKit behavior we need.
+- Do not advertise FSKit maintenance operations unless they are real and proven
+  on the mount path. A stub `FSCheckOptionSyntax` /
+  `FSManageableResourceMaintenanceOperations` implementation caused `/sbin/mount`
+  to run `loadResource -> startCheckWithTask -> stop extension`, never reaching
+  `activateWithOptions` or `mountWithOptions`.
 - For unmounting, use the `umount` CLI in a sacrificial child. Do not use
   `diskutil unmount` and do not force-unmount FSKit mounts as part of ordinary
   repair.
@@ -159,6 +164,9 @@ one-click mount repair path.
   - FSKit probe implementation. For this block-backed filesystem,
     `probeResource` must return a usable result with stable container/volume
     identity. A recognized-only result is not mountable enough for this path.
+  - Do not add check/format maintenance conformance back without a mount-path
+    integration test showing the full `loadResource -> activateWithOptions ->
+    mountWithOptions` sequence still happens.
 - `apps/mac/scripts/debug-simple-fskit-reset.sh`
   - The manual reset oracle. Keep this script as the reference when comparing
     the app repair transaction.

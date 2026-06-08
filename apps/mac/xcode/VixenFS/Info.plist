@@ -30,11 +30,6 @@
 			<key>shortOptions</key>
 			<string>g:m:o:u:</string>
 		</dict>
-		<key>FSCheckOptionSyntax</key>
-		<dict>
-			<key>shortOptions</key>
-			<string>nqy</string>
-		</dict>
 		<key>FSFileSystemType</key>
 		<string>vixenfs</string>
 		<key>FSMediaTypes</key>
