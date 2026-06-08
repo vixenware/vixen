@@ -10,17 +10,16 @@
 //! if that fails to clear the mount, and only then cleans up the backing image.
 //!
 //! The discipline from the wiki ("The FSKit doctor & kill-switch") is preserved: each
-//! privileged capability is a **fixed, payload-less [`Button`]**. The launchd queue is
-//! only valid for operations that work correctly from the system bootstrap. Ordinary
-//! FSKit mount must be run by the installed helper as an elevated process in the active
-//! login session, matching the manual `sudo vixen-management mount` path.
+//! privileged capability is a **fixed, payload-less [`Button`]**. The root service owns
+//! provisioning, recovery, and cleanup. Ordinary FSKit mount is the one privileged
+//! operation whose final `/sbin/mount` process must run in the active console user's
+//! launchd bootstrap; [`mount`] keeps that boundary at the leaf command.
 
 pub mod extension;
 pub mod killswitch;
 pub mod mount;
 pub mod probe;
 pub mod queue;
-pub mod repair;
 pub mod repair_status;
 pub mod session;
 pub mod status;
@@ -35,20 +34,22 @@ pub enum Button {
     Mount,
     /// Recover the VixenFS mount by unwinding FSKit, then detach its mock backing image.
     Unmount,
-    /// Legacy queue remount request. The launchd mount path is disabled until
-    /// proven; app-visible repair runs the direct helper mount instead.
+    /// Recover the VixenFS mount, then establish it again.
     Remount,
     /// Terminate the system `fskitd` — the wedge kill-switch.
     KillFskitd,
+    /// Remove Vixen-owned privileged state and the installed app bundle.
+    Uninstall,
 }
 
 impl Button {
     /// Every button, in a stable order (the daemon scans them on launch).
-    pub const ALL: [Button; 4] = [
+    pub const ALL: [Button; 5] = [
         Button::Mount,
         Button::Unmount,
         Button::Remount,
         Button::KillFskitd,
+        Button::Uninstall,
     ];
 
     /// The queue-directory basename for this button.
@@ -58,6 +59,7 @@ impl Button {
             Button::Unmount => "unmount",
             Button::Remount => "remount",
             Button::KillFskitd => "kill-fskitd",
+            Button::Uninstall => "uninstall",
         }
     }
 
@@ -71,19 +73,20 @@ impl Button {
         match self {
             Button::Mount => mount::establish(),
             Button::Unmount => mount::unmount(),
-            Button::Remount => repair::repair_vixenfs(),
+            Button::Remount => mount::remount(),
             Button::KillFskitd => killswitch::terminate_fskitd().map(|_| ()),
+            Button::Uninstall => uninstall::uninstall_vixenfs(),
         }
     }
 
     /// Execute the capability from the system launchd job.
     pub fn execute_from_launchd(self) -> eyre::Result<()> {
         match self {
-            Button::Mount | Button::Remount => eyre::bail!(
-                "mount requests from the launchd queue are disabled; run vixen-management mount as an elevated process in the active login session"
-            ),
+            Button::Mount => mount::establish(),
             Button::Unmount => mount::unmount(),
+            Button::Remount => mount::remount(),
             Button::KillFskitd => killswitch::terminate_fskitd().map(|_| ()),
+            Button::Uninstall => uninstall::uninstall_vixenfs(),
         }
     }
 }

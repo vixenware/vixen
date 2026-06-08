@@ -108,7 +108,7 @@ installed app:
 - `/Applications/Vixen.app/Contents/MacOS/Vixen management register`
 
 Registration failures do not fail the package install. The app onboarding UI can
-still prompt for approval or repair the daemon after installation.
+still guide the user through background-item approval after installation.
 
 Useful installed-app commands:
 
@@ -124,13 +124,13 @@ Useful installed-app commands:
 item. They must not run LaunchServices or PlugInKit cleanup as a side effect of
 service setup.
 
-`uninstall` is the explicit teardown path. The app first unregisters the
-management background item, then asks for administrator approval once and runs
-the bundled `vixen-management uninstall` helper command. That helper unmounts
-VixenFS through the same sacrificial unmount path as recovery, removes the mock
-backing image and management support directory under `/Library/Application
-Support/Vixen`, and removes the old legacy `/Library/LaunchDaemons` plist if it
-is still present. It does not manually register or elect the FSKit extension.
+`uninstall` is the explicit teardown path. The app queues the already-approved
+root management service to remove privileged Vixen-owned state. The service
+unmounts VixenFS through the same sacrificial unmount path as recovery, removes
+the mock backing image and management support directory under
+`/Library/Application Support/Vixen`, removes `/Applications/Vixen.app`, and
+removes the old legacy `/Library/LaunchDaemons` plist if it is still present.
+It does not manually register or elect the FSKit extension.
 
 `repair-extension` runs the bundled management helper directly in the current
 effective user and exists for explicit diagnostics/experiments. It is not part
@@ -138,16 +138,17 @@ of app startup, the Open Settings button, or the one-click GUI repair path.
 Automatic app paths must not elect PlugInKit use or create extension identities,
 because a manually added FSKit identity can be distinct from the identity the
 user approved in System Settings.
-The GUI "Repair VixenFS" button runs the installed helper's `mount` command
-once through administrator approval. That intentionally mirrors the working
-manual path:
+The GUI "Repair VixenFS" button queues the root management service's fixed
+`mount` button. The service provisions the backing image as root, discovers the
+active console uid from `/dev/console`, and runs only the final FSKit mount leaf
+in that user's launchd bootstrap:
 
-- `sudo /Applications/Vixen.app/Contents/MacOS/vixen-management mount`
+- `launchctl asuser <console_uid> /sbin/mount -F -t vixenfs /dev/diskN /Volumes/Vixen/vfs`
 
-Do not route ordinary mount through the launchd queue. Queue-trigger commands
-are only for operations proven to work from launchd's system bootstrap;
-mount/remount requests from that queue fail explicitly because that path can
-make macOS report the enabled FSKit module as disabled.
+Do not route ordinary mount through an app-side AppleScript password prompt.
+The root service already has the privilege needed for attach/mount/recovery;
+the console bootstrap is only for the final FSKit module lookup performed by
+`/sbin/mount`.
 
 ## Install and activate
 
@@ -181,7 +182,8 @@ The old standalone executable-swap experiment has been retired. `install-rust-fs
 
 ### What actually registers the extension
 
-The supported repair path is cleanup-only:
+For poisoned development machines, the explicit diagnostic cleanup path is
+cleanup-only:
 
 - remove stale `eu.bearcove.vixen` containing-app records
 - remove stale `eu.bearcove.vixenfs` PlugInKit paths

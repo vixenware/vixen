@@ -59,8 +59,8 @@ path is proven.
   /dev/diskN on /Volumes/Vixen/vfs (vixenfs, local, nodev, nosuid, noowners, noatime, fskit)
   ```
 
-- The next replacement step after the manual mount is not the installer,
-  service, app doctor, stale-record cleanup, or VFS provider probe. It is:
+- The first replacement step after the manual mount is not stale-record cleanup
+  or a VFS provider probe. It is:
 
   ```sh
   sudo /Applications/Vixen.app/Contents/MacOS/vixen-management mount
@@ -68,15 +68,23 @@ path is proven.
 
   from a manually installed DMG app after the extension is visible and enabled.
   That direct helper path has worked.
-- The approved background management item is not a working ordinary mount path.
-  A launchd queue request, even bridged with `launchctl asuser`, can still make
-  `/sbin/mount` report `Module eu.bearcove.vixenfs is disabled!`.
-- The working privilege shape for ordinary mount is the installed helper run as
-  an elevated process from the active login session, matching:
+- The working root-service shape for ordinary mount is:
+  - root service creates/attaches the backing image;
+  - root service discovers the active console user from `/dev/console`;
+  - root service runs only the final mount leaf in that user's launchd
+    bootstrap, while keeping root privileges:
+
+    ```sh
+    launchctl asuser "$CONSOLE_UID" /sbin/mount -F -t vixenfs /dev/diskN /Volumes/Vixen/vfs
+    ```
+
+  This matches the manual proof:
 
   ```sh
-  sudo /Applications/Vixen.app/Contents/MacOS/vixen-management mount
+  sudo launchctl asuser "501" /sbin/mount -F -t vixenfs /dev/diskN /Volumes/Vixen/vfs
   ```
+
+  The UID must be discovered, not hardcoded.
 
 ## Manual Baseline From A Clean DMG Install
 
@@ -110,11 +118,11 @@ manual step at a time.
    exit
    ```
 
-## Next Test: Replace Manual Mount With Helper Mount
+## Current Product Repair Path
 
-After the clean DMG install, app open, and System Settings enablement from the
-manual baseline, replace only the manual `mkfile` / `hdiutil attach` / `mount`
-sequence with the installed helper:
+After the clean install, app open, System Settings enablement, and management
+item approval, the app repair button should fire the root-service `mount`
+queue. The service then performs the same primitive as:
 
    ```sh
    sudo /Applications/Vixen.app/Contents/MacOS/vixen-management mount
@@ -127,9 +135,8 @@ Then check the result without touching arbitrary paths:
    cat /Volumes/Vixen/vfs/.vixenfs/status.json
    ```
 
-This helper path has worked from a clean DMG install. The app UI should call
-this primitive through administrator approval; it should not fire the launchd
-mount queue.
+The app UI should not ask for an AppleScript administrator password here. The
+already-approved management service owns the privileged work.
 
 If this fails, capture the helper log and FSKit logs before changing anything:
 
@@ -168,15 +175,15 @@ discovery and enablement.
     state,
   - whether `/sbin/mount` shows `/Volumes/Vixen/vfs`,
   - whether `/.vixenfs/status.json` is readable when mounted.
-- The first repair operation should be the smallest privileged primitive:
+- The first repair operation should be the smallest privileged primitive,
+  queued to the approved management service:
 
   ```text
   vixen-management mount
   ```
 
-  From the app, that should be the installed helper's `mount` command run
-  through administrator approval. Do not route ordinary mount through the
-  launchd queue.
+  The service creates/attaches the image as root and runs only `/sbin/mount`
+  via `launchctl asuser <console_uid>`.
 
 - If direct helper mount fails with stale FSKit state, the next privileged
   primitive is direct `kill(2)` of `/usr/libexec/fskitd`, then `mount` again.
@@ -233,12 +240,12 @@ discovery and enablement.
   access-check conformance is unnecessary for the current mount oracle.
 - Do not run expensive LaunchServices scans before trying the cheap mount
   primitive. The slow registration scan is not a first-line repair.
-- Do not hide privileged work behind vague UI. If the app needs administrator
-  approval, the UI must say which primitive it is about to run.
-- Do not ask for repeated password prompts for one repair. If a repair needs
-  privileges, batch the privileged primitive into one invocation.
-- Do not make the root management service the owner of app doctor logic until
-  the direct installed helper primitive is known to work.
+- Do not hide privileged work behind vague UI. The app repair button should say
+  it is asking Vixen Management to repair VixenFS.
+- Do not ask for password prompts for ordinary repair when the management
+  service is already installed and approved.
+- Do not move app doctor logic into the root service. The service owns fixed
+  privileged primitives; the app owns diagnosis and user flow.
 - Do not treat "Backend Connection" as an install failure when the mount and
   status file are healthy. That is a separate VFS-provider/routing question.
 

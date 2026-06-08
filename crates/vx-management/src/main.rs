@@ -8,9 +8,10 @@
 //! - **direct CLI**: `vixen-management repair-app-records` removes stale
 //!   LaunchServices app state for the current effective user,
 //!   `vixen-management repair-extension` records/repairs deeper extension state for
-//!   diagnostics, `vixen-management uninstall` removes Vixen-owned privileged
-//!   support state, and `vixen-management <button>` runs one privileged capability
-//!   immediately for manual testing.
+//!   diagnostics, `vixen-management repair` runs the mount primitive,
+//!   `vixen-management uninstall` removes Vixen-owned privileged support state, and
+//!   `vixen-management <button>` runs one privileged capability immediately for
+//!   manual testing.
 
 use std::fs::OpenOptions;
 use std::io::Write;
@@ -34,7 +35,7 @@ fn main() -> Result<()> {
     );
 
     match std::env::args().nth(1) {
-        // Direct CLI: repair user-session registration or run one button now.
+        // Direct CLI: run a diagnostic helper or one fixed button now.
         Some(arg) => {
             tracing::info!(arg, "vixen-management direct CLI command received");
             if arg == "ensure-queues" {
@@ -64,7 +65,7 @@ fn main() -> Result<()> {
                 return outcome;
             }
             if arg == "repair" {
-                let outcome = vx_management::repair::repair_vixenfs();
+                let outcome = vx_management::mount::establish();
                 tracing::info!(ok = outcome.is_ok(), "repair finished");
                 report_direct_command(&arg, &outcome)?;
                 return outcome;
@@ -118,6 +119,7 @@ fn report_button_result(button: Button, outcome: &Result<()>) -> Result<()> {
                 Button::Unmount => " (unmounted)".to_string(),
                 Button::Remount => format!(" ({})", vx_management::mount::MOUNT_POINT),
                 Button::KillFskitd => " (fskitd terminated if it was running)".to_string(),
+                Button::Uninstall => " (removed VixenFS setup)".to_string(),
             };
             writeln!(std::io::stdout(), "vixen-management {command}: ok{detail}")
         }
@@ -191,6 +193,10 @@ fn run_launchd() -> Result<()> {
         fired_any = true;
         tracing::info!(button = ?button, "trigger fired");
         let outcome = button.execute_from_launchd();
+        if button == Button::Uninstall && outcome.is_ok() {
+            tracing::info!(button = ?button, "uninstall completed; management support removed");
+            return Ok(());
+        }
         if let Err(err) = status::record(button, &outcome) {
             tracing::warn!(button = ?button, "failed to record action status: {err:#}");
         }

@@ -1,64 +1,21 @@
-//! Disproven launchd-to-login-session bridge.
+//! Active console-session helpers.
 //!
-//! This path made `/sbin/mount` report an enabled VixenFS module as disabled.
-//! Ordinary mount should run the installed helper as an elevated process from
-//! the active login session instead.
+//! Most privileged work stays in the root management service. FSKit enablement,
+//! however, is user-session state, so the final `/sbin/mount` invocation must run in
+//! the active console user's launchd bootstrap while keeping the caller's root
+//! privileges.
 
 use std::ffi::{CStr, CString};
-use std::process::Command;
 
-use eyre::{Result, WrapErr, bail};
+use eyre::{Result, WrapErr};
 
-pub fn run_current_helper_in_console_bootstrap(command: &str) -> Result<()> {
-    let Some(user) = console_user()? else {
-        bail!("no logged-in console user for FSKit bootstrap");
-    };
-    let exe = std::env::current_exe().wrap_err("resolving current helper path")?;
-    tracing::info!(
-        uid = user.uid,
-        user = user.name,
-        helper = %exe.display(),
-        command,
-        "running helper command in console user bootstrap"
-    );
-
-    let output = Command::new("/bin/launchctl")
-        .args(["asuser", &user.uid.to_string()])
-        .arg(&exe)
-        .arg(command)
-        .env(
-            "VIXEN_MANAGEMENT_LOG",
-            "info,vx_management=debug,vixen_management=debug",
-        )
-        .output()
-        .wrap_err("running helper command in console user bootstrap")?;
-    let stdout = String::from_utf8_lossy(&output.stdout);
-    let stderr = String::from_utf8_lossy(&output.stderr);
-    tracing::info!(
-        uid = user.uid,
-        user = user.name,
-        command,
-        status = ?output.status.code(),
-        stdout = %stdout.trim(),
-        stderr = %stderr.trim(),
-        "console bootstrap helper command finished"
-    );
-    if !output.status.success() {
-        bail!(
-            "console bootstrap {command} failed: {}",
-            child_failure_detail(&stdout, &stderr)
-        );
-    }
-    Ok(())
+#[derive(Debug, Clone)]
+pub struct ConsoleUser {
+    pub uid: u32,
+    pub name: String,
 }
 
-#[derive(Debug)]
-struct ConsoleUser {
-    uid: u32,
-    name: String,
-}
-
-fn console_user() -> Result<Option<ConsoleUser>> {
+pub fn console_user() -> Result<Option<ConsoleUser>> {
     let path = CString::new("/dev/console").expect("static path has no NUL");
     let mut stat = std::mem::MaybeUninit::<libc::stat>::zeroed();
     if unsafe { libc::stat(path.as_ptr(), stat.as_mut_ptr()) } != 0 {
@@ -86,17 +43,4 @@ fn console_user() -> Result<Option<ConsoleUser>> {
         return Ok(None);
     }
     Ok(Some(ConsoleUser { uid, name }))
-}
-
-fn child_failure_detail(stdout: &str, stderr: &str) -> String {
-    let raw = if stderr.trim().is_empty() {
-        stdout.trim()
-    } else {
-        stderr.trim()
-    };
-    if raw.is_empty() {
-        "command failed without output".to_string()
-    } else {
-        raw.to_string()
-    }
 }

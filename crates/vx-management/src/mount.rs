@@ -12,13 +12,13 @@
 //! image + `hdiutil attach` is unprivileged, but the daemon owns the whole sequence so
 //! its trigger stays payload-less (no caller names the device or path).
 
-use std::process::{Command, Stdio};
+use std::process::{Command, Output, Stdio};
 use std::time::{Duration, Instant};
 
 use eyre::{Result, WrapErr, bail};
 use vx_vfs_types::MACOS_VFS_MOUNT_PARENT;
 
-use crate::killswitch;
+use crate::{killswitch, session};
 
 /// Where the block volume mounts — a real `/Volumes` descendant, not an arbitrary path.
 pub use vx_vfs_types::MACOS_VFS_MOUNT_POINT as MOUNT_POINT;
@@ -60,6 +60,21 @@ pub fn establish() -> Result<()> {
 pub fn unmount() -> Result<()> {
     tracing::info!(mount_point = MOUNT_POINT, "unmount requested");
     recover_existing_state()
+}
+
+/// Unwind any existing VixenFS state and then establish a fresh mount.
+pub fn remount() -> Result<()> {
+    tracing::info!(mount_point = MOUNT_POINT, "remount requested");
+    recover_existing_state().wrap_err("recovering existing VixenFS state before remount")?;
+    let device = provision_device()?;
+    if let Err(err) = mount_volume(&device) {
+        if let Err(detach_err) = detach_device(&device) {
+            tracing::warn!(device, error = %detach_err, "failed to detach backing device after remount failure");
+        }
+        return Err(err).wrap_err("mounting fresh VixenFS device during remount");
+    }
+    tracing::info!(device, mount_point = MOUNT_POINT, "remounted VixenFS");
+    Ok(())
 }
 
 fn recover_existing_state() -> Result<()> {
@@ -217,10 +232,7 @@ fn mount_volume(device: &str) -> Result<()> {
     );
     std::fs::create_dir_all(MACOS_VFS_MOUNT_PARENT).wrap_err("creating Vixen mount parent")?;
     std::fs::create_dir_all(MOUNT_POINT).wrap_err("creating Vixen mount point")?;
-    let out = Command::new("/sbin/mount")
-        .args(["-F", "-t", FS_TYPE, &devnode, MOUNT_POINT])
-        .output()
-        .wrap_err("running mount")?;
+    let out = run_mount_command(&devnode)?;
     tracing::info!(
         device,
         devnode,
@@ -237,6 +249,43 @@ fn mount_volume(device: &str) -> Result<()> {
         );
     }
     Ok(())
+}
+
+fn run_mount_command(devnode: &str) -> Result<Output> {
+    let euid = unsafe { libc::geteuid() };
+    if euid == 0 {
+        let Some(user) = session::console_user()? else {
+            bail!("no logged-in console user for VixenFS mount");
+        };
+        let uid = user.uid.to_string();
+        tracing::info!(
+            uid = user.uid,
+            user = %user.name,
+            devnode,
+            fs_type = FS_TYPE,
+            mount_point = MOUNT_POINT,
+            "running VixenFS mount in active console bootstrap"
+        );
+        return Command::new("/bin/launchctl")
+            .arg("asuser")
+            .arg(&uid)
+            .arg("/sbin/mount")
+            .args(["-F", "-t", FS_TYPE, devnode, MOUNT_POINT])
+            .output()
+            .wrap_err("running launchctl asuser mount");
+    }
+
+    tracing::warn!(
+        euid,
+        devnode,
+        fs_type = FS_TYPE,
+        mount_point = MOUNT_POINT,
+        "running VixenFS mount without root privileges"
+    );
+    Command::new("/sbin/mount")
+        .args(["-F", "-t", FS_TYPE, devnode, MOUNT_POINT])
+        .output()
+        .wrap_err("running mount")
 }
 
 /// Detach any raw disk-image devices currently attached for [`IMAGE_PATH`].
@@ -441,9 +490,12 @@ image-alias     : /Library/Application Support/Vixen/vixen-volume.img
     }
 
     #[test]
-    fn mount_path_does_not_reenter_launchctl_bootstrap() {
+    fn root_mount_path_runs_only_the_mount_leaf_in_console_bootstrap() {
         let source = include_str!("mount.rs");
-        assert!(!source.contains(&["/bin", "/launchctl"].concat()));
-        assert!(!source.contains(&["as", "user"].concat()));
+        assert!(source.contains(&["/bin", "/launchctl"].concat()));
+        assert!(source.contains(&["as", "user"].concat()));
+        assert!(source.contains(&["/sbin", "/mount"].concat()));
+        assert!(!source.contains(&["current", "_exe"].concat()));
+        assert!(!source.contains(&["sudo", " -u"].concat()));
     }
 }

@@ -21,6 +21,7 @@
     <string>/Library/Application Support/Vixen/management/queue/unmount</string>
     <string>/Library/Application Support/Vixen/management/queue/remount</string>
     <string>/Library/Application Support/Vixen/management/queue/kill-fskitd</string>
+    <string>/Library/Application Support/Vixen/management/queue/uninstall</string>
   </array>
 </dict>
 </plist>

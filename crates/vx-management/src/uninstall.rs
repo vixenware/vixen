@@ -1,7 +1,8 @@
 //! Explicit VixenFS uninstall cleanup.
 //!
-//! This is not part of the install or repair path. The app calls it only after the
-//! user chooses the uninstall action and grants administrator approval.
+//! This is not part of the install or repair path. The app queues it only after the
+//! user chooses the uninstall action; the already-approved root service performs the
+//! privileged cleanup and removes itself last.
 
 use std::fs;
 use std::path::Path;
@@ -13,21 +14,25 @@ use crate::{mount, queue};
 
 const SUPPORT_ROOT: &str = "/Library/Application Support/Vixen";
 const LEGACY_LAUNCH_DAEMON: &str = "/Library/LaunchDaemons/eu.bearcove.vixen.management.plist";
+const LEGACY_LAUNCH_DAEMON_TARGET: &str = "system/eu.bearcove.vixen.management";
+const INSTALLED_APP_PATH: &str = "/Applications/Vixen.app";
 
 pub fn uninstall_vixenfs() -> Result<()> {
     tracing::info!("VixenFS uninstall cleanup started");
+    let legacy_launch_daemon_present = Path::new(LEGACY_LAUNCH_DAEMON).exists();
     mount::unmount().wrap_err("unmounting VixenFS before uninstall cleanup")?;
     remove_file_if_present(mount::IMAGE_PATH)?;
-    remove_dir_if_present(queue::SUPPORT_DIR)?;
-    bootout_legacy_launch_daemon();
     remove_file_if_present(LEGACY_LAUNCH_DAEMON)?;
+    remove_dir_if_present(INSTALLED_APP_PATH)?;
+    remove_dir_if_present(queue::SUPPORT_DIR)?;
     remove_empty_dir_if_present(SUPPORT_ROOT)?;
+    bootout_legacy_launch_daemon(legacy_launch_daemon_present);
     tracing::info!("VixenFS uninstall cleanup finished");
     Ok(())
 }
 
-fn bootout_legacy_launch_daemon() {
-    if !Path::new(LEGACY_LAUNCH_DAEMON).exists() {
+fn bootout_legacy_launch_daemon(was_installed: bool) {
+    if !was_installed {
         tracing::info!(
             path = LEGACY_LAUNCH_DAEMON,
             "legacy Vixen LaunchDaemon absent"
@@ -35,7 +40,7 @@ fn bootout_legacy_launch_daemon() {
         return;
     }
     let output = Command::new("/bin/launchctl")
-        .args(["bootout", "system", LEGACY_LAUNCH_DAEMON])
+        .args(["bootout", LEGACY_LAUNCH_DAEMON_TARGET])
         .output();
     match output {
         Ok(output) => {
