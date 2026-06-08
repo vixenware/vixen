@@ -253,8 +253,8 @@ enum ManagementService {
     static func repairVixenFS(progress: @escaping @Sendable (String) -> Void) async throws {
         let started = DispatchTime.now().uptimeNanoseconds
         logger.notice("VixenFS repair transaction requested from app")
-        progress("Starting VixenFS repair")
-        let status = try await runQueuedButton("remount") { repairStatus in
+        progress("Requesting administrator approval")
+        let status = try await runElevatedRepair { repairStatus in
             progress(repairStatus.displayText)
         }
         guard let status else {
@@ -267,15 +267,96 @@ enum ManagementService {
                 ]
             )
         }
-        if !status.ok {
+        if status.state == "failed" {
             throw NSError(
                 domain: NSPOSIXErrorDomain,
                 code: Int(EIO),
-                userInfo: [NSLocalizedDescriptionKey: status.failureDescription ?? status.message]
+                userInfo: [NSLocalizedDescriptionKey: status.message]
             )
         }
         progress("VixenFS repair finished")
         logger.notice("VixenFS repair transaction finished in \(elapsedMilliseconds(since: started), privacy: .public)ms")
+    }
+
+    private static func runElevatedRepair(
+        progress: (@Sendable (RepairStatus) -> Void)? = nil
+    ) async throws -> RepairStatus? {
+        let requestedAfterMillis = unixMillis()
+        let started = DispatchTime.now().uptimeNanoseconds
+        let helperPath = helperURL.path
+        let shellCommand =
+            "VIXEN_MANAGEMENT_LOG=info,vx_management=debug,vixen_management=debug "
+            + shellSingleQuote(helperPath) + " repair"
+        let script = "do shell script \(appleScriptStringLiteral(shellCommand)) with administrator privileges"
+        logger.notice("starting elevated VixenFS repair helper=\(helperPath, privacy: .public)")
+
+        let process = Process()
+        process.executableURL = URL(fileURLWithPath: "/usr/bin/osascript")
+        process.arguments = ["-e", script]
+
+        let stdout = Pipe()
+        let stderr = Pipe()
+        process.standardOutput = stdout
+        process.standardError = stderr
+
+        do {
+            try process.run()
+        } catch {
+            logger.error("elevated VixenFS repair failed to start error=\(error.localizedDescription, privacy: .public)")
+            throw error
+        }
+
+        while process.isRunning {
+            if let repairStatus = readRepairStatus(),
+                repairStatus.updatedUnixMillis >= requestedAfterMillis
+            {
+                progress?(repairStatus)
+            }
+            try await Task.sleep(for: .milliseconds(250))
+        }
+        process.waitUntilExit()
+
+        let stdoutText =
+            String(data: stdout.fileHandleForReading.readDataToEndOfFile(), encoding: .utf8) ?? ""
+        let stderrText =
+            String(data: stderr.fileHandleForReading.readDataToEndOfFile(), encoding: .utf8) ?? ""
+        logger.notice("elevated VixenFS repair finished in \(elapsedMilliseconds(since: started), privacy: .public)ms status=\(process.terminationStatus, privacy: .public) stdout=\(stdoutText.trimmingCharacters(in: .whitespacesAndNewlines), privacy: .public) stderr=\(stderrText.trimmingCharacters(in: .whitespacesAndNewlines), privacy: .public)")
+
+        let repairStatus = readRepairStatus()
+        if let repairStatus, repairStatus.updatedUnixMillis >= requestedAfterMillis {
+            progress?(repairStatus)
+        }
+
+        guard process.terminationStatus == 0 else {
+            let detail =
+                stderrText.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
+                ? stdoutText.trimmingCharacters(in: .whitespacesAndNewlines)
+                : stderrText.trimmingCharacters(in: .whitespacesAndNewlines)
+            throw NSError(
+                domain: NSPOSIXErrorDomain,
+                code: Int(process.terminationStatus),
+                userInfo: [
+                    NSLocalizedDescriptionKey: detail.isEmpty
+                        ? "Administrator repair exited \(process.terminationStatus)"
+                        : detail
+                ]
+            )
+        }
+
+        return repairStatus
+    }
+
+    private static func shellSingleQuote(_ value: String) -> String {
+        "'" + value.replacingOccurrences(of: "'", with: "'\\''") + "'"
+    }
+
+    private static func appleScriptStringLiteral(_ value: String) -> String {
+        "\""
+            + value
+                .replacingOccurrences(of: "\\", with: "\\\\")
+                .replacingOccurrences(of: "\"", with: "\\\"")
+                .replacingOccurrences(of: "\n", with: "\\n")
+            + "\""
     }
 
     static func runQueuedButton(

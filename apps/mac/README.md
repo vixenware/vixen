@@ -126,10 +126,14 @@ record. As root, it removes only non-installed Vixen LaunchServices records and
 also preserves `/Applications/Vixen.app`; removing that installed root-visible
 record can leave `fskitd` reporting the module as disabled. The repair path does
 not create registrations, because a manually added FSKit identity can be
-distinct from the identity the user approved in System Settings. The
-queue-trigger commands (`mount`, `unmount`, `remount`,
-`kill-fskitd`) only drop fixed trigger files into the root-owned management
-queues. The privileged work still runs inside `vixen-management` under launchd.
+distinct from the identity the user approved in System Settings.
+The GUI "Repair VixenFS" button runs the installed helper's full `repair`
+command once through administrator approval in the logged-in user's session, so
+the mount attempt follows the same path as a terminal `sudo` repair instead of
+the LaunchDaemon bootstrap. The queue-trigger commands (`mount`, `unmount`,
+`remount`, `kill-fskitd`) only drop fixed trigger files into the root-owned
+management queues. Work requested through those queues still runs inside
+`vixen-management` under launchd.
 
 ## Install and activate
 
