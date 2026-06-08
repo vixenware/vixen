@@ -28,7 +28,7 @@ struct VixenApp: App {
         WindowGroup {
             ContentView()
         }
-        .windowResizability(.contentSize)
+        .windowResizability(.automatic)
         .commands {
             CommandGroup(after: .appInfo) {
                 Button("Check for Updates…") {

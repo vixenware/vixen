@@ -86,7 +86,7 @@ struct VixenShell: View {
             .safeAreaInset(edge: .bottom) { accountFooter }
         } detail: {
             detail
-                .frame(minWidth: 560, minHeight: 480)
+                .frame(minWidth: 600, idealWidth: 780, minHeight: 620, idealHeight: 820)
                 .toolbar { toolbarContent }
         }
     }
