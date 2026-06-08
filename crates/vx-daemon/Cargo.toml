@@ -12,7 +12,6 @@ ignored = ["moire"]
 rustdoc-args = ["--html-in-header", "arborium-header.html"]
 
 [dependencies]
-async-recursion = "1"
 vox = { workspace = true }
 moire = { workspace = true }
 tokio = { workspace = true }
@@ -22,15 +21,12 @@ eyre = { workspace = true }
 tracing = { workspace = true }
 facet = { workspace = true }
 facet-styx = { workspace = true }
-thiserror = { workspace = true }
 blake3 = { workspace = true }
 
 vx-exec-protocol.workspace = true
 vx-services.workspace = true
 vx-ir.workspace = true
-vx-diagnostics = { workspace = true }
 vx-parser.workspace = true
-vx-types.workspace = true
 margin.workspace = true
 vx-store = { path = "../vx-store" }
 vx-runner = { path = "../vx-runner" }

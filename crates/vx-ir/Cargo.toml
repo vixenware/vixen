@@ -27,4 +27,3 @@ command-model = { path = "../../crates-plus/command-model" }
 command-grammar-vx = { path = "../../crates-plus/command-grammar-vx" }
 
 [dev-dependencies]
-rowan = "0.16"
