@@ -800,22 +800,48 @@ struct ContentView: View {
         return 500
     }
 
-    var body: some View {
-        Group {
-            if !isSupportedOS {
-                unsupportedOSView
-            } else if needsExtensionEnablement {
-                setupView
-            } else if !isManagementConfigured {
-                managementSetupView
-            } else {
-                completeView
+    private var appVersionString: String {
+        (Bundle.main.infoDictionary?["CFBundleShortVersionString"] as? String) ?? "—"
+    }
+
+    @ViewBuilder
+    private var rootContent: some View {
+        if isSupportedOS && !needsExtensionEnablement && isManagementConfigured {
+            VixenShell(
+                doctor: doctorSnapshot,
+                management: managementSnapshot,
+                ext: extensionSnapshot,
+                isChecking: isCheckingDoctor,
+                isRepairing: isAutoRepairingDoctor,
+                progress: activeProgressText,
+                appVersion: appVersionString,
+                brandOrange: brandOrange,
+                onRecheck: { Task { await refreshDoctorStatus() } },
+                onRepair: { Task { await performDoctorRepair() } }
+            )
+            .onAppear {
+                refreshManagementStatus()
+                Task { await refreshDoctorStatus() }
             }
+        } else {
+            Group {
+                if !isSupportedOS {
+                    unsupportedOSView
+                } else if needsExtensionEnablement {
+                    setupView
+                } else {
+                    managementSetupView
+                }
+            }
+            .padding(36)
+            .frame(width: 720)
+            .frame(minHeight: contentMinHeight)
         }
-        .padding(36)
-        .frame(width: 720)
-        .frame(minHeight: contentMinHeight)
-        .background(baseBg)
+    }
+
+    var body: some View {
+        rootContent
+            .background(baseBg)
         .task {
             guard isSupportedOS else { return }
             await pollExtensionStatus()
