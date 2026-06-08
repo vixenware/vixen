@@ -130,38 +130,15 @@ fix-registration profile='Debug':
 release-build version='':
     ./scripts/build.sh {{ version }}
 
-# Build a signed installer pkg that installs Vixen.app and registers the bundled management daemon.
-
-# Optional argument: 'just release-pkg 1.2.3'
-release-pkg version='':
-    ./scripts/dist-pkg.sh {{ version }}
-
-# Build, sign, notarize, staple, then open the installer pkg for local end-to-end testing.
-
-# Optional argument: 'just release-open-installer 1.2.3'
-release-open-installer version='':
-    #!/usr/bin/env bash
-    set -euo pipefail
-    ./scripts/build.sh "{{ version }}"
-    ./scripts/dist-pkg.sh "{{ version }}"
-    version="{{ version }}"
-    if [[ -z "$version" ]]; then
-      version="$(tr -d '[:space:]' < VERSION)"
-    fi
-    pkg="dist/${version}/Vixen-Installer.pkg"
-    [[ -f "$pkg" ]]
-    open "$pkg"
-
-# Notarize, generate appcast, and publish to R2.
+# Notarize, staple, generate appcast. (Vixen ships as a DMG / brew cask — no pkg.)
 
 # Optional argument: 'just release-publish 1.2.3'
 release-publish version='':
     ./scripts/publish.sh {{ version }}
 
-# Build + publish in one shot (no review step).
+# Build + publish in one shot (no review step). DMG-only.
 release version='':
     ./scripts/build.sh {{ version }}
-    ./scripts/dist-pkg.sh {{ version }}
     ./scripts/publish.sh {{ version }}
 
 # Generate appcast and upload release artifacts to R2.
