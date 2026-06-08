@@ -261,26 +261,9 @@ enum ManagementService {
     static func repairVixenFS(progress: @escaping @Sendable (String) -> Void) async throws {
         let started = DispatchTime.now().uptimeNanoseconds
         logger.notice("VixenFS repair transaction requested from app")
-        progress("Requesting Vixen Management")
-        let lastAction = try await runQueuedButton("mount")
-        guard let lastAction else {
-            throw NSError(
-                domain: NSPOSIXErrorDomain,
-                code: Int(EIO),
-                userInfo: [
-                    NSLocalizedDescriptionKey:
-                        "Vixen Management did not publish a mount result"
-                ]
-            )
-        }
-        if !lastAction.ok {
-            throw NSError(
-                domain: NSPOSIXErrorDomain,
-                code: Int(EIO),
-                userInfo: [
-                    NSLocalizedDescriptionKey: lastAction.failureDescription ?? lastAction.message
-                ]
-            )
+        progress("Requesting administrator approval")
+        _ = try await runElevatedRepair(command: "mount") { repairStatus in
+            progress(repairStatus.displayText)
         }
         progress("VixenFS mounted")
         logger.notice("VixenFS repair transaction finished in \(elapsedMilliseconds(since: started), privacy: .public)ms")
@@ -317,7 +300,7 @@ enum ManagementService {
         logger.notice("VixenFS synchronous uninstall transaction finished in \(elapsedMilliseconds(since: started), privacy: .public)ms")
     }
 
-    private static func runElevatedHelperSync(command: String) throws {
+    static func runElevatedHelperSync(command: String) throws {
         let started = DispatchTime.now().uptimeNanoseconds
         let helperPath = helperURL.path
         let shellCommand =
@@ -802,8 +785,8 @@ private enum ManagementCommand {
                 try ManagementService.repairExtension()
                 print("Vixen Management: repaired extension registration")
             case "repair":
-                _ = try ManagementService.runQueuedButtonSync("remount")
-                print("Vixen Management: repaired VixenFS")
+                try ManagementService.runElevatedHelperSync(command: "mount")
+                print("Vixen Management: mounted VixenFS")
                 ManagementService.printSnapshot()
             case "uninstall":
                 try ManagementService.uninstallVixenFSSync()
@@ -812,8 +795,8 @@ private enum ManagementCommand {
             case "status":
                 ManagementService.printSnapshot()
             case "mount", "remount":
-                _ = try ManagementService.runQueuedButtonSync(command)
-                print("Vixen Management: queued \(command)")
+                try ManagementService.runElevatedHelperSync(command: "mount")
+                print("Vixen Management: mounted VixenFS")
                 ManagementService.printSnapshot()
             case "unmount", "kill-fskitd":
                 _ = try ManagementService.runQueuedButtonSync(command)

@@ -59,24 +59,24 @@ path is proven.
   /dev/diskN on /Volumes/Vixen/vfs (vixenfs, local, nodev, nosuid, noowners, noatime, fskit)
   ```
 
-- The next unproven step is not the installer, service, app doctor, stale-record
-  cleanup, or VFS provider probe. The next unproven step is:
+- The next replacement step after the manual mount is not the installer,
+  service, app doctor, stale-record cleanup, or VFS provider probe. It is:
 
   ```sh
   sudo /Applications/Vixen.app/Contents/MacOS/vixen-management mount
   ```
 
   from a manually installed DMG app after the extension is visible and enabled.
-- The approved background management item must not run the FSKit mount from a
-  plain system bootstrap. The working privilege shape is root in the active
-  user's login bootstrap. The queued management path therefore bridges mount
-  requests with:
+  That direct helper path has worked.
+- The approved background management item is not a working ordinary mount path.
+  A launchd queue request, even bridged with `launchctl asuser`, can still make
+  `/sbin/mount` report `Module eu.bearcove.vixenfs is disabled!`.
+- The working privilege shape for ordinary mount is the installed helper run as
+  an elevated process from the active login session, matching:
 
   ```sh
-  launchctl asuser <console-uid> /Applications/Vixen.app/Contents/MacOS/vixen-management mount
+  sudo /Applications/Vixen.app/Contents/MacOS/vixen-management mount
   ```
-
-  It does not add `sudo -u`; the mount still needs root privileges.
 
 ## Manual Baseline From A Clean DMG Install
 
@@ -127,8 +127,9 @@ Then check the result without touching arbitrary paths:
    cat /Volumes/Vixen/vfs/.vixenfs/status.json
    ```
 
-If this works, the helper can do the same primitive operation as the manual
-root shell. Only then should the app UI be wired around this primitive.
+This helper path has worked from a clean DMG install. The app UI should call
+this primitive through administrator approval; it should not fire the launchd
+mount queue.
 
 If this fails, capture the helper log and FSKit logs before changing anything:
 
@@ -173,8 +174,9 @@ discovery and enablement.
   vixen-management mount
   ```
 
-  From the app, that should be the approved management queue firing the fixed
-  `mount` capability, not an AppleScript administrator prompt.
+  From the app, that should be the installed helper's `mount` command run
+  through administrator approval. Do not route ordinary mount through the
+  launchd queue.
 
 - If direct helper mount fails with stale FSKit state, the next privileged
   primitive is direct `kill(2)` of `/usr/libexec/fskitd`, then `mount` again.

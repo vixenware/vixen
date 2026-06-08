@@ -138,15 +138,16 @@ of app startup, the Open Settings button, or the one-click GUI repair path.
 Automatic app paths must not elect PlugInKit use or create extension identities,
 because a manually added FSKit identity can be distinct from the identity the
 user approved in System Settings.
-The GUI "Repair VixenFS" button runs the installed helper's full `repair`
-command once through administrator approval. That repair intentionally mirrors
-the working manual reset path, but tries the cheap operation first: mount from a
-fresh helper process. If that mount fails, it cleans stale containing-app records
-for the logged-in user and root, restarts `fskitd`, then retries the mount. The
-queue-trigger commands (`mount`, `unmount`, `remount`,
-`kill-fskitd`) only drop fixed trigger files into the root-owned management
-queues. Work requested through those queues still runs inside
-`vixen-management` under launchd.
+The GUI "Repair VixenFS" button runs the installed helper's `mount` command
+once through administrator approval. That intentionally mirrors the working
+manual path:
+
+- `sudo /Applications/Vixen.app/Contents/MacOS/vixen-management mount`
+
+Do not route ordinary mount through the launchd queue. Queue-trigger commands
+are only for operations proven to work from launchd's system bootstrap;
+mount/remount requests from that queue fail explicitly because that path can
+make macOS report the enabled FSKit module as disabled.
 
 ## Install and activate
 

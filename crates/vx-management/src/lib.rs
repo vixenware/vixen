@@ -10,11 +10,10 @@
 //! if that fails to clear the mount, and only then cleans up the backing image.
 //!
 //! The discipline from the wiki ("The FSKit doctor & kill-switch") is preserved: each
-//! privileged capability is a **fixed, payload-less [`Button`]**. A caller fires one by
-//! dropping a file into its launchd `QueueDirectories` queue ([`queue`]); nothing the
-//! caller supplies decides *what* runs. There is no general "run as root" surface —
-//! only this fixed set of buttons, each gated by filesystem permission on its queue
-//! directory.
+//! privileged capability is a **fixed, payload-less [`Button`]**. The launchd queue is
+//! only valid for operations that work correctly from the system bootstrap. Ordinary
+//! FSKit mount must be run by the installed helper as an elevated process in the active
+//! login session, matching the manual `sudo vixen-management mount` path.
 
 pub mod extension;
 pub mod killswitch;
@@ -36,8 +35,8 @@ pub enum Button {
     Mount,
     /// Recover the VixenFS mount by unwinding FSKit, then detach its mock backing image.
     Unmount,
-    /// Run the full app-visible repair transaction: mount first, then stale
-    /// app-record cleanup and FSKit restart only if the mount fails.
+    /// Legacy queue remount request. The launchd mount path is disabled until
+    /// proven; app-visible repair runs the direct helper mount instead.
     Remount,
     /// Terminate the system `fskitd` — the wedge kill-switch.
     KillFskitd,
@@ -78,16 +77,11 @@ impl Button {
     }
 
     /// Execute the capability from the system launchd job.
-    ///
-    /// FSKit enablement is tied to the logged-in user's extension state. The direct
-    /// helper command that works in practice is root from the user's login session,
-    /// so the system daemon bridges mount requests into that bootstrap without
-    /// dropping root privileges.
     pub fn execute_from_launchd(self) -> eyre::Result<()> {
         match self {
-            Button::Mount | Button::Remount => {
-                session::run_current_helper_in_console_bootstrap("mount")
-            }
+            Button::Mount | Button::Remount => eyre::bail!(
+                "mount requests from the launchd queue are disabled; run vixen-management mount as an elevated process in the active login session"
+            ),
             Button::Unmount => mount::unmount(),
             Button::KillFskitd => killswitch::terminate_fskitd().map(|_| ()),
         }

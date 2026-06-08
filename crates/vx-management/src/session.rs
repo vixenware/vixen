@@ -1,4 +1,8 @@
-//! Running privileged helper commands in the active login session.
+//! Disproven launchd-to-login-session bridge.
+//!
+//! This path made `/sbin/mount` report an enabled VixenFS module as disabled.
+//! Ordinary mount should run the installed helper as an elevated process from
+//! the active login session instead.
 
 use std::ffi::{CStr, CString};
 use std::process::Command;
