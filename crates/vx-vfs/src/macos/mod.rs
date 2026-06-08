@@ -93,38 +93,20 @@ where
     })
 }
 
-/// Bring up the block-backed VixenFS volume by firing the Vixen Management
-/// daemon's `mount` button — mounting a block device needs root, which the user-level
-/// daemon doesn't have. Waits, bounded, for the volume to appear. A missing queue
-/// directory means the management daemon isn't installed/approved, surfaced as the
-/// failure reason. (When the volume is already mounted, `mount()` reuses it via
-/// `read_status` and never calls this.)
+/// Bring up the block-backed VixenFS volume by mounting it directly. The daemon runs as
+/// the logged-in user, so it attaches the user-owned backing image and `/sbin/mount`s the
+/// volume itself — there is no privileged management daemon anymore. The one-time
+/// mountpoint creation under root-owned `/Volumes` must already have been done (the app
+/// does it once via an admin prompt); if it hasn't, `establish` fails with an actionable
+/// message. (When the volume is already mounted, `mount()` reuses it via `read_status`
+/// and never calls this.)
 async fn do_mount(_mount_path: &Utf8Path) -> Result<(), String> {
-    use std::time::Instant;
+    use vx_management::mount as block;
 
-    use vx_management::{Button, mount as block, queue};
-
-    queue::fire(Button::Mount).map_err(|e| {
-        format!("could not fire Vixen Management mount (is it installed and approved?): {e:#}")
-    })?;
-
-    let deadline = Instant::now() + Duration::from_secs(20);
-    loop {
-        let mounted = tokio::task::spawn_blocking(block::is_mounted)
-            .await
-            .map_err(|e| format!("mount-table check task failed: {e}"))?
-            .map_err(|e| format!("reading the mount table: {e:#}"))?;
-        if mounted {
-            return Ok(());
-        }
-        if Instant::now() >= deadline {
-            return Err(format!(
-                "timed out waiting for {} to mount via Vixen Management",
-                block::MOUNT_POINT
-            ));
-        }
-        tokio::time::sleep(Duration::from_millis(250)).await;
-    }
+    tokio::task::spawn_blocking(block::establish)
+        .await
+        .map_err(|e| format!("VixenFS mount task failed: {e}"))?
+        .map_err(|e| format!("mounting VixenFS: {e:#}"))
 }
 
 async fn read_status(mount_path: &Utf8Path) -> Result<vx_fskit_types::StatusPayload, String> {
