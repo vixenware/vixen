@@ -406,12 +406,11 @@ fn attached_image_devices() -> Result<Vec<String>> {
             String::from_utf8_lossy(&out.stderr).trim()
         );
     }
-    let image = image_path()?;
-    let image_str = image.to_string_lossy();
-    let devices = parse_attached_image_devices(&String::from_utf8_lossy(&out.stdout), &image_str);
+    let devices =
+        parse_attached_image_devices(&String::from_utf8_lossy(&out.stdout), IMAGE_FILE_NAME);
     tracing::info!(
         ?devices,
-        image_path = %image_str,
+        image_file = IMAGE_FILE_NAME,
         "parsed attached Vixen image devices"
     );
     Ok(devices)
@@ -433,14 +432,17 @@ pub fn is_mounted() -> Result<bool> {
     Ok(mounted)
 }
 
-/// Extract the whole-disk BSD names attached for a specific `hdiutil info` image block.
-fn parse_attached_image_devices(hdiutil_info_stdout: &str, image_path: &str) -> Vec<String> {
+/// Extract the whole-disk BSD names attached for our backing image. Matches by **file
+/// name** (`vixen-volume.img`), not full path, so a device attached for a stale path
+/// (e.g. an earlier root-owned `/Library/...` image) is still recognized as ours and
+/// detached. The name is Vixen-specific, so this won't catch unrelated disk images.
+fn parse_attached_image_devices(hdiutil_info_stdout: &str, image_file_name: &str) -> Vec<String> {
     let mut devices = Vec::new();
     for block in hdiutil_info_stdout.split("================================================") {
         if !block.lines().any(|line| {
             line.strip_prefix("image-path")
                 .and_then(|line| line.split_once(':'))
-                .is_some_and(|(_, path)| path.trim() == image_path)
+                .is_some_and(|(_, path)| path.trim().rsplit('/').next() == Some(image_file_name))
         }) {
             continue;
         }
@@ -526,10 +528,7 @@ image-alias     : /Users/amos/Library/Application Support/Vixen/vixen-volume.img
 "#;
 
         assert_eq!(
-            parse_attached_image_devices(
-                info,
-                "/Users/amos/Library/Application Support/Vixen/vixen-volume.img"
-            ),
+            parse_attached_image_devices(info, IMAGE_FILE_NAME),
             vec!["disk7".to_string(), "disk8".to_string()]
         );
     }

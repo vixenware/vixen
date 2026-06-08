@@ -13,9 +13,8 @@
 //!   `vixen-management <button>` runs one privileged capability immediately for
 //!   manual testing.
 
-use std::fs::OpenOptions;
 use std::io::Write;
-use std::path::Path;
+use std::path::PathBuf;
 
 use eyre::{Result, WrapErr, bail};
 use tracing_subscriber::EnvFilter;
@@ -23,7 +22,10 @@ use tracing_subscriber::layer::SubscriberExt;
 use tracing_subscriber::util::SubscriberInitExt;
 use vx_management::{Button, queue, status};
 
-const LOG_DIR: &str = "/Library/Application Support/Vixen/management/logs";
+/// Root daemon log dir (legacy path, used only when running as root).
+const ROOT_LOG_DIR: &str = "/Library/Application Support/Vixen/management/logs";
+/// User-relative log dir (under `$HOME`) — where the user-side helper logs now go.
+const USER_LOG_DIR_REL: &str = "Library/Logs/Vixen";
 const LOG_FILE_NAME: &str = "vixen-management.log";
 
 fn main() -> Result<()> {
@@ -138,32 +140,46 @@ fn report_button_result(button: Button, outcome: &Result<()>) -> Result<()> {
 }
 
 fn init_tracing() {
-    if unsafe { libc::geteuid() } == 0 && can_write_log_file() {
-        let file_appender = tracing_appender::rolling::never(LOG_DIR, LOG_FILE_NAME);
-        let fmt_layer = tracing_subscriber::fmt::layer()
+    // Always log to stderr (captured by the app when it spawns us, visible from a
+    // terminal). Additionally persist to a log file so failures are debuggable after the
+    // fact — under the user's `~/Library/Logs/Vixen` when running as the user (the normal
+    // case now), or the legacy root dir when running as root.
+    let stderr_layer = tracing_subscriber::fmt::layer()
+        .with_ansi(false)
+        .with_writer(std::io::stderr)
+        .with_target(true)
+        .with_file(true)
+        .with_line_number(true);
+
+    if let Some(dir) = log_dir().filter(|dir| std::fs::create_dir_all(dir).is_ok()) {
+        let file_appender = tracing_appender::rolling::never(&dir, LOG_FILE_NAME);
+        let file_layer = tracing_subscriber::fmt::layer()
             .with_ansi(false)
             .with_writer(file_appender)
             .with_target(true)
             .with_file(true)
             .with_line_number(true);
-
         tracing_subscriber::registry()
             .with(env_filter())
-            .with(fmt_layer)
+            .with(stderr_layer)
+            .with(file_layer)
             .init();
-    } else {
-        let fmt_layer = tracing_subscriber::fmt::layer()
-            .with_ansi(false)
-            .with_writer(std::io::stderr)
-            .with_target(true)
-            .with_file(true)
-            .with_line_number(true);
-
-        tracing_subscriber::registry()
-            .with(env_filter())
-            .with(fmt_layer)
-            .init();
+        return;
     }
+
+    tracing_subscriber::registry()
+        .with(env_filter())
+        .with(stderr_layer)
+        .init();
+}
+
+/// The directory the helper writes its log file to, or `None` if it can't be determined.
+fn log_dir() -> Option<PathBuf> {
+    if unsafe { libc::geteuid() } == 0 {
+        return Some(PathBuf::from(ROOT_LOG_DIR));
+    }
+    let home = std::env::var_os("HOME")?;
+    Some(PathBuf::from(home).join(USER_LOG_DIR_REL))
 }
 
 fn env_filter() -> EnvFilter {
@@ -171,17 +187,6 @@ fn env_filter() -> EnvFilter {
         std::env::var("VIXEN_MANAGEMENT_LOG")
             .unwrap_or_else(|_| "info,vx_management=debug,vixen_management=debug".to_string()),
     )
-}
-
-fn can_write_log_file() -> bool {
-    if std::fs::create_dir_all(LOG_DIR).is_err() {
-        return false;
-    }
-    OpenOptions::new()
-        .create(true)
-        .append(true)
-        .open(Path::new(LOG_DIR).join(LOG_FILE_NAME))
-        .is_ok()
 }
 
 /// launchd-invoked: repair the queue perms, then for each fired button run it once and
