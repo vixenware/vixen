@@ -21,7 +21,9 @@ pub fn uninstall_vixenfs() -> Result<()> {
     tracing::info!("VixenFS uninstall cleanup started");
     let legacy_launch_daemon_present = Path::new(LEGACY_LAUNCH_DAEMON).exists();
     mount::unmount().wrap_err("unmounting VixenFS before uninstall cleanup")?;
-    remove_file_if_present(mount::IMAGE_PATH)?;
+    if let Ok(image) = mount::image_path() {
+        remove_file_if_present(&image.to_string_lossy())?;
+    }
     remove_file_if_present(LEGACY_LAUNCH_DAEMON)?;
     remove_dir_if_present(INSTALLED_APP_PATH)?;
     remove_dir_if_present(queue::SUPPORT_DIR)?;

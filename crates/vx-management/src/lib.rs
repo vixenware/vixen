@@ -73,23 +73,23 @@ impl Button {
     /// calling process is already in the user's GUI session, so `launchctl asuser` works.
     pub fn execute(self) -> eyre::Result<()> {
         match self {
-            Button::Mount => mount::establish(None),
+            Button::Mount => mount::establish(),
             Button::Unmount => mount::unmount(),
-            Button::Remount => mount::remount(None),
+            Button::Remount => mount::remount(),
             Button::KillFskitd => killswitch::terminate_fskitd().map(|_| ()),
             Button::Uninstall => uninstall::uninstall_vixenfs(),
         }
     }
 
-    /// Execute the capability from the system launchd job.
-    /// `caller_pid` is the PID extracted from the queue trigger file — the Vixen app
-    /// process running in the user's GUI session. For mount, we use `launchctl bsexec`
-    /// into that PID so `/sbin/mount` runs in the login session where `fskit_agent` lives.
-    pub fn execute_from_launchd(self, caller_pid: Option<u32>) -> eyre::Result<()> {
+    /// Execute the capability from the system launchd job. `caller_pid` is retained from
+    /// the queue trigger for logging only — the mount no longer runs in any borrowed
+    /// session; it runs as the logged-in user. (This launchd path is being retired in
+    /// favor of a fully user-side mount; see `FSKIT-REPAIR.md`.)
+    pub fn execute_from_launchd(self, _caller_pid: Option<u32>) -> eyre::Result<()> {
         match self {
-            Button::Mount => mount::establish(caller_pid),
+            Button::Mount => mount::establish(),
             Button::Unmount => mount::unmount(),
-            Button::Remount => mount::remount(caller_pid),
+            Button::Remount => mount::remount(),
             Button::KillFskitd => killswitch::terminate_fskitd().map(|_| ()),
             Button::Uninstall => uninstall::uninstall_vixenfs(),
         }

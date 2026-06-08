@@ -8,36 +8,49 @@
 //! forced Full Disk Access before. The actual mountpoint is intentionally nested below
 //! a plain `/Volumes` child so a wedged FSKit root does not poison `/Volumes` itself.
 //!
-//! `mount(2)` needs root, so these run inside the privileged daemon. Provisioning the
-//! image + `hdiutil attach` is unprivileged, but the daemon owns the whole sequence so
-//! its trigger stays payload-less (no caller names the device or path).
+//! Both `hdiutil attach` and the final `/sbin/mount` run **as the logged-in user**, not
+//! as root. The FSKit extension runs in the user's `fskit_agent`, so it must be able to
+//! `open(2)` the `/dev/diskN` node — which means the *user* must attach the image (a
+//! root-attached node is root-owned and the extension gets "Probing resource: Permission
+//! denied"). With a user-owned device node, the mount needs no privilege at all. The one
+//! thing that does need root — creating and chowning the `/Volumes/Vixen/vfs` mountpoint,
+//! since `/Volumes` is root-owned — is a one-time first-run step handled elsewhere.
 
+use std::path::{Path, PathBuf};
 use std::process::{Command, Output, Stdio};
 use std::time::{Duration, Instant};
 
 use eyre::{Result, WrapErr, bail};
 use vx_vfs_types::MACOS_VFS_MOUNT_PARENT;
 
-use crate::{killswitch, session};
+use crate::killswitch;
 
 /// Where the block volume mounts — a real `/Volumes` descendant, not an arbitrary path.
 pub use vx_vfs_types::MACOS_VFS_MOUNT_POINT as MOUNT_POINT;
 /// The FSKit filesystem type — matches the extension's `FSFileSystemType`.
 pub const FS_TYPE: &str = "vixenfs";
-/// The mock backing image: sparse, root-owned, and never holds file data.
-pub const IMAGE_PATH: &str = "/Library/Application Support/Vixen/vixen-volume.img";
+/// User-relative directory holding the backing image (under `$HOME`).
+pub const IMAGE_DIR_REL: &str = "Library/Application Support/Vixen";
+/// Filename of the mock backing image.
+pub const IMAGE_FILE_NAME: &str = "vixen-volume.img";
 /// Size of the mock image in bytes. Created sparse (`set_len`), so it costs ~0 real
 /// bytes; the volume's reported size comes from the extension's statfs, not from this.
 pub const IMAGE_SIZE_BYTES: u64 = 100 * 1024 * 1024;
 const SACRIFICIAL_UNMOUNT_DEADLINE: Duration = Duration::from_secs(2);
 
+/// The mock backing image path: a **user-owned** file under `$HOME`. It must be owned by
+/// the user running the mount so that `hdiutil attach` produces a user-owned device node
+/// the FSKit extension can open. Never holds file data — data is served from the CAS.
+pub fn image_path() -> Result<PathBuf> {
+    let home = std::env::var_os("HOME")
+        .ok_or_else(|| eyre::eyre!("HOME is not set; cannot locate the VixenFS backing image"))?;
+    Ok(Path::new(&home).join(IMAGE_DIR_REL).join(IMAGE_FILE_NAME))
+}
+
 /// Establish the mount if it isn't already up: provision the device, then mount it.
-/// Idempotent — a healthy existing mount is a no-op. **Requires root** (the mount).
-///
-/// `caller_pid` is retained for API symmetry but is no longer used; the final
-/// `/sbin/mount` always runs via `launchctl asuser <console-uid>`, which reaches
-/// `fskit_agent` in the user's background launchd session from both CLI and daemon.
-pub fn establish(caller_pid: Option<u32>) -> Result<()> {
+/// Idempotent — a healthy existing mount is a no-op. Runs **as the logged-in user** (no
+/// root): the user-owned device node is what lets the FSKit extension open it.
+pub fn establish() -> Result<()> {
     tracing::info!(mount_point = MOUNT_POINT, "establishing VixenFS mount");
     if is_mounted()? {
         tracing::info!("{MOUNT_POINT} already mounted");
@@ -45,7 +58,7 @@ pub fn establish(caller_pid: Option<u32>) -> Result<()> {
     }
     recover_existing_state()?;
     let device = provision_device()?;
-    if let Err(err) = mount_volume(&device, caller_pid) {
+    if let Err(err) = mount_volume(&device) {
         if let Err(detach_err) = detach_device(&device) {
             tracing::warn!(device, error = %detach_err, "failed to detach backing device after mount failure");
         }
@@ -67,11 +80,11 @@ pub fn unmount() -> Result<()> {
 }
 
 /// Unwind any existing VixenFS state and then establish a fresh mount.
-pub fn remount(caller_pid: Option<u32>) -> Result<()> {
+pub fn remount() -> Result<()> {
     tracing::info!(mount_point = MOUNT_POINT, "remount requested");
     recover_existing_state().wrap_err("recovering existing VixenFS state before remount")?;
     let device = provision_device()?;
-    if let Err(err) = mount_volume(&device, caller_pid) {
+    if let Err(err) = mount_volume(&device) {
         if let Err(detach_err) = detach_device(&device) {
             tracing::warn!(device, error = %detach_err, "failed to detach backing device after remount failure");
         }
@@ -171,15 +184,17 @@ fn try_sacrificial_unmount() -> Result<SacrificialUnmount> {
 /// Provision the mock raw block device: create the sparse image if absent, attach it
 /// raw with no filesystem mounted, and return its whole-disk BSD name (e.g. `disk18`).
 pub fn provision_device() -> Result<String> {
-    tracing::info!(image_path = IMAGE_PATH, "provisioning Vixen backing device");
-    ensure_image()?;
+    let image = image_path()?;
+    let image_str = image.to_string_lossy().into_owned();
+    tracing::info!(image_path = %image_str, "provisioning Vixen backing device");
+    ensure_image(&image)?;
     let out = Command::new("/usr/bin/hdiutil")
         .args([
             "attach",
             "-imagekey",
             "diskimage-class=CRawDiskImage",
             "-nomount",
-            IMAGE_PATH,
+            &image_str,
         ])
         .output()
         .wrap_err("running hdiutil attach")?;
@@ -205,10 +220,9 @@ pub fn provision_device() -> Result<String> {
 /// Create the sparse mock image if it doesn't exist yet. `set_len` extends the file
 /// without allocating blocks (a hole on APFS) — exactly what `mkfile -n` does, with no
 /// dependency on an external tool (`mkfile` isn't present at a fixed path on macOS 26).
-fn ensure_image() -> Result<()> {
-    let path = std::path::Path::new(IMAGE_PATH);
+fn ensure_image(path: &Path) -> Result<()> {
     if path.exists() {
-        tracing::info!(image_path = IMAGE_PATH, "mock backing image already exists");
+        tracing::info!(image_path = %path.display(), "mock backing image already exists");
         return Ok(());
     }
     if let Some(parent) = path.parent() {
@@ -218,17 +232,17 @@ fn ensure_image() -> Result<()> {
     file.set_len(IMAGE_SIZE_BYTES)
         .wrap_err("sizing mock image (sparse)")?;
     tracing::info!(
-        image_path = IMAGE_PATH,
+        image_path = %path.display(),
         size_bytes = IMAGE_SIZE_BYTES,
         "created sparse mock backing image"
     );
     Ok(())
 }
 
-/// Mount the block device as `vixenfs` at [`MOUNT_POINT`]. **Requires root.**
-fn mount_volume(device: &str, caller_pid: Option<u32>) -> Result<()> {
+/// Mount the block device as `vixenfs` at [`MOUNT_POINT`]. Runs as the logged-in user;
+/// the mountpoint must already exist and be user-owned (created once at first run).
+fn mount_volume(device: &str) -> Result<()> {
     let devnode = format!("/dev/{device}");
-    // Keep `/Volumes/Vixen` itself plain APFS; FSKit owns only the nested child.
     tracing::info!(
         device,
         devnode,
@@ -237,9 +251,15 @@ fn mount_volume(device: &str, caller_pid: Option<u32>) -> Result<()> {
         fs_type = FS_TYPE,
         "mounting VixenFS volume"
     );
-    std::fs::create_dir_all(MACOS_VFS_MOUNT_PARENT).wrap_err("creating Vixen mount parent")?;
-    std::fs::create_dir_all(MOUNT_POINT).wrap_err("creating Vixen mount point")?;
-    let out = run_mount_command(&devnode, caller_pid)?;
+    // The mountpoint lives under root-owned `/Volumes`, so it is created and chowned to
+    // the user once at first run (the only privileged step). If it's missing, that
+    // one-time setup hasn't run — say so instead of emitting a cryptic mount error.
+    if !Path::new(MOUNT_POINT).is_dir() {
+        bail!(
+            "mountpoint {MOUNT_POINT} does not exist; first-run setup must create and chown it (mkdir -p {MOUNT_POINT} && chown <user> {MOUNT_POINT})"
+        );
+    }
+    let out = run_mount_command(&devnode)?;
     tracing::info!(
         device,
         devnode,
@@ -266,40 +286,25 @@ fn mount_volume(device: &str, caller_pid: Option<u32>) -> Result<()> {
     Ok(())
 }
 
-fn run_mount_command(devnode: &str, _caller_pid: Option<u32>) -> Result<Output> {
+fn run_mount_command(devnode: &str) -> Result<Output> {
+    // Mount runs as the logged-in user with no privilege escalation. The device node was
+    // attached by this same user (so it is user-owned and the FSKit extension can open
+    // it), and the mountpoint is user-owned, so a plain `/sbin/mount` is all that's
+    // needed — no session/bootstrap trampoline, no root. Running this as root instead
+    // fails ("Unable to invoke task"): the root context cannot reach the user's FSKit.
     let euid = unsafe { libc::geteuid() };
     if euid == 0 {
-        // fskit_agent runs in the user's background launchd session. asuser <uid>
-        // targets that session directly and works from both CLI (sudo) and the system
-        // daemon. bsexec into a GUI-session process puts mount in the wrong bootstrap
-        // and results in "Unable to invoke task".
-        let Some(user) = session::console_user()? else {
-            bail!("no logged-in console user for VixenFS mount");
-        };
-        let uid = user.uid.to_string();
-        tracing::info!(
-            uid = user.uid,
-            user = %user.name,
+        tracing::warn!(
             devnode,
-            fs_type = FS_TYPE,
-            mount_point = MOUNT_POINT,
-            "running VixenFS mount via launchctl asuser"
+            "VixenFS mount is being run as root; it must run as the logged-in user and will likely fail"
         );
-        return Command::new("/bin/launchctl")
-            .arg("asuser")
-            .arg(&uid)
-            .arg("/sbin/mount")
-            .args(["-F", "-t", FS_TYPE, devnode, MOUNT_POINT])
-            .output()
-            .wrap_err("running launchctl asuser mount");
     }
-
-    tracing::warn!(
+    tracing::info!(
         euid,
         devnode,
         fs_type = FS_TYPE,
         mount_point = MOUNT_POINT,
-        "running VixenFS mount without root privileges"
+        "running VixenFS mount as the logged-in user"
     );
     Command::new("/sbin/mount")
         .args(["-F", "-t", FS_TYPE, devnode, MOUNT_POINT])
@@ -357,10 +362,12 @@ fn attached_image_devices() -> Result<Vec<String>> {
             String::from_utf8_lossy(&out.stderr).trim()
         );
     }
-    let devices = parse_attached_image_devices(&String::from_utf8_lossy(&out.stdout), IMAGE_PATH);
+    let image = image_path()?;
+    let image_str = image.to_string_lossy();
+    let devices = parse_attached_image_devices(&String::from_utf8_lossy(&out.stdout), &image_str);
     tracing::info!(
         ?devices,
-        image_path = IMAGE_PATH,
+        image_path = %image_str,
         "parsed attached Vixen image devices"
     );
     Ok(devices)
@@ -463,19 +470,22 @@ image-alias     : /System/Library/AssetsV2/toolchain.dmg
 /dev/disk5	GUID_partition_scheme
 /dev/disk5s1	7C3457EF-0000-11AA-AA11-00306543ECAC
 ================================================
-image-path      : /Library/Application Support/Vixen/vixen-volume.img
-image-alias     : /Library/Application Support/Vixen/vixen-volume.img
+image-path      : /Users/amos/Library/Application Support/Vixen/vixen-volume.img
+image-alias     : /Users/amos/Library/Application Support/Vixen/vixen-volume.img
 autodiskmount   : false
 /dev/disk7
 ================================================
-image-path      : /Library/Application Support/Vixen/vixen-volume.img
-image-alias     : /Library/Application Support/Vixen/vixen-volume.img
+image-path      : /Users/amos/Library/Application Support/Vixen/vixen-volume.img
+image-alias     : /Users/amos/Library/Application Support/Vixen/vixen-volume.img
 /dev/disk8
 /dev/disk8s1	41504653-0000-11AA-AA11-00306543ECAC
 "#;
 
         assert_eq!(
-            parse_attached_image_devices(info, IMAGE_PATH),
+            parse_attached_image_devices(
+                info,
+                "/Users/amos/Library/Application Support/Vixen/vixen-volume.img"
+            ),
             vec!["disk7".to_string(), "disk8".to_string()]
         );
     }
@@ -509,13 +519,16 @@ image-alias     : /Library/Application Support/Vixen/vixen-volume.img
     }
 
     #[test]
-    fn root_mount_path_uses_asuser() {
+    fn mount_runs_as_user_with_plain_mount() {
         let source = include_str!("mount.rs");
-        assert!(source.contains(&["/bin", "/launchctl"].concat()));
-        assert!(source.contains(&["as", "user"].concat()));
+        // The mount is a plain user-side `/sbin/mount` — no privilege trampoline.
         assert!(source.contains(&["/sbin", "/mount"].concat()));
-        assert!(!source.contains("bsexec"));
-        assert!(!source.contains(&["current", "_exe"].concat()));
+        // No session-borrowing primitive, no sudo, no self-re-exec. The user-owned
+        // device node is what makes the mount work, not any session/bootstrap juggling.
+        assert!(!source.contains(&["launch", "ctl"].concat()));
+        assert!(!source.contains(&["as", "user"].concat()));
+        assert!(!source.contains(&["bs", "exec"].concat()));
         assert!(!source.contains(&["sudo", " -u"].concat()));
+        assert!(!source.contains(&["current", "_exe"].concat()));
     }
 }

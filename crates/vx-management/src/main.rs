@@ -65,7 +65,7 @@ fn main() -> Result<()> {
                 return outcome;
             }
             if arg == "repair" {
-                let outcome = vx_management::mount::establish(None);
+                let outcome = vx_management::mount::establish();
                 tracing::info!(ok = outcome.is_ok(), "repair finished");
                 report_direct_command(&arg, &outcome)?;
                 return outcome;

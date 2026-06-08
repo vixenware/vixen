@@ -10,6 +10,136 @@ macOS, enabled by the user in System Settings, and mounted by the installed
 `vixen-management` helper. Do not expand the repair architecture until that
 path is proven.
 
+## BREAKTHROUGH 2026-06-08: the mount must run entirely in the user context
+
+Everything below this section that talks about "root service runs the mount via
+`launchctl asuser`" is now **falsified**. The real decisive condition is the
+**owner of the `/dev/diskN` block device node**, not the audit session, not
+`bsexec`, not `asuser`.
+
+Proven matrix (all run by hand, back to back, single login session):
+
+```text
+mount -F -t vixenfs /dev/disk4 ...               (user, device root-owned)  → "Probing resource ... Permission denied" / Unable to invoke task
+sudo mount -F -t vixenfs /dev/disk4 ...           (root)                     → "Unable to invoke task"
+sudo launchctl bsexec <pid> /sbin/mount ...                                  → "Unable to invoke task"
+sudo launchctl bsexec <pid> launchctl asuser 501 /sbin/mount ...             → "Failed to get user context: 141: Reentrancy avoided"
+sudo launchctl asuser 501 /sbin/mount ...         (from terminal)            → WORKS
+daemon: launchctl asuser 501 /sbin/mount ...      (from SMAppService daemon) → "Module ... is disabled"
+```
+
+Then the actual fix was found:
+
+```text
+# device attached by ROOT → /dev/disk4 owned by root → every mount attempt fails
+# even after: sudo chown amos /Volumes/Vixen/vfs  AND  sudo chown amos vixen-volume.img
+#   → still "Probing resource ... Permission denied"
+
+hdiutil detach /dev/disk4
+hdiutil attach -imagekey diskimage-class=CRawDiskImage -nomount \
+  "/Library/Application Support/Vixen/vixen-volume.img"      # run AS THE USER (no sudo)
+ls -l /dev/disk4        # brw-r----- 1 amos ...  ← device node now owned by amos
+mount -F -t vixenfs /dev/disk4 /Volumes/Vixen/vfs            # AS THE USER, no sudo → WORKS
+```
+
+Conclusions:
+
+- The FSKit extension runs as the **user** (via `fskit_agent`). It must be able
+  to `open(2)` the `/dev/diskN` node. A root-owned node → "Probing resource:
+  Permission denied". **`hdiutil attach` must be run by the user** so the device
+  node is user-owned. chowning the *image file* or *mountpoint* afterward is not
+  enough — the device node owner is set at attach time.
+- With a user-owned device node, the mount needs **no root at all**:
+  `mount -F -t vixenfs /dev/diskN <mountpoint>` works as the plain user.
+- The **mountpoint may be root-owned**. `sudo mkdir /Volumes/ha` then a non-root
+  `mount` onto it worked fine. So `/Volumes/Vixen/vfs` being root-created is OK.
+- **Unmount** is also user-side: whoever mounted it can `umount` without sudo. A
+  root-mounted volume needs `sudo umount`. So if the user mounts, the user
+  unmounts — no privilege needed.
+- This explains the daemon "Module disabled" failure: the daemon attached the
+  image as root, producing a root-owned device node, so the user's FSKit
+  extension could never probe it regardless of the `asuser` trampoline.
+
+New intended design (replaces the asuser-trampoline shape):
+
+- **Root / daemon does only what genuinely needs root, one time:**
+  - create `/Volumes/Vixen` and `/Volumes/Vixen/vfs` (because `/Volumes` is
+    root-owned and the user cannot `mkdir` there);
+  - ensure the backing image file exists and is **user-accessible** (owned by /
+    readable+writable by the active console user) so the user can `hdiutil
+    attach` it.
+- **User-side app / LaunchAgent does the mount lifecycle (no password):**
+  - `hdiutil attach -nomount` → user-owned device node;
+  - `mount -F -t vixenfs /dev/diskN /Volumes/Vixen/vfs`;
+  - `umount` on teardown.
+
+Open question to settle next: where the image lives and how the user gets write
+access to it (user-owned file in `/Library/Application Support/Vixen`, an ACL,
+or relocating the image under a user-writable path). The mountpoint creation
+under `/Volumes` is the only hard root requirement that remains.
+
+## FINAL ARCHITECTURE (agreed 2026-06-08): no daemon, no PKG, DMG-only
+
+Decision: rip out SMAppService, the management queue, the privileged
+`vixen-management` daemon, and the PKG. Ship a **DMG** (brew cask friendly).
+
+Verified facts that make this safe:
+
+- The main Vixen app is **not sandboxed** (`Vixen.entitlements` has no
+  `com.apple.security.app-sandbox`; the `temporary-exception.mach-lookup` keys
+  are sandbox-only and inert). So the app may spawn `hdiutil` and `/sbin/mount`
+  directly.
+- A non-root user **can** `umount` only a filesystem mounted on a directory
+  **they own** — so the mountpoint must be chowned to the user (not just
+  created). That, plus the `mkdir` under root-owned `/Volumes`, is the entire
+  privileged surface.
+- `/Volumes/Vixen/vfs` stays the mountpoint: FSKit docs say block devices must
+  mount under `/Volumes` ("random things break" otherwise — and they break even
+  when we follow the docs), and it's the stable CAS base for every file path.
+
+The one-time privileged op (single admin prompt at first run, e.g. AppleScript
+`do shell script … with administrator privileges`):
+
+```sh
+mkdir -p /Volumes/Vixen/vfs && chown <console-uid> /Volumes/Vixen/vfs
+```
+
+Self-healing first-run check: on launch, if `/Volumes/Vixen/vfs` is missing or
+not owned by the console user, prompt once to (re)create+chown it. If a
+hand-created `/Volumes/Vixen` survives reboot, the prompt is seen exactly once;
+if `diskarbitrationd` reaps it, it reappears after reboot. Never per-mount.
+
+Everything else is user-side and passwordless:
+
+- Backing image relocates to a **user-owned** path:
+  `~/Library/Application Support/Vixen/vixen-volume.img` (plain user dir — avoids
+  Group Containers entitlement subtleties; the image is just backing bytes, not
+  the extension's socket).
+- `hdiutil attach -nomount` run **as the user** → user-owned `/dev/diskN`.
+- `mount -F -t vixenfs /dev/diskN /Volumes/Vixen/vfs` as the user.
+- `umount` as the user on teardown.
+
+Implementation sequence (preserve the oracle — prove before deleting):
+
+1. Make the mount primitive run fully user-side: relocate the image to the
+   user path, drop all `launchctl asuser`/`bsexec`/root branches, plain
+   `hdiutil` + `/sbin/mount`. Test by hand as the user (no sudo) — this is the
+   new oracle.
+2. Add the one-time admin prompt (mkdir + chown the mountpoint) on the Swift
+   first-run path.
+3. Wire the app to spawn the user-side mount binary directly (no queue, no
+   SMAppService).
+4. Delete: `queue.rs`, launchd mode in `main.rs`, `Button::execute_from_launchd`,
+   `killswitch` daemon coupling, the SMAppService `ManagementService` enum in
+   `VixenApp.swift`, `installer/eu.bearcove.vixen.management.bundle.plist`,
+   `installer/scripts/postinstall` daemon setup, `scripts/dist-pkg.sh`, and the
+   `pkg*` Justfile targets.
+5. DMG + brew cask for distribution.
+
+Keep as user-side helpers: `mount.rs` primitives (attach/mount/umount/detach),
+`extension.rs` (diagnostics), `probe.rs` (health check), `session.rs`
+(console-user lookup, used to find the uid to chown to).
+
 ## Current Ground Truth
 
 - VixenFS is an FSKit app extension bundled at:
@@ -68,23 +198,14 @@ path is proven.
 
   from a manually installed DMG app after the extension is visible and enabled.
   That direct helper path has worked.
-- The working root-service shape for ordinary mount is:
-  - root service creates/attaches the backing image;
-  - root service discovers the active console user from `/dev/console`;
-  - root service runs only the final mount leaf in that user's launchd
-    bootstrap, while keeping root privileges:
-
-    ```sh
-    launchctl asuser "$CONSOLE_UID" /sbin/mount -F -t vixenfs /dev/diskN /Volumes/Vixen/vfs
-    ```
-
-  This matches the manual proof:
-
-  ```sh
-  sudo launchctl asuser "501" /sbin/mount -F -t vixenfs /dev/diskN /Volumes/Vixen/vfs
-  ```
-
-  The UID must be discovered, not hardcoded.
+- **FALSIFIED (see BREAKTHROUGH section above).** The old belief was that the
+  root service attaches the image and runs the mount leaf via
+  `launchctl asuser "$CONSOLE_UID" /sbin/mount ...`. This only ever worked from a
+  terminal (login audit session) and fails from the SMAppService daemon with
+  "Module disabled" — because the daemon-attached device node is root-owned and
+  the user's FSKit extension cannot open it. The real fix is to attach **and**
+  mount in the user context so the device node is user-owned. Kept here only to
+  warn against re-deriving the dead end.
 
 ## Manual Baseline From A Clean DMG Install
 
