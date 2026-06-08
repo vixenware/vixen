@@ -121,24 +121,38 @@ Everything else is user-side and passwordless:
 
 Implementation sequence (preserve the oracle — prove before deleting):
 
-1. Make the mount primitive run fully user-side: relocate the image to the
-   user path, drop all `launchctl asuser`/`bsexec`/root branches, plain
-   `hdiutil` + `/sbin/mount`. Test by hand as the user (no sudo) — this is the
-   new oracle.
-2. Add the one-time admin prompt (mkdir + chown the mountpoint) on the Swift
-   first-run path.
-3. Wire the app to spawn the user-side mount binary directly (no queue, no
-   SMAppService).
-4. Delete: `queue.rs`, launchd mode in `main.rs`, `Button::execute_from_launchd`,
-   `killswitch` daemon coupling, the SMAppService `ManagementService` enum in
-   `VixenApp.swift`, `installer/eu.bearcove.vixen.management.bundle.plist`,
-   `installer/scripts/postinstall` daemon setup, `scripts/dist-pkg.sh`, and the
-   `pkg*` Justfile targets.
-5. DMG + brew cask for distribution.
+1. [DONE, oracle passed live] User-side mount primitive: image relocated to
+   `~/Library/Application Support/Vixen/vixen-volume.img`, all
+   `launchctl`/`bsexec`/root branches dropped, plain `hdiutil` + `/sbin/mount`
+   as the user. `./target/debug/vixen-management mount` mounts with no sudo.
+2. [DONE] `vixen-management setup-mountpoint` (root): mkdir+chown the mountpoint
+   to the console user. The one privileged op.
+3. [DONE] Swift app: `ManagementService` is now a thin façade — mount/unmount via
+   the bundled binary, `ensureMountpoint()` runs `setup-mountpoint` through one
+   AppleScript admin prompt. SMAppService enum, queue polling, and the
+   "One more step" approval screen removed; the only first-run gate is FSKit
+   extension enablement. `xcodebuild` Debug compiles clean.
+4. [DONE] Build system: the "Embed Vixen Management" Xcode phase no longer
+   bundles the daemon plist; deleted `installer/eu.bearcove.vixen.management.bundle.plist`.
+5. [TODO] DMG + brew cask distribution. The whole `just release*` pipeline is
+   still PKG-based (`scripts/dist-pkg.sh`, `installer/scripts/postinstall`,
+   `build.sh`, `publish.sh`, `publish-r2.sh`) and the PKG path is now BROKEN
+   (postinstall calls the removed `vixen management register`). Replace with a
+   DMG build + a brew cask; rework Sparkle appcast + R2 publish for the DMG.
+6. [TODO] Rework `uninstall`: `vixen-management uninstall` (uninstall.rs) still
+   tries to remove `/Applications/Vixen.app` and `/Library` dirs and boot out a
+   LaunchDaemon — all root-only and now stale. As a user-side action it can only
+   unmount + remove the user image; app removal belongs to `brew uninstall`.
+   The in-app "Uninstall Vixen" menu flow calls this and will partially fail.
 
-Keep as user-side helpers: `mount.rs` primitives (attach/mount/umount/detach),
-`extension.rs` (diagnostics), `probe.rs` (health check), `session.rs`
-(console-user lookup, used to find the uid to chown to).
+Still-unfinished cleanup (not yet removed, no longer on the live path): the Rust
+daemon plumbing — `queue.rs`, launchd mode in `main.rs`, `Button::execute_from_launchd`,
+`status.rs`/`repair_status.rs` writing to the root-owned daemon dir. Harmless but
+dead; remove when convenient.
+
+Keep as user-side helpers: `mount.rs` primitives (attach/mount/umount/detach,
+`setup_mountpoint`), `extension.rs` (diagnostics), `probe.rs` (health check),
+`session.rs` (console-user lookup — used to find the uid to chown to).
 
 ## Current Ground Truth
 
