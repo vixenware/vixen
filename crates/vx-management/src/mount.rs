@@ -34,11 +34,9 @@ const SACRIFICIAL_UNMOUNT_DEADLINE: Duration = Duration::from_secs(2);
 /// Establish the mount if it isn't already up: provision the device, then mount it.
 /// Idempotent — a healthy existing mount is a no-op. **Requires root** (the mount).
 ///
-/// `caller_pid` is the PID of the process that triggered this action. When present, the
-/// final `/sbin/mount` runs in that process's Mach bootstrap via `launchctl bsexec`,
-/// which places it in the login/GUI session where `fskit_agent` is running. When absent
-/// (direct CLI invocation), `launchctl asuser` is used instead — that works because the
-/// calling process is already in the user's bootstrap.
+/// `caller_pid` is retained for API symmetry but is no longer used; the final
+/// `/sbin/mount` always runs via `launchctl asuser <console-uid>`, which reaches
+/// `fskit_agent` in the user's background launchd session from both CLI and daemon.
 pub fn establish(caller_pid: Option<u32>) -> Result<()> {
     tracing::info!(mount_point = MOUNT_POINT, "establishing VixenFS mount");
     if is_mounted()? {
@@ -268,42 +266,13 @@ fn mount_volume(device: &str, caller_pid: Option<u32>) -> Result<()> {
     Ok(())
 }
 
-fn run_mount_command(devnode: &str, caller_pid: Option<u32>) -> Result<Output> {
+fn run_mount_command(devnode: &str, _caller_pid: Option<u32>) -> Result<Output> {
     let euid = unsafe { libc::geteuid() };
     if euid == 0 {
-        // When launched from the system daemon, `launchctl asuser <uid>` only reaches
-        // the user's background bootstrap, not the login/GUI session where `fskit_agent`
-        // runs. `bsexec <pid>` enters the exact bootstrap of the calling app, which IS
-        // in the GUI session. When invoked directly via sudo (no caller_pid), `asuser`
-        // still works because the calling process is already in the GUI session.
-        if let Some(pid) = caller_pid {
-            let alive = unsafe { libc::kill(pid as libc::pid_t, 0) } == 0;
-            if alive {
-                tracing::info!(
-                    pid,
-                    devnode,
-                    fs_type = FS_TYPE,
-                    mount_point = MOUNT_POINT,
-                    "running VixenFS mount via bsexec into caller bootstrap"
-                );
-                return Command::new("/bin/launchctl")
-                    .arg("bsexec")
-                    .arg(pid.to_string())
-                    .arg("/sbin/mount")
-                    .args(["-F", "-t", FS_TYPE, devnode, MOUNT_POINT])
-                    .output()
-                    .wrap_err("running launchctl bsexec mount");
-            }
-            tracing::warn!(
-                pid,
-                "caller PID is no longer alive; falling back to launchctl asuser"
-            );
-        } else {
-            tracing::warn!(
-                devnode,
-                "no caller PID found in trigger queue; falling back to launchctl asuser"
-            );
-        }
+        // fskit_agent runs in the user's background launchd session. asuser <uid>
+        // targets that session directly and works from both CLI (sudo) and the system
+        // daemon. bsexec into a GUI-session process puts mount in the wrong bootstrap
+        // and results in "Unable to invoke task".
         let Some(user) = session::console_user()? else {
             bail!("no logged-in console user for VixenFS mount");
         };
@@ -314,7 +283,7 @@ fn run_mount_command(devnode: &str, caller_pid: Option<u32>) -> Result<Output> {
             devnode,
             fs_type = FS_TYPE,
             mount_point = MOUNT_POINT,
-            "running VixenFS mount in active console bootstrap"
+            "running VixenFS mount via launchctl asuser"
         );
         return Command::new("/bin/launchctl")
             .arg("asuser")
@@ -540,12 +509,12 @@ image-alias     : /Library/Application Support/Vixen/vixen-volume.img
     }
 
     #[test]
-    fn root_mount_path_uses_bsexec_for_launchd_and_asuser_for_cli() {
+    fn root_mount_path_uses_asuser() {
         let source = include_str!("mount.rs");
         assert!(source.contains(&["/bin", "/launchctl"].concat()));
-        assert!(source.contains("bsexec"));
         assert!(source.contains(&["as", "user"].concat()));
         assert!(source.contains(&["/sbin", "/mount"].concat()));
+        assert!(!source.contains("bsexec"));
         assert!(!source.contains(&["current", "_exe"].concat()));
         assert!(!source.contains(&["sudo", " -u"].concat()));
     }
