@@ -5,17 +5,16 @@ use std::ptr;
 use std::sync::Mutex;
 
 use objc2::rc::Retained;
-use objc2::runtime::Bool;
 use objc2::{AnyThread, DefinedClass, define_class, msg_send};
 use objc2_foundation::{NSArray, NSData, NSError, NSObjectProtocol, NSString, NSUUID};
 use objc2_fs_kit::{
-    FSAccessMask, FSContainerStatus, FSDeactivateOptions, FSDirectoryCookie,
-    FSDirectoryCookieInitial, FSDirectoryEntryPacker, FSDirectoryVerifier, FSFileName,
-    FSFileSystemBase, FSItem, FSItemAttribute, FSItemAttributes, FSItemGetAttributesRequest,
-    FSItemID, FSItemType, FSMutableFileDataBuffer, FSSetXattrPolicy, FSStatFSResult, FSSyncFlags,
-    FSTaskOptions, FSUnaryFileSystem, FSVolume, FSVolumeAccessCheckOperations, FSVolumeIdentifier,
-    FSVolumeOpenCloseOperations, FSVolumeOpenModes, FSVolumeOperations, FSVolumePathConfOperations,
-    FSVolumeReadWriteOperations, FSVolumeSupportedCapabilities, FSVolumeXattrOperations,
+    FSContainerStatus, FSDeactivateOptions, FSDirectoryCookie, FSDirectoryCookieInitial,
+    FSDirectoryEntryPacker, FSDirectoryVerifier, FSFileName, FSFileSystemBase, FSItem,
+    FSItemAttribute, FSItemAttributes, FSItemGetAttributesRequest, FSItemID, FSItemType,
+    FSMutableFileDataBuffer, FSSetXattrPolicy, FSStatFSResult, FSSyncFlags, FSTaskOptions,
+    FSUnaryFileSystem, FSVolume, FSVolumeIdentifier, FSVolumeOpenCloseOperations,
+    FSVolumeOpenModes, FSVolumeOperations, FSVolumePathConfOperations, FSVolumeReadWriteOperations,
+    FSVolumeSupportedCapabilities, FSVolumeXattrOperations,
 };
 use vx_services::{
     CreateResult, GetAttributesResult, LookupResult, ReadDirResult, ReadResult,
@@ -860,30 +859,6 @@ define_class!(
                 ),
             );
             reply.call((ptr::null_mut(),));
-        }
-    }
-
-    unsafe impl FSVolumeAccessCheckOperations for RustVolume {
-        #[unsafe(method(isAccessCheckInhibited))]
-        unsafe fn isAccessCheckInhibited(&self) -> bool {
-            true
-        }
-
-        #[unsafe(method(checkAccessToItem:requestedAccess:replyHandler:))]
-        unsafe fn checkAccessToItem_requestedAccess_replyHandler(
-            &self,
-            item: &FSItem,
-            access: FSAccessMask,
-            reply: &block2::DynBlock<dyn Fn(Bool, *mut NSError)>,
-        ) {
-            let details = as_rust_item(item)
-                .map(|item| item.debug_summary())
-                .unwrap_or_else(|| "<non-rust-item>".to_owned());
-            log_event(
-                "debug",
-                format!("vixen-fskit checkAccess access={:#x} {}", access.0, details),
-            );
-            reply.call((Bool::YES, ptr::null_mut()));
         }
     }
 );

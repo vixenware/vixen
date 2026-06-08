@@ -226,10 +226,11 @@ discovery and enablement.
   the `umount` CLI in a sacrificial child where needed.
 - Do not use `launchctl kill` to restart `fskitd`. Use direct `kill(2)` against
   the `/usr/libexec/fskitd` PID when the last-resort kill switch is needed.
-- Do not add FSKit check/format/maintenance metadata unless there is a proven
-  implementation and an integration test showing that `mount` still reaches the
-  real FSKit mount path. A stub check path caused `mount` to enter check/stop
-  behavior instead of mounting.
+- Do not add FSKit check/format/maintenance metadata or access-check protocol
+  conformance unless there is a proven implementation and an integration test
+  showing that `mount` still reaches the real FSKit mount path. A stub check
+  path caused `mount` to enter check/stop behavior instead of mounting, and
+  access-check conformance is unnecessary for the current mount oracle.
 - Do not run expensive LaunchServices scans before trying the cheap mount
   primitive. The slow registration scan is not a first-line repair.
 - Do not hide privileged work behind vague UI. If the app needs administrator
