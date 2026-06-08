@@ -24,6 +24,7 @@ pub mod queue;
 pub mod repair;
 pub mod repair_status;
 pub mod status;
+pub mod uninstall;
 
 /// The fixed privileged capabilities. Each maps to one queue directory; a file
 /// appearing there *is* the request. Adding a button is a deliberate widening of the

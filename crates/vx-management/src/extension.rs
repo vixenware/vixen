@@ -18,7 +18,6 @@ use eyre::{Result, WrapErr, bail};
 
 const APP_BUNDLE_IDENTIFIER: &str = "eu.bearcove.vixen";
 const EXTENSION_BUNDLE_IDENTIFIER: &str = "eu.bearcove.vixenfs";
-const FSKIT_EXTENSION_POINT: &str = "com.apple.fskit.fsmodule";
 const INSTALLED_APP_PATH: &str = "/Applications/Vixen.app";
 const PLUGINKIT: &str = "/usr/bin/pluginkit";
 const LSREGISTER: &str = "/System/Library/Frameworks/CoreServices.framework/Versions/Current/Frameworks/LaunchServices.framework/Versions/Current/Support/lsregister";
@@ -57,7 +56,6 @@ pub fn repair_installed_extension() -> Result<()> {
             "cleaning user-session PlugInKit state"
         );
         repair_extension(&extension_path)?;
-        elect_extension_use()?;
         repair_launch_services_extension(&extension_path, mode)?;
     } else {
         tracing::info!("skipping PlugInKit repair outside the user session");
@@ -208,27 +206,6 @@ fn repair_extension(extension_path: &Path) -> Result<()> {
             .wrap_err_with(|| format!("unregistering stale VixenFS at {}", stale_path.display()))?;
     }
 
-    Ok(())
-}
-
-fn elect_extension_use() -> Result<()> {
-    tracing::info!(
-        extension_bundle_identifier = EXTENSION_BUNDLE_IDENTIFIER,
-        extension_point = FSKIT_EXTENSION_POINT,
-        "requesting PlugInKit use election for VixenFS"
-    );
-    run(
-        PLUGINKIT,
-        [
-            OsStr::new("-e"),
-            OsStr::new("use"),
-            OsStr::new("-p"),
-            OsStr::new(FSKIT_EXTENSION_POINT),
-            OsStr::new("-i"),
-            OsStr::new(EXTENSION_BUNDLE_IDENTIFIER),
-        ],
-    )
-    .wrap_err("requesting PlugInKit use election for VixenFS")?;
     Ok(())
 }
 

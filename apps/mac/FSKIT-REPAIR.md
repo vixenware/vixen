@@ -17,9 +17,9 @@ flow.
   can create or elect state that is not the same identity the user approved.
   Keep it out of the reset/mount transaction unless a future investigation
   proves a precise reason to use it.
-- The FSKit extension install/registration and the user enablement are separate
-  facts. The app can programmatically install/register its bundled extension, but
-  user enablement still happens in System Settings.
+- FSKit extension discovery and user enablement are separate facts. The bundled
+  app extension should be discovered as part of the installed app; user
+  enablement still happens in System Settings.
 - The app should check whether VixenFS is present and enabled through FSKit's
   own API. If it is not present/enabled, the app should guide the user to System
   Settings. The normal doctor path should not enumerate PlugInKit or
@@ -129,6 +129,23 @@ The automatic setup, refresh, and "Open Settings" paths must not call
 `repair-extension`. They can register the management daemon or open System
 Settings, but extension repair is explicit diagnostics only.
 
+`management register` and `management refresh` only manage the `SMAppService`
+management daemon registration. They must not run LaunchServices or PlugInKit
+cleanup as a side effect of setup.
+
+Uninstall cleanup is explicit. The app menu action runs the app-side
+`SMAppService` unregister call, then asks for administrator approval once and
+runs:
+
+```text
+/Applications/Vixen.app/Contents/MacOS/vixen-management uninstall
+```
+
+That command unmounts VixenFS, detaches the mock backing device through the
+existing unmount path, removes Vixen-owned root support state, and removes the
+old legacy `/Library/LaunchDaemons` plist if present. It does not install,
+register, or elect the FSKit extension.
+
 The separate CLI command:
 
 ```text
@@ -157,6 +174,9 @@ one-click mount repair path.
 - `crates/vx-management/src/mount.rs`
   - Sparse mock block image, `hdiutil attach`, `/sbin/mount -F -t vixenfs`,
     sacrificial unmount, and backing-device detach.
+- `crates/vx-management/src/uninstall.rs`
+  - Explicit administrator-approved uninstall cleanup for the mount, mock image,
+    management support directory, and legacy LaunchDaemon plist.
 - `crates/vx-management/src/probe.rs`
   - VFS/backend probe that reads through the mounted filesystem when a mount
     exists.

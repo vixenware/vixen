@@ -35,10 +35,18 @@ struct VixenApp: App {
                     updaterController?.checkForUpdates(nil)
                 }
                 .disabled(updaterController == nil)
+
+                Button("Uninstall Vixen…") {
+                    NotificationCenter.default.post(name: .vixenUninstallRequested, object: nil)
+                }
             }
         }
     }
 
+}
+
+private extension Notification.Name {
+    static let vixenUninstallRequested = Notification.Name("eu.bearcove.vixen.uninstallRequested")
 }
 
 enum ManagementService {
@@ -254,7 +262,7 @@ enum ManagementService {
         let started = DispatchTime.now().uptimeNanoseconds
         logger.notice("VixenFS repair transaction requested from app")
         progress("Requesting administrator approval")
-        let status = try await runElevatedRepair { repairStatus in
+        let status = try await runElevatedRepair(command: "repair") { repairStatus in
             progress(repairStatus.displayText)
         }
         guard let status else {
@@ -278,7 +286,83 @@ enum ManagementService {
         logger.notice("VixenFS repair transaction finished in \(elapsedMilliseconds(since: started), privacy: .public)ms")
     }
 
+    static func uninstallVixenFS(progress: @escaping @Sendable (String) -> Void) async throws {
+        let started = DispatchTime.now().uptimeNanoseconds
+        logger.notice("VixenFS uninstall transaction requested from app")
+        progress("Removing background management item")
+        do {
+            try unregister()
+        } catch {
+            logger.warning("management unregister during uninstall failed: \(error.localizedDescription, privacy: .public)")
+            progress("Background item unregister failed; continuing cleanup")
+        }
+
+        progress("Requesting administrator approval")
+        _ = try await runElevatedRepair(command: "uninstall") { repairStatus in
+            progress(repairStatus.displayText)
+        }
+        progress("VixenFS setup removed")
+        logger.notice("VixenFS uninstall transaction finished in \(elapsedMilliseconds(since: started), privacy: .public)ms")
+    }
+
+    static func uninstallVixenFSSync() throws {
+        let started = DispatchTime.now().uptimeNanoseconds
+        logger.notice("VixenFS synchronous uninstall transaction requested")
+        do {
+            try unregister()
+        } catch {
+            logger.warning("management unregister during synchronous uninstall failed: \(error.localizedDescription, privacy: .public)")
+        }
+        try runElevatedHelperSync(command: "uninstall")
+        logger.notice("VixenFS synchronous uninstall transaction finished in \(elapsedMilliseconds(since: started), privacy: .public)ms")
+    }
+
+    private static func runElevatedHelperSync(command: String) throws {
+        let started = DispatchTime.now().uptimeNanoseconds
+        let helperPath = helperURL.path
+        let shellCommand =
+            "VIXEN_MANAGEMENT_LOG=info,vx_management=debug,vixen_management=debug "
+            + shellSingleQuote(helperPath) + " " + shellSingleQuote(command)
+        let script = "do shell script \(appleScriptStringLiteral(shellCommand)) with administrator privileges"
+        logger.notice("starting synchronous elevated VixenFS helper command=\(command, privacy: .public) helper=\(helperPath, privacy: .public)")
+
+        let process = Process()
+        process.executableURL = URL(fileURLWithPath: "/usr/bin/osascript")
+        process.arguments = ["-e", script]
+
+        let stdout = Pipe()
+        let stderr = Pipe()
+        process.standardOutput = stdout
+        process.standardError = stderr
+
+        try process.run()
+        process.waitUntilExit()
+
+        let stdoutText =
+            String(data: stdout.fileHandleForReading.readDataToEndOfFile(), encoding: .utf8) ?? ""
+        let stderrText =
+            String(data: stderr.fileHandleForReading.readDataToEndOfFile(), encoding: .utf8) ?? ""
+        logger.notice("synchronous elevated VixenFS helper finished in \(elapsedMilliseconds(since: started), privacy: .public)ms command=\(command, privacy: .public) status=\(process.terminationStatus, privacy: .public) stdout=\(stdoutText.trimmingCharacters(in: .whitespacesAndNewlines), privacy: .public) stderr=\(stderrText.trimmingCharacters(in: .whitespacesAndNewlines), privacy: .public)")
+
+        guard process.terminationStatus == 0 else {
+            let detail =
+                stderrText.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
+                ? stdoutText.trimmingCharacters(in: .whitespacesAndNewlines)
+                : stderrText.trimmingCharacters(in: .whitespacesAndNewlines)
+            throw NSError(
+                domain: NSPOSIXErrorDomain,
+                code: Int(process.terminationStatus),
+                userInfo: [
+                    NSLocalizedDescriptionKey: detail.isEmpty
+                        ? "Administrator \(command) exited \(process.terminationStatus)"
+                        : detail
+                ]
+            )
+        }
+    }
+
     private static func runElevatedRepair(
+        command: String,
         progress: (@Sendable (RepairStatus) -> Void)? = nil
     ) async throws -> RepairStatus? {
         let requestedAfterMillis = unixMillis()
@@ -286,9 +370,9 @@ enum ManagementService {
         let helperPath = helperURL.path
         let shellCommand =
             "VIXEN_MANAGEMENT_LOG=info,vx_management=debug,vixen_management=debug "
-            + shellSingleQuote(helperPath) + " repair"
+            + shellSingleQuote(helperPath) + " " + shellSingleQuote(command)
         let script = "do shell script \(appleScriptStringLiteral(shellCommand)) with administrator privileges"
-        logger.notice("starting elevated VixenFS repair helper=\(helperPath, privacy: .public)")
+        logger.notice("starting elevated VixenFS helper command=\(command, privacy: .public) helper=\(helperPath, privacy: .public)")
 
         let process = Process()
         process.executableURL = URL(fileURLWithPath: "/usr/bin/osascript")
@@ -302,7 +386,7 @@ enum ManagementService {
         do {
             try process.run()
         } catch {
-            logger.error("elevated VixenFS repair failed to start error=\(error.localizedDescription, privacy: .public)")
+            logger.error("elevated VixenFS helper failed to start command=\(command, privacy: .public) error=\(error.localizedDescription, privacy: .public)")
             throw error
         }
 
@@ -320,7 +404,7 @@ enum ManagementService {
             String(data: stdout.fileHandleForReading.readDataToEndOfFile(), encoding: .utf8) ?? ""
         let stderrText =
             String(data: stderr.fileHandleForReading.readDataToEndOfFile(), encoding: .utf8) ?? ""
-        logger.notice("elevated VixenFS repair finished in \(elapsedMilliseconds(since: started), privacy: .public)ms status=\(process.terminationStatus, privacy: .public) stdout=\(stdoutText.trimmingCharacters(in: .whitespacesAndNewlines), privacy: .public) stderr=\(stderrText.trimmingCharacters(in: .whitespacesAndNewlines), privacy: .public)")
+        logger.notice("elevated VixenFS helper finished in \(elapsedMilliseconds(since: started), privacy: .public)ms command=\(command, privacy: .public) status=\(process.terminationStatus, privacy: .public) stdout=\(stdoutText.trimmingCharacters(in: .whitespacesAndNewlines), privacy: .public) stderr=\(stderrText.trimmingCharacters(in: .whitespacesAndNewlines), privacy: .public)")
 
         let repairStatus = readRepairStatus()
         if let repairStatus, repairStatus.updatedUnixMillis >= requestedAfterMillis {
@@ -337,7 +421,7 @@ enum ManagementService {
                 code: Int(process.terminationStatus),
                 userInfo: [
                     NSLocalizedDescriptionKey: detail.isEmpty
-                        ? "Administrator repair exited \(process.terminationStatus)"
+                        ? "Administrator \(command) exited \(process.terminationStatus)"
                         : detail
                 ]
             )
@@ -703,11 +787,9 @@ private enum ManagementCommand {
         do {
             switch command {
             case "register":
-                try ManagementService.repairAppRecords()
                 try ManagementService.register()
                 ManagementService.printSnapshot()
             case "refresh":
-                try ManagementService.repairAppRecords()
                 try ManagementService.refreshRegistration()
                 ManagementService.printSnapshot()
             case "unregister":
@@ -722,6 +804,10 @@ private enum ManagementCommand {
             case "repair":
                 _ = try ManagementService.runQueuedButtonSync("remount")
                 print("Vixen Management: repaired VixenFS")
+                ManagementService.printSnapshot()
+            case "uninstall":
+                try ManagementService.uninstallVixenFSSync()
+                print("Vixen Management: uninstalled VixenFS setup")
                 ManagementService.printSnapshot()
             case "status":
                 ManagementService.printSnapshot()
@@ -752,12 +838,13 @@ private enum ManagementCommand {
     private static func printUsage(to stream: UnsafeMutablePointer<FILE>) {
         fputs(
             """
-            Usage: Vixen management register|refresh|status|unregister|repair|repair-app-records|repair-extension|mount|unmount|remount|kill-fskitd
+            Usage: Vixen management register|refresh|status|unregister|uninstall|repair|repair-app-records|repair-extension|mount|unmount|remount|kill-fskitd
 
             """,
             stream
         )
     }
+
 }
 
 struct ContentView: View {
@@ -779,6 +866,9 @@ struct ContentView: View {
     @State private var isAutoRepairingDoctor = false
     @State private var doctorProgressText: String? = nil
     @State private var repairProgressText: String? = nil
+    @State private var uninstallDialog: UninstallDialog? = nil
+    @State private var uninstallProgressText: String? = nil
+    @State private var isUninstalling = false
     @State private var demoToggleOn = false
     @State private var cursorBob = false
 
@@ -858,6 +948,54 @@ struct ContentView: View {
                 if shouldUseDoctorFlow {
                     await refreshDoctorStatus()
                 }
+            }
+        }
+        .onReceive(NotificationCenter.default.publisher(for: .vixenUninstallRequested)) { _ in
+            uninstallDialog = .confirm
+        }
+        .alert(item: $uninstallDialog) { dialog in
+            switch dialog {
+            case .confirm:
+                return Alert(
+                    title: Text("Uninstall VixenFS setup?"),
+                    message: Text(
+                        "This unmounts VixenFS, removes Vixen's privileged management state, and unregisters the background management item. The Vixen app will remain in Applications."
+                    ),
+                    primaryButton: .destructive(Text("Uninstall")) {
+                        Task { await performUninstall() }
+                    },
+                    secondaryButton: .cancel()
+                )
+            case .completed:
+                return Alert(
+                    title: Text("VixenFS setup removed"),
+                    message: Text("You can quit Vixen and move the app to Trash when you are ready."),
+                    dismissButton: .default(Text("OK"))
+                )
+            case .failed(let message):
+                return Alert(
+                    title: Text("Uninstall failed"),
+                    message: Text(message),
+                    dismissButton: .default(Text("OK"))
+                )
+            }
+        }
+        .overlay(alignment: .bottom) {
+            if let uninstallProgressText {
+                HStack(spacing: 10) {
+                    ProgressView()
+                        .controlSize(.small)
+                        .tint(brandOrange)
+                    Text(uninstallProgressText)
+                        .font(.system(size: 12, weight: .medium))
+                }
+                .padding(.horizontal, 14)
+                .padding(.vertical, 10)
+                .background(
+                    sectionBg,
+                    in: RoundedRectangle(cornerRadius: 10, style: .continuous)
+                )
+                .padding(.bottom, 8)
             }
         }
     }
@@ -1233,6 +1371,40 @@ struct ContentView: View {
         )
         refreshManagementStatus()
         logger.notice("doctor repair finished ready=\(doctorSnapshot.isReady, privacy: .public) failures=\(doctorSnapshot.rows.filter { $0.state == .failed }.count, privacy: .public) warnings=\(doctorSnapshot.rows.filter { $0.state == .warning }.count, privacy: .public)")
+    }
+
+    @MainActor
+    private func performUninstall() async {
+        guard !isUninstalling else {
+            logger.notice("uninstall skipped because uninstall is already running")
+            return
+        }
+        isUninstalling = true
+        uninstallProgressText = "Starting uninstall"
+        logger.notice("uninstall started from UI")
+        defer {
+            isUninstalling = false
+            uninstallProgressText = nil
+        }
+
+        do {
+            try await ManagementService.uninstallVixenFS { message in
+                Task { @MainActor in
+                    uninstallProgressText = message
+                }
+            }
+            logger.notice("uninstall finished successfully")
+            uninstallDialog = .completed
+            refreshManagementStatus()
+            await checkExtensionOnce()
+            if shouldUseDoctorFlow {
+                await refreshDoctorStatus()
+            }
+        } catch {
+            logger.error("uninstall failed: \(error.localizedDescription, privacy: .public)")
+            uninstallDialog = .failed(error.localizedDescription)
+            refreshManagementStatus()
+        }
     }
 
     private func elapsedMilliseconds(since started: UInt64) -> Int {
@@ -1625,6 +1797,23 @@ struct ContentView: View {
         .onAppear {
             refreshManagementStatus()
             Task { await refreshDoctorStatus() }
+        }
+    }
+}
+
+private enum UninstallDialog: Identifiable {
+    case confirm
+    case completed
+    case failed(String)
+
+    var id: String {
+        switch self {
+        case .confirm:
+            "confirm"
+        case .completed:
+            "completed"
+        case .failed(let message):
+            "failed-\(message)"
         }
     }
 }

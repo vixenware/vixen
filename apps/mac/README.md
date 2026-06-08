@@ -116,8 +116,21 @@ Useful installed-app commands:
 - `/Applications/Vixen.app/Contents/MacOS/Vixen management register`
 - `/Applications/Vixen.app/Contents/MacOS/Vixen management refresh`
 - `/Applications/Vixen.app/Contents/MacOS/Vixen management unregister`
+- `/Applications/Vixen.app/Contents/MacOS/Vixen management uninstall`
 - `/Applications/Vixen.app/Contents/MacOS/Vixen management repair-extension`
 - `/Applications/Vixen.app/Contents/MacOS/Vixen management remount`
+
+`register` and `refresh` only manage the bundled `SMAppService` background
+item. They must not run LaunchServices or PlugInKit cleanup as a side effect of
+service setup.
+
+`uninstall` is the explicit teardown path. The app first unregisters the
+management background item, then asks for administrator approval once and runs
+the bundled `vixen-management uninstall` helper command. That helper unmounts
+VixenFS through the same sacrificial unmount path as recovery, removes the mock
+backing image and management support directory under `/Library/Application
+Support/Vixen`, and removes the old legacy `/Library/LaunchDaemons` plist if it
+is still present. It does not manually register or elect the FSKit extension.
 
 `repair-extension` runs the bundled management helper directly in the current
 effective user and exists for explicit diagnostics/experiments. It is not part

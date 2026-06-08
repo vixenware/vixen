@@ -8,7 +8,8 @@
 //! - **direct CLI**: `vixen-management repair-app-records` removes stale
 //!   LaunchServices app state for the current effective user,
 //!   `vixen-management repair-extension` records/repairs deeper extension state for
-//!   diagnostics, and `vixen-management <button>` runs one privileged capability
+//!   diagnostics, `vixen-management uninstall` removes Vixen-owned privileged
+//!   support state, and `vixen-management <button>` runs one privileged capability
 //!   immediately for manual testing.
 
 use std::fs::OpenOptions;
@@ -60,10 +61,15 @@ fn main() -> Result<()> {
                 tracing::info!(ok = outcome.is_ok(), "repair finished");
                 return outcome;
             }
+            if arg == "uninstall" {
+                let outcome = vx_management::uninstall::uninstall_vixenfs();
+                tracing::info!(ok = outcome.is_ok(), "uninstall finished");
+                return outcome;
+            }
             let Some(button) = Button::from_name(&arg) else {
                 tracing::warn!(arg, "unknown direct CLI command");
                 bail!(
-                    "unknown command {arg:?}; expected mount|unmount|remount|kill-fskitd|repair|repair-app-records|repair-extension|probe-vfs"
+                    "unknown command {arg:?}; expected mount|unmount|remount|kill-fskitd|repair|uninstall|repair-app-records|repair-extension|probe-vfs"
                 );
             };
             tracing::info!(button = ?button, "executing direct management button");
