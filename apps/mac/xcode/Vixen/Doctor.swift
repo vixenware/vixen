@@ -72,6 +72,11 @@ struct DoctorSnapshot: Sendable {
         rows.allSatisfy { $0.state == .ok }
     }
 
+    /// Is the VixenFS volume currently mounted? Used to re-arm auto-mount.
+    var mountIsUp: Bool {
+        row(id: "mount")?.state == .ok
+    }
+
     var canAttemptSafeMountRepair: Bool {
         row(id: "extension")?.state == .ok
             && row(id: "management")?.state == .ok

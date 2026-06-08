@@ -806,15 +806,24 @@ struct ContentView: View {
 
         doctorSnapshot = firstSnapshot
 
-        // Auto-mount (once per launch): if the only thing down is the mount itself —
-        // extension enabled and mountpoint ready — bring the volume up passwordlessly
-        // instead of making the user click Repair. Anything that needs privileged
-        // recovery (a poisoned/wedged path) still falls back to the Repair button.
-        if !didAttemptAutoMount && firstSnapshot.canAttemptSafeMountRepair {
+        // Auto-mount: if the only thing down is the mount itself — extension enabled and
+        // mountpoint ready — bring the volume up passwordlessly instead of making the
+        // user click Repair. Anything that needs privileged recovery (a poisoned/wedged
+        // path) still falls back to the Repair button's elevated kill-fskitd.
+        //
+        // The latch is re-armed whenever the volume is observed up (below), so each
+        // down-cycle gets a fresh attempt — but a persistently-failing path only retries
+        // once per cycle, not every poll.
+        if doctorSnapshot.mountIsUp {
+            didAttemptAutoMount = false
+        } else if !didAttemptAutoMount && firstSnapshot.canAttemptSafeMountRepair {
             didAttemptAutoMount = true
             logger.notice("attempting passwordless auto-mount")
             await Task.detached(priority: .userInitiated) { ManagementService.autoMount() }.value
             doctorSnapshot = await DoctorService.check(extensionSnapshot: extensionSnapshot)
+            if doctorSnapshot.mountIsUp {
+                didAttemptAutoMount = false
+            }
         }
 
         refreshManagementStatus()
