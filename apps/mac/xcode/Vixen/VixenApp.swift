@@ -2,7 +2,6 @@ import AppKit
 import Darwin
 @preconcurrency import FSKit
 import OSLog
-import ServiceManagement
 import Sparkle
 import SwiftUI
 
@@ -49,22 +48,15 @@ private extension Notification.Name {
     static let vixenUninstallRequested = Notification.Name("eu.bearcove.vixen.uninstallRequested")
 }
 
+/// Thin façade over the bundled `vixen-management` binary. There is no privileged
+/// daemon anymore: mount/unmount run as the logged-in user (the user-owned device node
+/// is what FSKit needs), and the only privileged step — creating and chowning the
+/// `/Volumes/Vixen/vfs` mountpoint — is done once via a single admin prompt that runs
+/// `vixen-management setup-mountpoint` as root. See FSKIT-REPAIR.md.
 enum ManagementService {
     fileprivate static let logger = Logger(subsystem: "eu.bearcove.vixen", category: "Management")
-    private static let label = "eu.bearcove.vixen.management"
-    private static let plistName = "eu.bearcove.vixen.management.plist"
-    private static let queueRoot = URL(
-        fileURLWithPath: "/Library/Application Support/Vixen/management/queue",
-        isDirectory: true
-    )
-    private static let lastActionURL = URL(
-        fileURLWithPath: "/Library/Application Support/Vixen/management/last-action.json",
-        isDirectory: false
-    )
-    private static let repairStatusURL = URL(
-        fileURLWithPath: "/Library/Application Support/Vixen/management/repair-status.json",
-        isDirectory: false
-    )
+    static let mountPoint = "/Volumes/Vixen/vfs"
+
     private static var helperURL: URL {
         Bundle.main.bundleURL
             .appendingPathComponent("Contents", isDirectory: true)
@@ -72,63 +64,50 @@ enum ManagementService {
             .appendingPathComponent("vixen-management", isDirectory: false)
     }
 
+    /// Last mount/unmount result, surfaced in the doctor's mount row. Guarded by a lock
+    /// because it is read from the doctor's detached check task and written from repair.
+    private static let lastActionLock = NSLock()
+    nonisolated(unsafe) private static var lastActionStorage: LastActionStatus?
+
+    private static func setLastAction(_ value: LastActionStatus?) {
+        lastActionLock.lock()
+        lastActionStorage = value
+        lastActionLock.unlock()
+    }
+
+    private static func currentLastAction() -> LastActionStatus? {
+        lastActionLock.lock()
+        defer { lastActionLock.unlock() }
+        return lastActionStorage
+    }
+
     struct StatusSnapshot {
         let helperAvailable: Bool
         let helperDetail: String?
-        let serviceStatus: SMAppService.Status
-        let launchdStatus: LaunchdStatus?
+        /// Does `/Volumes/Vixen/vfs` exist and is it owned by the current user? This is
+        /// the only setup the app gates on; everything else is passwordless.
+        let mountpointReady: Bool
         let lastActionStatus: LastActionStatus?
 
         var isReady: Bool {
-            guard helperAvailable else { return false }
-            switch serviceStatus {
-            case .enabled:
-                return true
-            default:
-                return false
-            }
+            helperAvailable && mountpointReady
         }
 
         var description: String {
             guard helperAvailable else {
                 return helperDetail ?? "Helper missing from app bundle"
             }
-            switch serviceStatus {
-            case .enabled:
-                return "Ready"
-            case .requiresApproval:
-                return "Needs approval"
-            case .notRegistered:
-                return "Not configured"
-            case .notFound:
-                return "Missing from app bundle"
-            @unknown default:
-                return "Status unknown"
-            }
+            return mountpointReady ? "Ready" : "Mountpoint not set up"
         }
 
         var backgroundItemDescription: String? {
             guard helperAvailable else { return nil }
-            switch serviceStatus {
-            case .enabled:
-                if launchdStatus?.failureDescription != nil {
-                    return "Background item launch failed"
-                }
-                return "Background item allowed"
-            case .requiresApproval:
-                return "Background item needs approval"
-            case .notRegistered:
-                return "Background item not registered"
-            case .notFound:
-                return "Background item missing from app bundle"
-            @unknown default:
-                return "Background item status unknown"
-            }
+            return mountpointReady ? "Mountpoint ready" : "Mountpoint needs first-run setup"
         }
 
         var detail: String? {
             guard helperAvailable else { return helperDetail }
-            return launchdStatus?.failureDescription ?? backgroundItemDescription
+            return backgroundItemDescription
         }
     }
 
@@ -144,78 +123,17 @@ enum ManagementService {
         }
     }
 
-    struct RepairStatus {
-        let active: Bool
-        let step: String
-        let state: String
-        let message: String
-        let updatedUnixMillis: UInt64
-
-        var displayText: String {
-            if !message.isEmpty {
-                return message
-            }
-            switch state {
-            case "ok":
-                return "Finished \(step)"
-            case "failed":
-                return "Failed \(step)"
-            default:
-                return "Running \(step)"
-            }
-        }
-    }
-
-    struct LaunchdStatus {
-        let jobState: String?
-        let lastExitCode: String?
-        let commandError: String?
-
-        var failureDescription: String? {
-            if let commandError {
-                return commandError
-            }
-            if let jobState, jobState.localizedCaseInsensitiveContains("failed") {
-                if let lastExitCode, isFailureExit(lastExitCode) {
-                    return "launchd: \(jobState); last exit \(lastExitCode)"
-                }
-                return "launchd: \(jobState)"
-            }
-            if let lastExitCode, isFailureExit(lastExitCode) {
-                return "launchd: last exit \(lastExitCode)"
-            }
-            return nil
-        }
-
-        private func isFailureExit(_ value: String) -> Bool {
-            let trimmed = value.trimmingCharacters(in: .whitespacesAndNewlines)
-            return !trimmed.hasPrefix("0") && !trimmed.hasPrefix("(")
-        }
-    }
-
-    static var service: SMAppService {
-        SMAppService.daemon(plistName: plistName)
-    }
-
-    static var status: SMAppService.Status {
-        service.status
-    }
-
     static func snapshot() -> StatusSnapshot {
         let started = DispatchTime.now().uptimeNanoseconds
-        logger.notice("management snapshot started")
         let helper = helperStatus()
-        let serviceStatus = status
-        let launchdStatus = serviceStatus == .enabled ? inspectLaunchd() : nil
-        let lastActionStatus = helper.available ? readLastActionStatus() : nil
+        let mountpointReady = helper.available && isMountpointReady()
         let snapshot = StatusSnapshot(
             helperAvailable: helper.available,
             helperDetail: helper.detail,
-            serviceStatus: serviceStatus,
-            launchdStatus: launchdStatus,
-            lastActionStatus: lastActionStatus
+            mountpointReady: mountpointReady,
+            lastActionStatus: currentLastAction()
         )
-        logger.notice("management snapshot finished in \(elapsedMilliseconds(since: started), privacy: .public)ms helperAvailable=\(helper.available, privacy: .public) helperDetail=\(helper.detail ?? "none", privacy: .public) service=\(statusName(serviceStatus), privacy: .public) ready=\(snapshot.isReady, privacy: .public) detail=\(snapshot.detail ?? "none", privacy: .public)")
+        logger.notice("management snapshot finished in \(elapsedMilliseconds(since: started), privacy: .public)ms helperAvailable=\(helper.available, privacy: .public) mountpointReady=\(mountpointReady, privacy: .public) ready=\(snapshot.isReady, privacy: .public)")
         return snapshot
     }
 
@@ -233,232 +151,152 @@ enum ManagementService {
         return (false, "Bundled helper missing from app bundle")
     }
 
-    static func repairExtension() throws {
-        logger.notice("repair-extension started helper=\(helperURL.path, privacy: .public)")
-        let result = runHelper(arguments: ["repair-extension"])
-        guard result.status == 0 else {
-            let detail =
-                result.stderr.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
-                ? result.stdout.trimmingCharacters(in: .whitespacesAndNewlines)
-                : result.stderr.trimmingCharacters(in: .whitespacesAndNewlines)
-            throw NSError(
-                domain: NSPOSIXErrorDomain,
-                code: Int(result.status),
-                userInfo: [
-                    NSLocalizedDescriptionKey: detail.isEmpty
-                        ? "vixen-management repair-extension exited \(result.status)"
-                        : detail
-                ]
-            )
+    /// `/Volumes/Vixen/vfs` exists and is owned by us. When the volume is mounted the
+    /// mountpoint reports the volume's root ownership, so treat a live mount as ready too.
+    static func isMountpointReady() -> Bool {
+        var st = stat()
+        guard stat(mountPoint, &st) == 0 else { return false }
+        guard (st.st_mode & S_IFMT) == S_IFDIR else { return false }
+        return st.st_uid == getuid() || isVixenMounted()
+    }
+
+    private static func isVixenMounted() -> Bool {
+        let result = runProcess("/sbin/mount", arguments: [])
+        guard result.status == 0 else { return false }
+        return result.stdout.split(whereSeparator: \.isNewline).contains { line in
+            line.contains(" on \(mountPoint) ") && line.localizedCaseInsensitiveContains("vixenfs")
         }
-        logger.notice("repair-extension succeeded stdout=\(result.stdout.trimmingCharacters(in: .whitespacesAndNewlines), privacy: .public)")
+    }
+
+    static func repairExtension() throws {
+        try runHelperChecked(["repair-extension"], label: "repair-extension")
     }
 
     static func repairAppRecords() throws {
-        logger.notice("repair-app-records started helper=\(helperURL.path, privacy: .public)")
-        let result = runHelper(arguments: ["repair-app-records"])
-        guard result.status == 0 else {
-            let detail =
-                result.stderr.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
-                ? result.stdout.trimmingCharacters(in: .whitespacesAndNewlines)
-                : result.stderr.trimmingCharacters(in: .whitespacesAndNewlines)
-            throw NSError(
-                domain: NSPOSIXErrorDomain,
-                code: Int(result.status),
-                userInfo: [
-                    NSLocalizedDescriptionKey: detail.isEmpty
-                        ? "vixen-management repair-app-records exited \(result.status)"
-                        : detail
-                ]
-            )
-        }
-        logger.notice("repair-app-records succeeded stdout=\(result.stdout.trimmingCharacters(in: .whitespacesAndNewlines), privacy: .public)")
+        try runHelperChecked(["repair-app-records"], label: "repair-app-records")
     }
 
+    /// Ensure the volume is mounted: make the mountpoint exist+owned (one-time admin
+    /// prompt), then run the user-side mount. No password unless the mountpoint must be
+    /// (re)created.
     static func repairVixenFS(progress: @escaping @Sendable (String) -> Void) async throws {
         let started = DispatchTime.now().uptimeNanoseconds
-        logger.notice("VixenFS repair transaction requested from app")
-        progress("Requesting Vixen Management")
-        let lastAction = try await runQueuedButton("mount") { repairStatus in
-            progress(repairStatus.displayText)
-        }
-        try requireQueuedActionSucceeded(lastAction, name: "mount")
+        logger.notice("VixenFS repair requested from app")
+        progress("Preparing mountpoint")
+        try ensureMountpoint()
+        progress("Mounting VixenFS")
+        let result = runHelper(arguments: ["mount"])
+        recordAction("mount", result: result)
+        try requireHelperSucceeded(result, name: "mount")
         progress("VixenFS mounted")
-        logger.notice("VixenFS repair transaction finished in \(elapsedMilliseconds(since: started), privacy: .public)ms")
+        logger.notice("VixenFS repair finished in \(elapsedMilliseconds(since: started), privacy: .public)ms")
     }
 
     static func uninstallVixenFS(progress: @escaping @Sendable (String) -> Void) async throws {
-        let started = DispatchTime.now().uptimeNanoseconds
-        logger.notice("VixenFS uninstall transaction requested from app")
-        progress("Requesting Vixen Management")
-        let lastAction = try await runQueuedButton("uninstall") { repairStatus in
-            progress(repairStatus.displayText)
-        }
-        try requireQueuedActionSucceeded(lastAction, name: "uninstall", allowMissingStatus: true)
+        logger.notice("VixenFS uninstall requested from app")
+        progress("Unmounting VixenFS")
+        let result = runHelper(arguments: ["uninstall"])
+        recordAction("uninstall", result: result)
+        try requireHelperSucceeded(result, name: "uninstall")
         progress("VixenFS setup removed")
-        logger.notice("VixenFS uninstall transaction finished in \(elapsedMilliseconds(since: started), privacy: .public)ms")
     }
 
-    static func uninstallVixenFSSync() throws {
-        let started = DispatchTime.now().uptimeNanoseconds
-        logger.notice("VixenFS synchronous uninstall transaction requested")
-        let lastAction = try runQueuedButtonSync("uninstall")
-        try requireQueuedActionSucceeded(lastAction, name: "uninstall", allowMissingStatus: true)
-        logger.notice("VixenFS synchronous uninstall transaction finished in \(elapsedMilliseconds(since: started), privacy: .public)ms")
-    }
-
-    static func runQueuedButton(
-        _ name: String,
-        progress: (@Sendable (RepairStatus) -> Void)? = nil
-    ) async throws -> LastActionStatus? {
-        let requestedAfterMillis = unixMillis()
-        let trigger = try fireQueue(name)
-        let started = DispatchTime.now().uptimeNanoseconds
-        logger.notice("waiting for management queue name=\(name, privacy: .public) trigger=\(trigger.path, privacy: .public)")
-        while elapsedMilliseconds(since: started) < 90_000 {
-            if !FileManager.default.fileExists(atPath: trigger.path) {
-                let lastAction = readLastActionStatus()
-                logger.notice("management queue consumed name=\(name, privacy: .public) elapsedMs=\(elapsedMilliseconds(since: started), privacy: .public) lastActionOk=\(lastAction?.ok.description ?? "none", privacy: .public)")
-                return lastAction
-            }
-            if let repairStatus = readRepairStatus(),
-                repairStatus.updatedUnixMillis >= requestedAfterMillis
-            {
-                progress?(repairStatus)
-            }
-            try await Task.sleep(for: .milliseconds(250))
+    /// The single privileged operation, via one admin prompt. No-op when the mountpoint
+    /// is already owned by us, so it normally prompts at most once in the app's lifetime.
+    static func ensureMountpoint() throws {
+        if isMountpointReady() {
+            logger.notice("mountpoint already set up; no admin prompt needed")
+            return
         }
-
-        logger.error("management queue timed out name=\(name, privacy: .public) trigger=\(trigger.path, privacy: .public)")
-        throw NSError(
-            domain: NSPOSIXErrorDomain,
-            code: Int(ETIMEDOUT),
-            userInfo: [NSLocalizedDescriptionKey: "Timed out waiting for Vixen Management"]
-        )
-    }
-
-    static func runQueuedButtonSync(_ name: String) throws -> LastActionStatus? {
-        let trigger = try fireQueue(name)
-        let started = DispatchTime.now().uptimeNanoseconds
-        logger.notice("waiting synchronously for management queue name=\(name, privacy: .public) trigger=\(trigger.path, privacy: .public)")
-        while elapsedMilliseconds(since: started) < 90_000 {
-            if !FileManager.default.fileExists(atPath: trigger.path) {
-                let lastAction = readLastActionStatus()
-                logger.notice("synchronous management queue consumed name=\(name, privacy: .public) elapsedMs=\(elapsedMilliseconds(since: started), privacy: .public) lastActionOk=\(lastAction?.ok.description ?? "none", privacy: .public)")
-                if let lastAction, !lastAction.ok {
-                    throw NSError(
-                        domain: NSPOSIXErrorDomain,
-                        code: Int(EIO),
-                        userInfo: [
-                            NSLocalizedDescriptionKey: lastAction.failureDescription ?? lastAction.message
-                        ]
-                    )
-                }
-                return lastAction
-            }
-            Thread.sleep(forTimeInterval: 0.25)
+        logger.notice("mountpoint not set up; requesting one-time admin authorization")
+        let helperPath = helperURL.path
+        // Run the privileged helper through AppleScript so macOS shows the standard admin
+        // password dialog. `quoted form of` keeps a path with spaces intact.
+        let command = "do shell script quoted form of \"\(appleScriptEscaped(helperPath))\" & \" setup-mountpoint\" with administrator privileges"
+        try runAppleScriptPrivileged(command)
+        guard isMountpointReady() else {
+            throw NSError(
+                domain: NSPOSIXErrorDomain,
+                code: Int(EIO),
+                userInfo: [NSLocalizedDescriptionKey: "Mountpoint setup did not take effect"]
+            )
         }
-
-        logger.error("synchronous management queue timed out name=\(name, privacy: .public) trigger=\(trigger.path, privacy: .public)")
-        throw NSError(
-            domain: NSPOSIXErrorDomain,
-            code: Int(ETIMEDOUT),
-            userInfo: [NSLocalizedDescriptionKey: "Timed out waiting for Vixen Management"]
-        )
+        logger.notice("mountpoint set up via admin prompt")
     }
 
-    fileprivate static func requireQueuedActionSucceeded(
-        _ lastAction: LastActionStatus?,
-        name: String,
-        allowMissingStatus: Bool = false
+    private static func appleScriptEscaped(_ value: String) -> String {
+        value.replacingOccurrences(of: "\\", with: "\\\\")
+            .replacingOccurrences(of: "\"", with: "\\\"")
+    }
+
+    private static func runAppleScriptPrivileged(_ source: String) throws {
+        let run: () throws -> Void = {
+            var errorInfo: NSDictionary?
+            guard let script = NSAppleScript(source: source) else {
+                throw NSError(
+                    domain: NSPOSIXErrorDomain,
+                    code: Int(EINVAL),
+                    userInfo: [NSLocalizedDescriptionKey: "Could not build authorization script"]
+                )
+            }
+            script.executeAndReturnError(&errorInfo)
+            if let errorInfo {
+                let message = (errorInfo[NSAppleScript.errorMessage] as? String)
+                    ?? "Authorization was cancelled"
+                logger.error("privileged AppleScript failed: \(message, privacy: .public)")
+                throw NSError(
+                    domain: NSPOSIXErrorDomain,
+                    code: Int(EPERM),
+                    userInfo: [NSLocalizedDescriptionKey: message]
+                )
+            }
+        }
+        // NSAppleScript must run on the main thread.
+        if Thread.isMainThread {
+            try run()
+        } else {
+            var thrown: Error?
+            DispatchQueue.main.sync {
+                do { try run() } catch { thrown = error }
+            }
+            if let thrown { throw thrown }
+        }
+    }
+
+    private static func recordAction(
+        _ button: String,
+        result: (status: Int32, stdout: String, stderr: String)
+    ) {
+        let message = (result.stderr.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
+            ? result.stdout
+            : result.stderr).trimmingCharacters(in: .whitespacesAndNewlines)
+        setLastAction(LastActionStatus(button: button, ok: result.status == 0, message: message))
+    }
+
+    private static func runHelperChecked(_ arguments: [String], label: String) throws {
+        logger.notice("\(label, privacy: .public) started helper=\(helperURL.path, privacy: .public)")
+        let result = runHelper(arguments: arguments)
+        try requireHelperSucceeded(result, name: label)
+        logger.notice("\(label, privacy: .public) succeeded stdout=\(result.stdout.trimmingCharacters(in: .whitespacesAndNewlines), privacy: .public)")
+    }
+
+    private static func requireHelperSucceeded(
+        _ result: (status: Int32, stdout: String, stderr: String),
+        name: String
     ) throws {
-        guard let lastAction else {
-            logger.notice("management queue finished without last-action status name=\(name, privacy: .public) allowMissing=\(allowMissingStatus, privacy: .public)")
-            if allowMissingStatus {
-                return
-            }
-            throw NSError(
-                domain: NSPOSIXErrorDomain,
-                code: Int(EIO),
-                userInfo: [
-                    NSLocalizedDescriptionKey:
-                        "Vixen Management finished \(name) without recording a result"
-                ]
-            )
-        }
-        guard lastAction.ok else {
-            throw NSError(
-                domain: NSPOSIXErrorDomain,
-                code: Int(EIO),
-                userInfo: [
-                    NSLocalizedDescriptionKey: lastAction.failureDescription ?? lastAction.message
-                ]
-            )
-        }
-    }
-
-    static func register() throws {
-        let daemon = service
-        logger.notice("management register requested currentStatus=\(statusName(daemon.status), privacy: .public)")
-        // Skip only when approval is already pending — calling register() during
-        // that window is incorrect. For .enabled we still call through so that a
-        // PKG upgrade that replaced the binary gets its launchd job hash refreshed
-        // (Apple docs: register() on an already-enabled service is non-destructive
-        // and does not show the approval dialog again).
-        if daemon.status == .requiresApproval {
-            logger.notice("management register skipped because approval is pending currentStatus=\(statusName(daemon.status), privacy: .public)")
-            return
-        }
-
-        try registerService()
-    }
-
-    private static func registerService() throws {
-        do {
-            logger.notice("SMAppService.register starting plist=\(plistName, privacy: .public)")
-            try service.register()
-            logger.notice("SMAppService.register returned status=\(statusName(service.status), privacy: .public)")
-        } catch {
-            logger.error("SMAppService.register threw status=\(statusName(service.status), privacy: .public) error=\(error.localizedDescription, privacy: .public)")
-            switch service.status {
-            case .enabled, .requiresApproval:
-                logger.notice("SMAppService.register error treated as acceptable status=\(statusName(service.status), privacy: .public)")
-                return
-            default:
-                throw error
-            }
-        }
-    }
-
-    static func refreshRegistration() throws {
-        let daemon = service
-        logger.notice("management refresh requested currentStatus=\(statusName(daemon.status), privacy: .public)")
-        switch daemon.status {
-        case .enabled:
-            logger.notice("SMAppService.unregister before refresh starting")
-            try daemon.unregister()
-            logger.notice("SMAppService.unregister before refresh returned status=\(statusName(service.status), privacy: .public)")
-        case .requiresApproval:
-            logger.notice("management refresh skipped because approval is pending")
-            return
-        default:
-            break
-        }
-
-        try registerService()
-    }
-
-    static func unregister() throws {
-        let daemon = service
-        logger.notice("management unregister requested currentStatus=\(statusName(daemon.status), privacy: .public)")
-        switch daemon.status {
-        case .notFound, .notRegistered:
-            logger.notice("management unregister skipped currentStatus=\(statusName(daemon.status), privacy: .public)")
-            return
-        default:
-            try daemon.unregister()
-            logger.notice("management unregister returned status=\(statusName(service.status), privacy: .public)")
-        }
+        guard result.status != 0 else { return }
+        let detail = result.stderr.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
+            ? result.stdout.trimmingCharacters(in: .whitespacesAndNewlines)
+            : result.stderr.trimmingCharacters(in: .whitespacesAndNewlines)
+        throw NSError(
+            domain: NSPOSIXErrorDomain,
+            code: Int(result.status),
+            userInfo: [
+                NSLocalizedDescriptionKey: detail.isEmpty
+                    ? "vixen-management \(name) exited \(result.status)"
+                    : detail
+            ]
+        )
     }
 
     static func printSnapshot(_ snapshot: StatusSnapshot = snapshot()) {
@@ -474,35 +312,19 @@ enum ManagementService {
         }
     }
 
-    static func fireQueue(_ name: String) throws -> URL {
-        logger.notice("firing management queue name=\(name, privacy: .public)")
-        let trigger = queueRoot
-            .appendingPathComponent(name, isDirectory: true)
-            .appendingPathComponent("trigger-\(getpid())-\(UUID().uuidString)")
-        let fd = trigger.path.withCString {
-            Darwin.open($0, O_CREAT | O_EXCL | O_WRONLY, mode_t(S_IRUSR | S_IWUSR))
-        }
-        guard fd >= 0 else {
-            let code = Int(errno)
-            logger.error("failed to create management trigger name=\(name, privacy: .public) path=\(trigger.path, privacy: .public) errno=\(code, privacy: .public) message=\(String(cString: strerror(Int32(code))), privacy: .public)")
-            throw NSError(
-                domain: NSPOSIXErrorDomain,
-                code: code,
-                userInfo: [NSLocalizedDescriptionKey: String(cString: strerror(Int32(code)))]
-            )
-        }
-        Darwin.close(fd)
-        logger.notice("created management trigger name=\(name, privacy: .public) path=\(trigger.path, privacy: .public)")
-        return trigger
-    }
-
     private static func runHelper(arguments: [String]) -> (
         status: Int32, stdout: String, stderr: String
     ) {
+        runProcess(helperURL.path, arguments: arguments)
+    }
+
+    private static func runProcess(_ executable: String, arguments: [String]) -> (
+        status: Int32, stdout: String, stderr: String
+    ) {
         let started = DispatchTime.now().uptimeNanoseconds
-        logger.notice("running bundled helper path=\(helperURL.path, privacy: .public) arguments=\(arguments.joined(separator: " "), privacy: .public)")
+        logger.notice("running \(executable, privacy: .public) arguments=\(arguments.joined(separator: " "), privacy: .public)")
         let process = Process()
-        process.executableURL = helperURL
+        process.executableURL = URL(fileURLWithPath: executable)
         process.arguments = arguments
 
         let stdout = Pipe()
@@ -513,7 +335,7 @@ enum ManagementService {
         do {
             try process.run()
         } catch {
-            logger.error("bundled helper failed to start arguments=\(arguments.joined(separator: " "), privacy: .public) error=\(error.localizedDescription, privacy: .public)")
+            logger.error("\(executable, privacy: .public) failed to start error=\(error.localizedDescription, privacy: .public)")
             return (127, "", error.localizedDescription)
         }
 
@@ -522,152 +344,13 @@ enum ManagementService {
             String(data: stdout.fileHandleForReading.readDataToEndOfFile(), encoding: .utf8) ?? ""
         let stderrText =
             String(data: stderr.fileHandleForReading.readDataToEndOfFile(), encoding: .utf8) ?? ""
-        logger.notice("bundled helper finished in \(elapsedMilliseconds(since: started), privacy: .public)ms status=\(process.terminationStatus, privacy: .public) stdout=\(stdoutText.trimmingCharacters(in: .whitespacesAndNewlines), privacy: .public) stderr=\(stderrText.trimmingCharacters(in: .whitespacesAndNewlines), privacy: .public)")
-        return (
-            process.terminationStatus,
-            stdoutText,
-            stderrText
-        )
-    }
-
-    private static func inspectLaunchd() -> LaunchdStatus {
-        let started = DispatchTime.now().uptimeNanoseconds
-        logger.notice("launchd inspection started label=\(label, privacy: .public)")
-        let process = Process()
-        process.executableURL = URL(fileURLWithPath: "/bin/launchctl")
-        process.arguments = ["print", "system/\(label)"]
-
-        let stdout = Pipe()
-        let stderr = Pipe()
-        process.standardOutput = stdout
-        process.standardError = stderr
-
-        do {
-            try process.run()
-        } catch {
-            logger.error("launchd inspection failed to start: \(error.localizedDescription, privacy: .public)")
-            return LaunchdStatus(
-                jobState: nil,
-                lastExitCode: nil,
-                commandError: "launchctl unavailable: \(error.localizedDescription)"
-            )
-        }
-
-        process.waitUntilExit()
-
-        let output = String(
-            data: stdout.fileHandleForReading.readDataToEndOfFile(),
-            encoding: .utf8
-        ) ?? ""
-        let errorOutput = String(
-            data: stderr.fileHandleForReading.readDataToEndOfFile(),
-            encoding: .utf8
-        )?
-            .trimmingCharacters(in: .whitespacesAndNewlines)
-
-        if process.terminationStatus != 0 {
-            let detail =
-                errorOutput?.isEmpty == false ? errorOutput! : "exit \(process.terminationStatus)"
-            logger.error("launchd inspection failed in \(elapsedMilliseconds(since: started), privacy: .public)ms detail=\(detail, privacy: .public)")
-            return LaunchdStatus(
-                jobState: nil,
-                lastExitCode: nil,
-                commandError: "launchctl print failed: \(detail)"
-            )
-        }
-
-        var jobState: String?
-        var lastExitCode: String?
-        for rawLine in output.split(whereSeparator: \.isNewline) {
-            let line = rawLine.trimmingCharacters(in: .whitespaces)
-            if let value = value(in: line, after: "job state = ") {
-                jobState = value
-            } else if let value = value(in: line, after: "last exit code = ") {
-                lastExitCode = value
-            }
-        }
-
-        logger.notice("launchd inspection finished in \(elapsedMilliseconds(since: started), privacy: .public)ms jobState=\(jobState ?? "none", privacy: .public) lastExitCode=\(lastExitCode ?? "none", privacy: .public)")
-        return LaunchdStatus(
-            jobState: jobState,
-            lastExitCode: lastExitCode,
-            commandError: nil
-        )
-    }
-
-    private static func value(in line: String, after prefix: String) -> String? {
-        guard line.hasPrefix(prefix) else { return nil }
-        return String(line.dropFirst(prefix.count)).trimmingCharacters(in: .whitespaces)
-    }
-
-    private static func readLastActionStatus() -> LastActionStatus? {
-        guard let data = try? Data(contentsOf: lastActionURL) else {
-            logger.notice("management last-action missing path=\(lastActionURL.path, privacy: .public)")
-            return nil
-        }
-        guard
-            let object = try? JSONSerialization.jsonObject(with: data),
-            let dictionary = object as? [String: Any],
-            let button = dictionary["button"] as? String,
-            let ok = dictionary["ok"] as? Bool
-        else {
-            logger.error("management last-action unreadable path=\(lastActionURL.path, privacy: .public)")
-            return nil
-        }
-        let message = dictionary["message"] as? String ?? ""
-        logger.notice("management last-action read button=\(button, privacy: .public) ok=\(ok, privacy: .public) message=\(message, privacy: .public)")
-        return LastActionStatus(button: button, ok: ok, message: message)
-    }
-
-    private static func readRepairStatus() -> RepairStatus? {
-        guard let data = try? Data(contentsOf: repairStatusURL) else {
-            return nil
-        }
-        guard
-            let object = try? JSONSerialization.jsonObject(with: data),
-            let dictionary = object as? [String: Any],
-            let active = dictionary["active"] as? Bool,
-            let step = dictionary["step"] as? String,
-            let state = dictionary["state"] as? String
-        else {
-            logger.error("management repair-status unreadable path=\(repairStatusURL.path, privacy: .public)")
-            return nil
-        }
-        let message = dictionary["message"] as? String ?? ""
-        let updatedUnixMillis =
-            (dictionary["updated_unix_millis"] as? NSNumber)?.uint64Value ?? 0
-        logger.notice("management repair-status read active=\(active, privacy: .public) step=\(step, privacy: .public) state=\(state, privacy: .public) updatedUnixMillis=\(updatedUnixMillis, privacy: .public) message=\(message, privacy: .public)")
-        return RepairStatus(
-            active: active,
-            step: step,
-            state: state,
-            message: message,
-            updatedUnixMillis: updatedUnixMillis
-        )
-    }
-
-    private static func statusName(_ status: SMAppService.Status) -> String {
-        switch status {
-        case .enabled:
-            "enabled"
-        case .requiresApproval:
-            "requiresApproval"
-        case .notRegistered:
-            "notRegistered"
-        case .notFound:
-            "notFound"
-        @unknown default:
-            "unknown"
-        }
+        logger.notice("\(executable, privacy: .public) finished in \(elapsedMilliseconds(since: started), privacy: .public)ms status=\(process.terminationStatus, privacy: .public)")
+        return (process.terminationStatus, stdoutText, stderrText)
     }
 
     private static func elapsedMilliseconds(since started: UInt64) -> Int {
         let elapsed = DispatchTime.now().uptimeNanoseconds - started
         return Int(elapsed / 1_000_000)
-    }
-
-    private static func unixMillis() -> UInt64 {
-        UInt64((Date().timeIntervalSince1970 * 1000).rounded(.down))
     }
 }
 
@@ -682,39 +365,16 @@ private enum ManagementCommand {
 
         do {
             switch command {
-            case "register":
-                try ManagementService.register()
-                ManagementService.printSnapshot()
-            case "refresh":
-                try ManagementService.refreshRegistration()
-                ManagementService.printSnapshot()
-            case "unregister":
-                try ManagementService.unregister()
-                ManagementService.printSnapshot()
             case "repair-app-records":
                 try ManagementService.repairAppRecords()
                 print("Vixen Management: repaired app registration")
             case "repair-extension":
                 try ManagementService.repairExtension()
                 print("Vixen Management: repaired extension registration")
-            case "repair":
-                let lastAction = try ManagementService.runQueuedButtonSync("mount")
-                try ManagementService.requireQueuedActionSucceeded(lastAction, name: "mount")
-                print("Vixen Management: mounted VixenFS")
-                ManagementService.printSnapshot()
-            case "uninstall":
-                try ManagementService.uninstallVixenFSSync()
-                print("Vixen Management: uninstalled VixenFS setup")
+            case "setup-mountpoint":
+                try ManagementService.ensureMountpoint()
+                print("Vixen Management: mountpoint ready")
             case "status":
-                ManagementService.printSnapshot()
-            case "mount", "remount":
-                let lastAction = try ManagementService.runQueuedButtonSync(command)
-                try ManagementService.requireQueuedActionSucceeded(lastAction, name: command)
-                print("Vixen Management: \(command) completed")
-                ManagementService.printSnapshot()
-            case "unmount", "kill-fskitd":
-                _ = try ManagementService.runQueuedButtonSync(command)
-                print("Vixen Management: queued \(command)")
                 ManagementService.printSnapshot()
             case "help", "--help", "-h":
                 printUsage(to: stdout)
@@ -735,7 +395,8 @@ private enum ManagementCommand {
     private static func printUsage(to stream: UnsafeMutablePointer<FILE>) {
         fputs(
             """
-            Usage: Vixen management register|refresh|status|unregister|uninstall|repair|repair-app-records|repair-extension|mount|unmount|remount|kill-fskitd
+            Usage: Vixen management status|setup-mountpoint|repair-app-records|repair-extension
+            (mount/unmount/uninstall run as the user via the bundled vixen-management binary.)
 
             """,
             stream
@@ -751,13 +412,10 @@ struct ContentView: View {
     @State private var managementSnapshot = ManagementService.StatusSnapshot(
         helperAvailable: false,
         helperDetail: "Not checked",
-        serviceStatus: .notFound,
-        launchdStatus: nil,
+        mountpointReady: false,
         lastActionStatus: nil
     )
     @State private var managementError: String? = nil
-    @State private var isConfiguringManagement = false
-    @State private var didRequestManagementSetup = false
     @State private var doctorSnapshot = DoctorSnapshot.pending
     @State private var isCheckingDoctor = false
     @State private var isAutoRepairingDoctor = false
@@ -779,8 +437,10 @@ struct ContentView: View {
     private var isSupportedOS: Bool {
         ProcessInfo.processInfo.operatingSystemVersion.majorVersion >= requiredMajorVersion
     }
+    /// The bundled `vixen-management` binary is present. (The mountpoint, the only
+    /// privileged setup, is created lazily by the Repair button — not a gate to the UI.)
     private var isManagementConfigured: Bool {
-        managementSnapshot.isReady
+        managementSnapshot.helperAvailable
     }
     private var isExtensionEnabled: Bool {
         extensionSnapshot.enabled
@@ -789,7 +449,7 @@ struct ContentView: View {
         extensionSnapshot.error == nil && (!extensionSnapshot.found || !extensionSnapshot.enabled)
     }
     private var shouldUseDoctorFlow: Bool {
-        isManagementConfigured && !needsExtensionEnablement
+        !needsExtensionEnablement
     }
 
     private var contentMinHeight: CGFloat {
@@ -806,7 +466,7 @@ struct ContentView: View {
 
     @ViewBuilder
     private var rootContent: some View {
-        if isSupportedOS && !needsExtensionEnablement && isManagementConfigured {
+        if isSupportedOS && !needsExtensionEnablement {
             VixenShell(
                 doctor: doctorSnapshot,
                 management: managementSnapshot,
@@ -827,10 +487,8 @@ struct ContentView: View {
             Group {
                 if !isSupportedOS {
                     unsupportedOSView
-                } else if needsExtensionEnablement {
-                    setupView
                 } else {
-                    managementSetupView
+                    setupView
                 }
             }
             .padding(36)
@@ -1090,120 +748,7 @@ struct ContentView: View {
         NSWorkspace.shared.open(URL(fileURLWithPath: "/System/Applications/System Settings.app"))
     }
 
-    // MARK: - Management daemon
-
-    private var managementSetupView: some View {
-        HStack(alignment: .center, spacing: 32) {
-            Image("fox_logo")
-                .resizable()
-                .aspectRatio(contentMode: .fit)
-                .frame(width: foxSize, height: foxSize)
-
-            VStack(spacing: 16) {
-                Text("One more step")
-                    .font(.system(size: 24, weight: .bold))
-
-                Text(
-                    "Allow Vixen's background management item so it can mount and recover VixenFS when privileged macOS filesystem work is needed."
-                )
-                .font(.system(size: 14))
-                .foregroundStyle(.secondary)
-                .multilineTextAlignment(.center)
-                .fixedSize(horizontal: false, vertical: true)
-
-                managementSetupPanel
-            }
-            .frame(maxWidth: .infinity)
-
-            Spacer()
-                .frame(width: foxSize)
-        }
-        .task {
-            guard !didRequestManagementSetup else { return }
-            didRequestManagementSetup = true
-            logger.notice("management setup view appeared; configuring management daemon")
-            configureManagementDaemon()
-        }
-    }
-
-    private var managementStatusText: String {
-        managementSnapshot.description
-    }
-
-    private var managementDetailText: String? {
-        managementError ?? managementSnapshot.detail
-    }
-
-    private var managementButtonTitle: String {
-        if isManagementConfigured {
-            return "Check"
-        }
-        switch managementSnapshot.serviceStatus {
-        case .enabled:
-            return "Retry"
-        case .requiresApproval:
-            return "Open Settings"
-        default:
-            return "Configure"
-        }
-    }
-
-    private var managementSetupPanel: some View {
-        HStack(alignment: .center, spacing: 12) {
-            Image(systemName: isManagementConfigured ? "checkmark.shield.fill" : "lock.shield")
-                .font(.system(size: 18, weight: .semibold))
-                .foregroundStyle(isManagementConfigured ? Color.green : brandOrange)
-                .frame(width: 28)
-
-            VStack(alignment: .leading, spacing: 3) {
-                Text("Management Daemon")
-                    .font(.system(size: 13, weight: .semibold))
-                Text(managementStatusText)
-                    .font(.system(size: 12))
-                    .foregroundStyle(.secondary)
-                if let managementDetailText {
-                    Text(managementDetailText)
-                        .font(.system(size: 11))
-                        .foregroundStyle(.secondary)
-                        .fixedSize(horizontal: false, vertical: true)
-                }
-            }
-
-            Spacer()
-
-            Button(action: managementButtonAction) {
-                Text(managementButtonTitle)
-                    .font(.system(size: 13, weight: .semibold))
-                    .foregroundStyle(.white)
-                    .padding(.horizontal, 16)
-                    .padding(.vertical, 8)
-                    .background(
-                        brandOrange,
-                        in: RoundedRectangle(cornerRadius: 8, style: .continuous)
-                    )
-            }
-            .buttonStyle(.plain)
-            .disabled(isConfiguringManagement)
-        }
-        .padding(12)
-        .background(
-            RoundedRectangle(cornerRadius: 10, style: .continuous)
-                .fill(sectionBg)
-        )
-    }
-
-    private func managementButtonAction() {
-        logger.notice("management button action configured=\(isManagementConfigured, privacy: .public) service=\(managementStatusText, privacy: .public)")
-        if isManagementConfigured {
-            Task { await refreshDoctorStatus() }
-        } else if managementSnapshot.serviceStatus == .requiresApproval {
-            openLoginItemsSettings()
-        } else if managementSnapshot.serviceStatus == .enabled {
-            refreshManagementDaemon()
-        } else {
-            configureManagementDaemon()
-        }
-    }
+    // MARK: - Management helper
 
     private func refreshManagementStatus() {
         let snapshot = ManagementService.snapshot()
@@ -1328,75 +873,6 @@ struct ContentView: View {
     private func elapsedMilliseconds(since started: UInt64) -> Int {
         let elapsed = DispatchTime.now().uptimeNanoseconds - started
         return Int(elapsed / 1_000_000)
-    }
-
-    private func configureManagementDaemon() {
-        logger.notice("configure management daemon started")
-        isConfiguringManagement = true
-        defer {
-            isConfiguringManagement = false
-            refreshManagementStatus()
-            logger.notice("configure management daemon finished configured=\(isManagementConfigured, privacy: .public) error=\(managementError ?? "none", privacy: .public)")
-        }
-
-        do {
-            try ManagementService.register()
-            managementError = nil
-            refreshManagementStatus()
-            if managementSnapshot.serviceStatus == .requiresApproval {
-                logger.notice("configure management daemon requires approval; opening settings")
-                openLoginItemsSettings()
-            }
-        } catch {
-            refreshManagementStatus()
-            if isManagementConfigured || managementSnapshot.serviceStatus == .requiresApproval {
-                managementError = nil
-            } else {
-                managementError = error.localizedDescription
-            }
-            logger.error("configure management daemon failed: \(error.localizedDescription, privacy: .public)")
-        }
-    }
-
-    private func refreshManagementDaemon() {
-        logger.notice("refresh management daemon started")
-        isConfiguringManagement = true
-        defer {
-            isConfiguringManagement = false
-            refreshManagementStatus()
-            logger.notice("refresh management daemon finished configured=\(isManagementConfigured, privacy: .public) error=\(managementError ?? "none", privacy: .public)")
-        }
-
-        do {
-            try ManagementService.refreshRegistration()
-            managementError = nil
-            refreshManagementStatus()
-            if managementSnapshot.serviceStatus == .requiresApproval {
-                logger.notice("refresh management daemon requires approval; opening settings")
-                openLoginItemsSettings()
-            }
-        } catch {
-            refreshManagementStatus()
-            if isManagementConfigured || managementSnapshot.serviceStatus == .requiresApproval {
-                managementError = nil
-            } else {
-                managementError = error.localizedDescription
-            }
-            logger.error("refresh management daemon failed: \(error.localizedDescription, privacy: .public)")
-        }
-    }
-
-    private func openLoginItemsSettings() {
-        let targets = [
-            "x-apple.systempreferences:com.apple.LoginItems-Settings.extension",
-            "x-apple.systempreferences:com.apple.ExtensionsPreferences",
-        ]
-        for target in targets {
-            if let url = URL(string: target), NSWorkspace.shared.open(url) {
-                return
-            }
-        }
-        NSWorkspace.shared.open(URL(fileURLWithPath: "/System/Applications/System Settings.app"))
     }
 
     // MARK: - Settings preview
@@ -1552,7 +1028,7 @@ struct ContentView: View {
                             )
                     }
                     .buttonStyle(.plain)
-                    .disabled(isConfiguringManagement || isCheckingDoctor || isAutoRepairingDoctor)
+                    .disabled(isCheckingDoctor || isAutoRepairingDoctor)
                 }
 
                 Button(action: { Task { await refreshDoctorStatus() } }) {
