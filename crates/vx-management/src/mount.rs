@@ -139,22 +139,35 @@ pub fn remount() -> Result<()> {
 }
 
 fn recover_existing_state() -> Result<()> {
-    tracing::info!(
-        mount_point = MOUNT_POINT,
-        "recovering existing VixenFS state"
-    );
-    let unmount = try_sacrificial_unmount()?;
-    tracing::info!(outcome = ?unmount, "sacrificial unmount attempt finished");
-    if unmount.needs_fskitd_kill() || is_mounted()? {
+    // Unmount EVERY vixenfs volume currently mounted, wherever it is — not just the one
+    // at MOUNT_POINT. A stale VixenFS volume left mounted elsewhere (e.g. auto-mounted by
+    // its "Vixen" name, or a leftover from a previous run) is what makes a fresh mount's
+    // final step fail with "a file with the same name already exists". Clean it all up
+    // first, then mount.
+    let points = vixenfs_mount_points(&mount_output()?);
+    tracing::info!(?points, "recovering existing VixenFS state");
+    let mut needs_kill = false;
+    for point in &points {
+        match try_sacrificial_unmount(point)? {
+            SacrificialUnmount::Failed | SacrificialUnmount::TimedOut => needs_kill = true,
+            SacrificialUnmount::Succeeded => {}
+        }
+    }
+
+    let remaining = vixenfs_mount_points(&mount_output()?);
+    if needs_kill || !remaining.is_empty() {
         tracing::warn!(
-            outcome = ?unmount,
-            "sacrificial unmount did not clear VixenFS; terminating fskitd"
+            ?remaining,
+            "vixenfs still mounted after unmount attempts; terminating fskitd"
         );
         killswitch::terminate_fskitd()?;
     }
-    if is_mounted()? {
-        bail!("{MOUNT_POINT} is still mounted after terminating fskitd");
+
+    let remaining = vixenfs_mount_points(&mount_output()?);
+    if !remaining.is_empty() {
+        bail!("vixenfs volumes still mounted after terminating fskitd: {remaining:?}");
     }
+
     // A stale device left by a previous crashed run may fail to detach (EBUSY). That
     // shouldn't abort recovery entirely — log it and continue. The fresh hdiutil attach
     // and mount attempt may still succeed.
@@ -168,33 +181,15 @@ fn recover_existing_state() -> Result<()> {
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum SacrificialUnmount {
-    NotMounted,
     Succeeded,
     Failed,
     TimedOut,
 }
 
-impl SacrificialUnmount {
-    fn needs_fskitd_kill(self) -> bool {
-        matches!(
-            self,
-            SacrificialUnmount::Failed | SacrificialUnmount::TimedOut
-        )
-    }
-}
-
-fn try_sacrificial_unmount() -> Result<SacrificialUnmount> {
-    if !is_mounted()? {
-        tracing::info!(
-            mount_point = MOUNT_POINT,
-            "sacrificial unmount skipped; not mounted"
-        );
-        return Ok(SacrificialUnmount::NotMounted);
-    }
-
-    tracing::info!("{MOUNT_POINT} is mounted; spawning sacrificial umount child");
+fn try_sacrificial_unmount(point: &str) -> Result<SacrificialUnmount> {
+    tracing::info!(mount_point = point, "spawning sacrificial umount child");
     let mut child = Command::new("/sbin/umount")
-        .arg(MOUNT_POINT)
+        .arg(point)
         .stdin(Stdio::null())
         .stdout(Stdio::null())
         .stderr(Stdio::null())
@@ -205,15 +200,20 @@ fn try_sacrificial_unmount() -> Result<SacrificialUnmount> {
     loop {
         if let Some(status) = child.try_wait().wrap_err("polling sacrificial umount")? {
             if status.success() {
-                tracing::info!("sacrificial umount cleared {MOUNT_POINT}");
+                tracing::info!(mount_point = point, "sacrificial umount cleared volume");
                 return Ok(SacrificialUnmount::Succeeded);
             }
-            tracing::warn!(?status, "sacrificial umount exited unsuccessfully");
+            tracing::warn!(
+                mount_point = point,
+                ?status,
+                "sacrificial umount exited unsuccessfully"
+            );
             return Ok(SacrificialUnmount::Failed);
         }
 
         if Instant::now() >= deadline {
             tracing::warn!(
+                mount_point = point,
                 pid = child.id(),
                 "sacrificial umount did not exit; leaving recovery to FSKit kill-switch"
             );
@@ -455,6 +455,28 @@ fn attached_image_devices() -> Result<Vec<String>> {
     Ok(devices)
 }
 
+/// The raw `/sbin/mount` table.
+fn mount_output() -> Result<String> {
+    let out = Command::new("/sbin/mount")
+        .output()
+        .wrap_err("running mount")?;
+    Ok(String::from_utf8_lossy(&out.stdout).into_owned())
+}
+
+/// Every mountpoint in the mount table backed by a `vixenfs`/`fskit` volume, regardless
+/// of where it is mounted. Recovery clears all of them before a fresh mount.
+fn vixenfs_mount_points(mount_output: &str) -> Vec<String> {
+    mount_output
+        .lines()
+        .filter(|line| line.contains(FS_TYPE) || line.contains("fskit"))
+        .filter_map(|line| {
+            let (_, rest) = line.split_once(" on ")?;
+            let (point, _) = rest.rsplit_once(" (")?;
+            Some(point.to_string())
+        })
+        .collect()
+}
+
 /// Is the vixenfs volume currently mounted at [`MOUNT_POINT`]?
 pub fn is_mounted() -> Result<bool> {
     let out = Command::new("/sbin/mount")
@@ -570,6 +592,20 @@ image-alias     : /Users/amos/Library/Application Support/Vixen/vixen-volume.img
             parse_attached_image_devices(info, IMAGE_FILE_NAME),
             vec!["disk7".to_string(), "disk8".to_string()]
         );
+    }
+
+    #[test]
+    fn finds_all_vixenfs_mount_points_anywhere() {
+        let table = "\
+/dev/disk1s1 on / (apfs, local, journaled)
+/dev/disk4 on /Volumes/Vixen/vfs (vixenfs, local, nodev, nosuid, fskit, mounted by amos)
+/dev/disk5 on /Volumes/ha (vixenfs, local, fskit, mounted by amos)
+map auto_home on /System/Volumes/Data/home (autofs, ...)";
+        assert_eq!(
+            vixenfs_mount_points(table),
+            vec!["/Volumes/Vixen/vfs".to_string(), "/Volumes/ha".to_string()]
+        );
+        assert!(vixenfs_mount_points("/dev/disk1s1 on / (apfs, local)").is_empty());
     }
 
     #[test]
