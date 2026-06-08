@@ -60,6 +60,14 @@ log "ensuring management queues"
 }
 log "management queues ready"
 
+# Boot out any stale launchd job before re-registering. SMAppService.register()
+# on an already-enabled service is a no-op to launchd — it won't refresh the
+# binary hash. Booting the job out first forces SMAppService to submit a fresh
+# job with the current binary, without requiring user re-approval (the BTM
+# approval record is separate and survives this).
+log "booting out stale launchd job (if any) to force fresh job submission"
+/bin/launchctl bootout "system/$label" 2>/dev/null && log "booted out stale job" || log "no stale job to boot out"
+
 log "requesting SMAppService registration through installed app CLI"
 "$app" management register || {
   log_error "could not register Vixen Management; the app will prompt for setup"

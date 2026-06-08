@@ -400,12 +400,14 @@ enum ManagementService {
     static func register() throws {
         let daemon = service
         logger.notice("management register requested currentStatus=\(statusName(daemon.status), privacy: .public)")
-        switch daemon.status {
-        case .enabled, .requiresApproval:
-            logger.notice("management register skipped currentStatus=\(statusName(daemon.status), privacy: .public)")
+        // Skip only when approval is already pending — calling register() during
+        // that window is incorrect. For .enabled we still call through so that a
+        // PKG upgrade that replaced the binary gets its launchd job hash refreshed
+        // (Apple docs: register() on an already-enabled service is non-destructive
+        // and does not show the approval dialog again).
+        if daemon.status == .requiresApproval {
+            logger.notice("management register skipped because approval is pending currentStatus=\(statusName(daemon.status), privacy: .public)")
             return
-        default:
-            break
         }
 
         try registerService()

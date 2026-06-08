@@ -100,12 +100,15 @@ fn recover_existing_state() -> Result<()> {
     if is_mounted()? {
         bail!("{MOUNT_POINT} is still mounted after terminating fskitd");
     }
-    let result = detach_backing_devices();
-    tracing::info!(
-        ok = result.is_ok(),
-        "existing VixenFS state recovery finished"
-    );
-    result
+    // A stale device left by a previous crashed run may fail to detach (EBUSY). That
+    // shouldn't abort recovery entirely — log it and continue. The fresh hdiutil attach
+    // and mount attempt may still succeed.
+    if let Err(err) = detach_backing_devices() {
+        tracing::warn!(error = %format!("{err:#}"), "failed to detach existing VixenFS backing devices; continuing anyway");
+    } else {
+        tracing::info!("existing VixenFS state recovery finished");
+    }
+    Ok(())
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -252,6 +255,14 @@ fn mount_volume(device: &str, caller_pid: Option<u32>) -> Result<()> {
         bail!(
             "mount {devnode} -> {MOUNT_POINT} failed: {}",
             String::from_utf8_lossy(&out.stderr).trim()
+        );
+    }
+    // Belt-and-suspenders: the mount command exited 0 but FSKit can silently fail to
+    // initialize, leaving the volume absent from the mount table. Verify it's actually
+    // there before reporting success.
+    if !is_mounted()? {
+        bail!(
+            "mount {devnode} -> {MOUNT_POINT} exited 0 but volume is not in the mount table; VixenFS extension may have crashed on initialization"
         );
     }
     Ok(())
