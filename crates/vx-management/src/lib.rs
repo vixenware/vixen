@@ -69,22 +69,27 @@ impl Button {
     }
 
     /// Execute the capability. **Requires root** (mount/unmount/kill).
+    /// Used for direct CLI invocations (e.g. `sudo vixen-management mount`) where the
+    /// calling process is already in the user's GUI session, so `launchctl asuser` works.
     pub fn execute(self) -> eyre::Result<()> {
         match self {
-            Button::Mount => mount::establish(),
+            Button::Mount => mount::establish(None),
             Button::Unmount => mount::unmount(),
-            Button::Remount => mount::remount(),
+            Button::Remount => mount::remount(None),
             Button::KillFskitd => killswitch::terminate_fskitd().map(|_| ()),
             Button::Uninstall => uninstall::uninstall_vixenfs(),
         }
     }
 
     /// Execute the capability from the system launchd job.
-    pub fn execute_from_launchd(self) -> eyre::Result<()> {
+    /// `caller_pid` is the PID extracted from the queue trigger file — the Vixen app
+    /// process running in the user's GUI session. For mount, we use `launchctl bsexec`
+    /// into that PID so `/sbin/mount` runs in the login session where `fskit_agent` lives.
+    pub fn execute_from_launchd(self, caller_pid: Option<u32>) -> eyre::Result<()> {
         match self {
-            Button::Mount => mount::establish(),
+            Button::Mount => mount::establish(caller_pid),
             Button::Unmount => mount::unmount(),
-            Button::Remount => mount::remount(),
+            Button::Remount => mount::remount(caller_pid),
             Button::KillFskitd => killswitch::terminate_fskitd().map(|_| ()),
             Button::Uninstall => uninstall::uninstall_vixenfs(),
         }

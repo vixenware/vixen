@@ -65,7 +65,7 @@ fn main() -> Result<()> {
                 return outcome;
             }
             if arg == "repair" {
-                let outcome = vx_management::mount::establish();
+                let outcome = vx_management::mount::establish(None);
                 tracing::info!(ok = outcome.is_ok(), "repair finished");
                 report_direct_command(&arg, &outcome)?;
                 return outcome;
@@ -191,8 +191,9 @@ fn run_launchd() -> Result<()> {
             continue;
         }
         fired_any = true;
-        tracing::info!(button = ?button, "trigger fired");
-        let outcome = button.execute_from_launchd();
+        let caller_pid = queue::caller_pid(button);
+        tracing::info!(button = ?button, caller_pid, "trigger fired");
+        let outcome = button.execute_from_launchd(caller_pid);
         if button == Button::Uninstall && outcome.is_ok() {
             tracing::info!(button = ?button, "uninstall completed; management support removed");
             return Ok(());

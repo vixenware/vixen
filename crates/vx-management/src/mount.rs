@@ -33,7 +33,13 @@ const SACRIFICIAL_UNMOUNT_DEADLINE: Duration = Duration::from_secs(2);
 
 /// Establish the mount if it isn't already up: provision the device, then mount it.
 /// Idempotent — a healthy existing mount is a no-op. **Requires root** (the mount).
-pub fn establish() -> Result<()> {
+///
+/// `caller_pid` is the PID of the process that triggered this action. When present, the
+/// final `/sbin/mount` runs in that process's Mach bootstrap via `launchctl bsexec`,
+/// which places it in the login/GUI session where `fskit_agent` is running. When absent
+/// (direct CLI invocation), `launchctl asuser` is used instead — that works because the
+/// calling process is already in the user's bootstrap.
+pub fn establish(caller_pid: Option<u32>) -> Result<()> {
     tracing::info!(mount_point = MOUNT_POINT, "establishing VixenFS mount");
     if is_mounted()? {
         tracing::info!("{MOUNT_POINT} already mounted");
@@ -41,7 +47,7 @@ pub fn establish() -> Result<()> {
     }
     recover_existing_state()?;
     let device = provision_device()?;
-    if let Err(err) = mount_volume(&device) {
+    if let Err(err) = mount_volume(&device, caller_pid) {
         if let Err(detach_err) = detach_device(&device) {
             tracing::warn!(device, error = %detach_err, "failed to detach backing device after mount failure");
         }
@@ -63,11 +69,11 @@ pub fn unmount() -> Result<()> {
 }
 
 /// Unwind any existing VixenFS state and then establish a fresh mount.
-pub fn remount() -> Result<()> {
+pub fn remount(caller_pid: Option<u32>) -> Result<()> {
     tracing::info!(mount_point = MOUNT_POINT, "remount requested");
     recover_existing_state().wrap_err("recovering existing VixenFS state before remount")?;
     let device = provision_device()?;
-    if let Err(err) = mount_volume(&device) {
+    if let Err(err) = mount_volume(&device, caller_pid) {
         if let Err(detach_err) = detach_device(&device) {
             tracing::warn!(device, error = %detach_err, "failed to detach backing device after remount failure");
         }
@@ -219,7 +225,7 @@ fn ensure_image() -> Result<()> {
 }
 
 /// Mount the block device as `vixenfs` at [`MOUNT_POINT`]. **Requires root.**
-fn mount_volume(device: &str) -> Result<()> {
+fn mount_volume(device: &str, caller_pid: Option<u32>) -> Result<()> {
     let devnode = format!("/dev/{device}");
     // Keep `/Volumes/Vixen` itself plain APFS; FSKit owns only the nested child.
     tracing::info!(
@@ -232,7 +238,7 @@ fn mount_volume(device: &str) -> Result<()> {
     );
     std::fs::create_dir_all(MACOS_VFS_MOUNT_PARENT).wrap_err("creating Vixen mount parent")?;
     std::fs::create_dir_all(MOUNT_POINT).wrap_err("creating Vixen mount point")?;
-    let out = run_mount_command(&devnode)?;
+    let out = run_mount_command(&devnode, caller_pid)?;
     tracing::info!(
         device,
         devnode,
@@ -251,9 +257,30 @@ fn mount_volume(device: &str) -> Result<()> {
     Ok(())
 }
 
-fn run_mount_command(devnode: &str) -> Result<Output> {
+fn run_mount_command(devnode: &str, caller_pid: Option<u32>) -> Result<Output> {
     let euid = unsafe { libc::geteuid() };
     if euid == 0 {
+        // When launched from the system daemon, `launchctl asuser <uid>` only reaches
+        // the user's background bootstrap, not the login/GUI session where `fskit_agent`
+        // runs. `bsexec <pid>` enters the exact bootstrap of the calling app, which IS
+        // in the GUI session. When invoked directly via sudo (no caller_pid), `asuser`
+        // still works because the calling process is already in the GUI session.
+        if let Some(pid) = caller_pid {
+            tracing::info!(
+                pid,
+                devnode,
+                fs_type = FS_TYPE,
+                mount_point = MOUNT_POINT,
+                "running VixenFS mount via bsexec into caller bootstrap"
+            );
+            return Command::new("/bin/launchctl")
+                .arg("bsexec")
+                .arg(pid.to_string())
+                .arg("/sbin/mount")
+                .args(["-F", "-t", FS_TYPE, devnode, MOUNT_POINT])
+                .output()
+                .wrap_err("running launchctl bsexec mount");
+        }
         let Some(user) = session::console_user()? else {
             bail!("no logged-in console user for VixenFS mount");
         };
@@ -490,9 +517,10 @@ image-alias     : /Library/Application Support/Vixen/vixen-volume.img
     }
 
     #[test]
-    fn root_mount_path_runs_only_the_mount_leaf_in_console_bootstrap() {
+    fn root_mount_path_uses_bsexec_for_launchd_and_asuser_for_cli() {
         let source = include_str!("mount.rs");
         assert!(source.contains(&["/bin", "/launchctl"].concat()));
+        assert!(source.contains("bsexec"));
         assert!(source.contains(&["as", "user"].concat()));
         assert!(source.contains(&["/sbin", "/mount"].concat()));
         assert!(!source.contains(&["current", "_exe"].concat()));

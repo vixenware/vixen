@@ -28,6 +28,20 @@ pub fn queue_dir(button: Button) -> PathBuf {
         .join(button.queue_name())
 }
 
+/// Extract the PID of the process that fired this button's queue, by parsing the first
+/// trigger filename (`trigger-<pid>-<rest>`). Returns `None` if the queue is empty or
+/// the name doesn't match the expected format.
+pub fn caller_pid(button: Button) -> Option<u32> {
+    let dir = queue_dir(button);
+    fs::read_dir(&dir).ok()?.flatten().find_map(|entry| {
+        let name = entry.file_name();
+        let name = name.to_str()?;
+        let rest = name.strip_prefix("trigger-")?;
+        let (pid_str, _) = rest.split_once('-')?;
+        pid_str.parse::<u32>().ok()
+    })
+}
+
 /// Does this button's queue hold at least one trigger file?
 pub fn is_fired(button: Button) -> bool {
     let dir = queue_dir(button);
