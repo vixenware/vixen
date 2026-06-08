@@ -64,6 +64,12 @@ fn main() -> Result<()> {
                 }
                 return outcome;
             }
+            if arg == "setup-mountpoint" {
+                let outcome = vx_management::mount::setup_mountpoint();
+                tracing::info!(ok = outcome.is_ok(), "setup-mountpoint finished");
+                report_direct_command(&arg, &outcome)?;
+                return outcome;
+            }
             if arg == "repair" {
                 let outcome = vx_management::mount::establish();
                 tracing::info!(ok = outcome.is_ok(), "repair finished");

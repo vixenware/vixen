@@ -23,7 +23,7 @@ use std::time::{Duration, Instant};
 use eyre::{Result, WrapErr, bail};
 use vx_vfs_types::MACOS_VFS_MOUNT_PARENT;
 
-use crate::killswitch;
+use crate::{killswitch, session};
 
 /// Where the block volume mounts — a real `/Volumes` descendant, not an arbitrary path.
 pub use vx_vfs_types::MACOS_VFS_MOUNT_POINT as MOUNT_POINT;
@@ -45,6 +45,50 @@ pub fn image_path() -> Result<PathBuf> {
     let home = std::env::var_os("HOME")
         .ok_or_else(|| eyre::eyre!("HOME is not set; cannot locate the VixenFS backing image"))?;
     Ok(Path::new(&home).join(IMAGE_DIR_REL).join(IMAGE_FILE_NAME))
+}
+
+/// The one and only privileged operation: create the mountpoint under root-owned
+/// `/Volumes` and chown it (and its `/Volumes/Vixen` parent) to the logged-in console
+/// user, so that user can later mount and — crucially — `umount` it without any
+/// privilege. **Must run as root** (invoked once at first run via a single admin
+/// prompt). Idempotent: re-running it just re-asserts ownership.
+pub fn setup_mountpoint() -> Result<()> {
+    let euid = unsafe { libc::geteuid() };
+    if euid != 0 {
+        bail!("setup-mountpoint must run as root (it creates and chowns {MOUNT_POINT})");
+    }
+    let Some(user) = session::console_user()? else {
+        bail!("no logged-in console user to own the VixenFS mountpoint");
+    };
+    tracing::info!(
+        uid = user.uid,
+        user = %user.name,
+        parent = MACOS_VFS_MOUNT_PARENT,
+        mount_point = MOUNT_POINT,
+        "setting up VixenFS mountpoint as root"
+    );
+    std::fs::create_dir_all(MOUNT_POINT).wrap_err("creating VixenFS mountpoint")?;
+    // chown both the parent and the mountpoint: umount permission keys off ownership of
+    // the directory the volume is mounted on.
+    chown_to(Path::new(MACOS_VFS_MOUNT_PARENT), user.uid)?;
+    chown_to(Path::new(MOUNT_POINT), user.uid)?;
+    tracing::info!(
+        mount_point = MOUNT_POINT,
+        uid = user.uid,
+        "VixenFS mountpoint ready"
+    );
+    Ok(())
+}
+
+fn chown_to(path: &Path, uid: u32) -> Result<()> {
+    use std::os::unix::ffi::OsStrExt;
+    let c_path = std::ffi::CString::new(path.as_os_str().as_bytes()).wrap_err("path has NUL")?;
+    // gid -1 leaves the group unchanged.
+    if unsafe { libc::chown(c_path.as_ptr(), uid, u32::MAX) } != 0 {
+        return Err(std::io::Error::last_os_error())
+            .wrap_err_with(|| format!("chown {} to uid {uid}", path.display()));
+    }
+    Ok(())
 }
 
 /// Establish the mount if it isn't already up: provision the device, then mount it.
