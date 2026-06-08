@@ -101,6 +101,7 @@ install -m 755 "$POSTINSTALL_SRC" "$PKG_SCRIPTS/postinstall"
 
 pkgbuild --analyze --root "$PAYLOAD_ROOT" "$COMPONENT_PLIST"
 /usr/libexec/PlistBuddy -c 'Set :0:BundleIsRelocatable false' "$COMPONENT_PLIST" 2>/dev/null || true
+/usr/libexec/PlistBuddy -c 'Delete :0:ChildBundles' "$COMPONENT_PLIST" 2>/dev/null || true
 
 pkgbuild \
   --root "$PAYLOAD_ROOT" \

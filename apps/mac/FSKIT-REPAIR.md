@@ -1,275 +1,264 @@
-# VixenFS / FSKit Repair Notes
+# VixenFS / FSKit Notes
 
-This document records the local macOS FSKit lessons learned while making the
-Vixen app install, diagnose, and repair its filesystem mount. Read this before
-changing the VixenFS installer, app doctor, management helper, or release build
-flow.
+This is the working memory for the macOS app, installer, VixenFS extension, and
+management helper. Read this before touching `apps/mac`, `crates/vx-management`,
+or `crates/vx-fskit`.
 
-## Core Rules
+The current goal is deliberately small: prove that a freshly copied
+`/Applications/Vixen.app` can have its bundled VixenFS extension discovered by
+macOS, enabled by the user in System Settings, and mounted by the installed
+`vixen-management` helper. Do not expand the repair architecture until that
+path is proven.
 
-- Do not manually register VixenFS with LaunchServices. In particular, do not
-  use `lsregister -f`, `lsregister -R`, or an equivalent "add/register" command
-  as a repair mechanism for the installed app. FSKit and PlugInKit need to own
-  the identity that the user approves in System Settings.
-- It is acceptable to use `lsregister -dump` for diagnostics and `lsregister -u`
-  to remove stale records that point away from `/Applications/Vixen.app`.
-- Do not use `pluginkit -e use` in the one-click mount repair path. That command
-  can create or elect state that is not the same identity the user approved.
-  Keep it out of the reset/mount transaction unless a future investigation
-  proves a precise reason to use it.
-- FSKit extension discovery and user enablement are separate facts. The bundled
-  app extension should be discovered as part of the installed app; user
-  enablement still happens in System Settings.
-- The app should check whether VixenFS is present and enabled through FSKit's
-  own API. If it is not present/enabled, the app should guide the user to System
-  Settings. The normal doctor path should not enumerate PlugInKit or
-  LaunchServices registrations before it has a failed mount to explain.
-- Use `/sbin/mount -F -t vixenfs ...` for mounting. Do not route FSKit mounting
-  through DiskArbitration or `diskutil`; Apple DTS guidance has repeatedly said
-  the higher-level DiskArbitration paths do not cover the FSKit behavior we need.
-- Do not advertise FSKit maintenance operations unless they are real and proven
-  on the mount path. A stub `FSCheckOptionSyntax` /
-  `FSManageableResourceMaintenanceOperations` implementation caused `/sbin/mount`
-  to run `loadResource -> startCheckWithTask -> stop extension`, never reaching
-  `activateWithOptions` or `mountWithOptions`.
-- For unmounting, use the `umount` CLI in a sacrificial child. Do not use
-  `diskutil unmount` and do not force-unmount FSKit mounts as part of ordinary
-  repair.
-- If `fskitd` itself must be restarted, use direct `kill(2)` against the
-  `/usr/libexec/fskitd` PID. Do not use `launchctl kill` for this.
-- Do not touch the VixenFS mounted tree during diagnosis unless the test is
-  explicitly about the mounted filesystem. In particular, avoid `ls /Volumes`,
-  `cd /Volumes/Vixen/vfs`, and similar path touches when the filesystem may be
-  wedged.
-- When root privileges are needed for diagnostics, batch the diagnostics into
-  one script and ask for one password prompt. Repeated `sudo -v` attempts waste
-  time and have failed repeatedly in this environment.
+## Current Ground Truth
 
-## Known Hanging Commands
+- VixenFS is an FSKit app extension bundled at:
 
-When VixenFS is wedged, seemingly harmless commands can block because they touch
-filesystem or process state that crosses the wedge.
+  ```text
+  /Applications/Vixen.app/Contents/Extensions/VixenFS.appex
+  ```
 
-Avoid these during live recovery unless there is a specific reason and the
-command is run in a sacrificial process:
+- Copying the app into `/Applications` is not enough for System Settings to show
+  the extension. Opening the containing app is what causes macOS to discover the
+  bundled extension through the normal LaunchServices / PlugInKit app-extension
+  path.
+- Once the containing app has been opened, `pluginkit -mAvvv -i
+  eu.bearcove.vixenfs` should show one record pointing at the installed app.
+  Example known-good shape:
 
-- `ls /Volumes` through user aliases or wrappers
-- `cd /Volumes/Vixen/vfs`
-- `ps`
-- `pgrep`
-- `pkill`
-- `killall`
+  ```text
+  +    eu.bearcove.vixenfs(0.0.105)
+              Path = /Applications/Vixen.app/Contents/Extensions/VixenFS.appex
+         Parent Bundle = /Applications/Vixen.app
+              SDK = com.apple.fskit.fsmodule
+  ```
 
-Prefer explicit tools and full paths:
+- User enablement is still a System Settings action. The app may open the right
+  Settings page and explain what to enable. It must not secretly mutate
+  extension registration while doing that.
+- The clean manual root mount worked. That proves the installed app bundle,
+  FSKit extension, entitlements, user enablement, and plain FSKit mount path are
+  fundamentally valid. This is the baseline we are replacing one step at a
+  time:
 
-- `/usr/bin/log show` / `/usr/bin/log stream`
-- `/usr/bin/pluginkit -mAvvv -i eu.bearcove.vixenfs`
-- `/sbin/mount` to read the mount table
-- `/bin/kill` or direct `kill(2)` inside the helper for `fskitd`
+  ```sh
+  sudo su
+  mkdir -p "/Library/Application Support/Vixen" /Volumes/Vixen/vfs
+  rm -f "/Library/Application Support/Vixen/vixen-volume.img"
+  mkfile -n 100m "/Library/Application Support/Vixen/vixen-volume.img"
+  hdiutil attach -imagekey diskimage-class=CRawDiskImage -nomount \
+    "/Library/Application Support/Vixen/vixen-volume.img"
+  mount -F -t vixenfs /dev/diskN /Volumes/Vixen/vfs/
+  mount | rg -i 'vixen'
+  exit
+  ```
 
-## Working Manual Reset Shape
+  Expected mount-table result:
 
-The reset script that produced a successful VixenFS mount was
-`apps/mac/scripts/debug-simple-fskit-reset.sh`, run once under `sudo`.
+  ```text
+  /dev/diskN on /Volumes/Vixen/vfs (vixenfs, local, nodev, nosuid, noowners, noatime, fskit)
+  ```
 
-The important sequence was:
+- The next unproven step is not the installer, service, app doctor, stale-record
+  cleanup, or VFS provider probe. The next unproven step is:
 
-1. Inspect the console user.
-2. List user-visible and root-visible LaunchServices records for
-   `eu.bearcove.vixen`.
-3. List user-visible and root-visible PlugInKit records for
-   `eu.bearcove.vixenfs`.
-4. Remove LaunchServices app records whose path is not
-   `/Applications/Vixen.app`.
-5. Keep the installed root VixenFS appex record. Do not remove the installed
-   `/Applications/Vixen.app/Contents/Extensions/VixenFS.appex` record just
-   because LaunchServices reports it as link-disabled.
-6. Kill `fskitd` through the installed management helper.
-7. Mount through the installed management helper.
+  ```sh
+  sudo /Applications/Vixen.app/Contents/MacOS/vixen-management mount
+  ```
 
-The known-good result from `/tmp/reset.txt` was:
+  from a manually installed DMG app after the extension is visible and enabled.
+- The approved background management item must not run the FSKit mount from a
+  plain system bootstrap. The working privilege shape is root in the active
+  user's login bootstrap. The queued management path therefore bridges mount
+  requests with:
 
-```text
-/dev/disk4 on /Volumes/Vixen/vfs (vixenfs, local, nodev, nosuid, noowners, noatime, fskit)
+  ```sh
+  launchctl asuser <console-uid> /Applications/Vixen.app/Contents/MacOS/vixen-management mount
+  ```
+
+  It does not add `sudo -u`; the mount still needs root privileges.
+
+## Manual Baseline From A Clean DMG Install
+
+This is the path that worked and should remain the oracle while replacing one
+manual step at a time.
+
+1. Uninstall/clean up any existing Vixen app and mount state.
+2. Open the DMG and drag `Vixen.app` to `/Applications`.
+3. Open `/Applications/Vixen.app` once.
+4. Confirm macOS has discovered the extension if needed:
+
+   ```sh
+   pluginkit -mAvvv -i eu.bearcove.vixenfs
+   ```
+
+   There should be exactly one record, and it should point at
+   `/Applications/Vixen.app/Contents/Extensions/VixenFS.appex`.
+
+5. In System Settings, enable VixenFS.
+6. Establish the mount manually as root:
+
+   ```sh
+   sudo su
+   mkdir -p "/Library/Application Support/Vixen" /Volumes/Vixen/vfs
+   rm -f "/Library/Application Support/Vixen/vixen-volume.img"
+   mkfile -n 100m "/Library/Application Support/Vixen/vixen-volume.img"
+   hdiutil attach -imagekey diskimage-class=CRawDiskImage -nomount \
+     "/Library/Application Support/Vixen/vixen-volume.img"
+   mount -F -t vixenfs /dev/diskN /Volumes/Vixen/vfs/
+   mount | rg -i 'vixen'
+   exit
+   ```
+
+## Next Test: Replace Manual Mount With Helper Mount
+
+After the clean DMG install, app open, and System Settings enablement from the
+manual baseline, replace only the manual `mkfile` / `hdiutil attach` / `mount`
+sequence with the installed helper:
+
+   ```sh
+   sudo /Applications/Vixen.app/Contents/MacOS/vixen-management mount
+   ```
+
+Then check the result without touching arbitrary paths:
+
+   ```sh
+   mount | rg -i vixen
+   cat /Volumes/Vixen/vfs/.vixenfs/status.json
+   ```
+
+If this works, the helper can do the same primitive operation as the manual
+root shell. Only then should the app UI be wired around this primitive.
+
+If this fails, capture the helper log and FSKit logs before changing anything:
+
+```sh
+/usr/bin/tail -n 240 "/Library/Application Support/Vixen/management/logs/vixen-management.log" 2>/dev/null || true
+/usr/bin/log show --last 10m --style compact --predicate \
+  '(process == "fskitd" OR process == "fskit_agent" OR process == "VixenFS") AND (eventMessage CONTAINS[c] "vixen" OR eventMessage CONTAINS[c] "vixenfs" OR eventMessage CONTAINS[c] "bearcove" OR eventMessage CONTAINS[c] "disabled" OR eventMessage CONTAINS[c] "mount")'
 ```
 
-The app repair path should stay as close to this sequence as possible. If a new
-step is added, it must have a clear reason and logging proving why it is needed.
+## Installer Discipline
 
-One optimization is intentional: the app repair transaction tries the direct
-mount first. If the mount works, it stops there and does not pay the
-LaunchServices scan/cleanup cost. If the mount fails, it restarts FSKit and
-tries the mount again before collecting recent FSKit logs. Only when the
-persistent failure points at registration state does it fall back to the stale
-record cleanup sequence above.
+The pkg installer must preserve the same shape as the DMG path: one containing
+app bundle at `/Applications/Vixen.app`. It must not package
+`VixenFS.appex` as its own component. FSKit extension discovery comes from
+opening the containing app, and FSKit enablement comes from System Settings.
 
-## Current App Repair Strategy
-
-The GUI "Repair VixenFS" button runs:
+`apps/mac/scripts/dist-pkg.sh` deletes the generated component plist's
+`ChildBundles` key before `pkgbuild` runs. The intended component metadata names
+only:
 
 ```text
-/Applications/Vixen.app/Contents/MacOS/vixen-management repair
+Applications/Vixen.app
 ```
 
-through one administrator approval prompt. The helper then performs one
-transaction:
+The installer may prepare management support directories and ask macOS to know
+about the background management item, but that is separate from FSKit extension
+discovery and enablement.
 
-1. Spawn a fresh helper process and run the direct `mount` command.
-2. If the mount succeeds, stop immediately.
-3. If the mount fails, restart `fskitd` with direct `kill(2)`.
-4. Wait briefly for FSKit to come back.
-5. Spawn a fresh helper process and retry the direct `mount` command.
-6. If the retry succeeds, stop immediately.
-7. If the retry fails, collect recent FSKit logs.
-8. If the failure/logs point at stale registration state, clean stale
-   containing-app LaunchServices records for the logged-in user and for root.
-9. Restart `fskitd` again and run one final fresh-helper mount attempt.
+## Minimal Intended Product Shape
 
-The automatic setup, refresh, and "Open Settings" paths must not call
-`repair-extension`. They can register the management daemon or open System
-Settings, but extension repair is explicit diagnostics only.
+- The first-run app screen handles only FSKit extension discovery and user
+  enablement.
+- The app can diagnose without privileges:
+  - whether PlugInKit sees the installed VixenFS extension,
+  - whether System Settings reports it enabled through the app's FSKit-facing
+    state,
+  - whether `/sbin/mount` shows `/Volumes/Vixen/vfs`,
+  - whether `/.vixenfs/status.json` is readable when mounted.
+- The first repair operation should be the smallest privileged primitive:
 
-`management register` and `management refresh` only manage the `SMAppService`
-management daemon registration. They must not run LaunchServices or PlugInKit
-cleanup as a side effect of setup.
+  ```text
+  vixen-management mount
+  ```
 
-Uninstall cleanup is explicit. The app menu action runs the app-side
-`SMAppService` unregister call, then asks for administrator approval once and
-runs:
+  From the app, that should be the approved management queue firing the fixed
+  `mount` capability, not an AppleScript administrator prompt.
 
-```text
-/Applications/Vixen.app/Contents/MacOS/vixen-management uninstall
-```
+- If direct helper mount fails with stale FSKit state, the next privileged
+  primitive is direct `kill(2)` of `/usr/libexec/fskitd`, then `mount` again.
+- Anything more expensive or more invasive needs evidence from the failed mount
+  and logs before it runs.
+- The app's VFS-provider/backend probe is not the mount oracle. The mount oracle
+  is `/sbin/mount -F -t vixenfs` plus the status file. Real VFS provider routing
+  should be tested through the real VFS provider path, not a synthetic probe
+  that may not match the prefix-routing design.
 
-That command unmounts VixenFS, detaches the mock backing device through the
-existing unmount path, removes Vixen-owned root support state, and removes the
-old legacy `/Library/LaunchDaemons` plist if present. It does not install,
-register, or elect the FSKit extension.
+## What We Learned The Hard Way
 
-The separate CLI command:
+- A stuck FSKit mount can poison ordinary commands. Avoid touching the mounted
+  tree unless the test is specifically about the mounted filesystem.
+- `/bin/ls` may be safe when shell aliases are not. User aliases can route to
+  tools that touch more filesystem state.
+- `ps`, `pgrep`, `pkill`, and `killall` can hang while FSKit is wedged. Do not
+  build recovery around them.
+- `log show` and `log stream` stayed usable during the wedge and are safe first
+  diagnostics.
+- There can be more than one `VixenFS` process. This usually reflects
+  ExtensionKit / `fskit_agent` state, not proof that the app intentionally
+  launched duplicate filesystems.
+- Killing `fskitd` can unwedge the system, but it affects all FSKit modules and
+  must be the last-resort primitive, not the first button.
+- Mounting at `/Volumes/Vixen/vfs` reduces blast radius compared with mounting
+  directly at `/Volumes/Vixen`.
+- `mkfile` is `/usr/sbin/mkfile`, not `/usr/bin/mkfile`.
+- macOS app-extension discovery is normal: install/copy the app, open the app,
+  then System Settings can show the extension.
 
-```text
-/Applications/Vixen.app/Contents/MacOS/Vixen management repair-extension
-```
+## Do Not Do This
 
-still exists for explicit diagnostics/experiments, but it is not part of the
-one-click mount repair path.
+- Do not manually register the installed Vixen app or VixenFS extension as a
+  repair mechanism. In particular, do not use:
+  - `lsregister -f`
+  - `lsregister -R`
+  - `lsregister -trusted`
+  - `pluginkit -a`
+  - `pluginkit -e use`
+- Do not call those commands automatically from app startup, "Open Settings",
+  doctor refresh, installer postinstall, or one-click repair.
+- `lsregister -dump`, `lsregister -u`, and `pluginkit -mAvvv` are diagnostic or
+  cleanup tools only. They are not product install APIs.
+- Do not use Disk Utility, DiskArbitration, or `diskutil unmount` for FSKit
+  mount/unmount recovery. The supported path we are using is the `mount` CLI and
+  the `umount` CLI in a sacrificial child where needed.
+- Do not use `launchctl kill` to restart `fskitd`. Use direct `kill(2)` against
+  the `/usr/libexec/fskitd` PID when the last-resort kill switch is needed.
+- Do not add FSKit check/format/maintenance metadata unless there is a proven
+  implementation and an integration test showing that `mount` still reaches the
+  real FSKit mount path. A stub check path caused `mount` to enter check/stop
+  behavior instead of mounting.
+- Do not run expensive LaunchServices scans before trying the cheap mount
+  primitive. The slow registration scan is not a first-line repair.
+- Do not hide privileged work behind vague UI. If the app needs administrator
+  approval, the UI must say which primitive it is about to run.
+- Do not ask for repeated password prompts for one repair. If a repair needs
+  privileges, batch the privileged primitive into one invocation.
+- Do not make the root management service the owner of app doctor logic until
+  the direct installed helper primitive is known to work.
+- Do not treat "Backend Connection" as an install failure when the mount and
+  status file are healthy. That is a separate VFS-provider/routing question.
 
-## Source Map
+## Useful Files
 
 - `apps/mac/xcode/Vixen/VixenApp.swift`
-  - SwiftUI onboarding and doctor UI.
-  - The GUI repair button runs the elevated helper transaction.
-  - The `management` CLI bridge lives here too.
+  - first-run UI, doctor UI, and the `Vixen management ...` CLI bridge.
 - `apps/mac/xcode/Vixen/Doctor.swift`
-  - Doctor checks for extension presence/enabled state, mount table state,
-    status payload, and VFS/backend probe state.
-- `crates/vx-management/src/repair.rs`
-  - The one-click end-to-end repair transaction.
-- `crates/vx-management/src/extension.rs`
-  - LaunchServices and PlugInKit diagnostics/cleanup.
-  - Must not create/register VixenFS identities.
-- `crates/vx-management/src/killswitch.rs`
-  - Direct `kill(2)` implementation for `/usr/libexec/fskitd`.
+  - non-privileged diagnostics.
+- `apps/mac/xcode/VixenFS/RustFSKitBootstrap.swift`
+  - app-group path and FSKit Rust bootstrap.
 - `crates/vx-management/src/mount.rs`
-  - Sparse mock block image, `hdiutil attach`, `/sbin/mount -F -t vixenfs`,
-    sacrificial unmount, and backing-device detach.
-- `crates/vx-management/src/uninstall.rs`
-  - Explicit administrator-approved uninstall cleanup for the mount, mock image,
-    management support directory, and legacy LaunchDaemon plist.
+  - mock image creation, `hdiutil attach`, and `/sbin/mount -F -t vixenfs`.
+- `crates/vx-management/src/killswitch.rs`
+  - direct `fskitd` kill switch.
+- `crates/vx-management/src/repair.rs`
+  - current overbuilt repair transaction. Treat with suspicion until the direct
+    helper mount test is proven.
+- `crates/vx-management/src/extension.rs`
+  - diagnostic/stale-record cleanup. Must not register or elect extensions.
 - `crates/vx-management/src/probe.rs`
-  - VFS/backend probe that reads through the mounted filesystem when a mount
-    exists.
-- `crates/vx-fskit/src/macos/filesystem.rs`
-  - FSKit probe implementation. For this block-backed filesystem,
-    `probeResource` must return a usable result with stable container/volume
-    identity. A recognized-only result is not mountable enough for this path.
-  - Do not add check/format maintenance conformance back without a mount-path
-    integration test showing the full `loadResource -> activateWithOptions ->
-    mountWithOptions` sequence still happens.
-- `apps/mac/scripts/debug-simple-fskit-reset.sh`
-  - The manual reset oracle. Keep this script as the reference when comparing
-    the app repair transaction.
-- `apps/mac/scripts/clean-build-registration.sh`
-  - Cleans Xcode/archive/export app registrations that local release builds
-    create.
+  - synthetic VFS probe. Not the current mount oracle.
 - `apps/mac/installer/scripts/preinstall`
-  - Quits the running Vixen app before installation, escalating from graceful
-    termination to `SIGTERM` and then `SIGKILL`, and records whether the app
-    should be reopened.
+  - installer app-quit behavior.
 - `apps/mac/installer/scripts/postinstall`
-  - Ensures management queues, asks the installed app to register the
-    management service, and reopens the app if preinstall recorded that it had
-    been running.
-
-## Xcode And Local Builds
-
-Xcode archive/build products can be registered with LaunchServices as part of
-the build/archive process. This is expected local-build behavior, not evidence
-that `/Applications/Vixen.app` is wrong by itself.
-
-Those build-product records are stale for release testing because they point at
-paths such as:
-
-- `apps/mac/xcode/build/DerivedData/.../InstallationBuildProductsLocation/Applications/Vixen.app`
-- `apps/mac/dist/<version>/export/Vixen.app`
-- mounted DMG paths under `/Volumes/dmg.*`
-
-Release scripts should clean those registrations after archive/export. Repair
-code may unregister stale app records, but it must not manually add/register the
-installed app or extension.
-
-## Diagnostics To Capture
-
-Use full command paths.
-
-```bash
-/bin/cat "/Library/Application Support/Vixen/management/repair-status.json" 2>/dev/null || true
-/bin/cat "/Library/Application Support/Vixen/management/last-action.json" 2>/dev/null || true
-/usr/bin/tail -n 320 "/Library/Application Support/Vixen/management/logs/vixen-management.log"
-/usr/bin/pluginkit -mAvvv -i eu.bearcove.vixenfs
-/sbin/mount
-```
-
-Useful unified log predicates:
-
-```bash
-/usr/bin/log show --last 30m --style compact --predicate \
-  'subsystem == "eu.bearcove.vixen" AND (category == "Management" OR category == "Doctor" OR category == "DoctorUI" OR category == "App")'
-
-/usr/bin/log show --last 30m --style compact --predicate \
-  '(process == "fskitd" OR process == "fskit_agent" OR process == "VixenFS" OR process == "diskarbitrationd") AND (eventMessage CONTAINS[c] "vixen" OR eventMessage CONTAINS[c] "vixenfs" OR eventMessage CONTAINS[c] "bearcove" OR eventMessage CONTAINS[c] "disabled" OR eventMessage CONTAINS[c] "mount")'
-```
-
-If root-visible PlugInKit/LaunchServices state is needed, create a single
-diagnostic script and run it once with `sudo`; do not ask for a series of
-interactive sudo prompts.
-
-## Recent Failure Pattern
-
-In the `0.0.100` app flow, the GUI did call the elevated helper directly, the
-helper killed `fskitd` via direct PID signal, PlugInKit showed exactly one
-current VixenFS record at `/Applications/Vixen.app`, and the fresh helper still
-failed to mount with:
-
-```text
-Module eu.bearcove.vixenfs is disabled!
-mount: Unable to invoke task
-```
-
-The app-side doctor saw the extension as present and enabled, while the mount
-path still reported it disabled. Logs also showed `fskitd` and `fskit_agent`
-talking about different-looking module identities during some attempts. Treat
-that as evidence to preserve, not yet as a proven root cause.
-
-The lesson from this failure is not "add more registration commands." The repair
-path now tries the direct mount first, then falls back to the reset sequence only
-after a real mount failure.
-
-In the `0.0.101` flow, the GUI still had hidden automatic calls to
-`repair-extension` in setup/open-settings paths. That was wrong: it could mutate
-session-facing extension state before the user pressed the repair button, and it
-made later failures harder to interpret. Automatic app paths must not run
-`repair-extension`, and the normal doctor should not run a PlugInKit registration
-enumeration before trying the cheap mount/restart path.
-`repair-extension`.
+  - installer management-service setup. Must not register/elect VixenFS.

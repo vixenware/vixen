@@ -23,6 +23,7 @@ pub mod probe;
 pub mod queue;
 pub mod repair;
 pub mod repair_status;
+pub mod session;
 pub mod status;
 pub mod uninstall;
 
@@ -72,6 +73,22 @@ impl Button {
             Button::Mount => mount::establish(),
             Button::Unmount => mount::unmount(),
             Button::Remount => repair::repair_vixenfs(),
+            Button::KillFskitd => killswitch::terminate_fskitd().map(|_| ()),
+        }
+    }
+
+    /// Execute the capability from the system launchd job.
+    ///
+    /// FSKit enablement is tied to the logged-in user's extension state. The direct
+    /// helper command that works in practice is root from the user's login session,
+    /// so the system daemon bridges mount requests into that bootstrap without
+    /// dropping root privileges.
+    pub fn execute_from_launchd(self) -> eyre::Result<()> {
+        match self {
+            Button::Mount | Button::Remount => {
+                session::run_current_helper_in_console_bootstrap("mount")
+            }
+            Button::Unmount => mount::unmount(),
             Button::KillFskitd => killswitch::terminate_fskitd().map(|_| ()),
         }
     }

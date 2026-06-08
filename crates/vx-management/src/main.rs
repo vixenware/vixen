@@ -13,9 +13,10 @@
 //!   immediately for manual testing.
 
 use std::fs::OpenOptions;
+use std::io::Write;
 use std::path::Path;
 
-use eyre::{Result, bail};
+use eyre::{Result, WrapErr, bail};
 use tracing_subscriber::EnvFilter;
 use tracing_subscriber::layer::SubscriberExt;
 use tracing_subscriber::util::SubscriberInitExt;
@@ -39,31 +40,39 @@ fn main() -> Result<()> {
             if arg == "ensure-queues" {
                 let outcome = queue::ensure_queues();
                 tracing::info!(ok = outcome.is_ok(), "ensure-queues finished");
+                report_direct_command(&arg, &outcome)?;
                 return outcome;
             }
             if arg == "repair-app-records" {
                 let outcome = vx_management::extension::repair_installed_app_records();
                 tracing::info!(ok = outcome.is_ok(), "repair-app-records finished");
+                report_direct_command(&arg, &outcome)?;
                 return outcome;
             }
             if arg == "repair-extension" {
                 let outcome = vx_management::extension::repair_installed_extension();
                 tracing::info!(ok = outcome.is_ok(), "repair-extension finished");
+                report_direct_command(&arg, &outcome)?;
                 return outcome;
             }
             if arg == "probe-vfs" {
                 let outcome = vx_management::probe::probe_vfs();
                 tracing::info!(ok = outcome.is_ok(), "probe-vfs finished");
+                if outcome.is_err() {
+                    report_direct_command(&arg, &outcome)?;
+                }
                 return outcome;
             }
             if arg == "repair" {
                 let outcome = vx_management::repair::repair_vixenfs();
                 tracing::info!(ok = outcome.is_ok(), "repair finished");
+                report_direct_command(&arg, &outcome)?;
                 return outcome;
             }
             if arg == "uninstall" {
                 let outcome = vx_management::uninstall::uninstall_vixenfs();
                 tracing::info!(ok = outcome.is_ok(), "uninstall finished");
+                report_direct_command(&arg, &outcome)?;
                 return outcome;
             }
             let Some(button) = Button::from_name(&arg) else {
@@ -78,6 +87,7 @@ fn main() -> Result<()> {
                 tracing::warn!(button = ?button, "failed to record direct action status: {err:#}");
             }
             tracing::info!(button = ?button, ok = outcome.is_ok(), "direct management button finished");
+            report_button_result(button, &outcome)?;
             outcome
         }
         // launchd mode: a queue fired (or RunAtLoad).
@@ -86,6 +96,37 @@ fn main() -> Result<()> {
             run_launchd()
         }
     }
+}
+
+fn report_direct_command(command: &str, outcome: &Result<()>) -> Result<()> {
+    match outcome {
+        Ok(()) => writeln!(std::io::stdout(), "vixen-management {command}: ok"),
+        Err(err) => writeln!(
+            std::io::stderr(),
+            "vixen-management {command}: failed: {err:#}"
+        ),
+    }
+    .wrap_err("writing direct command result")
+}
+
+fn report_button_result(button: Button, outcome: &Result<()>) -> Result<()> {
+    let command = button.queue_name();
+    match outcome {
+        Ok(()) => {
+            let detail = match button {
+                Button::Mount => format!(" ({})", vx_management::mount::MOUNT_POINT),
+                Button::Unmount => " (unmounted)".to_string(),
+                Button::Remount => format!(" ({})", vx_management::mount::MOUNT_POINT),
+                Button::KillFskitd => " (fskitd terminated if it was running)".to_string(),
+            };
+            writeln!(std::io::stdout(), "vixen-management {command}: ok{detail}")
+        }
+        Err(err) => writeln!(
+            std::io::stderr(),
+            "vixen-management {command}: failed: {err:#}"
+        ),
+    }
+    .wrap_err("writing direct button result")
 }
 
 fn init_tracing() {
@@ -149,7 +190,7 @@ fn run_launchd() -> Result<()> {
         }
         fired_any = true;
         tracing::info!(button = ?button, "trigger fired");
-        let outcome = button.execute();
+        let outcome = button.execute_from_launchd();
         if let Err(err) = status::record(button, &outcome) {
             tracing::warn!(button = ?button, "failed to record action status: {err:#}");
         }

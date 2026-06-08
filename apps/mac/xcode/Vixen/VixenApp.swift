@@ -261,28 +261,28 @@ enum ManagementService {
     static func repairVixenFS(progress: @escaping @Sendable (String) -> Void) async throws {
         let started = DispatchTime.now().uptimeNanoseconds
         logger.notice("VixenFS repair transaction requested from app")
-        progress("Requesting administrator approval")
-        let status = try await runElevatedRepair(command: "repair") { repairStatus in
-            progress(repairStatus.displayText)
-        }
-        guard let status else {
+        progress("Requesting Vixen Management")
+        let lastAction = try await runQueuedButton("mount")
+        guard let lastAction else {
             throw NSError(
                 domain: NSPOSIXErrorDomain,
                 code: Int(EIO),
                 userInfo: [
                     NSLocalizedDescriptionKey:
-                        "Vixen Management did not publish a repair result"
+                        "Vixen Management did not publish a mount result"
                 ]
             )
         }
-        if status.state == "failed" {
+        if !lastAction.ok {
             throw NSError(
                 domain: NSPOSIXErrorDomain,
                 code: Int(EIO),
-                userInfo: [NSLocalizedDescriptionKey: status.message]
+                userInfo: [
+                    NSLocalizedDescriptionKey: lastAction.failureDescription ?? lastAction.message
+                ]
             )
         }
-        progress("VixenFS repair finished")
+        progress("VixenFS mounted")
         logger.notice("VixenFS repair transaction finished in \(elapsedMilliseconds(since: started), privacy: .public)ms")
     }
 
@@ -957,9 +957,9 @@ struct ContentView: View {
             switch dialog {
             case .confirm:
                 return Alert(
-                    title: Text("Uninstall VixenFS setup?"),
+                    title: Text("Uninstall Vixen?"),
                     message: Text(
-                        "This unmounts VixenFS, removes Vixen's privileged management state, and unregisters the background management item. The Vixen app will remain in Applications."
+                        "This unmounts VixenFS, removes Vixen's privileged management state, moves Vixen to Trash, and quits the app."
                     ),
                     primaryButton: .destructive(Text("Uninstall")) {
                         Task { await performUninstall() }
@@ -968,8 +968,8 @@ struct ContentView: View {
                 )
             case .completed:
                 return Alert(
-                    title: Text("VixenFS setup removed"),
-                    message: Text("You can quit Vixen and move the app to Trash when you are ready."),
+                    title: Text("Vixen removed"),
+                    message: Text("VixenFS setup was removed and Vixen was moved to Trash."),
                     dismissButton: .default(Text("OK"))
                 )
             case .failed(let message):
@@ -1393,18 +1393,32 @@ struct ContentView: View {
                     uninstallProgressText = message
                 }
             }
-            logger.notice("uninstall finished successfully")
-            uninstallDialog = .completed
-            refreshManagementStatus()
-            await checkExtensionOnce()
-            if shouldUseDoctorFlow {
-                await refreshDoctorStatus()
-            }
+            uninstallProgressText = "Moving Vixen to Trash"
+            try await moveRunningAppToTrash()
+            logger.notice("uninstall finished successfully; terminating app")
+            NSApplication.shared.terminate(nil)
         } catch {
             logger.error("uninstall failed: \(error.localizedDescription, privacy: .public)")
             uninstallDialog = .failed(error.localizedDescription)
             refreshManagementStatus()
         }
+    }
+
+    @MainActor
+    private func moveRunningAppToTrash() async throws {
+        let appURL = Bundle.main.bundleURL.standardizedFileURL
+        let appPath = appURL.path
+        logger.notice("moving app bundle to Trash path=\(appPath, privacy: .public)")
+        let trashedPath = try await withCheckedThrowingContinuation { (continuation: CheckedContinuation<String, Error>) in
+            NSWorkspace.shared.recycle([appURL]) { trashedURLs, error in
+                if let error {
+                    continuation.resume(throwing: error)
+                    return
+                }
+                continuation.resume(returning: trashedURLs[appURL]?.path ?? "none")
+            }
+        }
+        logger.notice("app bundle moved to Trash path=\(appPath, privacy: .public) trashedPath=\(trashedPath, privacy: .public)")
     }
 
     private func elapsedMilliseconds(since started: UInt64) -> Int {
