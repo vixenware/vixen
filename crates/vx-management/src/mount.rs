@@ -303,6 +303,7 @@ fn mount_volume(device: &str) -> Result<()> {
             "mountpoint {MOUNT_POINT} does not exist; first-run setup must create and chown it (mkdir -p {MOUNT_POINT} && chown <user> {MOUNT_POINT})"
         );
     }
+    clean_mountpoint()?;
     let out = run_mount_command(&devnode)?;
     tracing::info!(
         device,
@@ -325,6 +326,44 @@ fn mount_volume(device: &str) -> Result<()> {
     if !is_mounted()? {
         bail!(
             "mount {devnode} -> {MOUNT_POINT} exited 0 but volume is not in the mount table; VixenFS extension may have crashed on initialization"
+        );
+    }
+    Ok(())
+}
+
+/// Empty the mountpoint directory before mounting. A VixenFS mountpoint is a *pure mount
+/// target* — it must never hold real files. Stale entries left in the underlying
+/// directory by earlier sessions (leftover `c-*.sock` connection sockets, `.DS_Store`,
+/// container metadata plists) make FSKit's final mount step fail with "a file with the
+/// same name already exists" (Cocoa `NSFileWriteFileExistsError`). Recovery has already
+/// confirmed nothing is mounted here, so removing the contents is safe.
+fn clean_mountpoint() -> Result<()> {
+    let entries = match std::fs::read_dir(MOUNT_POINT) {
+        Ok(entries) => entries,
+        Err(err) if err.kind() == std::io::ErrorKind::NotFound => return Ok(()),
+        Err(err) => return Err(err).wrap_err_with(|| format!("reading mountpoint {MOUNT_POINT}")),
+    };
+    let mut removed = 0usize;
+    for entry in entries.flatten() {
+        let path = entry.path();
+        let is_dir = entry.file_type().map(|ft| ft.is_dir()).unwrap_or(false);
+        let result = if is_dir {
+            std::fs::remove_dir_all(&path)
+        } else {
+            std::fs::remove_file(&path)
+        };
+        match result {
+            Ok(()) => removed += 1,
+            Err(err) => {
+                tracing::warn!(path = %path.display(), error = %err, "failed to remove stale mountpoint entry");
+            }
+        }
+    }
+    if removed > 0 {
+        tracing::info!(
+            removed,
+            mount_point = MOUNT_POINT,
+            "cleaned stale entries from mountpoint before mounting"
         );
     }
     Ok(())
