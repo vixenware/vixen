@@ -31,16 +31,34 @@ struct FSKitModuleSnapshot: Sendable {
     )
 }
 
+/// Live backend/daemon facts, parsed from the VixenFS `status.json` payload.
+/// This is the process the FSKit mount is connected to; on macOS it stands in
+/// for "the daemon" in the Daemon & Health surface.
+struct BackendStatus: Sendable {
+    let connected: Bool
+    let extensionPid: Int?
+    let uptimeSeconds: Double?
+    let socketPath: String?
+    let appGroupPath: String?
+    let bundleVersion: String?
+    let connectedAt: String?
+    let disconnectReason: String?
+}
+
 struct DoctorSnapshot: Sendable {
     let rows: [DoctorRow]
+    let backend: BackendStatus?
 
-    static let pending = DoctorSnapshot(rows: [
-        DoctorRow(id: "extension", title: "File System Extension", state: .pending, detail: nil),
-        DoctorRow(id: "management", title: "Management Helper", state: .pending, detail: nil),
-        DoctorRow(id: "mount", title: "VixenFS Mount", state: .pending, detail: nil),
-        DoctorRow(id: "status", title: "Status File", state: .pending, detail: nil),
-        DoctorRow(id: "backend", title: "Backend Connection", state: .pending, detail: nil),
-    ])
+    static let pending = DoctorSnapshot(
+        rows: [
+            DoctorRow(id: "extension", title: "File System Extension", state: .pending, detail: nil),
+            DoctorRow(id: "management", title: "Management Helper", state: .pending, detail: nil),
+            DoctorRow(id: "mount", title: "VixenFS Mount", state: .pending, detail: nil),
+            DoctorRow(id: "status", title: "Status File", state: .pending, detail: nil),
+            DoctorRow(id: "backend", title: "Backend Connection", state: .pending, detail: nil),
+        ],
+        backend: nil
+    )
 
     var hasFailure: Bool {
         rows.contains { $0.state == .failed || $0.state == .warning }
@@ -129,7 +147,27 @@ enum DoctorService {
             checkBackend(status)
         })
 
-        return DoctorSnapshot(rows: rows)
+        return DoctorSnapshot(rows: rows, backend: backendStatus(from: status.payload))
+    }
+
+    private static func backendStatus(from payload: [String: Any]?) -> BackendStatus? {
+        guard let payload else { return nil }
+        return BackendStatus(
+            connected: payload["connected"] as? Bool ?? false,
+            extensionPid: (payload["extension_pid"] as? NSNumber)?.intValue,
+            uptimeSeconds: (payload["uptime_seconds"] as? NSNumber)?.doubleValue,
+            socketPath: trimmedString(payload["socket_path"]),
+            appGroupPath: trimmedString(payload["app_group_path"]),
+            bundleVersion: trimmedString(payload["bundle_version"]),
+            connectedAt: trimmedString(payload["connected_at"]),
+            disconnectReason: trimmedString(payload["disconnect_reason"])
+        )
+    }
+
+    private static func trimmedString(_ value: Any?) -> String? {
+        guard let string = value as? String else { return nil }
+        let trimmed = string.trimmingCharacters(in: .whitespacesAndNewlines)
+        return trimmed.isEmpty ? nil : trimmed
     }
 
     private static func timed<T>(_ name: String, _ body: () -> T) -> T {

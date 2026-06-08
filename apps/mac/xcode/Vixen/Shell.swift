@@ -335,6 +335,8 @@ private struct DaemonHealthSurface: View {
                     }
                 }
 
+                backendCard
+
                 // Health checks card
                 VStack(alignment: .leading, spacing: 0) {
                     HStack {
@@ -384,6 +386,68 @@ private struct DaemonHealthSurface: View {
         if isRepairing { return "Repairing…" }
         if isChecking { return "Checking…" }
         return healthy ? "Healthy" : "\(doctor.rows.count - okCount) issue\(doctor.rows.count - okCount == 1 ? "" : "s")"
+    }
+
+    @ViewBuilder
+    private var backendCard: some View {
+        VStack(alignment: .leading, spacing: 0) {
+            HStack {
+                Text("BACKEND PROCESS")
+                    .font(.system(size: 11, weight: .semibold)).tracking(0.5).foregroundStyle(.secondary)
+                Spacer()
+                statusBadge(ok: doctor.backend?.connected == true,
+                            text: doctor.backend?.connected == true ? "connected" : "offline")
+            }
+            .padding(.bottom, 8)
+
+            if let backend = doctor.backend {
+                if let pid = backend.extensionPid { infoRow("extension pid", "\(pid)", mono: true) }
+                if let uptime = backend.uptimeSeconds { infoRow("uptime", formatUptime(uptime), mono: false) }
+                if let socket = backend.socketPath { infoRow("socket", socket, mono: true) }
+                if let version = backend.bundleVersion { infoRow("backend build", version, mono: true) }
+                if let connectedAt = backend.connectedAt { infoRow("connected", connectedAt, mono: false) }
+                if backend.connected == false, let reason = backend.disconnectReason {
+                    infoRow("last error", reason, mono: false, tint: .red)
+                }
+            } else {
+                Text("The VFS backend isn't connected, so there's no live process to report. Mount VixenFS to bring it online.")
+                    .font(.system(size: 12)).foregroundStyle(.secondary)
+                    .fixedSize(horizontal: false, vertical: true)
+            }
+        }
+        .padding(15)
+        .background(RoundedRectangle(cornerRadius: 11, style: .continuous).fill(.quaternary.opacity(0.5)))
+        .overlay(RoundedRectangle(cornerRadius: 11, style: .continuous).strokeBorder(Color(nsColor: .separatorColor), lineWidth: 0.5))
+    }
+
+    private func statusBadge(ok: Bool, text: String) -> some View {
+        HStack(spacing: 6) {
+            Circle().fill(ok ? Color.green : Color.red).frame(width: 7, height: 7)
+            Text(text).font(.system(size: 11.5, weight: .medium)).foregroundStyle(ok ? Color.green : Color.red)
+        }
+    }
+
+    private func infoRow(_ key: String, _ value: String, mono: Bool, tint: Color? = nil) -> some View {
+        HStack(alignment: .firstTextBaseline) {
+            Text(key).font(.system(size: 12.5)).foregroundStyle(.secondary)
+            Spacer(minLength: 12)
+            Text(value)
+                .font(mono ? .system(size: 11.5, design: .monospaced) : .system(size: 12.5))
+                .foregroundStyle(tint ?? .primary)
+                .lineLimit(1)
+                .truncationMode(.middle)
+        }
+        .padding(.vertical, 4)
+    }
+
+    private func formatUptime(_ seconds: Double) -> String {
+        let total = Int(seconds)
+        let hours = total / 3600
+        let minutes = (total % 3600) / 60
+        let secs = total % 60
+        if hours > 0 { return "\(hours)h \(minutes)m" }
+        if minutes > 0 { return "\(minutes)m \(secs)s" }
+        return "\(secs)s"
     }
 }
 
