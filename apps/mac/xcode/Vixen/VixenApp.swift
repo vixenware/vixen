@@ -176,16 +176,37 @@ enum ManagementService {
         try runHelperChecked(["repair-app-records"], label: "repair-app-records")
     }
 
-    /// Ensure the volume is mounted: make the mountpoint exist+owned (one-time admin
-    /// prompt), then run the user-side mount. No password unless the mountpoint must be
-    /// (re)created.
+    /// Best-effort passwordless mount: only runs when the mountpoint is already set up
+    /// and the volume is down. Never prompts and never escalates — failures are left for
+    /// an explicit `repairVixenFS`. Used to auto-mount on launch.
+    static func autoMount() {
+        guard isMountpointReady(), !isVixenMounted() else { return }
+        logger.notice("auto-mounting VixenFS (mountpoint ready, volume down)")
+        let result = runHelper(arguments: ["mount"])
+        recordAction("mount", result: result)
+        logger.notice("auto-mount finished ok=\(result.status == 0, privacy: .public)")
+    }
+
+    /// Make the volume mounted, escalating as needed. First ensures the mountpoint exists
+    /// (one-time admin prompt) and runs the user-side mount. If that fails — typically a
+    /// wedged/zombie `fskitd` registration that poisons the path — it escalates to a
+    /// privileged `fskitd` restart through one more admin prompt, then retries.
     static func repairVixenFS(progress: @escaping @Sendable (String) -> Void) async throws {
         let started = DispatchTime.now().uptimeNanoseconds
         logger.notice("VixenFS repair requested from app")
         progress("Preparing mountpoint")
         try ensureMountpoint()
         progress("Mounting VixenFS")
-        let result = runHelper(arguments: ["mount"])
+        var result = runHelper(arguments: ["mount"])
+        if result.status != 0 {
+            // A ready mountpoint that still won't mount almost always means fskitd is
+            // holding a stale registration for the path. Clearing it needs root, so do it
+            // through one admin prompt, then retry the user-side mount.
+            logger.notice("mount failed; escalating to privileged fskitd restart")
+            progress("Recovering FSKit…")
+            try runPrivileged("kill-fskitd")
+            result = runHelper(arguments: ["mount"])
+        }
         recordAction("mount", result: result)
         try requireHelperSucceeded(result, name: "mount")
         progress("VixenFS mounted")
@@ -201,19 +222,15 @@ enum ManagementService {
         progress("VixenFS setup removed")
     }
 
-    /// The single privileged operation, via one admin prompt. No-op when the mountpoint
-    /// is already owned by us, so it normally prompts at most once in the app's lifetime.
+    /// Create + chown the mountpoint, via one admin prompt. No-op when it's already owned
+    /// by us, so it normally prompts at most once in the app's lifetime.
     static func ensureMountpoint() throws {
         if isMountpointReady() {
             logger.notice("mountpoint already set up; no admin prompt needed")
             return
         }
         logger.notice("mountpoint not set up; requesting one-time admin authorization")
-        let helperPath = helperURL.path
-        // Run the privileged helper through AppleScript so macOS shows the standard admin
-        // password dialog. `quoted form of` keeps a path with spaces intact.
-        let command = "do shell script quoted form of \"\(appleScriptEscaped(helperPath))\" & \" setup-mountpoint\" with administrator privileges"
-        try runAppleScriptPrivileged(command)
+        try runPrivileged("setup-mountpoint")
         guard isMountpointReady() else {
             throw NSError(
                 domain: NSPOSIXErrorDomain,
@@ -222,6 +239,16 @@ enum ManagementService {
             )
         }
         logger.notice("mountpoint set up via admin prompt")
+    }
+
+    /// Run `vixen-management <subcommand>` as root via a single macOS admin prompt
+    /// (AppleScript `with administrator privileges`). Used for the only operations that
+    /// genuinely need root: creating the mountpoint and restarting `fskitd`.
+    static func runPrivileged(_ subcommand: String) throws {
+        let helperPath = helperURL.path
+        // `quoted form of` keeps a path with spaces intact inside the shell command.
+        let command = "do shell script quoted form of \"\(appleScriptEscaped(helperPath))\" & \" \(subcommand)\" with administrator privileges"
+        try runAppleScriptPrivileged(command)
     }
 
     private static func appleScriptEscaped(_ value: String) -> String {
@@ -419,6 +446,7 @@ struct ContentView: View {
     @State private var doctorSnapshot = DoctorSnapshot.pending
     @State private var isCheckingDoctor = false
     @State private var isAutoRepairingDoctor = false
+    @State private var didAttemptAutoMount = false
     @State private var doctorProgressText: String? = nil
     @State private var repairProgressText: String? = nil
     @State private var uninstallDialog: UninstallDialog? = nil
@@ -777,7 +805,18 @@ struct ContentView: View {
         logger.notice("doctor first snapshot ready=\(firstSnapshot.isReady, privacy: .public) failures=\(firstSnapshot.rows.filter { $0.state == .failed }.count, privacy: .public) warnings=\(firstSnapshot.rows.filter { $0.state == .warning }.count, privacy: .public) canSafeRepair=\(firstSnapshot.canAttemptSafeMountRepair, privacy: .public) needsFskitRestart=\(firstSnapshot.needsFskitRestart, privacy: .public)")
 
         doctorSnapshot = firstSnapshot
-        logger.notice("doctor ui accepted snapshot without mutation")
+
+        // Auto-mount (once per launch): if the only thing down is the mount itself —
+        // extension enabled and mountpoint ready — bring the volume up passwordlessly
+        // instead of making the user click Repair. Anything that needs privileged
+        // recovery (a poisoned/wedged path) still falls back to the Repair button.
+        if !didAttemptAutoMount && firstSnapshot.canAttemptSafeMountRepair {
+            didAttemptAutoMount = true
+            logger.notice("attempting passwordless auto-mount")
+            await Task.detached(priority: .userInitiated) { ManagementService.autoMount() }.value
+            doctorSnapshot = await DoctorService.check(extensionSnapshot: extensionSnapshot)
+        }
+
         refreshManagementStatus()
         logger.notice("doctor ui refresh finished in \(elapsedMilliseconds(since: started), privacy: .public)ms")
     }
