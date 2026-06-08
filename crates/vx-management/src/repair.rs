@@ -4,19 +4,12 @@
 //! path that proved useful: clean stale app records, restart FSKit before it can bind
 //! stale module state, then mount once from a fresh helper process.
 
-use std::ffi::{CStr, CString};
 use std::process::Command;
 use std::time::Duration;
 
 use eyre::{Result, WrapErr, bail};
 
 use crate::{extension, killswitch, repair_status};
-
-#[derive(Debug)]
-struct ConsoleUser {
-    uid: u32,
-    name: String,
-}
 
 pub fn repair_vixenfs() -> Result<()> {
     tracing::info!("VixenFS repair transaction started");
@@ -38,14 +31,14 @@ pub fn repair_vixenfs() -> Result<()> {
 
 fn repair_vixenfs_inner() -> Result<()> {
     run_step(
+        "user-app-records",
+        "Cleaning stale app records for the logged-in user",
+        repair_user_session_app_records,
+    )?;
+    run_step(
         "root-extension",
         "Cleaning stale extension records for root",
         extension::repair_installed_extension,
-    )?;
-    run_step(
-        "user-extension",
-        "Repairing VixenFS for the logged-in user",
-        repair_user_session_extension,
     )?;
     run_step("restart-fskit", "Restarting FSKit before mounting", || {
         killswitch::terminate_fskitd().map(|_| ())
@@ -117,9 +110,9 @@ fn mount_in_fresh_helper() -> Result<()> {
     Ok(())
 }
 
-fn repair_user_session_extension() -> Result<()> {
+fn repair_user_session_app_records() -> Result<()> {
     let Some(user) = console_user()? else {
-        tracing::warn!("no logged-in console user; skipping user-session extension repair");
+        tracing::warn!("no logged-in console user; skipping user-session app registration cleanup");
         return Ok(());
     };
     let exe = std::env::current_exe().wrap_err("resolving current helper path")?;
@@ -127,7 +120,7 @@ fn repair_user_session_extension() -> Result<()> {
         uid = user.uid,
         user = user.name,
         helper = %exe.display(),
-        "running user-session VixenFS extension repair"
+        "running user-session Vixen app registration cleanup"
     );
 
     let output = Command::new("/bin/launchctl")
@@ -136,29 +129,37 @@ fn repair_user_session_extension() -> Result<()> {
         .arg("-u")
         .arg(&user.name)
         .arg(&exe)
-        .arg("repair-extension")
+        .arg("repair-app-records")
         .env(
             "VIXEN_MANAGEMENT_LOG",
             "info,vx_management=debug,vixen_management=debug",
         )
         .output()
-        .wrap_err("running user-session repair-extension")?;
+        .wrap_err("running user-session repair-app-records")?;
     let stdout = String::from_utf8_lossy(&output.stdout);
     let stderr = String::from_utf8_lossy(&output.stderr);
     tracing::info!(
         status = ?output.status.code(),
         stdout = %stdout.trim(),
         stderr = %stderr.trim(),
-        "user-session VixenFS extension repair finished"
+        "user-session Vixen app registration cleanup finished"
     );
     if !output.status.success() {
         let detail = child_failure_detail(&stdout, &stderr);
-        bail!("user-session repair-extension failed: {detail}");
+        bail!("user-session repair-app-records failed: {detail}");
     }
     Ok(())
 }
 
+#[derive(Debug)]
+struct ConsoleUser {
+    uid: u32,
+    name: String,
+}
+
 fn console_user() -> Result<Option<ConsoleUser>> {
+    use std::ffi::{CStr, CString};
+
     let path = CString::new("/dev/console").expect("static path has no NUL");
     let mut stat = std::mem::MaybeUninit::<libc::stat>::zeroed();
     if unsafe { libc::stat(path.as_ptr(), stat.as_mut_ptr()) } != 0 {

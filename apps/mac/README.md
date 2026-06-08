@@ -128,11 +128,13 @@ record can leave `fskitd` reporting the module as disabled. The repair path does
 not create registrations, because a manually added FSKit identity can be
 distinct from the identity the user approved in System Settings.
 The GUI "Repair VixenFS" button runs the installed helper's full `repair`
-command once through administrator approval in the logged-in user's session, so
-the mount attempt follows the same path as a terminal `sudo` repair instead of
-the LaunchDaemon bootstrap. The queue-trigger commands (`mount`, `unmount`,
-`remount`, `kill-fskitd`) only drop fixed trigger files into the root-owned
-management queues. Work requested through those queues still runs inside
+command once through administrator approval. That repair intentionally mirrors
+the working manual reset path: clean stale containing-app records for the
+logged-in user, clean stale root-visible records without electing or creating a
+new PlugInKit identity, restart `fskitd`, then mount from a fresh helper
+process. The queue-trigger commands (`mount`, `unmount`, `remount`,
+`kill-fskitd`) only drop fixed trigger files into the root-owned management
+queues. Work requested through those queues still runs inside
 `vixen-management` under launchd.
 
 ## Install and activate
