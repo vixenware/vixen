@@ -103,6 +103,11 @@ pub fn establish() -> Result<()> {
     recover_existing_state()?;
     let device = provision_device()?;
     if let Err(err) = mount_volume(&device) {
+        // Always release the mountpoint before yanking the device. If the mount partially
+        // registered with fskitd, detaching the device without unmounting first abandons
+        // it — fskitd keeps a zombie registration for the path that poisons every future
+        // mount there until fskitd restarts.
+        force_unmount_quietly(MOUNT_POINT);
         if let Err(detach_err) = detach_device(&device) {
             tracing::warn!(device, error = %detach_err, "failed to detach backing device after mount failure");
         }
@@ -110,6 +115,23 @@ pub fn establish() -> Result<()> {
     }
     tracing::info!("mounted {device} at {MOUNT_POINT}");
     Ok(())
+}
+
+/// Best-effort `umount` of a path, ignoring "not currently mounted". Always do this
+/// before detaching a backing device so a (possibly partially) mounted FSKit volume is
+/// released rather than abandoned.
+fn force_unmount_quietly(point: &str) {
+    match Command::new("/sbin/umount").arg(point).output() {
+        Ok(out) => tracing::info!(
+            mount_point = point,
+            status = ?out.status.code(),
+            stderr = %String::from_utf8_lossy(&out.stderr).trim(),
+            "best-effort umount before detach"
+        ),
+        Err(err) => {
+            tracing::warn!(mount_point = point, error = %err, "best-effort umount failed to spawn")
+        }
+    }
 }
 
 /// Recover from an active or wedged VixenFS mount, then detach any mock backing devices.
@@ -129,6 +151,7 @@ pub fn remount() -> Result<()> {
     recover_existing_state().wrap_err("recovering existing VixenFS state before remount")?;
     let device = provision_device()?;
     if let Err(err) = mount_volume(&device) {
+        force_unmount_quietly(MOUNT_POINT);
         if let Err(detach_err) = detach_device(&device) {
             tracing::warn!(device, error = %detach_err, "failed to detach backing device after remount failure");
         }
