@@ -81,3 +81,20 @@ oracle is negative evidence.
 - Never edit generated files — edit the source and regenerate.
 - Tests: `cargo nextest run`, not `cargo test`.
 - Commit work to avoid losing it; each rebuild phase ends in a committed state.
+
+## macOS app / FSKit
+
+Before touching `apps/mac`, `crates/vx-management`, or the VixenFS extension,
+read [`apps/mac/FSKIT-REPAIR.md`](apps/mac/FSKIT-REPAIR.md). The important
+rules are:
+
+- Do not manually register VixenFS with LaunchServices as a repair mechanism.
+  `lsregister -dump` and `lsregister -u` are diagnostic/cleanup tools only.
+- Do not use `pluginkit -e use` in automatic app setup, the doctor refresh, or
+  the one-click repair path.
+- The app may open System Settings for user enablement, but it must not hide
+  extension-registration mutations behind that button.
+- The one-click repair path is cheap-first: direct mount, direct `kill(2)` of
+  `fskitd`, mount again, then recent FSKit logs. Only if the persistent failure
+  points at registration state should it pay the slow stale app-record cleanup
+  cost and retry.

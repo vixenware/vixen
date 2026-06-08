@@ -1,8 +1,7 @@
 //! End-to-end VixenFS repair transaction.
 //!
-//! This is the app's single "fix it" path. It intentionally mirrors the manual reset
-//! path that proved useful: clean stale app records, restart FSKit before it can bind
-//! stale module state, then mount once from a fresh helper process.
+//! This is the app's single "fix it" path. It first tries the direct mount path, then
+//! falls back to the manual reset sequence only if macOS says the mount did not work.
 
 use std::process::Command;
 use std::time::Duration;
@@ -30,16 +29,10 @@ pub fn repair_vixenfs() -> Result<()> {
 }
 
 fn repair_vixenfs_inner() -> Result<()> {
-    run_step(
-        "user-app-records",
-        "Cleaning stale app records for the logged-in user",
-        repair_user_session_app_records,
-    )?;
-    run_step(
-        "root-extension",
-        "Cleaning stale extension records for root",
-        extension::repair_installed_extension,
-    )?;
+    let initial_mount = attempt_mount_step("mount", "Mounting VixenFS");
+    if initial_mount.mounted() {
+        return Ok(());
+    }
     run_step("restart-fskit", "Restarting FSKit before mounting", || {
         killswitch::terminate_fskitd().map(|_| ())
     })?;
@@ -48,11 +41,170 @@ fn repair_vixenfs_inner() -> Result<()> {
         "Waiting for FSKit to restart",
         wait_for_fskit_restart,
     )?;
+    let after_restart = attempt_mount_step(
+        "mount-after-fskit-restart",
+        "Mounting VixenFS after FSKit restart",
+    );
+    if after_restart.mounted() {
+        return Ok(());
+    }
+
+    let diagnostics = collect_recent_fskit_logs();
+    let diagnostic_excerpt = match diagnostics {
+        Ok(logs) => logs,
+        Err(err) => {
+            let detail = format!("{err:#}");
+            tracing::warn!(error = %detail, "failed to collect recent FSKit logs");
+            format!("FSKit log collection failed: {detail}")
+        }
+    };
+    tracing::warn!(
+        initial_mount_error = %initial_mount.detail(),
+        after_restart_error = %after_restart.detail(),
+        fskit_logs = %diagnostic_excerpt,
+        "mount still failed after FSKit restart"
+    );
+
+    if !should_try_registration_cleanup(
+        initial_mount.detail(),
+        after_restart.detail(),
+        &diagnostic_excerpt,
+    ) {
+        bail!(
+            "mount failed after FSKit restart: {}\n\nRecent FSKit logs:\n{}",
+            after_restart.detail(),
+            diagnostic_excerpt
+        );
+    }
+
     run_step(
-        "mount",
-        "Mounting VixenFS from the installed helper",
+        "user-app-records",
+        "FSKit logs point at registration state; cleaning stale app records for the logged-in user",
+        repair_user_session_app_records,
+    )?;
+    run_step(
+        "root-app-records",
+        "Cleaning stale app records for root",
+        extension::repair_installed_app_records,
+    )?;
+    run_step(
+        "restart-fskit-after-registration-cleanup",
+        "Restarting FSKit after registration cleanup",
+        || killswitch::terminate_fskitd().map(|_| ()),
+    )?;
+    run_step(
+        "wait-for-fskit-after-registration-cleanup",
+        "Waiting for FSKit to restart",
+        wait_for_fskit_restart,
+    )?;
+    run_step(
+        "mount-after-registration-cleanup",
+        "Mounting VixenFS after registration cleanup",
         mount_in_fresh_helper,
     )
+}
+
+#[derive(Debug)]
+enum MountAttempt {
+    Mounted,
+    Failed(String),
+}
+
+impl MountAttempt {
+    fn mounted(&self) -> bool {
+        matches!(self, Self::Mounted)
+    }
+
+    fn detail(&self) -> &str {
+        match self {
+            Self::Mounted => "mounted",
+            Self::Failed(detail) => detail,
+        }
+    }
+}
+
+fn attempt_mount_step(step: &str, message: &str) -> MountAttempt {
+    tracing::info!(step, message, "repair mount attempt started");
+    repair_status::running(step, message);
+    let outcome = mount_in_fresh_helper();
+    match outcome {
+        Ok(()) => {
+            repair_status::ok(step, "VixenFS mounted");
+            tracing::info!(step, "repair mount attempt succeeded");
+            MountAttempt::Mounted
+        }
+        Err(err) => {
+            let detail = format!("{err:#}");
+            tracing::warn!(
+                step,
+                error = %detail,
+                "repair mount attempt failed"
+            );
+            repair_status::running(step, "Mount failed; trying the next repair step");
+            MountAttempt::Failed(detail)
+        }
+    }
+}
+
+fn collect_recent_fskit_logs() -> Result<String> {
+    repair_status::running("fskit-logs", "Checking recent FSKit logs");
+    let predicate = r#"(process == "fskitd" OR process == "fskit_agent" OR process == "VixenFS") AND (eventMessage CONTAINS[c] "eu.bearcove.vixenfs" OR eventMessage CONTAINS[c] "vixenfs" OR eventMessage CONTAINS[c] "disabled" OR eventMessage CONTAINS[c] "module" OR eventMessage CONTAINS[c] "configureUserClient" OR eventMessage CONTAINS[c] "VixenFS.appex")"#;
+    let output = Command::new("/usr/bin/log")
+        .args([
+            "show",
+            "--style",
+            "compact",
+            "--last",
+            "5m",
+            "--info",
+            "--debug",
+            "--predicate",
+            predicate,
+        ])
+        .output()
+        .wrap_err("collecting recent FSKit logs")?;
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    tracing::info!(
+        status = ?output.status.code(),
+        stdout_len = stdout.len(),
+        stderr = %stderr.trim(),
+        "recent FSKit log collection finished"
+    );
+    if !output.status.success() {
+        let detail = child_failure_detail(&stdout, &stderr);
+        bail!("log show failed: {detail}");
+    }
+
+    let excerpt = trim_log_excerpt(&stdout);
+    repair_status::ok("fskit-logs", "Recent FSKit logs collected");
+    Ok(excerpt)
+}
+
+fn should_try_registration_cleanup(
+    initial_mount_error: &str,
+    after_restart_error: &str,
+    logs: &str,
+) -> bool {
+    let haystack = format!("{initial_mount_error}\n{after_restart_error}\n{logs}").to_lowercase();
+    let registration_markers = [
+        "module eu.bearcove.vixenfs is disabled",
+        "vixenfs.appex",
+        "/volumes/dmg",
+        "deriveddata",
+        "launchservices",
+        "pluginkit",
+        "configureuserclient",
+        "registration",
+    ];
+    let should_cleanup = registration_markers
+        .iter()
+        .any(|marker| haystack.contains(marker));
+    tracing::info!(
+        should_cleanup,
+        "evaluated whether persistent mount failure points at stale registration state"
+    );
+    should_cleanup
 }
 
 fn run_step<F>(step: &str, message: &str, body: F) -> Result<()>
@@ -225,6 +377,39 @@ fn trim_failure_detail(detail: &str) -> String {
         trimmed.push_str("...");
     }
     trimmed
+}
+
+fn trim_log_excerpt(logs: &str) -> String {
+    const MAX_CHARS: usize = 3_200;
+
+    let lines = logs
+        .lines()
+        .map(str::trim_end)
+        .filter(|line| !line.trim().is_empty())
+        .collect::<Vec<_>>();
+    let excerpt = lines
+        .iter()
+        .rev()
+        .scan(0usize, |total, line| {
+            let next_total = *total + line.len() + 1;
+            if next_total > MAX_CHARS && *total > 0 {
+                None
+            } else {
+                *total = next_total;
+                Some(*line)
+            }
+        })
+        .collect::<Vec<_>>()
+        .into_iter()
+        .rev()
+        .collect::<Vec<_>>()
+        .join("\n");
+
+    if excerpt.is_empty() {
+        "No matching FSKit logs in the last 5 minutes".to_string()
+    } else {
+        excerpt
+    }
 }
 
 #[cfg(test)]

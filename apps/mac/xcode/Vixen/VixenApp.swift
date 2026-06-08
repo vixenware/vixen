@@ -799,7 +799,7 @@ struct ContentView: View {
         extensionSnapshot.enabled
     }
     private var needsExtensionEnablement: Bool {
-        extensionSnapshot.found && !extensionSnapshot.enabled
+        extensionSnapshot.error == nil && (!extensionSnapshot.found || !extensionSnapshot.enabled)
     }
     private var shouldUseDoctorFlow: Bool {
         isManagementConfigured && !needsExtensionEnablement
@@ -1015,7 +1015,6 @@ struct ContentView: View {
 
     private func openExtensionSettings() {
         logger.notice("opening extension settings")
-        try? ManagementService.repairExtension()
         let targets = [
             "x-apple.systempreferences:com.apple.ExtensionsPreferences?extensionPointIdentifier=com.apple.fskit.fsmodule",
             "x-apple.systempreferences:com.apple.LoginItems-Settings.extension",
@@ -1172,39 +1171,9 @@ struct ContentView: View {
         logger.notice("doctor first snapshot ready=\(firstSnapshot.isReady, privacy: .public) failures=\(firstSnapshot.rows.filter { $0.state == .failed }.count, privacy: .public) warnings=\(firstSnapshot.rows.filter { $0.state == .warning }.count, privacy: .public) canSafeRepair=\(firstSnapshot.canAttemptSafeMountRepair, privacy: .public) needsFskitRestart=\(firstSnapshot.needsFskitRestart, privacy: .public)")
 
         doctorSnapshot = firstSnapshot
-        if firstSnapshot.needsUserSessionRegistrationRepair {
-            logger.notice("doctor detected stale user-session registration; running safe cleanup")
-            doctorProgressText = "Cleaning stale app records"
-            if let repairError = await repairUserSessionRegistrationForDoctor() {
-                logger.error("doctor safe registration cleanup failed: \(repairError, privacy: .public)")
-                doctorSnapshot = firstSnapshot.withRegistrationRepairFailure(repairError)
-                refreshManagementStatus()
-                logger.notice("doctor ui refresh finished in \(elapsedMilliseconds(since: started), privacy: .public)ms after failed safe cleanup")
-                return
-            }
-
-            doctorProgressText = "Checking cleaned state"
-            let repairedSnapshot = await DoctorService.check(
-                extensionSnapshot: extensionSnapshot
-            )
-            doctorSnapshot = repairedSnapshot
-            logger.notice("doctor ui accepted snapshot after safe registration cleanup ready=\(repairedSnapshot.isReady, privacy: .public) failures=\(repairedSnapshot.rows.filter { $0.state == .failed }.count, privacy: .public) warnings=\(repairedSnapshot.rows.filter { $0.state == .warning }.count, privacy: .public)")
-        } else {
-            logger.notice("doctor ui accepted snapshot without mutation")
-        }
+        logger.notice("doctor ui accepted snapshot without mutation")
         refreshManagementStatus()
         logger.notice("doctor ui refresh finished in \(elapsedMilliseconds(since: started), privacy: .public)ms")
-    }
-
-    private func repairUserSessionRegistrationForDoctor() async -> String? {
-        await Task.detached(priority: .utility) {
-            do {
-                try ManagementService.repairAppRecords()
-                return nil
-            } catch {
-                return error.localizedDescription
-            }
-        }.value
     }
 
     private func pollManagementStatus() async {
@@ -1281,7 +1250,6 @@ struct ContentView: View {
         }
 
         do {
-            try ManagementService.repairExtension()
             try ManagementService.register()
             managementError = nil
             refreshManagementStatus()
@@ -1310,7 +1278,6 @@ struct ContentView: View {
         }
 
         do {
-            try ManagementService.repairExtension()
             try ManagementService.refreshRegistration()
             managementError = nil
             refreshManagementStatus()

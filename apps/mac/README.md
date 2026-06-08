@@ -120,19 +120,17 @@ Useful installed-app commands:
 - `/Applications/Vixen.app/Contents/MacOS/Vixen management remount`
 
 `repair-extension` runs the bundled management helper directly in the current
-effective user. As the logged-in user, it removes stale LaunchServices and
-PlugInKit records while preserving the installed `/Applications/Vixen.app`
-record. As root, it removes only non-installed Vixen LaunchServices records and
-also preserves `/Applications/Vixen.app`; removing that installed root-visible
-record can leave `fskitd` reporting the module as disabled. The repair path does
-not create registrations, because a manually added FSKit identity can be
-distinct from the identity the user approved in System Settings.
+effective user and exists for explicit diagnostics/experiments. It is not part
+of app startup, the Open Settings button, or the one-click GUI repair path.
+Automatic app paths must not elect PlugInKit use or create extension identities,
+because a manually added FSKit identity can be distinct from the identity the
+user approved in System Settings.
 The GUI "Repair VixenFS" button runs the installed helper's full `repair`
 command once through administrator approval. That repair intentionally mirrors
-the working manual reset path: clean stale containing-app records for the
-logged-in user, clean stale root-visible records without electing or creating a
-new PlugInKit identity, restart `fskitd`, then mount from a fresh helper
-process. The queue-trigger commands (`mount`, `unmount`, `remount`,
+the working manual reset path, but tries the cheap operation first: mount from a
+fresh helper process. If that mount fails, it cleans stale containing-app records
+for the logged-in user and root, restarts `fskitd`, then retries the mount. The
+queue-trigger commands (`mount`, `unmount`, `remount`,
 `kill-fskitd`) only drop fixed trigger files into the root-owned management
 queues. Work requested through those queues still runs inside
 `vixen-management` under launchd.
@@ -231,13 +229,16 @@ This is not an in-extension bug. It means the host side is still holding an olde
 
 If registration gets poisoned, first decide which app copy should win, then reset to that copy only.
 
-For an installed app:
+For an installed app, prefer the one-click app repair flow or the equivalent
+installed-app CLI:
 
-- `/Applications/Vixen.app/Contents/MacOS/Vixen management repair-extension`
-- `just -f apps/mac/Justfile fix-registration`
+- `/Applications/Vixen.app/Contents/MacOS/Vixen management repair`
 
-Those commands are cleanup-only. After cleanup, open the installed app or
-System Settings and let macOS rediscover the extension.
+That command first tries the mount, then restarts `fskitd` with direct `kill(2)`
+and tries the mount again. Only after that second mount failure does it collect
+recent FSKit logs and pay the stale app-record cleanup cost if the failure points
+at registration state. Use `repair-extension` only for an explicit registration
+investigation, not as the normal reset path.
 
 For root-side diagnosis/recovery during development, batch the work into one
 sudo invocation:
@@ -271,17 +272,17 @@ Before debugging a mount failure, check these in order:
 
 1. Confirm which experiment you mean to run.
    - Hybrid FSKit host: `just -f apps/mac/Justfile install`
-2. Verify the winning registration:
+2. Run the installed app repair path:
+   - `/Applications/Vixen.app/Contents/MacOS/Vixen management repair`
+3. If a concrete registration investigation is needed, use the explicit tools:
    - `pluginkit -mAvvv -i eu.bearcove.vixenfs`
-3. If FSKit host state looks stale, use the management kill switch:
-   - `/Applications/Vixen.app/Contents/MacOS/Vixen management kill-fskitd`
-4. Clean stale registrations if needed:
    - `/Applications/Vixen.app/Contents/MacOS/Vixen management repair-extension`
    - `just -f apps/mac/Justfile fix-registration`
-5. Only then retry the mount or `vx eval`.
+4. Only then retry `vx eval`.
 
-If step 2 shows a path other than the app copy you intend to test, stop there and fix registration
-first. Otherwise you are debugging the wrong binary.
+If the explicit registration investigation shows a path other than the app copy
+you intend to test, stop there and fix registration first. Otherwise you are
+debugging the wrong binary.
 
 ## Runtime expectations from `vx-vfs`
 

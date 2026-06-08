@@ -34,8 +34,8 @@ pub enum Button {
     Mount,
     /// Recover the VixenFS mount by unwinding FSKit, then detach its mock backing image.
     Unmount,
-    /// Run the full app-visible repair transaction: registration repair, mount,
-    /// and FSKit restart retry when macOS reports stale module state.
+    /// Run the full app-visible repair transaction: mount first, then stale
+    /// app-record cleanup and FSKit restart only if the mount fails.
     Remount,
     /// Terminate the system `fskitd` — the wedge kill-switch.
     KillFskitd,
