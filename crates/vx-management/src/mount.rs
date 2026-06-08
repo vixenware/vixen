@@ -205,9 +205,11 @@ fn ensure_image() -> Result<()> {
 
 /// Mount the block device as `vixenfs` at [`MOUNT_POINT`]. **Requires root.**
 fn mount_volume(device: &str) -> Result<()> {
+    let devnode = format!("/dev/{device}");
     // Keep `/Volumes/Vixen` itself plain APFS; FSKit owns only the nested child.
     tracing::info!(
         device,
+        devnode,
         parent = MACOS_VFS_MOUNT_PARENT,
         mount_point = MOUNT_POINT,
         fs_type = FS_TYPE,
@@ -216,11 +218,12 @@ fn mount_volume(device: &str) -> Result<()> {
     std::fs::create_dir_all(MACOS_VFS_MOUNT_PARENT).wrap_err("creating Vixen mount parent")?;
     std::fs::create_dir_all(MOUNT_POINT).wrap_err("creating Vixen mount point")?;
     let out = Command::new("/sbin/mount")
-        .args(["-F", "-t", FS_TYPE, device, MOUNT_POINT])
+        .args(["-F", "-t", FS_TYPE, &devnode, MOUNT_POINT])
         .output()
         .wrap_err("running mount")?;
     tracing::info!(
         device,
+        devnode,
         mount_point = MOUNT_POINT,
         status = ?out.status.code(),
         stdout = %String::from_utf8_lossy(&out.stdout).trim(),
@@ -229,7 +232,7 @@ fn mount_volume(device: &str) -> Result<()> {
     );
     if !out.status.success() {
         bail!(
-            "mount {device} -> {MOUNT_POINT} failed: {}",
+            "mount {devnode} -> {MOUNT_POINT} failed: {}",
             String::from_utf8_lossy(&out.stderr).trim()
         );
     }
