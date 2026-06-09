@@ -114,7 +114,14 @@ install profile='Debug': (build profile)
     # re-activates the stale process instead of relaunching the new binary.
     osascript -e 'quit app "Vixen"' 2>/dev/null || true
     killall Vixen 2>/dev/null || true
-    # Wait (bounded) for it to actually exit before replacing the bundle.
+    # Unmount VixenFS so the freshly-built extension loads on the next mount (FSKit keeps
+    # the old extension instances running until the volume is unmounted, then unloads them
+    # itself). We own the mountpoint, so this needs no root.
+    #
+    # NEVER `killall VixenFS`: force-killing a system FSKit extension instance can hang the
+    # entire system. `umount` is the only safe way to drop it.
+    umount /Volumes/Vixen/vfs 2>/dev/null || true
+    # Wait (bounded) for the app to exit before replacing the bundle.
     for _ in $(seq 1 20); do pgrep -x Vixen >/dev/null || break; sleep 0.25; done
     rm -rf /Applications/Vixen.app
     ditto xcode/build/DerivedData/Build/Products/{{ profile }}/Vixen.app /Applications/Vixen.app
