@@ -23,6 +23,13 @@ enum VixenMain {
 struct VixenApp: App {
     private let updaterController = SparkleBootstrap.makeUpdaterController()
 
+    init() {
+        // Serve the in-app VFS backend over vixenfs.sock as soon as the GUI app starts,
+        // independent of any view's lifecycle. Self-reconnects until the volume's socket
+        // is up; flips "Backend Connection" green and shows files in /Volumes/Vixen/vfs.
+        VfsBackendService.shared.startIfNeeded()
+    }
+
     var body: some Scene {
         WindowGroup {
             ContentView()
@@ -546,10 +553,6 @@ struct ContentView: View {
         }
         .onAppear {
             cursorBob = true
-            // Serve the in-app VFS backend over vixenfs.sock so the mounted volume has a
-            // live provider (flips "Backend Connection" green and shows files). The
-            // service self-reconnects until the volume's socket is up.
-            VfsBackendService.shared.startIfNeeded()
         }
         .onReceive(
             NotificationCenter.default.publisher(for: NSApplication.didBecomeActiveNotification)

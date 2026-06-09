@@ -161,6 +161,7 @@ final class VfsBackendService: @unchecked Sendable {
     }
 
     func startIfNeeded() {
+        vfsBackendLog.notice("VfsBackendService.startIfNeeded called")
         lock.lock()
         let already = started
         started = true
@@ -170,6 +171,7 @@ final class VfsBackendService: @unchecked Sendable {
     }
 
     private func serveLoop() async {
+        vfsBackendLog.notice("VfsBackend serveLoop started")
         while !Task.isCancelled {
             guard let path = socketPath() else {
                 vfsBackendLog.error("no app-group container; cannot locate vixenfs.sock")
