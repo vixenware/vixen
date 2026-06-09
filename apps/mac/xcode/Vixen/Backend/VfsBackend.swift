@@ -14,6 +14,11 @@ import os
 /// `/Volumes/Vixen/vfs` without an external daemon.
 private let vfsBackendLog = Logger(subsystem: "eu.bearcove.vixen", category: "VfsBackend")
 
+enum VfsBackendError: Error, CustomStringConvertible {
+    case connectTimeout
+    var description: String { "connect/handshake timed out" }
+}
+
 /// Log to both os_log and a plain file (`~/Library/Logs/Vixen/vixen-backend.log`).
 /// os_log isn't reliably readable in every environment; the file always is.
 func backendLog(_ message: String) {
@@ -204,10 +209,25 @@ final class VfsBackendService: @unchecked Sendable {
             #if canImport(VoxRuntime)
                 do {
                     backendLog("connecting to \(path)")
-                    let connector = UnixConnector(path: path)
-                    let dispatcher = VfsDispatcher(handler: VfsBackend())
-                    let session = try await VoxRuntime.Session.initiator(
-                        connector, dispatcher: dispatcher, resumable: true)
+                    // Bound the connect/handshake so a stall is observable + retried
+                    // rather than dead-hanging forever.
+                    let session = try await withThrowingTaskGroup(
+                        of: VoxRuntime.Session.self
+                    ) { group in
+                        group.addTask {
+                            try await VoxRuntime.Session.initiator(
+                                UnixConnector(path: path),
+                                dispatcher: VfsDispatcher(handler: VfsBackend()),
+                                resumable: true)
+                        }
+                        group.addTask {
+                            try await Task.sleep(for: .seconds(10))
+                            throw VfsBackendError.connectTimeout
+                        }
+                        let established = try await group.next()!
+                        group.cancelAll()
+                        return established
+                    }
                     backendLog("connected; serving")
                     try await session.run()
                     backendLog("session ended; will reconnect")
