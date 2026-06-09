@@ -227,12 +227,16 @@ impl RustVolume {
             VirtualKind::Root => Ok(item.attributes_for_request(request)),
             VirtualKind::MetaDir => Ok(item.attributes_for_request(request)),
             VirtualKind::StatusJson => {
-                let bytes = root_peer_state().status_json_bytes();
                 if let Some(status_item) = self.get_cached_item(STATUS_JSON_ID) {
-                    status_item.update_status(bytes);
+                    // While a handle is open the snapshot is frozen — don't re-render, or
+                    // the reported size would drift from what read() will serve.
+                    if !status_item.status_is_open() {
+                        status_item.update_status(root_peer_state().status_json_bytes());
+                    }
                     Ok(status_item.attributes_for_request(request))
                 } else {
-                    let status_item = self.cache_item(RustItem::status_json(bytes));
+                    let status_item = self
+                        .cache_item(RustItem::status_json(root_peer_state().status_json_bytes()));
                     Ok(status_item.attributes_for_request(request))
                 }
             }
@@ -310,12 +314,13 @@ impl RustVolume {
         }
 
         if directory.item_id() == VIXENFS_DIR_ID && requested_name == STATUS_JSON_NAME {
-            let bytes = root_peer_state().status_json_bytes();
             let item = if let Some(item) = self.get_cached_item(STATUS_JSON_ID) {
-                item.update_status(bytes);
+                if !item.status_is_open() {
+                    item.update_status(root_peer_state().status_json_bytes());
+                }
                 item
             } else {
-                self.cache_item(RustItem::status_json(bytes))
+                self.cache_item(RustItem::status_json(root_peer_state().status_json_bytes()))
             };
             return Ok((item.clone().into_super(), item.fs_name()));
         }
@@ -391,12 +396,13 @@ impl RustVolume {
         packer: &FSDirectoryEntryPacker,
     ) -> Result<FSDirectoryVerifier, Retained<NSError>> {
         if directory.item_id() == VIXENFS_DIR_ID {
-            let bytes = root_peer_state().status_json_bytes();
             let item = if let Some(item) = self.get_cached_item(STATUS_JSON_ID) {
-                item.update_status(bytes);
+                if !item.status_is_open() {
+                    item.update_status(root_peer_state().status_json_bytes());
+                }
                 item
             } else {
-                self.cache_item(RustItem::status_json(bytes))
+                self.cache_item(RustItem::status_json(root_peer_state().status_json_bytes()))
             };
             if cookie == unsafe { FSDirectoryCookieInitial } {
                 let attrs = item.attributes_for_request(attributes);

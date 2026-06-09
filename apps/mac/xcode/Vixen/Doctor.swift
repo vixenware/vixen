@@ -149,7 +149,7 @@ enum DoctorService {
         }
         rows.append(status.row)
         rows.append(timed("backend probe") {
-            checkBackend(status)
+            checkBackend()
         })
 
         return DoctorSnapshot(rows: rows, backend: backendStatus(from: status.payload))
@@ -358,55 +358,44 @@ enum DoctorService {
         )
     }
 
-    private static func checkBackend(_ status: StatusProbe) -> DoctorRow {
-        guard let payload = status.payload else {
-            logger.error("doctor backend failed because status payload is missing")
+    /// Health = read the well-known file that Vixen.app's own prefix serves, straight
+    /// through the mount, with a normal Swift file read. That exercises the whole chain
+    /// (kernel → FSKit → vox socket → the app's prefix, looping back into this process)
+    /// without a helper, an active probe, or a second prefix-provider — so unlike the old
+    /// `vixen-management probe-vfs`, it can't displace the real prefix off the mount.
+    private static func checkBackend() -> DoctorRow {
+        let path = "\(mountPoint)/README.md"
+        guard let data = readFileWithTimeout(path, timeout: 2), !data.isEmpty else {
+            logger.error("doctor backend failed: couldn't read \(path, privacy: .public)")
             return DoctorRow(
                 id: "backend",
                 title: "Backend Connection",
                 state: .failed,
-                detail: "No status payload"
+                detail: "Couldn't read \(path)"
             )
         }
-
-        let connected = payload["connected"] as? Bool ?? false
-        if connected {
-            logger.notice("doctor backend ok connected=true")
-            return DoctorRow(
-                id: "backend",
-                title: "Backend Connection",
-                state: .ok,
-                detail: "VFS backend is connected"
-            )
-        }
-
-        let everConnected = payload["ever_connected"] as? Bool ?? false
-        let reason = (payload["disconnect_reason"] as? String)?
-            .trimmingCharacters(in: .whitespacesAndNewlines)
-        logger.notice("doctor backend idle connected=false everConnected=\(everConnected, privacy: .public) reason=\(reason ?? "none", privacy: .public); running active probe")
-        let result = runProcess(
-            managementHelperPath,
-            arguments: ["probe-vfs"],
-            timeout: 6
-        )
-        guard result.status == 0 else {
-            logger.error("doctor backend probe failed timedOut=\(result.timedOut, privacy: .public) detail=\(result.failureDetail(defaultMessage: "VFS backend probe failed"), privacy: .public)")
-            return DoctorRow(
-                id: "backend",
-                title: "Backend Connection",
-                state: .failed,
-                detail: result.failureDetail(defaultMessage: "VFS backend probe failed")
-            )
-        }
-
-        let detail = result.stdout.trimmingCharacters(in: .whitespacesAndNewlines)
-        logger.notice("doctor backend probe ok stdout=\(detail, privacy: .public)")
+        logger.notice("doctor backend ok: read \(data.count) bytes from \(path, privacy: .public)")
         return DoctorRow(
             id: "backend",
             title: "Backend Connection",
             state: .ok,
-            detail: detail.isEmpty ? "VFS probe read through VixenFS" : detail
+            detail: "Read README.md (\(data.count) bytes) from the Vixen prefix"
         )
+    }
+
+    /// Read a file on a background queue with a bound, so a wedged mount can't hang the
+    /// doctor (and the UI) indefinitely.
+    private static func readFileWithTimeout(_ path: String, timeout: TimeInterval) -> Data? {
+        let semaphore = DispatchSemaphore(value: 0)
+        var result: Data?
+        DispatchQueue.global(qos: .userInitiated).async {
+            result = try? Data(contentsOf: URL(fileURLWithPath: path))
+            semaphore.signal()
+        }
+        guard semaphore.wait(timeout: .now() + timeout) == .success else {
+            return nil
+        }
+        return result
     }
 
     private struct CommandResult {

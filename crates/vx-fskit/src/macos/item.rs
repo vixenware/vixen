@@ -35,6 +35,12 @@ struct CachedState {
     /// content matches the size `getAttributes` reported — otherwise a state change
     /// between the two calls leaves a stray byte and invalid JSON.
     status_bytes: Vec<u8>,
+    /// Number of currently-open handles on the synthetic `status.json`. While > 0 the
+    /// `status_bytes` snapshot is frozen (taken at the first open), so every
+    /// getAttributes/read between open and close sees one consistent view regardless of
+    /// how the underlying status changes — the open() consistency boundary a virtual
+    /// filesystem uses instead of re-rendering on each call.
+    status_open_count: u32,
 }
 
 pub(super) struct ItemIvars {
@@ -82,6 +88,7 @@ impl RustItem {
                 created_time,
                 mode,
                 status_bytes: Vec::new(),
+                status_open_count: 0,
             }),
         });
         unsafe { msg_send![super(this), init] }
@@ -265,6 +272,44 @@ impl RustItem {
             .expect("item state mutex poisoned")
             .status_bytes
             .clone()
+    }
+
+    /// Open a handle on `status.json`: on the first open, freeze `bytes` as the snapshot
+    /// served until the last close. Subsequent opens just bump the refcount and keep the
+    /// existing snapshot, so concurrent readers all see one consistent view.
+    pub(super) fn status_open(&self, bytes: Vec<u8>) {
+        let mut state = self
+            .ivars()
+            .state
+            .lock()
+            .expect("item state mutex poisoned");
+        if state.status_open_count == 0 {
+            state.size = bytes.len() as u64;
+            state.modified_time = unix_time();
+            state.status_bytes = bytes;
+        }
+        state.status_open_count += 1;
+    }
+
+    /// Close a handle on `status.json`. The frozen snapshot is kept after the last close
+    /// (a fresh render replaces it on the next getAttributes/open when not open).
+    pub(super) fn status_close(&self) {
+        let mut state = self
+            .ivars()
+            .state
+            .lock()
+            .expect("item state mutex poisoned");
+        state.status_open_count = state.status_open_count.saturating_sub(1);
+    }
+
+    /// Whether any handle is currently open on `status.json` (snapshot is frozen).
+    pub(super) fn status_is_open(&self) -> bool {
+        self.ivars()
+            .state
+            .lock()
+            .expect("item state mutex poisoned")
+            .status_open_count
+            > 0
     }
 
     pub(super) fn debug_summary(&self) -> String {

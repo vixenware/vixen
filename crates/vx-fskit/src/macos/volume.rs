@@ -821,7 +821,10 @@ define_class!(
     unsafe impl FSVolumeOpenCloseOperations for RustVolume {
         #[unsafe(method(isOpenCloseInhibited))]
         unsafe fn isOpenCloseInhibited(&self) -> bool {
-            true
+            // We want the open/close lifecycle: it's the consistency boundary used to
+            // freeze a stable snapshot of the synthetic status.json across getAttributes
+            // and read. For every other item open/close are harmless no-ops.
+            false
         }
 
         #[unsafe(method(openItem:withModes:replyHandler:))]
@@ -834,6 +837,13 @@ define_class!(
             let details = as_rust_item(item)
                 .map(|item| item.debug_summary())
                 .unwrap_or_else(|| "<non-rust-item>".to_owned());
+            // Freeze a consistent status.json snapshot for the lifetime of this open, so
+            // getAttributes (size) and read (bytes) can't disagree mid-flight.
+            if let Some(rust_item) = as_rust_item(item)
+                && rust_item.virtual_kind() == VirtualKind::StatusJson
+            {
+                rust_item.status_open(root_peer_state().status_json_bytes());
+            }
             log_event(
                 "info",
                 format!("vixen-fskit openItem modes={:#x} {}", modes.0, details),
@@ -851,6 +861,11 @@ define_class!(
             let details = as_rust_item(item)
                 .map(|item| item.debug_summary())
                 .unwrap_or_else(|| "<non-rust-item>".to_owned());
+            if let Some(rust_item) = as_rust_item(item)
+                && rust_item.virtual_kind() == VirtualKind::StatusJson
+            {
+                rust_item.status_close();
+            }
             log_event(
                 "info",
                 format!(
