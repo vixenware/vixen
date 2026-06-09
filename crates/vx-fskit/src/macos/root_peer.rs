@@ -292,44 +292,45 @@ impl ConnectionAcceptor for RootPeerAcceptor {
         request: &ConnectionRequest,
         connection: PendingConnection,
     ) -> Result<(), Metadata> {
-        // A provider claims its mount prefix via connection metadata. One virtual vox
-        // connection == one prefix == one Vfs (one-service-per-connection).
-        let prefix = match request.get_str("prefix") {
-            Some(prefix) if !prefix.is_empty() => prefix.to_owned(),
-            _ => {
-                log_event(
-                    "error",
-                    format!(
-                        "rejecting VFS connection with no 'prefix' metadata (service={})",
-                        request.service()
-                    ),
-                );
-                return Err(vox::metadata()
-                    .str("error", "missing required 'prefix' connection metadata")
-                    .build());
-            }
-        };
-        log_event(
-            "info",
-            format!(
-                "accepting VFS provider prefix={prefix} service={}",
-                request.service()
-            ),
-        );
         let client = connection.handle_with_client::<VfsClient>(());
         let client: VfsClient = client.with_middleware(ClientLogging::new(ClientLoggingOptions {
             log_metadata: true,
         }));
-        let generation = self.state.record_connected(prefix.clone(), client.clone());
-        log_event(
-            "info",
-            format!("accepted VFS provider prefix={prefix} generation={generation}"),
-        );
-        let state = self.state.clone();
-        tokio::spawn(async move {
-            client.caller.closed().await;
-            state.record_closed(&prefix, generation, "caller closed");
-        });
+        // A provider claims its mount prefix via connection metadata — one virtual vox
+        // connection == one prefix == one Vfs (one-service-per-connection). Connections
+        // without a prefix (e.g. the peer's root/session anchor) are accepted but register
+        // no provider, so they don't tear the session down.
+        match request.get_str("prefix") {
+            Some(prefix) if !prefix.is_empty() => {
+                let prefix = prefix.to_owned();
+                log_event(
+                    "info",
+                    format!(
+                        "accepting VFS provider prefix={prefix} service={}",
+                        request.service()
+                    ),
+                );
+                let generation = self.state.record_connected(prefix.clone(), client.clone());
+                log_event(
+                    "info",
+                    format!("accepted VFS provider prefix={prefix} generation={generation}"),
+                );
+                let state = self.state.clone();
+                tokio::spawn(async move {
+                    client.caller.closed().await;
+                    state.record_closed(&prefix, generation, "caller closed");
+                });
+            }
+            _ => {
+                log_event(
+                    "info",
+                    format!(
+                        "accepted connection with no prefix (not a provider) service={}",
+                        request.service()
+                    ),
+                );
+            }
+        }
         Ok(())
     }
 }

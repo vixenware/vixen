@@ -215,17 +215,17 @@ final class VfsBackendService: @unchecked Sendable {
             #if canImport(VoxRuntime)
                 do {
                     backendLog("connecting to \(path)")
-                    // Bound the connect/handshake so a stall is observable + retried
-                    // rather than dead-hanging forever.
+                    // Bound the connect/handshake so a stall is observable + retried rather
+                    // than dead-hanging. The root connection is just the session anchor — it
+                    // serves nothing (NoopDispatcher); the extension establishes NoopClient
+                    // and never calls it.
                     let session = try await withThrowingTaskGroup(
                         of: VoxRuntime.Session.self
                     ) { group in
                         group.addTask {
                             try await VoxRuntime.Session.initiator(
                                 UnixConnector(path: path),
-                                dispatcher: VfsDispatcher(handler: VfsBackend()),
-                                // Claim our mount prefix; the extension serves us under it.
-                                metadata: Metadata.null.metaSetting("prefix", .string(vfsPrefix)))
+                                dispatcher: NoopDispatcher())
                         }
                         group.addTask {
                             try await Task.sleep(for: .seconds(10))
@@ -235,7 +235,20 @@ final class VfsBackendService: @unchecked Sendable {
                         group.cancelAll()
                         return established
                     }
-                    backendLog("connected; serving")
+                    // Serve our Vfs on a *virtual* connection that claims the prefix. One
+                    // virtual connection == one prefix == one Vfs; the extension mounts us at
+                    // /Volumes/Vixen/vfs/<prefix>/. Parity is .initiator (we opened it).
+                    backendLog("connected; opening prefix '\(vfsPrefix)'")
+                    let settings = ConnectionSettings(
+                        parity: .initiator, maxConcurrentRequests: 64, initialChannelCredit: 16)
+                    let metadata = Metadata.null
+                        .metaSetting("vox-service", .string("Vfs"))
+                        .metaSetting("prefix", .string(vfsPrefix))
+                    _ = try await session.handle.openConnection(
+                        settings: settings,
+                        metadata: metadata,
+                        dispatcher: VfsDispatcher(handler: VfsBackend()))
+                    backendLog("serving prefix '\(vfsPrefix)'")
                     try await session.run()
                     backendLog("session ended; will reconnect")
                 } catch {
