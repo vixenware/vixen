@@ -422,7 +422,7 @@ impl vox::ConnectionAcceptor for VfsdAcceptor {
         &self,
         request: &vox::ConnectionRequest,
         connection: vox::PendingConnection,
-    ) -> std::result::Result<(), vox::Metadata<'static>> {
+    ) -> std::result::Result<(), vox::Metadata> {
         match request.service() {
             "Vfsd" => {
                 connection.handle_with(VfsdDispatcher::new(self.service.clone()));

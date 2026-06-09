@@ -78,16 +78,19 @@ facet = { version = "0.46", features = ["jiff02", "camino"] }
 facet-error = { version = "0.46" }
 facet-json = { version = "0.46" }
 facet-postcard = { version = "0.46", features = ["jiff02", "camino"] }
-facet-styx = "3.0.0"
+facet-styx = "4.0"
 
 
 # cmdline parsing
-figue = { version = "2.0.1" }
+figue = { version = "4" }
 
 # vox RPC framework
-vox = { version = "0.8.2", features = ["transport-tcp", "transport-local"] }
-vox-types = { version = "0.8.2" }
-vox-codegen = { version = "0.8.2" }
+# Migrated to the local ~/vox checkout (path deps) so the Rust extension and the Swift
+# VoxRuntime speak the exact same vox wire. crates.io is still 0.8.2; the only newer code
+# is ~/vox. Local-only until vox is published again.
+vox = { path = "/Users/amos/vox/rust/vox", features = ["transport-tcp", "transport-local"] }
+vox-types = { path = "/Users/amos/vox/rust/vox-types" }
+vox-codegen = { path = "/Users/amos/vox/rust/vox-codegen" }
 
 # copy-and-patch JIT substrate (from ~/phon): executable memory + AArch64
 # relocation patching + build-time stencil extraction. Backend-agnostic — no IR.
@@ -177,19 +180,56 @@ strip = "none"
 
 [patch.crates-io]
 
-# facet = { git = "https://github.com/facet-rs/facet", branch = "main" }
-# facet-core = { git = "https://github.com/facet-rs/facet", branch = "main" }
-# facet-macros = { git = "https://github.com/facet-rs/facet", branch = "main" }
-# facet-macros-impl = { git = "https://github.com/facet-rs/facet", branch = "main" }
-# facet-macro-parse = { git = "https://github.com/facet-rs/facet", branch = "main" }
-# facet-macro-types = { git = "https://github.com/facet-rs/facet", branch = "main" }
-# facet-reflect = { git = "https://github.com/facet-rs/facet", branch = "main" }
-# facet-json = { git = "https://github.com/facet-rs/facet", branch = "main" }
-# facet-toml = { git = "https://github.com/facet-rs/facet", branch = "main" }
-# facet-postcard = { git = "https://github.com/facet-rs/facet", branch = "main" }
-# facet-value = { git = "https://github.com/facet-rs/facet", branch = "main" }
-# facet-format = { git = "https://github.com/facet-rs/facet", branch = "main" }
-# facet-path = { git = "https://github.com/facet-rs/facet", branch = "main" }
+# Migrated to the local ~/vox checkout (path deps above) so the Rust extension and the
+# Swift VoxRuntime speak the exact same vox wire. ~/vox builds against the local facet
+# (~/facet 0.46.5, ahead of crates.io 0.46.0 — it has reflection APIs vox's facet-cbor
+# needs) + the format crates in ~/facet-format + figue 4.x, so the whole workspace must
+# too. This mirrors ~/vox's own [patch] set. Local-only until those are published again.
+#
+# ~/facet — core reflection crates (0.46.5).
+facet = { path = "/Users/amos/facet/facet" }
+facet-core = { path = "/Users/amos/facet/facet-core" }
+facet-macros = { path = "/Users/amos/facet/facet-macros" }
+facet-macros-impl = { path = "/Users/amos/facet/facet-macros-impl" }
+facet-macro-parse = { path = "/Users/amos/facet/facet-macro-parse" }
+facet-macro-types = { path = "/Users/amos/facet/facet-macro-types" }
+facet-reflect = { path = "/Users/amos/facet/facet-reflect" }
+facet-solver = { path = "/Users/amos/facet/facet-solver" }
+facet-path = { path = "/Users/amos/facet/facet-path" }
+facet-error = { path = "/Users/amos/facet/facet-error" }
+facet-default = { path = "/Users/amos/facet/facet-default" }
+facet-pretty = { path = "/Users/amos/facet/facet-pretty" }
+facet-testhelpers = { path = "/Users/amos/facet/facet-testhelpers" }
+facet-testhelpers-macros = { path = "/Users/amos/facet/facet-testhelpers-macros" }
+facet-validate = { path = "/Users/amos/facet/facet-validate" }
+facet-urlencoded = { path = "/Users/amos/facet/facet-urlencoded" }
+facet-testattrs = { path = "/Users/amos/facet/facet-testattrs" }
+# ~/facet-format — every format crate, so any transitively-pulled one builds against the
+# same ~/facet-format event types rather than a crates.io copy.
+facet-value = { path = "/Users/amos/facet-format/facet-value" }
+facet-format = { path = "/Users/amos/facet-format/facet-format" }
+facet-dessert = { path = "/Users/amos/facet-format/facet-dessert" }
+facet-json = { path = "/Users/amos/facet-format/facet-json" }
+facet-json-classics = { path = "/Users/amos/facet-format/facet-json-classics" }
+facet-postcard = { path = "/Users/amos/facet-format/facet-postcard" }
+facet-msgpack = { path = "/Users/amos/facet-format/facet-msgpack" }
+facet-toml = { path = "/Users/amos/facet-format/facet-toml" }
+facet-yaml = { path = "/Users/amos/facet-format/facet-yaml" }
+facet-asn1 = { path = "/Users/amos/facet-format/facet-asn1" }
+facet-csv = { path = "/Users/amos/facet-format/facet-csv" }
+facet-xdr = { path = "/Users/amos/facet-format/facet-xdr" }
+facet-json-schema = { path = "/Users/amos/facet-format/facet-json-schema" }
+facet-typescript = { path = "/Users/amos/facet-format/facet-typescript" }
+facet-python = { path = "/Users/amos/facet-format/facet-python" }
+facet-zod = { path = "/Users/amos/facet-format/facet-zod" }
+facet-cargo-toml = { path = "/Users/amos/facet-cargo-toml" }
+# figue (used only by crates/vx) — the local 4.x builds against the sealed facet; the
+# crates.io 2.0.x predates the seal.
+figue = { path = "/Users/amos/figue/crates/figue" }
+figue-attrs = { path = "/Users/amos/figue/crates/figue-attrs" }
+# facet-styx — crates.io 3.0.0 matches facet enums exhaustively; facet 0.46.5 made some
+# #[non_exhaustive], so use the local 4.x which handles it.
+facet-styx = { path = "/Users/amos/styx/crates/facet-styx" }
 
 windows-projfs = { path = "vendor/windows-projfs" }
 

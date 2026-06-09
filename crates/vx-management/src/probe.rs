@@ -7,7 +7,7 @@ use std::time::{Duration, SystemTime, UNIX_EPOCH};
 use eyre::{Result, WrapErr, bail, eyre};
 use tokio::process::Command;
 use tokio::time::timeout;
-use vox::{MetadataEntry, NoopClient};
+use vox::NoopClient;
 use vx_fskit_types::StatusPayload;
 use vx_services::{
     CreateResult, DirEntry, GetAttributesResult, ItemAttributes, ItemId, ItemType, LookupResult,
@@ -50,10 +50,12 @@ async fn probe_vfs_async() -> Result<()> {
 
     tracing::info!(addr, probe_name, "connecting VixenFS probe backend");
     let client = vox::connect::<NoopClient>(&addr)
-        .metadata(vec![
-            MetadataEntry::str("probe", "vixen-management"),
-            MetadataEntry::str("probe_name", probe_name.as_str()),
-        ])
+        .metadata(
+            vox::metadata()
+                .str("probe", "vixen-management")
+                .str("probe_name", probe_name.as_str())
+                .build(),
+        )
         .on_connection(VfsDispatcher::new(vfs))
         .connect_timeout(CONNECT_TIMEOUT)
         .wait_for_service(WAIT_FOR_SERVICE)

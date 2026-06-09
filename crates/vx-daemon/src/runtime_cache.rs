@@ -228,7 +228,7 @@ mod tests {
             &self,
             request: &vox::ConnectionRequest,
             connection: vox::PendingConnection,
-        ) -> std::result::Result<(), vox::Metadata<'static>> {
+        ) -> std::result::Result<(), vox::Metadata> {
             match request.service() {
                 "Observe" => {
                     connection.handle_with(ObserveDispatcher::new(self.service.clone()));

@@ -66,7 +66,7 @@ impl RunnerService {
     pub fn handle_producing_connection(
         &self,
         connection: vox::PendingConnection,
-    ) -> std::result::Result<(), vox::Metadata<'static>> {
+    ) -> std::result::Result<(), vox::Metadata> {
         match self.produced_outputs() {
             Some(outputs) => {
                 connection.handle_with(ProducingDispatcher::new(outputs));
@@ -97,7 +97,7 @@ impl vox::ConnectionAcceptor for RunnerAcceptor {
         &self,
         request: &vox::ConnectionRequest,
         connection: vox::PendingConnection,
-    ) -> std::result::Result<(), vox::Metadata<'static>> {
+    ) -> std::result::Result<(), vox::Metadata> {
         match request.service() {
             "Runner" => {
                 connection.handle_with(RunnerDispatcher::new(self.service.clone()));
@@ -211,7 +211,7 @@ mod tests {
             &self,
             request: &vox::ConnectionRequest,
             connection: vox::PendingConnection,
-        ) -> std::result::Result<(), vox::Metadata<'static>> {
+        ) -> std::result::Result<(), vox::Metadata> {
             match request.service() {
                 "Observe" => {
                     connection.handle_with(ObserveDispatcher::new(self.service.clone()));
@@ -280,7 +280,7 @@ mod tests {
             &self,
             request: &vox::ConnectionRequest,
             connection: vox::PendingConnection,
-        ) -> std::result::Result<(), vox::Metadata<'static>> {
+        ) -> std::result::Result<(), vox::Metadata> {
             match request.service() {
                 "Observe" => {
                     connection.handle_with(ObserveDispatcher::new(self.service.clone()));

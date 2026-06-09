@@ -410,7 +410,7 @@ impl ConnectionAcceptor for DaemonAcceptor {
         &self,
         request: &vox::ConnectionRequest,
         connection: vox::PendingConnection,
-    ) -> std::result::Result<(), Metadata<'static>> {
+    ) -> std::result::Result<(), Metadata> {
         tracing::info!("daemon got request for service: {}", request.service());
         match request.service() {
             "Daemon" => connection.handle_with(DaemonDispatcher::new(self.service.clone())),

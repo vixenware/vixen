@@ -226,7 +226,7 @@ impl ConnectionAcceptor for RootPeerAcceptor {
         &self,
         request: &ConnectionRequest,
         connection: PendingConnection,
-    ) -> Result<(), Metadata<'static>> {
+    ) -> Result<(), Metadata> {
         log_event(
             "info",
             format!("root listener request.service={}", request.service()),
