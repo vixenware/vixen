@@ -14,6 +14,26 @@ import os
 /// `/Volumes/Vixen/vfs` without an external daemon.
 private let vfsBackendLog = Logger(subsystem: "eu.bearcove.vixen", category: "VfsBackend")
 
+/// Log to both os_log and a plain file (`~/Library/Logs/Vixen/vixen-backend.log`).
+/// os_log isn't reliably readable in every environment; the file always is.
+func backendLog(_ message: String) {
+    vfsBackendLog.notice("\(message, privacy: .public)")
+    let path = (NSHomeDirectory() as NSString)
+        .appendingPathComponent("Library/Logs/Vixen/vixen-backend.log")
+    let dir = (path as NSString).deletingLastPathComponent
+    try? FileManager.default.createDirectory(
+        atPath: dir, withIntermediateDirectories: true)
+    let stamp = ISO8601DateFormatter().string(from: Date())
+    guard let data = "\(stamp) \(message)\n".data(using: .utf8) else { return }
+    if let fh = FileHandle(forWritingAtPath: path) {
+        defer { try? fh.close() }
+        _ = try? fh.seekToEnd()
+        try? fh.write(contentsOf: data)
+    } else {
+        try? data.write(to: URL(fileURLWithPath: path))
+    }
+}
+
 // Errno-ish codes (0 = OK). Mutations are refused read-only.
 private let E_OK: Int32 = 0
 private let E_NOENT: Int32 = 2
@@ -161,7 +181,7 @@ final class VfsBackendService: @unchecked Sendable {
     }
 
     func startIfNeeded() {
-        vfsBackendLog.notice("VfsBackendService.startIfNeeded called")
+        backendLog("startIfNeeded called")
         lock.lock()
         let already = started
         started = true
@@ -171,25 +191,28 @@ final class VfsBackendService: @unchecked Sendable {
     }
 
     private func serveLoop() async {
-        vfsBackendLog.notice("VfsBackend serveLoop started")
+        backendLog("serveLoop started")
+        #if !canImport(VoxRuntime)
+            backendLog("VoxRuntime not available at compile time — backend disabled")
+        #endif
         while !Task.isCancelled {
             guard let path = socketPath() else {
-                vfsBackendLog.error("no app-group container; cannot locate vixenfs.sock")
+                backendLog("no app-group container; cannot locate vixenfs.sock")
                 try? await Task.sleep(for: .seconds(5))
                 continue
             }
             #if canImport(VoxRuntime)
                 do {
-                    vfsBackendLog.notice("connecting VFS backend to \(path, privacy: .public)")
+                    backendLog("connecting to \(path)")
                     let connector = UnixConnector(path: path)
                     let dispatcher = VfsDispatcher(handler: VfsBackend())
                     let session = try await VoxRuntime.Session.initiator(
                         connector, dispatcher: dispatcher, resumable: true)
-                    vfsBackendLog.notice("VFS backend connected; serving")
+                    backendLog("connected; serving")
                     try await session.run()
-                    vfsBackendLog.notice("VFS backend session ended; will reconnect")
+                    backendLog("session ended; will reconnect")
                 } catch {
-                    vfsBackendLog.error("VFS backend connect failed: \(error.localizedDescription, privacy: .public)")
+                    backendLog("connect failed: \(error)")
                 }
             #endif
             // The socket only exists while the volume is mounted; retry until it's up.
