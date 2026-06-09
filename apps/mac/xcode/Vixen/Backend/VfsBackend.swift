@@ -217,8 +217,7 @@ final class VfsBackendService: @unchecked Sendable {
                         group.addTask {
                             try await VoxRuntime.Session.initiator(
                                 UnixConnector(path: path),
-                                dispatcher: VfsDispatcher(handler: VfsBackend()),
-                                resumable: true)
+                                dispatcher: VfsDispatcher(handler: VfsBackend()))
                         }
                         group.addTask {
                             try await Task.sleep(for: .seconds(10))

@@ -2,33 +2,18 @@
 // DO NOT EDIT - regenerate with `cargo xtask codegen --swift`
 
 import Foundation
-@preconcurrency import NIOCore
+import PhonEngine
+import PhonIR
+import PhonSchema
 import VoxRuntime
 
-// MARK: - Vfs Method IDs
-
-public enum VfsMethodId {
-    public static let lookup: UInt64 = 0xab2b853c144d133b
-    public static let getAttributes: UInt64 = 0xd97f57caa097adf9
-    public static let readDir: UInt64 = 0xf2ba29feced65eb7
-    public static let read: UInt64 = 0x719a43e94d147918
-    public static let write: UInt64 = 0xc330417994d57b8a
-    public static let create: UInt64 = 0x9b060d7cd7c1a62e
-    public static let delete: UInt64 = 0x2a1f41955c3e63a8
-    public static let rename: UInt64 = 0x5aca8524d890971d
-    public static let setAttributes: UInt64 = 0x2086815889a62b33
-    public static let ping: UInt64 = 0xda4fc1cc055a4fcb
-}
-
-// MARK: - Vfs Types
-
-public enum ItemType: Codable, Sendable {
+public enum ItemType: Sendable {
     case file
     case directory
     case symlink
 }
 
-public struct ItemAttributes: Codable, Sendable {
+public struct ItemAttributes: Sendable {
     public var itemId: UInt64
     public var itemType: ItemType
     public var size: UInt64
@@ -46,7 +31,7 @@ public struct ItemAttributes: Codable, Sendable {
     }
 }
 
-public struct LookupResult: Codable, Sendable {
+public struct LookupResult: Sendable {
     public var attrs: ItemAttributes
     public var error: Int32
 
@@ -56,7 +41,7 @@ public struct LookupResult: Codable, Sendable {
     }
 }
 
-public struct GetAttributesResult: Codable, Sendable {
+public struct GetAttributesResult: Sendable {
     public var attrs: ItemAttributes
     public var error: Int32
 
@@ -66,7 +51,7 @@ public struct GetAttributesResult: Codable, Sendable {
     }
 }
 
-public struct DirEntry: Codable, Sendable {
+public struct DirEntry: Sendable {
     public var name: String
     public var itemId: UInt64
     public var itemType: ItemType
@@ -86,7 +71,7 @@ public struct DirEntry: Codable, Sendable {
     }
 }
 
-public struct ReadDirResult: Codable, Sendable {
+public struct ReadDirResult: Sendable {
     public var entries: [DirEntry]
     public var nextCookie: UInt64
     public var verifier: UInt64
@@ -100,7 +85,7 @@ public struct ReadDirResult: Codable, Sendable {
     }
 }
 
-public struct ReadResult: Codable, Sendable {
+public struct ReadResult: Sendable {
     public var data: Data
     public var error: Int32
 
@@ -110,7 +95,7 @@ public struct ReadResult: Codable, Sendable {
     }
 }
 
-public struct WriteResult: Codable, Sendable {
+public struct WriteResult: Sendable {
     public var bytesWritten: UInt64
     public var error: Int32
 
@@ -120,7 +105,7 @@ public struct WriteResult: Codable, Sendable {
     }
 }
 
-public struct CreateResult: Codable, Sendable {
+public struct CreateResult: Sendable {
     public var itemId: UInt64
     public var error: Int32
 
@@ -130,7 +115,7 @@ public struct CreateResult: Codable, Sendable {
     }
 }
 
-public struct VfsResult: Codable, Sendable {
+public struct VfsResult: Sendable {
     public var error: Int32
 
     nonisolated public init(error: Int32) {
@@ -138,7 +123,7 @@ public struct VfsResult: Codable, Sendable {
     }
 }
 
-public struct SetAttributesParams: Codable, Sendable {
+public struct SetAttributesParams: Sendable {
     public var mode: UInt32?
     public var modifiedTime: UInt64?
     public var size: UInt64?
@@ -150,1424 +135,789 @@ public struct SetAttributesParams: Codable, Sendable {
     }
 }
 
-// MARK: - Vfs Encoders
 
-nonisolated internal func encodeItemType(_ value: ItemType, into buffer: inout ByteBuffer) {
-    switch value {
-    case .file:
-        encodeVarint(UInt64(0), into: &buffer)
-    case .directory:
-        encodeVarint(UInt64(1), into: &buffer)
-    case .symlink:
-        encodeVarint(UInt64(2), into: &buffer)
-    }
-}
-
-nonisolated internal func encodeItemAttributes(_ value: ItemAttributes, into buffer: inout ByteBuffer) {
-    encodeVarint(value.itemId, into: &buffer)
-    encodeItemType(value.itemType, into: &buffer)
-    encodeVarint(value.size, into: &buffer)
-    encodeVarint(value.modifiedTime, into: &buffer)
-    encodeVarint(value.createdTime, into: &buffer)
-    encodeU32(value.mode, into: &buffer)
-}
-
-nonisolated internal func encodeLookupResult(_ value: LookupResult, into buffer: inout ByteBuffer) {
-    encodeItemAttributes(value.attrs, into: &buffer)
-    encodeI32(value.error, into: &buffer)
-}
-
-nonisolated internal func encodeGetAttributesResult(_ value: GetAttributesResult, into buffer: inout ByteBuffer) {
-    encodeItemAttributes(value.attrs, into: &buffer)
-    encodeI32(value.error, into: &buffer)
-}
-
-nonisolated internal func encodeDirEntry(_ value: DirEntry, into buffer: inout ByteBuffer) {
-    encodeString(value.name, into: &buffer)
-    encodeVarint(value.itemId, into: &buffer)
-    encodeItemType(value.itemType, into: &buffer)
-    encodeVarint(value.size, into: &buffer)
-    encodeVarint(value.modifiedTime, into: &buffer)
-    encodeVarint(value.createdTime, into: &buffer)
-    encodeU32(value.mode, into: &buffer)
-}
-
-nonisolated internal func encodeReadDirResult(_ value: ReadDirResult, into buffer: inout ByteBuffer) {
-    encodeVec(value.entries, into: &buffer, encoder: { val, buf in encodeDirEntry(val, into: &buf) })
-    encodeVarint(value.nextCookie, into: &buffer)
-    encodeVarint(value.verifier, into: &buffer)
-    encodeI32(value.error, into: &buffer)
-}
-
-nonisolated internal func encodeReadResult(_ value: ReadResult, into buffer: inout ByteBuffer) {
-    encodeByteSeq(value.data, into: &buffer)
-    encodeI32(value.error, into: &buffer)
-}
-
-nonisolated internal func encodeWriteResult(_ value: WriteResult, into buffer: inout ByteBuffer) {
-    encodeVarint(value.bytesWritten, into: &buffer)
-    encodeI32(value.error, into: &buffer)
-}
-
-nonisolated internal func encodeCreateResult(_ value: CreateResult, into buffer: inout ByteBuffer) {
-    encodeVarint(value.itemId, into: &buffer)
-    encodeI32(value.error, into: &buffer)
-}
-
-nonisolated internal func encodeVfsResult(_ value: VfsResult, into buffer: inout ByteBuffer) {
-    encodeI32(value.error, into: &buffer)
-}
-
-nonisolated internal func encodeSetAttributesParams(_ value: SetAttributesParams, into buffer: inout ByteBuffer) {
-    encodeOption(value.mode, into: &buffer, encoder: { val, buf in encodeU32(val, into: &buf) })
-    encodeOption(value.modifiedTime, into: &buffer, encoder: { val, buf in encodeVarint(val, into: &buf) })
-    encodeOption(value.size, into: &buffer, encoder: { val, buf in encodeVarint(val, into: &buf) })
-}
-// MARK: - Vfs Decoders
-
-nonisolated internal func decodeItemType(from buffer: inout ByteBuffer) throws -> ItemType {
-    let disc = try decodeVarint(from: &buffer)
-    let result: ItemType
-    switch disc {
-    case 0:
-        result = .file
-    case 1:
-        result = .directory
-    case 2:
-        result = .symlink
-    default:
-        throw VoxError.decodeError("unknown enum variant")
-    }
-    return result
-}
-
-nonisolated internal func decodeItemAttributes(from buffer: inout ByteBuffer) throws -> ItemAttributes {
-    let _itemId = try ({ buf in try decodeVarint(from: &buf) })(&buffer)
-    let _itemType = try ({ buf in try decodeItemType(from: &buf) })(&buffer)
-    let _size = try ({ buf in try decodeVarint(from: &buf) })(&buffer)
-    let _modifiedTime = try ({ buf in try decodeVarint(from: &buf) })(&buffer)
-    let _createdTime = try ({ buf in try decodeVarint(from: &buf) })(&buffer)
-    let _mode = try ({ buf in try decodeU32(from: &buf) })(&buffer)
-    return ItemAttributes(itemId: _itemId, itemType: _itemType, size: _size, modifiedTime: _modifiedTime, createdTime: _createdTime, mode: _mode)
-}
-
-nonisolated internal func decodeLookupResult(from buffer: inout ByteBuffer) throws -> LookupResult {
-    let _attrs = try ({ buf in try decodeItemAttributes(from: &buf) })(&buffer)
-    let _error = try ({ buf in try decodeI32(from: &buf) })(&buffer)
-    return LookupResult(attrs: _attrs, error: _error)
-}
-
-nonisolated internal func decodeGetAttributesResult(from buffer: inout ByteBuffer) throws -> GetAttributesResult {
-    let _attrs = try ({ buf in try decodeItemAttributes(from: &buf) })(&buffer)
-    let _error = try ({ buf in try decodeI32(from: &buf) })(&buffer)
-    return GetAttributesResult(attrs: _attrs, error: _error)
-}
-
-nonisolated internal func decodeDirEntry(from buffer: inout ByteBuffer) throws -> DirEntry {
-    let _name = try ({ buf in try decodeString(from: &buf) })(&buffer)
-    let _itemId = try ({ buf in try decodeVarint(from: &buf) })(&buffer)
-    let _itemType = try ({ buf in try decodeItemType(from: &buf) })(&buffer)
-    let _size = try ({ buf in try decodeVarint(from: &buf) })(&buffer)
-    let _modifiedTime = try ({ buf in try decodeVarint(from: &buf) })(&buffer)
-    let _createdTime = try ({ buf in try decodeVarint(from: &buf) })(&buffer)
-    let _mode = try ({ buf in try decodeU32(from: &buf) })(&buffer)
-    return DirEntry(name: _name, itemId: _itemId, itemType: _itemType, size: _size, modifiedTime: _modifiedTime, createdTime: _createdTime, mode: _mode)
-}
-
-nonisolated internal func decodeReadDirResult(from buffer: inout ByteBuffer) throws -> ReadDirResult {
-    let _entries = try ({ buf in try decodeVec(from: &buf, decoder: { buf in try decodeDirEntry(from: &buf) }) })(&buffer)
-    let _nextCookie = try ({ buf in try decodeVarint(from: &buf) })(&buffer)
-    let _verifier = try ({ buf in try decodeVarint(from: &buf) })(&buffer)
-    let _error = try ({ buf in try decodeI32(from: &buf) })(&buffer)
-    return ReadDirResult(entries: _entries, nextCookie: _nextCookie, verifier: _verifier, error: _error)
-}
-
-nonisolated internal func decodeReadResult(from buffer: inout ByteBuffer) throws -> ReadResult {
-    let _data = try ({ buf in var _b = try decodeBytes(from: &buf); return Data(_b.readBytes(length: _b.readableBytes) ?? []) })(&buffer)
-    let _error = try ({ buf in try decodeI32(from: &buf) })(&buffer)
-    return ReadResult(data: _data, error: _error)
-}
-
-nonisolated internal func decodeWriteResult(from buffer: inout ByteBuffer) throws -> WriteResult {
-    let _bytesWritten = try ({ buf in try decodeVarint(from: &buf) })(&buffer)
-    let _error = try ({ buf in try decodeI32(from: &buf) })(&buffer)
-    return WriteResult(bytesWritten: _bytesWritten, error: _error)
-}
-
-nonisolated internal func decodeCreateResult(from buffer: inout ByteBuffer) throws -> CreateResult {
-    let _itemId = try ({ buf in try decodeVarint(from: &buf) })(&buffer)
-    let _error = try ({ buf in try decodeI32(from: &buf) })(&buffer)
-    return CreateResult(itemId: _itemId, error: _error)
-}
-
-nonisolated internal func decodeVfsResult(from buffer: inout ByteBuffer) throws -> VfsResult {
-    let _error = try ({ buf in try decodeI32(from: &buf) })(&buffer)
-    return VfsResult(error: _error)
-}
-
-nonisolated internal func decodeSetAttributesParams(from buffer: inout ByteBuffer) throws -> SetAttributesParams {
-    let _mode = try ({ buf in try decodeOption(from: &buf, decoder: { buf in try decodeU32(from: &buf) }) })(&buffer)
-    let _modifiedTime = try ({ buf in try decodeOption(from: &buf, decoder: { buf in try decodeVarint(from: &buf) }) })(&buffer)
-    let _size = try ({ buf in try decodeOption(from: &buf, decoder: { buf in try decodeVarint(from: &buf) }) })(&buffer)
-    return SetAttributesParams(mode: _mode, modifiedTime: _modifiedTime, size: _size)
-}
-// MARK: - Swift Value Descriptors
-
-nonisolated private func vfs_swift_value_desc_0_destroy(_ value: UnsafeMutableRawPointer?, _ context: UnsafeRawPointer?) {
-    guard let value else { return }
-    value.assumingMemoryBound(to: ItemType.self).deinitialize(count: 1)
-}
-
-nonisolated private func vfs_swift_value_desc_0_copyInit(_ dst: UnsafeMutableRawPointer?, _ src: UnsafeRawPointer?, _ context: UnsafeRawPointer?) -> VoxSwiftStatus {
-    guard let dst, let src else { return VoxSwiftStatusBadABI }
-    dst.assumingMemoryBound(to: ItemType.self).initialize(to: src.assumingMemoryBound(to: ItemType.self).pointee)
-    return VoxSwiftStatusOK
-}
-
-nonisolated private func vfs_swift_value_desc_0_takeInit(_ dst: UnsafeMutableRawPointer?, _ src: UnsafeMutableRawPointer?, _ context: UnsafeRawPointer?) -> VoxSwiftStatus {
-    guard let dst, let src else { return VoxSwiftStatusBadABI }
-    let srcTyped = src.assumingMemoryBound(to: ItemType.self)
-    dst.assumingMemoryBound(to: ItemType.self).initialize(to: srcTyped.pointee)
-    srcTyped.deinitialize(count: 1)
-    return VoxSwiftStatusOK
-}
-
-nonisolated private func vfs_swift_value_desc_0_tag(_ value: UnsafeRawPointer?, _ context: UnsafeRawPointer?) -> UInt32 {
-    guard let value else { return UInt32.max }
-    switch value.assumingMemoryBound(to: ItemType.self).pointee {
-    case .file:
-        return UInt32(0)
-    case .directory:
-        return UInt32(1)
-    case .symlink:
-        return UInt32(2)
-    }
-}
-
-nonisolated private func vfs_swift_value_desc_0_project(_ value: UnsafeRawPointer?, _ variantIndex: UInt32, _ visitorContext: UnsafeMutableRawPointer?, _ visitor: VoxSwiftEnumFieldVisitorFn?, _ context: UnsafeRawPointer?) -> VoxSwiftStatus {
-    guard let value else { return VoxSwiftStatusBadABI }
-    switch value.assumingMemoryBound(to: ItemType.self).pointee {
-    case .file:
-        guard variantIndex == UInt32(0) else { return VoxSwiftStatusBadABI }
-        return VoxSwiftStatusOK
-    case .directory:
-        guard variantIndex == UInt32(1) else { return VoxSwiftStatusBadABI }
-        return VoxSwiftStatusOK
-    case .symlink:
-        guard variantIndex == UInt32(2) else { return VoxSwiftStatusBadABI }
-        return VoxSwiftStatusOK
-    }
-}
-
-nonisolated private func vfs_swift_value_desc_0_inject(_ dst: UnsafeMutableRawPointer?, _ variantIndex: UInt32, _ fieldValues: UnsafePointer<UnsafeRawPointer?>?, _ fieldCount: Int, _ context: UnsafeRawPointer?) -> VoxSwiftStatus {
-    guard let dst else { return VoxSwiftStatusBadABI }
-    switch variantIndex {
-    case UInt32(0):
-        guard fieldCount == 0 else { return VoxSwiftStatusBadABI }
-        dst.assumingMemoryBound(to: ItemType.self).initialize(to: .file)
-        return VoxSwiftStatusOK
-    case UInt32(1):
-        guard fieldCount == 0 else { return VoxSwiftStatusBadABI }
-        dst.assumingMemoryBound(to: ItemType.self).initialize(to: .directory)
-        return VoxSwiftStatusOK
-    case UInt32(2):
-        guard fieldCount == 0 else { return VoxSwiftStatusBadABI }
-        dst.assumingMemoryBound(to: ItemType.self).initialize(to: .symlink)
-        return VoxSwiftStatusOK
-    default:
-        return VoxSwiftStatusBadABI
-    }
-}
-
-nonisolated private func vfs_swift_value_desc_1_destroy(_ value: UnsafeMutableRawPointer?, _ context: UnsafeRawPointer?) {
-    guard let value else { return }
-    value.assumingMemoryBound(to: ItemAttributes.self).deinitialize(count: 1)
-}
-
-nonisolated private func vfs_swift_value_desc_1_copyInit(_ dst: UnsafeMutableRawPointer?, _ src: UnsafeRawPointer?, _ context: UnsafeRawPointer?) -> VoxSwiftStatus {
-    guard let dst, let src else { return VoxSwiftStatusBadABI }
-    dst.assumingMemoryBound(to: ItemAttributes.self).initialize(to: src.assumingMemoryBound(to: ItemAttributes.self).pointee)
-    return VoxSwiftStatusOK
-}
-
-nonisolated private func vfs_swift_value_desc_1_takeInit(_ dst: UnsafeMutableRawPointer?, _ src: UnsafeMutableRawPointer?, _ context: UnsafeRawPointer?) -> VoxSwiftStatus {
-    guard let dst, let src else { return VoxSwiftStatusBadABI }
-    let srcTyped = src.assumingMemoryBound(to: ItemAttributes.self)
-    dst.assumingMemoryBound(to: ItemAttributes.self).initialize(to: srcTyped.pointee)
-    srcTyped.deinitialize(count: 1)
-    return VoxSwiftStatusOK
-}
-
-nonisolated private func vfs_swift_value_desc_2_destroy(_ value: UnsafeMutableRawPointer?, _ context: UnsafeRawPointer?) {
-    guard let value else { return }
-    value.assumingMemoryBound(to: UInt64.self).deinitialize(count: 1)
-}
-
-nonisolated private func vfs_swift_value_desc_2_copyInit(_ dst: UnsafeMutableRawPointer?, _ src: UnsafeRawPointer?, _ context: UnsafeRawPointer?) -> VoxSwiftStatus {
-    guard let dst, let src else { return VoxSwiftStatusBadABI }
-    dst.assumingMemoryBound(to: UInt64.self).initialize(to: src.assumingMemoryBound(to: UInt64.self).pointee)
-    return VoxSwiftStatusOK
-}
-
-nonisolated private func vfs_swift_value_desc_2_takeInit(_ dst: UnsafeMutableRawPointer?, _ src: UnsafeMutableRawPointer?, _ context: UnsafeRawPointer?) -> VoxSwiftStatus {
-    guard let dst, let src else { return VoxSwiftStatusBadABI }
-    let srcTyped = src.assumingMemoryBound(to: UInt64.self)
-    dst.assumingMemoryBound(to: UInt64.self).initialize(to: srcTyped.pointee)
-    srcTyped.deinitialize(count: 1)
-    return VoxSwiftStatusOK
-}
-
-nonisolated private func vfs_swift_value_desc_3_destroy(_ value: UnsafeMutableRawPointer?, _ context: UnsafeRawPointer?) {
-    guard let value else { return }
-    value.assumingMemoryBound(to: UInt32.self).deinitialize(count: 1)
-}
-
-nonisolated private func vfs_swift_value_desc_3_copyInit(_ dst: UnsafeMutableRawPointer?, _ src: UnsafeRawPointer?, _ context: UnsafeRawPointer?) -> VoxSwiftStatus {
-    guard let dst, let src else { return VoxSwiftStatusBadABI }
-    dst.assumingMemoryBound(to: UInt32.self).initialize(to: src.assumingMemoryBound(to: UInt32.self).pointee)
-    return VoxSwiftStatusOK
-}
-
-nonisolated private func vfs_swift_value_desc_3_takeInit(_ dst: UnsafeMutableRawPointer?, _ src: UnsafeMutableRawPointer?, _ context: UnsafeRawPointer?) -> VoxSwiftStatus {
-    guard let dst, let src else { return VoxSwiftStatusBadABI }
-    let srcTyped = src.assumingMemoryBound(to: UInt32.self)
-    dst.assumingMemoryBound(to: UInt32.self).initialize(to: srcTyped.pointee)
-    srcTyped.deinitialize(count: 1)
-    return VoxSwiftStatusOK
-}
-
-nonisolated private func vfs_swift_value_desc_4_destroy(_ value: UnsafeMutableRawPointer?, _ context: UnsafeRawPointer?) {
-    guard let value else { return }
-    value.assumingMemoryBound(to: LookupResult.self).deinitialize(count: 1)
-}
-
-nonisolated private func vfs_swift_value_desc_4_copyInit(_ dst: UnsafeMutableRawPointer?, _ src: UnsafeRawPointer?, _ context: UnsafeRawPointer?) -> VoxSwiftStatus {
-    guard let dst, let src else { return VoxSwiftStatusBadABI }
-    dst.assumingMemoryBound(to: LookupResult.self).initialize(to: src.assumingMemoryBound(to: LookupResult.self).pointee)
-    return VoxSwiftStatusOK
-}
-
-nonisolated private func vfs_swift_value_desc_4_takeInit(_ dst: UnsafeMutableRawPointer?, _ src: UnsafeMutableRawPointer?, _ context: UnsafeRawPointer?) -> VoxSwiftStatus {
-    guard let dst, let src else { return VoxSwiftStatusBadABI }
-    let srcTyped = src.assumingMemoryBound(to: LookupResult.self)
-    dst.assumingMemoryBound(to: LookupResult.self).initialize(to: srcTyped.pointee)
-    srcTyped.deinitialize(count: 1)
-    return VoxSwiftStatusOK
-}
-
-nonisolated private func vfs_swift_value_desc_5_destroy(_ value: UnsafeMutableRawPointer?, _ context: UnsafeRawPointer?) {
-    guard let value else { return }
-    value.assumingMemoryBound(to: Int32.self).deinitialize(count: 1)
-}
-
-nonisolated private func vfs_swift_value_desc_5_copyInit(_ dst: UnsafeMutableRawPointer?, _ src: UnsafeRawPointer?, _ context: UnsafeRawPointer?) -> VoxSwiftStatus {
-    guard let dst, let src else { return VoxSwiftStatusBadABI }
-    dst.assumingMemoryBound(to: Int32.self).initialize(to: src.assumingMemoryBound(to: Int32.self).pointee)
-    return VoxSwiftStatusOK
-}
-
-nonisolated private func vfs_swift_value_desc_5_takeInit(_ dst: UnsafeMutableRawPointer?, _ src: UnsafeMutableRawPointer?, _ context: UnsafeRawPointer?) -> VoxSwiftStatus {
-    guard let dst, let src else { return VoxSwiftStatusBadABI }
-    let srcTyped = src.assumingMemoryBound(to: Int32.self)
-    dst.assumingMemoryBound(to: Int32.self).initialize(to: srcTyped.pointee)
-    srcTyped.deinitialize(count: 1)
-    return VoxSwiftStatusOK
-}
-
-nonisolated private func vfs_swift_value_desc_6_destroy(_ value: UnsafeMutableRawPointer?, _ context: UnsafeRawPointer?) {
-    guard let value else { return }
-    value.assumingMemoryBound(to: GetAttributesResult.self).deinitialize(count: 1)
-}
-
-nonisolated private func vfs_swift_value_desc_6_copyInit(_ dst: UnsafeMutableRawPointer?, _ src: UnsafeRawPointer?, _ context: UnsafeRawPointer?) -> VoxSwiftStatus {
-    guard let dst, let src else { return VoxSwiftStatusBadABI }
-    dst.assumingMemoryBound(to: GetAttributesResult.self).initialize(to: src.assumingMemoryBound(to: GetAttributesResult.self).pointee)
-    return VoxSwiftStatusOK
-}
-
-nonisolated private func vfs_swift_value_desc_6_takeInit(_ dst: UnsafeMutableRawPointer?, _ src: UnsafeMutableRawPointer?, _ context: UnsafeRawPointer?) -> VoxSwiftStatus {
-    guard let dst, let src else { return VoxSwiftStatusBadABI }
-    let srcTyped = src.assumingMemoryBound(to: GetAttributesResult.self)
-    dst.assumingMemoryBound(to: GetAttributesResult.self).initialize(to: srcTyped.pointee)
-    srcTyped.deinitialize(count: 1)
-    return VoxSwiftStatusOK
-}
-
-nonisolated private func vfs_swift_value_desc_7_destroy(_ value: UnsafeMutableRawPointer?, _ context: UnsafeRawPointer?) {
-    guard let value else { return }
-    value.assumingMemoryBound(to: DirEntry.self).deinitialize(count: 1)
-}
-
-nonisolated private func vfs_swift_value_desc_7_copyInit(_ dst: UnsafeMutableRawPointer?, _ src: UnsafeRawPointer?, _ context: UnsafeRawPointer?) -> VoxSwiftStatus {
-    guard let dst, let src else { return VoxSwiftStatusBadABI }
-    dst.assumingMemoryBound(to: DirEntry.self).initialize(to: src.assumingMemoryBound(to: DirEntry.self).pointee)
-    return VoxSwiftStatusOK
-}
-
-nonisolated private func vfs_swift_value_desc_7_takeInit(_ dst: UnsafeMutableRawPointer?, _ src: UnsafeMutableRawPointer?, _ context: UnsafeRawPointer?) -> VoxSwiftStatus {
-    guard let dst, let src else { return VoxSwiftStatusBadABI }
-    let srcTyped = src.assumingMemoryBound(to: DirEntry.self)
-    dst.assumingMemoryBound(to: DirEntry.self).initialize(to: srcTyped.pointee)
-    srcTyped.deinitialize(count: 1)
-    return VoxSwiftStatusOK
-}
-
-nonisolated private func vfs_swift_value_desc_8_destroy(_ value: UnsafeMutableRawPointer?, _ context: UnsafeRawPointer?) {
-    guard let value else { return }
-    value.assumingMemoryBound(to: String.self).deinitialize(count: 1)
-}
-
-nonisolated private func vfs_swift_value_desc_8_copyInit(_ dst: UnsafeMutableRawPointer?, _ src: UnsafeRawPointer?, _ context: UnsafeRawPointer?) -> VoxSwiftStatus {
-    guard let dst, let src else { return VoxSwiftStatusBadABI }
-    dst.assumingMemoryBound(to: String.self).initialize(to: src.assumingMemoryBound(to: String.self).pointee)
-    return VoxSwiftStatusOK
-}
-
-nonisolated private func vfs_swift_value_desc_8_takeInit(_ dst: UnsafeMutableRawPointer?, _ src: UnsafeMutableRawPointer?, _ context: UnsafeRawPointer?) -> VoxSwiftStatus {
-    guard let dst, let src else { return VoxSwiftStatusBadABI }
-    let srcTyped = src.assumingMemoryBound(to: String.self)
-    dst.assumingMemoryBound(to: String.self).initialize(to: srcTyped.pointee)
-    srcTyped.deinitialize(count: 1)
-    return VoxSwiftStatusOK
-}
-
-nonisolated private func vfs_swift_value_desc_9_destroy(_ value: UnsafeMutableRawPointer?, _ context: UnsafeRawPointer?) {
-    guard let value else { return }
-    value.assumingMemoryBound(to: ReadDirResult.self).deinitialize(count: 1)
-}
-
-nonisolated private func vfs_swift_value_desc_9_copyInit(_ dst: UnsafeMutableRawPointer?, _ src: UnsafeRawPointer?, _ context: UnsafeRawPointer?) -> VoxSwiftStatus {
-    guard let dst, let src else { return VoxSwiftStatusBadABI }
-    dst.assumingMemoryBound(to: ReadDirResult.self).initialize(to: src.assumingMemoryBound(to: ReadDirResult.self).pointee)
-    return VoxSwiftStatusOK
-}
-
-nonisolated private func vfs_swift_value_desc_9_takeInit(_ dst: UnsafeMutableRawPointer?, _ src: UnsafeMutableRawPointer?, _ context: UnsafeRawPointer?) -> VoxSwiftStatus {
-    guard let dst, let src else { return VoxSwiftStatusBadABI }
-    let srcTyped = src.assumingMemoryBound(to: ReadDirResult.self)
-    dst.assumingMemoryBound(to: ReadDirResult.self).initialize(to: srcTyped.pointee)
-    srcTyped.deinitialize(count: 1)
-    return VoxSwiftStatusOK
-}
-
-nonisolated private func vfs_swift_value_desc_10_destroy(_ value: UnsafeMutableRawPointer?, _ context: UnsafeRawPointer?) {
-    guard let value else { return }
-    value.assumingMemoryBound(to: [DirEntry].self).deinitialize(count: 1)
-}
-
-nonisolated private func vfs_swift_value_desc_10_copyInit(_ dst: UnsafeMutableRawPointer?, _ src: UnsafeRawPointer?, _ context: UnsafeRawPointer?) -> VoxSwiftStatus {
-    guard let dst, let src else { return VoxSwiftStatusBadABI }
-    dst.assumingMemoryBound(to: [DirEntry].self).initialize(to: src.assumingMemoryBound(to: [DirEntry].self).pointee)
-    return VoxSwiftStatusOK
-}
-
-nonisolated private func vfs_swift_value_desc_10_takeInit(_ dst: UnsafeMutableRawPointer?, _ src: UnsafeMutableRawPointer?, _ context: UnsafeRawPointer?) -> VoxSwiftStatus {
-    guard let dst, let src else { return VoxSwiftStatusBadABI }
-    let srcTyped = src.assumingMemoryBound(to: [DirEntry].self)
-    dst.assumingMemoryBound(to: [DirEntry].self).initialize(to: srcTyped.pointee)
-    srcTyped.deinitialize(count: 1)
-    return VoxSwiftStatusOK
-}
-
-nonisolated private func vfs_swift_value_desc_11_destroy(_ value: UnsafeMutableRawPointer?, _ context: UnsafeRawPointer?) {
-    guard let value else { return }
-    value.assumingMemoryBound(to: ReadResult.self).deinitialize(count: 1)
-}
-
-nonisolated private func vfs_swift_value_desc_11_copyInit(_ dst: UnsafeMutableRawPointer?, _ src: UnsafeRawPointer?, _ context: UnsafeRawPointer?) -> VoxSwiftStatus {
-    guard let dst, let src else { return VoxSwiftStatusBadABI }
-    dst.assumingMemoryBound(to: ReadResult.self).initialize(to: src.assumingMemoryBound(to: ReadResult.self).pointee)
-    return VoxSwiftStatusOK
-}
-
-nonisolated private func vfs_swift_value_desc_11_takeInit(_ dst: UnsafeMutableRawPointer?, _ src: UnsafeMutableRawPointer?, _ context: UnsafeRawPointer?) -> VoxSwiftStatus {
-    guard let dst, let src else { return VoxSwiftStatusBadABI }
-    let srcTyped = src.assumingMemoryBound(to: ReadResult.self)
-    dst.assumingMemoryBound(to: ReadResult.self).initialize(to: srcTyped.pointee)
-    srcTyped.deinitialize(count: 1)
-    return VoxSwiftStatusOK
-}
-
-nonisolated private func vfs_swift_value_desc_12_destroy(_ value: UnsafeMutableRawPointer?, _ context: UnsafeRawPointer?) {
-    guard let value else { return }
-    value.assumingMemoryBound(to: Data.self).deinitialize(count: 1)
-}
-
-nonisolated private func vfs_swift_value_desc_12_copyInit(_ dst: UnsafeMutableRawPointer?, _ src: UnsafeRawPointer?, _ context: UnsafeRawPointer?) -> VoxSwiftStatus {
-    guard let dst, let src else { return VoxSwiftStatusBadABI }
-    dst.assumingMemoryBound(to: Data.self).initialize(to: src.assumingMemoryBound(to: Data.self).pointee)
-    return VoxSwiftStatusOK
-}
-
-nonisolated private func vfs_swift_value_desc_12_takeInit(_ dst: UnsafeMutableRawPointer?, _ src: UnsafeMutableRawPointer?, _ context: UnsafeRawPointer?) -> VoxSwiftStatus {
-    guard let dst, let src else { return VoxSwiftStatusBadABI }
-    let srcTyped = src.assumingMemoryBound(to: Data.self)
-    dst.assumingMemoryBound(to: Data.self).initialize(to: srcTyped.pointee)
-    srcTyped.deinitialize(count: 1)
-    return VoxSwiftStatusOK
-}
-
-nonisolated private func vfs_swift_value_desc_13_destroy(_ value: UnsafeMutableRawPointer?, _ context: UnsafeRawPointer?) {
-    guard let value else { return }
-    value.assumingMemoryBound(to: WriteResult.self).deinitialize(count: 1)
-}
-
-nonisolated private func vfs_swift_value_desc_13_copyInit(_ dst: UnsafeMutableRawPointer?, _ src: UnsafeRawPointer?, _ context: UnsafeRawPointer?) -> VoxSwiftStatus {
-    guard let dst, let src else { return VoxSwiftStatusBadABI }
-    dst.assumingMemoryBound(to: WriteResult.self).initialize(to: src.assumingMemoryBound(to: WriteResult.self).pointee)
-    return VoxSwiftStatusOK
-}
-
-nonisolated private func vfs_swift_value_desc_13_takeInit(_ dst: UnsafeMutableRawPointer?, _ src: UnsafeMutableRawPointer?, _ context: UnsafeRawPointer?) -> VoxSwiftStatus {
-    guard let dst, let src else { return VoxSwiftStatusBadABI }
-    let srcTyped = src.assumingMemoryBound(to: WriteResult.self)
-    dst.assumingMemoryBound(to: WriteResult.self).initialize(to: srcTyped.pointee)
-    srcTyped.deinitialize(count: 1)
-    return VoxSwiftStatusOK
-}
-
-nonisolated private func vfs_swift_value_desc_14_destroy(_ value: UnsafeMutableRawPointer?, _ context: UnsafeRawPointer?) {
-    guard let value else { return }
-    value.assumingMemoryBound(to: CreateResult.self).deinitialize(count: 1)
-}
-
-nonisolated private func vfs_swift_value_desc_14_copyInit(_ dst: UnsafeMutableRawPointer?, _ src: UnsafeRawPointer?, _ context: UnsafeRawPointer?) -> VoxSwiftStatus {
-    guard let dst, let src else { return VoxSwiftStatusBadABI }
-    dst.assumingMemoryBound(to: CreateResult.self).initialize(to: src.assumingMemoryBound(to: CreateResult.self).pointee)
-    return VoxSwiftStatusOK
-}
-
-nonisolated private func vfs_swift_value_desc_14_takeInit(_ dst: UnsafeMutableRawPointer?, _ src: UnsafeMutableRawPointer?, _ context: UnsafeRawPointer?) -> VoxSwiftStatus {
-    guard let dst, let src else { return VoxSwiftStatusBadABI }
-    let srcTyped = src.assumingMemoryBound(to: CreateResult.self)
-    dst.assumingMemoryBound(to: CreateResult.self).initialize(to: srcTyped.pointee)
-    srcTyped.deinitialize(count: 1)
-    return VoxSwiftStatusOK
-}
-
-nonisolated private func vfs_swift_value_desc_15_destroy(_ value: UnsafeMutableRawPointer?, _ context: UnsafeRawPointer?) {
-    guard let value else { return }
-    value.assumingMemoryBound(to: VfsResult.self).deinitialize(count: 1)
-}
-
-nonisolated private func vfs_swift_value_desc_15_copyInit(_ dst: UnsafeMutableRawPointer?, _ src: UnsafeRawPointer?, _ context: UnsafeRawPointer?) -> VoxSwiftStatus {
-    guard let dst, let src else { return VoxSwiftStatusBadABI }
-    dst.assumingMemoryBound(to: VfsResult.self).initialize(to: src.assumingMemoryBound(to: VfsResult.self).pointee)
-    return VoxSwiftStatusOK
-}
-
-nonisolated private func vfs_swift_value_desc_15_takeInit(_ dst: UnsafeMutableRawPointer?, _ src: UnsafeMutableRawPointer?, _ context: UnsafeRawPointer?) -> VoxSwiftStatus {
-    guard let dst, let src else { return VoxSwiftStatusBadABI }
-    let srcTyped = src.assumingMemoryBound(to: VfsResult.self)
-    dst.assumingMemoryBound(to: VfsResult.self).initialize(to: srcTyped.pointee)
-    srcTyped.deinitialize(count: 1)
-    return VoxSwiftStatusOK
-}
-
-nonisolated private func vfs_swift_value_desc_16_destroy(_ value: UnsafeMutableRawPointer?, _ context: UnsafeRawPointer?) {
-    guard let value else { return }
-    value.assumingMemoryBound(to: SetAttributesParams.self).deinitialize(count: 1)
-}
-
-nonisolated private func vfs_swift_value_desc_16_copyInit(_ dst: UnsafeMutableRawPointer?, _ src: UnsafeRawPointer?, _ context: UnsafeRawPointer?) -> VoxSwiftStatus {
-    guard let dst, let src else { return VoxSwiftStatusBadABI }
-    dst.assumingMemoryBound(to: SetAttributesParams.self).initialize(to: src.assumingMemoryBound(to: SetAttributesParams.self).pointee)
-    return VoxSwiftStatusOK
-}
-
-nonisolated private func vfs_swift_value_desc_16_takeInit(_ dst: UnsafeMutableRawPointer?, _ src: UnsafeMutableRawPointer?, _ context: UnsafeRawPointer?) -> VoxSwiftStatus {
-    guard let dst, let src else { return VoxSwiftStatusBadABI }
-    let srcTyped = src.assumingMemoryBound(to: SetAttributesParams.self)
-    dst.assumingMemoryBound(to: SetAttributesParams.self).initialize(to: srcTyped.pointee)
-    srcTyped.deinitialize(count: 1)
-    return VoxSwiftStatusOK
-}
-
-nonisolated private func vfs_swift_value_desc_17_destroy(_ value: UnsafeMutableRawPointer?, _ context: UnsafeRawPointer?) {
-    guard let value else { return }
-    value.assumingMemoryBound(to: UInt32?.self).deinitialize(count: 1)
-}
-
-nonisolated private func vfs_swift_value_desc_17_copyInit(_ dst: UnsafeMutableRawPointer?, _ src: UnsafeRawPointer?, _ context: UnsafeRawPointer?) -> VoxSwiftStatus {
-    guard let dst, let src else { return VoxSwiftStatusBadABI }
-    dst.assumingMemoryBound(to: UInt32?.self).initialize(to: src.assumingMemoryBound(to: UInt32?.self).pointee)
-    return VoxSwiftStatusOK
-}
-
-nonisolated private func vfs_swift_value_desc_17_takeInit(_ dst: UnsafeMutableRawPointer?, _ src: UnsafeMutableRawPointer?, _ context: UnsafeRawPointer?) -> VoxSwiftStatus {
-    guard let dst, let src else { return VoxSwiftStatusBadABI }
-    let srcTyped = src.assumingMemoryBound(to: UInt32?.self)
-    dst.assumingMemoryBound(to: UInt32?.self).initialize(to: srcTyped.pointee)
-    srcTyped.deinitialize(count: 1)
-    return VoxSwiftStatusOK
-}
-
-nonisolated private func vfs_swift_value_desc_18_destroy(_ value: UnsafeMutableRawPointer?, _ context: UnsafeRawPointer?) {
-    guard let value else { return }
-    value.assumingMemoryBound(to: UInt64?.self).deinitialize(count: 1)
-}
-
-nonisolated private func vfs_swift_value_desc_18_copyInit(_ dst: UnsafeMutableRawPointer?, _ src: UnsafeRawPointer?, _ context: UnsafeRawPointer?) -> VoxSwiftStatus {
-    guard let dst, let src else { return VoxSwiftStatusBadABI }
-    dst.assumingMemoryBound(to: UInt64?.self).initialize(to: src.assumingMemoryBound(to: UInt64?.self).pointee)
-    return VoxSwiftStatusOK
-}
-
-nonisolated private func vfs_swift_value_desc_18_takeInit(_ dst: UnsafeMutableRawPointer?, _ src: UnsafeMutableRawPointer?, _ context: UnsafeRawPointer?) -> VoxSwiftStatus {
-    guard let dst, let src else { return VoxSwiftStatusBadABI }
-    let srcTyped = src.assumingMemoryBound(to: UInt64?.self)
-    dst.assumingMemoryBound(to: UInt64?.self).initialize(to: srcTyped.pointee)
-    srcTyped.deinitialize(count: 1)
-    return VoxSwiftStatusOK
-}
-
-nonisolated private func vfs_swift_value_desc_19_destroy(_ value: UnsafeMutableRawPointer?, _ context: UnsafeRawPointer?) {
-    guard let value else { return }
-    value.assumingMemoryBound(to: (UInt64, String).self).deinitialize(count: 1)
-}
-
-nonisolated private func vfs_swift_value_desc_19_copyInit(_ dst: UnsafeMutableRawPointer?, _ src: UnsafeRawPointer?, _ context: UnsafeRawPointer?) -> VoxSwiftStatus {
-    guard let dst, let src else { return VoxSwiftStatusBadABI }
-    dst.assumingMemoryBound(to: (UInt64, String).self).initialize(to: src.assumingMemoryBound(to: (UInt64, String).self).pointee)
-    return VoxSwiftStatusOK
-}
-
-nonisolated private func vfs_swift_value_desc_19_takeInit(_ dst: UnsafeMutableRawPointer?, _ src: UnsafeMutableRawPointer?, _ context: UnsafeRawPointer?) -> VoxSwiftStatus {
-    guard let dst, let src else { return VoxSwiftStatusBadABI }
-    let srcTyped = src.assumingMemoryBound(to: (UInt64, String).self)
-    dst.assumingMemoryBound(to: (UInt64, String).self).initialize(to: srcTyped.pointee)
-    srcTyped.deinitialize(count: 1)
-    return VoxSwiftStatusOK
-}
-
-nonisolated private func vfs_swift_value_desc_20_destroy(_ value: UnsafeMutableRawPointer?, _ context: UnsafeRawPointer?) {
-    guard let value else { return }
-    value.assumingMemoryBound(to: (UInt64).self).deinitialize(count: 1)
-}
-
-nonisolated private func vfs_swift_value_desc_20_copyInit(_ dst: UnsafeMutableRawPointer?, _ src: UnsafeRawPointer?, _ context: UnsafeRawPointer?) -> VoxSwiftStatus {
-    guard let dst, let src else { return VoxSwiftStatusBadABI }
-    dst.assumingMemoryBound(to: (UInt64).self).initialize(to: src.assumingMemoryBound(to: (UInt64).self).pointee)
-    return VoxSwiftStatusOK
-}
-
-nonisolated private func vfs_swift_value_desc_20_takeInit(_ dst: UnsafeMutableRawPointer?, _ src: UnsafeMutableRawPointer?, _ context: UnsafeRawPointer?) -> VoxSwiftStatus {
-    guard let dst, let src else { return VoxSwiftStatusBadABI }
-    let srcTyped = src.assumingMemoryBound(to: (UInt64).self)
-    dst.assumingMemoryBound(to: (UInt64).self).initialize(to: srcTyped.pointee)
-    srcTyped.deinitialize(count: 1)
-    return VoxSwiftStatusOK
-}
-
-nonisolated private func vfs_swift_value_desc_21_destroy(_ value: UnsafeMutableRawPointer?, _ context: UnsafeRawPointer?) {
-    guard let value else { return }
-    value.assumingMemoryBound(to: (UInt64, UInt64, UInt64).self).deinitialize(count: 1)
-}
-
-nonisolated private func vfs_swift_value_desc_21_copyInit(_ dst: UnsafeMutableRawPointer?, _ src: UnsafeRawPointer?, _ context: UnsafeRawPointer?) -> VoxSwiftStatus {
-    guard let dst, let src else { return VoxSwiftStatusBadABI }
-    dst.assumingMemoryBound(to: (UInt64, UInt64, UInt64).self).initialize(to: src.assumingMemoryBound(to: (UInt64, UInt64, UInt64).self).pointee)
-    return VoxSwiftStatusOK
-}
-
-nonisolated private func vfs_swift_value_desc_21_takeInit(_ dst: UnsafeMutableRawPointer?, _ src: UnsafeMutableRawPointer?, _ context: UnsafeRawPointer?) -> VoxSwiftStatus {
-    guard let dst, let src else { return VoxSwiftStatusBadABI }
-    let srcTyped = src.assumingMemoryBound(to: (UInt64, UInt64, UInt64).self)
-    dst.assumingMemoryBound(to: (UInt64, UInt64, UInt64).self).initialize(to: srcTyped.pointee)
-    srcTyped.deinitialize(count: 1)
-    return VoxSwiftStatusOK
-}
-
-nonisolated private func vfs_swift_value_desc_22_destroy(_ value: UnsafeMutableRawPointer?, _ context: UnsafeRawPointer?) {
-    guard let value else { return }
-    value.assumingMemoryBound(to: (UInt64, UInt64, Data).self).deinitialize(count: 1)
-}
-
-nonisolated private func vfs_swift_value_desc_22_copyInit(_ dst: UnsafeMutableRawPointer?, _ src: UnsafeRawPointer?, _ context: UnsafeRawPointer?) -> VoxSwiftStatus {
-    guard let dst, let src else { return VoxSwiftStatusBadABI }
-    dst.assumingMemoryBound(to: (UInt64, UInt64, Data).self).initialize(to: src.assumingMemoryBound(to: (UInt64, UInt64, Data).self).pointee)
-    return VoxSwiftStatusOK
-}
-
-nonisolated private func vfs_swift_value_desc_22_takeInit(_ dst: UnsafeMutableRawPointer?, _ src: UnsafeMutableRawPointer?, _ context: UnsafeRawPointer?) -> VoxSwiftStatus {
-    guard let dst, let src else { return VoxSwiftStatusBadABI }
-    let srcTyped = src.assumingMemoryBound(to: (UInt64, UInt64, Data).self)
-    dst.assumingMemoryBound(to: (UInt64, UInt64, Data).self).initialize(to: srcTyped.pointee)
-    srcTyped.deinitialize(count: 1)
-    return VoxSwiftStatusOK
-}
-
-nonisolated private func vfs_swift_value_desc_23_destroy(_ value: UnsafeMutableRawPointer?, _ context: UnsafeRawPointer?) {
-    guard let value else { return }
-    value.assumingMemoryBound(to: (UInt64, String, ItemType, UInt32).self).deinitialize(count: 1)
-}
-
-nonisolated private func vfs_swift_value_desc_23_copyInit(_ dst: UnsafeMutableRawPointer?, _ src: UnsafeRawPointer?, _ context: UnsafeRawPointer?) -> VoxSwiftStatus {
-    guard let dst, let src else { return VoxSwiftStatusBadABI }
-    dst.assumingMemoryBound(to: (UInt64, String, ItemType, UInt32).self).initialize(to: src.assumingMemoryBound(to: (UInt64, String, ItemType, UInt32).self).pointee)
-    return VoxSwiftStatusOK
-}
-
-nonisolated private func vfs_swift_value_desc_23_takeInit(_ dst: UnsafeMutableRawPointer?, _ src: UnsafeMutableRawPointer?, _ context: UnsafeRawPointer?) -> VoxSwiftStatus {
-    guard let dst, let src else { return VoxSwiftStatusBadABI }
-    let srcTyped = src.assumingMemoryBound(to: (UInt64, String, ItemType, UInt32).self)
-    dst.assumingMemoryBound(to: (UInt64, String, ItemType, UInt32).self).initialize(to: srcTyped.pointee)
-    srcTyped.deinitialize(count: 1)
-    return VoxSwiftStatusOK
-}
-
-nonisolated private func vfs_swift_value_desc_24_destroy(_ value: UnsafeMutableRawPointer?, _ context: UnsafeRawPointer?) {
-    guard let value else { return }
-    value.assumingMemoryBound(to: (UInt64, UInt64, String).self).deinitialize(count: 1)
-}
-
-nonisolated private func vfs_swift_value_desc_24_copyInit(_ dst: UnsafeMutableRawPointer?, _ src: UnsafeRawPointer?, _ context: UnsafeRawPointer?) -> VoxSwiftStatus {
-    guard let dst, let src else { return VoxSwiftStatusBadABI }
-    dst.assumingMemoryBound(to: (UInt64, UInt64, String).self).initialize(to: src.assumingMemoryBound(to: (UInt64, UInt64, String).self).pointee)
-    return VoxSwiftStatusOK
-}
-
-nonisolated private func vfs_swift_value_desc_24_takeInit(_ dst: UnsafeMutableRawPointer?, _ src: UnsafeMutableRawPointer?, _ context: UnsafeRawPointer?) -> VoxSwiftStatus {
-    guard let dst, let src else { return VoxSwiftStatusBadABI }
-    let srcTyped = src.assumingMemoryBound(to: (UInt64, UInt64, String).self)
-    dst.assumingMemoryBound(to: (UInt64, UInt64, String).self).initialize(to: srcTyped.pointee)
-    srcTyped.deinitialize(count: 1)
-    return VoxSwiftStatusOK
-}
-
-nonisolated private func vfs_swift_value_desc_25_destroy(_ value: UnsafeMutableRawPointer?, _ context: UnsafeRawPointer?) {
-    guard let value else { return }
-    value.assumingMemoryBound(to: (UInt64, SetAttributesParams).self).deinitialize(count: 1)
-}
-
-nonisolated private func vfs_swift_value_desc_25_copyInit(_ dst: UnsafeMutableRawPointer?, _ src: UnsafeRawPointer?, _ context: UnsafeRawPointer?) -> VoxSwiftStatus {
-    guard let dst, let src else { return VoxSwiftStatusBadABI }
-    dst.assumingMemoryBound(to: (UInt64, SetAttributesParams).self).initialize(to: src.assumingMemoryBound(to: (UInt64, SetAttributesParams).self).pointee)
-    return VoxSwiftStatusOK
-}
-
-nonisolated private func vfs_swift_value_desc_25_takeInit(_ dst: UnsafeMutableRawPointer?, _ src: UnsafeMutableRawPointer?, _ context: UnsafeRawPointer?) -> VoxSwiftStatus {
-    guard let dst, let src else { return VoxSwiftStatusBadABI }
-    let srcTyped = src.assumingMemoryBound(to: (UInt64, SetAttributesParams).self)
-    dst.assumingMemoryBound(to: (UInt64, SetAttributesParams).self).initialize(to: srcTyped.pointee)
-    srcTyped.deinitialize(count: 1)
-    return VoxSwiftStatusOK
-}
-
-nonisolated private func vfs_swift_value_desc_26_destroy(_ value: UnsafeMutableRawPointer?, _ context: UnsafeRawPointer?) {
-    guard let value else { return }
-    value.assumingMemoryBound(to: Void.self).deinitialize(count: 1)
-}
-
-nonisolated private func vfs_swift_value_desc_26_copyInit(_ dst: UnsafeMutableRawPointer?, _ src: UnsafeRawPointer?, _ context: UnsafeRawPointer?) -> VoxSwiftStatus {
-    guard let dst, let src else { return VoxSwiftStatusBadABI }
-    dst.assumingMemoryBound(to: Void.self).initialize(to: src.assumingMemoryBound(to: Void.self).pointee)
-    return VoxSwiftStatusOK
-}
-
-nonisolated private func vfs_swift_value_desc_26_takeInit(_ dst: UnsafeMutableRawPointer?, _ src: UnsafeMutableRawPointer?, _ context: UnsafeRawPointer?) -> VoxSwiftStatus {
-    guard let dst, let src else { return VoxSwiftStatusBadABI }
-    let srcTyped = src.assumingMemoryBound(to: Void.self)
-    dst.assumingMemoryBound(to: Void.self).initialize(to: srcTyped.pointee)
-    srcTyped.deinitialize(count: 1)
-    return VoxSwiftStatusOK
-}
-
-nonisolated private func vfs_swift_value_desc_27_destroy(_ value: UnsafeMutableRawPointer?, _ context: UnsafeRawPointer?) {
-    guard let value else { return }
-    value.assumingMemoryBound(to: String.self).deinitialize(count: 1)
-}
-
-nonisolated private func vfs_swift_value_desc_27_copyInit(_ dst: UnsafeMutableRawPointer?, _ src: UnsafeRawPointer?, _ context: UnsafeRawPointer?) -> VoxSwiftStatus {
-    guard let dst, let src else { return VoxSwiftStatusBadABI }
-    dst.assumingMemoryBound(to: String.self).initialize(to: src.assumingMemoryBound(to: String.self).pointee)
-    return VoxSwiftStatusOK
-}
-
-nonisolated private func vfs_swift_value_desc_27_takeInit(_ dst: UnsafeMutableRawPointer?, _ src: UnsafeMutableRawPointer?, _ context: UnsafeRawPointer?) -> VoxSwiftStatus {
-    guard let dst, let src else { return VoxSwiftStatusBadABI }
-    let srcTyped = src.assumingMemoryBound(to: String.self)
-    dst.assumingMemoryBound(to: String.self).initialize(to: srcTyped.pointee)
-    srcTyped.deinitialize(count: 1)
-    return VoxSwiftStatusOK
-}
-
-nonisolated(unsafe) public let vfs_swift_value_descriptors: VoxSwiftDescriptorRegistry = {
-    let registry = VoxSwiftDescriptorRegistry()
-    let d0 = registry.reserveDescriptor()
-    let d1 = registry.reserveDescriptor()
-    let d2 = registry.reserveDescriptor()
-    let d3 = registry.reserveDescriptor()
-    let d4 = registry.reserveDescriptor()
-    let d5 = registry.reserveDescriptor()
-    let d6 = registry.reserveDescriptor()
-    let d7 = registry.reserveDescriptor()
-    let d8 = registry.reserveDescriptor()
-    let d9 = registry.reserveDescriptor()
-    let d10 = registry.reserveDescriptor()
-    let d11 = registry.reserveDescriptor()
-    let d12 = registry.reserveDescriptor()
-    let d13 = registry.reserveDescriptor()
-    let d14 = registry.reserveDescriptor()
-    let d15 = registry.reserveDescriptor()
-    let d16 = registry.reserveDescriptor()
-    let d17 = registry.reserveDescriptor()
-    let d18 = registry.reserveDescriptor()
-    let d19 = registry.reserveDescriptor()
-    let d20 = registry.reserveDescriptor()
-    let d21 = registry.reserveDescriptor()
-    let d22 = registry.reserveDescriptor()
-    let d23 = registry.reserveDescriptor()
-    let d24 = registry.reserveDescriptor()
-    let d25 = registry.reserveDescriptor()
-    let d26 = registry.reserveDescriptor()
-    let d27 = registry.reserveDescriptor()
-
-    let d0Variants = registry.allocateVariants([
-        VoxSwiftVariantDescriptor(name: .staticString("File"), index: UInt32(0), fields: nil, fieldCount: 0),
-        VoxSwiftVariantDescriptor(name: .staticString("Directory"), index: UInt32(1), fields: nil, fieldCount: 0),
-        VoxSwiftVariantDescriptor(name: .staticString("Symlink"), index: UInt32(2), fields: nil, fieldCount: 0)
-    ])
-    _ = registry.defineDescriptor(
-        d0,
-        as: VoxSwiftTypeDescriptor.concrete(
-            of: ItemType.self,
-            kind: VoxSwiftTypeKindEnum,
-            primitiveKind: VoxSwiftPrimitiveUnit,
-            flags: VoxSwiftTypeFlagFixedLayout,
-            schemaId: 0xd1e63100371f0715,
-            typeArgs: nil,
-            typeArgCount: 0,
-            fields: nil,
-            fieldCount: 0,
-            variants: d0Variants,
-            variantCount: 3,
-            witnesses: VoxSwiftValueWitnesses(destroy: vfs_swift_value_desc_0_destroy, copyInit: vfs_swift_value_desc_0_copyInit, takeInit: vfs_swift_value_desc_0_takeInit),
-            enumWitnesses: VoxSwiftEnumWitnesses(tag: vfs_swift_value_desc_0_tag, project: vfs_swift_value_desc_0_project, inject: vfs_swift_value_desc_0_inject)
-        )
-    )
-
-    let d1Fields = registry.allocateFields([
-        VoxSwiftFieldDescriptor(name: .staticString("item_id"), schemaId: 0xd9356298b81639ac, type: UnsafePointer(d2), offset: MemoryLayout<ItemAttributes>.offset(of: \ItemAttributes.itemId)!),
-        VoxSwiftFieldDescriptor(name: .staticString("item_type"), schemaId: 0xd1e63100371f0715, type: UnsafePointer(d0), offset: MemoryLayout<ItemAttributes>.offset(of: \ItemAttributes.itemType)!),
-        VoxSwiftFieldDescriptor(name: .staticString("size"), schemaId: 0xd9356298b81639ac, type: UnsafePointer(d2), offset: MemoryLayout<ItemAttributes>.offset(of: \ItemAttributes.size)!),
-        VoxSwiftFieldDescriptor(name: .staticString("modified_time"), schemaId: 0xd9356298b81639ac, type: UnsafePointer(d2), offset: MemoryLayout<ItemAttributes>.offset(of: \ItemAttributes.modifiedTime)!),
-        VoxSwiftFieldDescriptor(name: .staticString("created_time"), schemaId: 0xd9356298b81639ac, type: UnsafePointer(d2), offset: MemoryLayout<ItemAttributes>.offset(of: \ItemAttributes.createdTime)!),
-        VoxSwiftFieldDescriptor(name: .staticString("mode"), schemaId: 0x281c5be4f2ee63b4, type: UnsafePointer(d3), offset: MemoryLayout<ItemAttributes>.offset(of: \ItemAttributes.mode)!)
-    ])
-    _ = registry.defineDescriptor(
-        d1,
-        as: VoxSwiftTypeDescriptor.concrete(
-            of: ItemAttributes.self,
-            kind: VoxSwiftTypeKindStruct,
-            primitiveKind: VoxSwiftPrimitiveUnit,
-            flags: VoxSwiftTypeFlagFixedLayout,
-            schemaId: 0xae6ac02e727cc211,
-            typeArgs: nil,
-            typeArgCount: 0,
-            fields: d1Fields,
-            fieldCount: 6,
-            variants: nil,
-            variantCount: 0,
-            witnesses: VoxSwiftValueWitnesses(destroy: vfs_swift_value_desc_1_destroy, copyInit: vfs_swift_value_desc_1_copyInit, takeInit: vfs_swift_value_desc_1_takeInit),
-            enumWitnesses: VoxSwiftEnumWitnesses()
-        )
-    )
-
-    _ = registry.defineDescriptor(
-        d2,
-        as: VoxSwiftTypeDescriptor.concrete(
-            of: UInt64.self,
-            kind: VoxSwiftTypeKindPrimitive,
-            primitiveKind: VoxSwiftPrimitiveU64,
-            flags: VoxSwiftTypeFlagTrivial | VoxSwiftTypeFlagBitwiseMovable | VoxSwiftTypeFlagFixedLayout,
-            schemaId: 0xd9356298b81639ac,
-            typeArgs: nil,
-            typeArgCount: 0,
-            fields: nil,
-            fieldCount: 0,
-            variants: nil,
-            variantCount: 0,
-            witnesses: VoxSwiftValueWitnesses(destroy: vfs_swift_value_desc_2_destroy, copyInit: vfs_swift_value_desc_2_copyInit, takeInit: vfs_swift_value_desc_2_takeInit),
-            enumWitnesses: VoxSwiftEnumWitnesses()
-        )
-    )
-
-    _ = registry.defineDescriptor(
-        d3,
-        as: VoxSwiftTypeDescriptor.concrete(
-            of: UInt32.self,
-            kind: VoxSwiftTypeKindPrimitive,
-            primitiveKind: VoxSwiftPrimitiveU32,
-            flags: VoxSwiftTypeFlagTrivial | VoxSwiftTypeFlagBitwiseMovable | VoxSwiftTypeFlagFixedLayout,
-            schemaId: 0x281c5be4f2ee63b4,
-            typeArgs: nil,
-            typeArgCount: 0,
-            fields: nil,
-            fieldCount: 0,
-            variants: nil,
-            variantCount: 0,
-            witnesses: VoxSwiftValueWitnesses(destroy: vfs_swift_value_desc_3_destroy, copyInit: vfs_swift_value_desc_3_copyInit, takeInit: vfs_swift_value_desc_3_takeInit),
-            enumWitnesses: VoxSwiftEnumWitnesses()
-        )
-    )
-
-    let d4Fields = registry.allocateFields([
-        VoxSwiftFieldDescriptor(name: .staticString("attrs"), schemaId: 0xae6ac02e727cc211, type: UnsafePointer(d1), offset: MemoryLayout<LookupResult>.offset(of: \LookupResult.attrs)!),
-        VoxSwiftFieldDescriptor(name: .staticString("error"), schemaId: 0x361f4536eee9f991, type: UnsafePointer(d5), offset: MemoryLayout<LookupResult>.offset(of: \LookupResult.error)!)
-    ])
-    _ = registry.defineDescriptor(
-        d4,
-        as: VoxSwiftTypeDescriptor.concrete(
-            of: LookupResult.self,
-            kind: VoxSwiftTypeKindStruct,
-            primitiveKind: VoxSwiftPrimitiveUnit,
-            flags: VoxSwiftTypeFlagFixedLayout,
-            schemaId: 0xb5d116be89549d7a,
-            typeArgs: nil,
-            typeArgCount: 0,
-            fields: d4Fields,
-            fieldCount: 2,
-            variants: nil,
-            variantCount: 0,
-            witnesses: VoxSwiftValueWitnesses(destroy: vfs_swift_value_desc_4_destroy, copyInit: vfs_swift_value_desc_4_copyInit, takeInit: vfs_swift_value_desc_4_takeInit),
-            enumWitnesses: VoxSwiftEnumWitnesses()
-        )
-    )
-
-    _ = registry.defineDescriptor(
-        d5,
-        as: VoxSwiftTypeDescriptor.concrete(
-            of: Int32.self,
-            kind: VoxSwiftTypeKindPrimitive,
-            primitiveKind: VoxSwiftPrimitiveI32,
-            flags: VoxSwiftTypeFlagTrivial | VoxSwiftTypeFlagBitwiseMovable | VoxSwiftTypeFlagFixedLayout,
-            schemaId: 0x361f4536eee9f991,
-            typeArgs: nil,
-            typeArgCount: 0,
-            fields: nil,
-            fieldCount: 0,
-            variants: nil,
-            variantCount: 0,
-            witnesses: VoxSwiftValueWitnesses(destroy: vfs_swift_value_desc_5_destroy, copyInit: vfs_swift_value_desc_5_copyInit, takeInit: vfs_swift_value_desc_5_takeInit),
-            enumWitnesses: VoxSwiftEnumWitnesses()
-        )
-    )
-
-    let d6Fields = registry.allocateFields([
-        VoxSwiftFieldDescriptor(name: .staticString("attrs"), schemaId: 0xae6ac02e727cc211, type: UnsafePointer(d1), offset: MemoryLayout<GetAttributesResult>.offset(of: \GetAttributesResult.attrs)!),
-        VoxSwiftFieldDescriptor(name: .staticString("error"), schemaId: 0x361f4536eee9f991, type: UnsafePointer(d5), offset: MemoryLayout<GetAttributesResult>.offset(of: \GetAttributesResult.error)!)
-    ])
-    _ = registry.defineDescriptor(
-        d6,
-        as: VoxSwiftTypeDescriptor.concrete(
-            of: GetAttributesResult.self,
-            kind: VoxSwiftTypeKindStruct,
-            primitiveKind: VoxSwiftPrimitiveUnit,
-            flags: VoxSwiftTypeFlagFixedLayout,
-            schemaId: 0x6a734a2e970719e0,
-            typeArgs: nil,
-            typeArgCount: 0,
-            fields: d6Fields,
-            fieldCount: 2,
-            variants: nil,
-            variantCount: 0,
-            witnesses: VoxSwiftValueWitnesses(destroy: vfs_swift_value_desc_6_destroy, copyInit: vfs_swift_value_desc_6_copyInit, takeInit: vfs_swift_value_desc_6_takeInit),
-            enumWitnesses: VoxSwiftEnumWitnesses()
-        )
-    )
-
-    let d7Fields = registry.allocateFields([
-        VoxSwiftFieldDescriptor(name: .staticString("name"), schemaId: 0x6d7dce914ee150e8, type: UnsafePointer(d8), offset: MemoryLayout<DirEntry>.offset(of: \DirEntry.name)!),
-        VoxSwiftFieldDescriptor(name: .staticString("item_id"), schemaId: 0xd9356298b81639ac, type: UnsafePointer(d2), offset: MemoryLayout<DirEntry>.offset(of: \DirEntry.itemId)!),
-        VoxSwiftFieldDescriptor(name: .staticString("item_type"), schemaId: 0xd1e63100371f0715, type: UnsafePointer(d0), offset: MemoryLayout<DirEntry>.offset(of: \DirEntry.itemType)!),
-        VoxSwiftFieldDescriptor(name: .staticString("size"), schemaId: 0xd9356298b81639ac, type: UnsafePointer(d2), offset: MemoryLayout<DirEntry>.offset(of: \DirEntry.size)!),
-        VoxSwiftFieldDescriptor(name: .staticString("modified_time"), schemaId: 0xd9356298b81639ac, type: UnsafePointer(d2), offset: MemoryLayout<DirEntry>.offset(of: \DirEntry.modifiedTime)!),
-        VoxSwiftFieldDescriptor(name: .staticString("created_time"), schemaId: 0xd9356298b81639ac, type: UnsafePointer(d2), offset: MemoryLayout<DirEntry>.offset(of: \DirEntry.createdTime)!),
-        VoxSwiftFieldDescriptor(name: .staticString("mode"), schemaId: 0x281c5be4f2ee63b4, type: UnsafePointer(d3), offset: MemoryLayout<DirEntry>.offset(of: \DirEntry.mode)!)
-    ])
-    _ = registry.defineDescriptor(
-        d7,
-        as: VoxSwiftTypeDescriptor.concrete(
-            of: DirEntry.self,
-            kind: VoxSwiftTypeKindStruct,
-            primitiveKind: VoxSwiftPrimitiveUnit,
-            flags: VoxSwiftTypeFlagFixedLayout,
-            schemaId: 0xf428edeadbdd9e2c,
-            typeArgs: nil,
-            typeArgCount: 0,
-            fields: d7Fields,
-            fieldCount: 7,
-            variants: nil,
-            variantCount: 0,
-            witnesses: VoxSwiftValueWitnesses(destroy: vfs_swift_value_desc_7_destroy, copyInit: vfs_swift_value_desc_7_copyInit, takeInit: vfs_swift_value_desc_7_takeInit),
-            enumWitnesses: VoxSwiftEnumWitnesses()
-        )
-    )
-
-    _ = registry.defineDescriptor(
-        d8,
-        as: VoxSwiftTypeDescriptor.concrete(
-            of: String.self,
-            kind: VoxSwiftTypeKindString,
-            primitiveKind: VoxSwiftPrimitiveUnit,
-            flags: 0,
-            schemaId: 0x6d7dce914ee150e8,
-            typeArgs: nil,
-            typeArgCount: 0,
-            fields: nil,
-            fieldCount: 0,
-            variants: nil,
-            variantCount: 0,
-            witnesses: VoxSwiftValueWitnesses(destroy: vfs_swift_value_desc_8_destroy, copyInit: vfs_swift_value_desc_8_copyInit, takeInit: vfs_swift_value_desc_8_takeInit),
-            enumWitnesses: VoxSwiftEnumWitnesses()
-        )
-    )
-
-    let d9Fields = registry.allocateFields([
-        VoxSwiftFieldDescriptor(name: .staticString("entries"), schemaId: 0x0a96b404b4d79d67, type: UnsafePointer(d10), offset: MemoryLayout<ReadDirResult>.offset(of: \ReadDirResult.entries)!),
-        VoxSwiftFieldDescriptor(name: .staticString("next_cookie"), schemaId: 0xd9356298b81639ac, type: UnsafePointer(d2), offset: MemoryLayout<ReadDirResult>.offset(of: \ReadDirResult.nextCookie)!),
-        VoxSwiftFieldDescriptor(name: .staticString("verifier"), schemaId: 0xd9356298b81639ac, type: UnsafePointer(d2), offset: MemoryLayout<ReadDirResult>.offset(of: \ReadDirResult.verifier)!),
-        VoxSwiftFieldDescriptor(name: .staticString("error"), schemaId: 0x361f4536eee9f991, type: UnsafePointer(d5), offset: MemoryLayout<ReadDirResult>.offset(of: \ReadDirResult.error)!)
-    ])
-    _ = registry.defineDescriptor(
-        d9,
-        as: VoxSwiftTypeDescriptor.concrete(
-            of: ReadDirResult.self,
-            kind: VoxSwiftTypeKindStruct,
-            primitiveKind: VoxSwiftPrimitiveUnit,
-            flags: VoxSwiftTypeFlagFixedLayout,
-            schemaId: 0x2c1d30ab16671dd0,
-            typeArgs: nil,
-            typeArgCount: 0,
-            fields: d9Fields,
-            fieldCount: 4,
-            variants: nil,
-            variantCount: 0,
-            witnesses: VoxSwiftValueWitnesses(destroy: vfs_swift_value_desc_9_destroy, copyInit: vfs_swift_value_desc_9_copyInit, takeInit: vfs_swift_value_desc_9_takeInit),
-            enumWitnesses: VoxSwiftEnumWitnesses()
-        )
-    )
-
-    let d10TypeArgs = registry.allocateTypeArgs([UnsafePointer(d7)])
-    _ = registry.defineDescriptor(
-        d10,
-        as: VoxSwiftTypeDescriptor.concrete(
-            of: [DirEntry].self,
-            kind: VoxSwiftTypeKindList,
-            primitiveKind: VoxSwiftPrimitiveUnit,
-            flags: 0,
-            schemaId: 0x0a96b404b4d79d67,
-            typeArgs: d10TypeArgs,
-            typeArgCount: 1,
-            fields: nil,
-            fieldCount: 0,
-            variants: nil,
-            variantCount: 0,
-            witnesses: VoxSwiftValueWitnesses(destroy: vfs_swift_value_desc_10_destroy, copyInit: vfs_swift_value_desc_10_copyInit, takeInit: vfs_swift_value_desc_10_takeInit),
-            enumWitnesses: VoxSwiftEnumWitnesses()
-        )
-    )
-
-    let d11Fields = registry.allocateFields([
-        VoxSwiftFieldDescriptor(name: .staticString("data"), schemaId: 0xba8125876d6388b4, type: UnsafePointer(d12), offset: MemoryLayout<ReadResult>.offset(of: \ReadResult.data)!),
-        VoxSwiftFieldDescriptor(name: .staticString("error"), schemaId: 0x361f4536eee9f991, type: UnsafePointer(d5), offset: MemoryLayout<ReadResult>.offset(of: \ReadResult.error)!)
-    ])
-    _ = registry.defineDescriptor(
-        d11,
-        as: VoxSwiftTypeDescriptor.concrete(
-            of: ReadResult.self,
-            kind: VoxSwiftTypeKindStruct,
-            primitiveKind: VoxSwiftPrimitiveUnit,
-            flags: VoxSwiftTypeFlagFixedLayout,
-            schemaId: 0x0abe5d9b06f825da,
-            typeArgs: nil,
-            typeArgCount: 0,
-            fields: d11Fields,
-            fieldCount: 2,
-            variants: nil,
-            variantCount: 0,
-            witnesses: VoxSwiftValueWitnesses(destroy: vfs_swift_value_desc_11_destroy, copyInit: vfs_swift_value_desc_11_copyInit, takeInit: vfs_swift_value_desc_11_takeInit),
-            enumWitnesses: VoxSwiftEnumWitnesses()
-        )
-    )
-
-    _ = registry.defineDescriptor(
-        d12,
-        as: VoxSwiftTypeDescriptor.concrete(
-            of: Data.self,
-            kind: VoxSwiftTypeKindBytes,
-            primitiveKind: VoxSwiftPrimitiveUnit,
-            flags: 0,
-            schemaId: 0xba8125876d6388b4,
-            typeArgs: nil,
-            typeArgCount: 0,
-            fields: nil,
-            fieldCount: 0,
-            variants: nil,
-            variantCount: 0,
-            witnesses: VoxSwiftValueWitnesses(destroy: vfs_swift_value_desc_12_destroy, copyInit: vfs_swift_value_desc_12_copyInit, takeInit: vfs_swift_value_desc_12_takeInit),
-            enumWitnesses: VoxSwiftEnumWitnesses()
-        )
-    )
-
-    let d13Fields = registry.allocateFields([
-        VoxSwiftFieldDescriptor(name: .staticString("bytes_written"), schemaId: 0xd9356298b81639ac, type: UnsafePointer(d2), offset: MemoryLayout<WriteResult>.offset(of: \WriteResult.bytesWritten)!),
-        VoxSwiftFieldDescriptor(name: .staticString("error"), schemaId: 0x361f4536eee9f991, type: UnsafePointer(d5), offset: MemoryLayout<WriteResult>.offset(of: \WriteResult.error)!)
-    ])
-    _ = registry.defineDescriptor(
-        d13,
-        as: VoxSwiftTypeDescriptor.concrete(
-            of: WriteResult.self,
-            kind: VoxSwiftTypeKindStruct,
-            primitiveKind: VoxSwiftPrimitiveUnit,
-            flags: VoxSwiftTypeFlagFixedLayout,
-            schemaId: 0xcef75facafe734d2,
-            typeArgs: nil,
-            typeArgCount: 0,
-            fields: d13Fields,
-            fieldCount: 2,
-            variants: nil,
-            variantCount: 0,
-            witnesses: VoxSwiftValueWitnesses(destroy: vfs_swift_value_desc_13_destroy, copyInit: vfs_swift_value_desc_13_copyInit, takeInit: vfs_swift_value_desc_13_takeInit),
-            enumWitnesses: VoxSwiftEnumWitnesses()
-        )
-    )
-
-    let d14Fields = registry.allocateFields([
-        VoxSwiftFieldDescriptor(name: .staticString("item_id"), schemaId: 0xd9356298b81639ac, type: UnsafePointer(d2), offset: MemoryLayout<CreateResult>.offset(of: \CreateResult.itemId)!),
-        VoxSwiftFieldDescriptor(name: .staticString("error"), schemaId: 0x361f4536eee9f991, type: UnsafePointer(d5), offset: MemoryLayout<CreateResult>.offset(of: \CreateResult.error)!)
-    ])
-    _ = registry.defineDescriptor(
-        d14,
-        as: VoxSwiftTypeDescriptor.concrete(
-            of: CreateResult.self,
-            kind: VoxSwiftTypeKindStruct,
-            primitiveKind: VoxSwiftPrimitiveUnit,
-            flags: VoxSwiftTypeFlagFixedLayout,
-            schemaId: 0x2ef062292a4e82d5,
-            typeArgs: nil,
-            typeArgCount: 0,
-            fields: d14Fields,
-            fieldCount: 2,
-            variants: nil,
-            variantCount: 0,
-            witnesses: VoxSwiftValueWitnesses(destroy: vfs_swift_value_desc_14_destroy, copyInit: vfs_swift_value_desc_14_copyInit, takeInit: vfs_swift_value_desc_14_takeInit),
-            enumWitnesses: VoxSwiftEnumWitnesses()
-        )
-    )
-
-    let d15Fields = registry.allocateFields([
-        VoxSwiftFieldDescriptor(name: .staticString("error"), schemaId: 0x361f4536eee9f991, type: UnsafePointer(d5), offset: MemoryLayout<VfsResult>.offset(of: \VfsResult.error)!)
-    ])
-    _ = registry.defineDescriptor(
-        d15,
-        as: VoxSwiftTypeDescriptor.concrete(
-            of: VfsResult.self,
-            kind: VoxSwiftTypeKindStruct,
-            primitiveKind: VoxSwiftPrimitiveUnit,
-            flags: VoxSwiftTypeFlagFixedLayout,
-            schemaId: 0xebf5b3e4ab445912,
-            typeArgs: nil,
-            typeArgCount: 0,
-            fields: d15Fields,
-            fieldCount: 1,
-            variants: nil,
-            variantCount: 0,
-            witnesses: VoxSwiftValueWitnesses(destroy: vfs_swift_value_desc_15_destroy, copyInit: vfs_swift_value_desc_15_copyInit, takeInit: vfs_swift_value_desc_15_takeInit),
-            enumWitnesses: VoxSwiftEnumWitnesses()
-        )
-    )
-
-    let d16Fields = registry.allocateFields([
-        VoxSwiftFieldDescriptor(name: .staticString("mode"), schemaId: 0xdcafd4de6b7969bb, type: UnsafePointer(d17), offset: MemoryLayout<SetAttributesParams>.offset(of: \SetAttributesParams.mode)!),
-        VoxSwiftFieldDescriptor(name: .staticString("modified_time"), schemaId: 0xdcafd4de6b7969bb, type: UnsafePointer(d18), offset: MemoryLayout<SetAttributesParams>.offset(of: \SetAttributesParams.modifiedTime)!),
-        VoxSwiftFieldDescriptor(name: .staticString("size"), schemaId: 0xdcafd4de6b7969bb, type: UnsafePointer(d18), offset: MemoryLayout<SetAttributesParams>.offset(of: \SetAttributesParams.size)!)
-    ])
-    _ = registry.defineDescriptor(
-        d16,
-        as: VoxSwiftTypeDescriptor.concrete(
-            of: SetAttributesParams.self,
-            kind: VoxSwiftTypeKindStruct,
-            primitiveKind: VoxSwiftPrimitiveUnit,
-            flags: VoxSwiftTypeFlagFixedLayout,
-            schemaId: 0xfa5d032e4ed71409,
-            typeArgs: nil,
-            typeArgCount: 0,
-            fields: d16Fields,
-            fieldCount: 3,
-            variants: nil,
-            variantCount: 0,
-            witnesses: VoxSwiftValueWitnesses(destroy: vfs_swift_value_desc_16_destroy, copyInit: vfs_swift_value_desc_16_copyInit, takeInit: vfs_swift_value_desc_16_takeInit),
-            enumWitnesses: VoxSwiftEnumWitnesses()
-        )
-    )
-
-    let d17TypeArgs = registry.allocateTypeArgs([UnsafePointer(d3)])
-    _ = registry.defineDescriptor(
-        d17,
-        as: VoxSwiftTypeDescriptor.concrete(
-            of: UInt32?.self,
-            kind: VoxSwiftTypeKindOption,
-            primitiveKind: VoxSwiftPrimitiveUnit,
-            flags: 0,
-            schemaId: 0xdcafd4de6b7969bb,
-            typeArgs: d17TypeArgs,
-            typeArgCount: 1,
-            fields: nil,
-            fieldCount: 0,
-            variants: nil,
-            variantCount: 0,
-            witnesses: VoxSwiftValueWitnesses(destroy: vfs_swift_value_desc_17_destroy, copyInit: vfs_swift_value_desc_17_copyInit, takeInit: vfs_swift_value_desc_17_takeInit),
-            enumWitnesses: VoxSwiftEnumWitnesses()
-        )
-    )
-
-    let d18TypeArgs = registry.allocateTypeArgs([UnsafePointer(d2)])
-    _ = registry.defineDescriptor(
-        d18,
-        as: VoxSwiftTypeDescriptor.concrete(
-            of: UInt64?.self,
-            kind: VoxSwiftTypeKindOption,
-            primitiveKind: VoxSwiftPrimitiveUnit,
-            flags: 0,
-            schemaId: 0xdcafd4de6b7969bb,
-            typeArgs: d18TypeArgs,
-            typeArgCount: 1,
-            fields: nil,
-            fieldCount: 0,
-            variants: nil,
-            variantCount: 0,
-            witnesses: VoxSwiftValueWitnesses(destroy: vfs_swift_value_desc_18_destroy, copyInit: vfs_swift_value_desc_18_copyInit, takeInit: vfs_swift_value_desc_18_takeInit),
-            enumWitnesses: VoxSwiftEnumWitnesses()
-        )
-    )
-
-    let d19Fields = registry.allocateFields([
-        VoxSwiftFieldDescriptor(name: .staticString("0"), schemaId: 0xd9356298b81639ac, type: UnsafePointer(d2), offset: 0),
-        VoxSwiftFieldDescriptor(name: .staticString("1"), schemaId: 0x6d7dce914ee150e8, type: UnsafePointer(d8), offset: 0)
-    ])
-    _ = registry.defineDescriptor(
-        d19,
-        as: VoxSwiftTypeDescriptor.concrete(
-            of: (UInt64, String).self,
-            kind: VoxSwiftTypeKindStruct,
-            primitiveKind: VoxSwiftPrimitiveUnit,
-            flags: VoxSwiftTypeFlagFixedLayout,
-            schemaId: 0xba0496aa8cee7a4c,
-            typeArgs: nil,
-            typeArgCount: 0,
-            fields: d19Fields,
-            fieldCount: 2,
-            variants: nil,
-            variantCount: 0,
-            witnesses: VoxSwiftValueWitnesses(destroy: vfs_swift_value_desc_19_destroy, copyInit: vfs_swift_value_desc_19_copyInit, takeInit: vfs_swift_value_desc_19_takeInit),
-            enumWitnesses: VoxSwiftEnumWitnesses()
-        )
-    )
-
-    let d20Fields = registry.allocateFields([
-        VoxSwiftFieldDescriptor(name: .staticString("0"), schemaId: 0xd9356298b81639ac, type: UnsafePointer(d2), offset: 0)
-    ])
-    _ = registry.defineDescriptor(
-        d20,
-        as: VoxSwiftTypeDescriptor.concrete(
-            of: (UInt64).self,
-            kind: VoxSwiftTypeKindStruct,
-            primitiveKind: VoxSwiftPrimitiveUnit,
-            flags: VoxSwiftTypeFlagFixedLayout,
-            schemaId: 0x6847ab90feda71c1,
-            typeArgs: nil,
-            typeArgCount: 0,
-            fields: d20Fields,
-            fieldCount: 1,
-            variants: nil,
-            variantCount: 0,
-            witnesses: VoxSwiftValueWitnesses(destroy: vfs_swift_value_desc_20_destroy, copyInit: vfs_swift_value_desc_20_copyInit, takeInit: vfs_swift_value_desc_20_takeInit),
-            enumWitnesses: VoxSwiftEnumWitnesses()
-        )
-    )
-
-    let d21Fields = registry.allocateFields([
-        VoxSwiftFieldDescriptor(name: .staticString("0"), schemaId: 0xd9356298b81639ac, type: UnsafePointer(d2), offset: 0),
-        VoxSwiftFieldDescriptor(name: .staticString("1"), schemaId: 0xd9356298b81639ac, type: UnsafePointer(d2), offset: 0),
-        VoxSwiftFieldDescriptor(name: .staticString("2"), schemaId: 0xd9356298b81639ac, type: UnsafePointer(d2), offset: 0)
-    ])
-    _ = registry.defineDescriptor(
-        d21,
-        as: VoxSwiftTypeDescriptor.concrete(
-            of: (UInt64, UInt64, UInt64).self,
-            kind: VoxSwiftTypeKindStruct,
-            primitiveKind: VoxSwiftPrimitiveUnit,
-            flags: VoxSwiftTypeFlagFixedLayout,
-            schemaId: 0xaa510ab07d34f141,
-            typeArgs: nil,
-            typeArgCount: 0,
-            fields: d21Fields,
-            fieldCount: 3,
-            variants: nil,
-            variantCount: 0,
-            witnesses: VoxSwiftValueWitnesses(destroy: vfs_swift_value_desc_21_destroy, copyInit: vfs_swift_value_desc_21_copyInit, takeInit: vfs_swift_value_desc_21_takeInit),
-            enumWitnesses: VoxSwiftEnumWitnesses()
-        )
-    )
-
-    let d22Fields = registry.allocateFields([
-        VoxSwiftFieldDescriptor(name: .staticString("0"), schemaId: 0xd9356298b81639ac, type: UnsafePointer(d2), offset: 0),
-        VoxSwiftFieldDescriptor(name: .staticString("1"), schemaId: 0xd9356298b81639ac, type: UnsafePointer(d2), offset: 0),
-        VoxSwiftFieldDescriptor(name: .staticString("2"), schemaId: 0xba8125876d6388b4, type: UnsafePointer(d12), offset: 0)
-    ])
-    _ = registry.defineDescriptor(
-        d22,
-        as: VoxSwiftTypeDescriptor.concrete(
-            of: (UInt64, UInt64, Data).self,
-            kind: VoxSwiftTypeKindStruct,
-            primitiveKind: VoxSwiftPrimitiveUnit,
-            flags: VoxSwiftTypeFlagFixedLayout,
-            schemaId: 0xaa510ab07d34f141,
-            typeArgs: nil,
-            typeArgCount: 0,
-            fields: d22Fields,
-            fieldCount: 3,
-            variants: nil,
-            variantCount: 0,
-            witnesses: VoxSwiftValueWitnesses(destroy: vfs_swift_value_desc_22_destroy, copyInit: vfs_swift_value_desc_22_copyInit, takeInit: vfs_swift_value_desc_22_takeInit),
-            enumWitnesses: VoxSwiftEnumWitnesses()
-        )
-    )
-
-    let d23Fields = registry.allocateFields([
-        VoxSwiftFieldDescriptor(name: .staticString("0"), schemaId: 0xd9356298b81639ac, type: UnsafePointer(d2), offset: 0),
-        VoxSwiftFieldDescriptor(name: .staticString("1"), schemaId: 0x6d7dce914ee150e8, type: UnsafePointer(d8), offset: 0),
-        VoxSwiftFieldDescriptor(name: .staticString("2"), schemaId: 0xd1e63100371f0715, type: UnsafePointer(d0), offset: 0),
-        VoxSwiftFieldDescriptor(name: .staticString("3"), schemaId: 0x281c5be4f2ee63b4, type: UnsafePointer(d3), offset: 0)
-    ])
-    _ = registry.defineDescriptor(
-        d23,
-        as: VoxSwiftTypeDescriptor.concrete(
-            of: (UInt64, String, ItemType, UInt32).self,
-            kind: VoxSwiftTypeKindStruct,
-            primitiveKind: VoxSwiftPrimitiveUnit,
-            flags: VoxSwiftTypeFlagFixedLayout,
-            schemaId: 0x915c6fb5b64f270b,
-            typeArgs: nil,
-            typeArgCount: 0,
-            fields: d23Fields,
-            fieldCount: 4,
-            variants: nil,
-            variantCount: 0,
-            witnesses: VoxSwiftValueWitnesses(destroy: vfs_swift_value_desc_23_destroy, copyInit: vfs_swift_value_desc_23_copyInit, takeInit: vfs_swift_value_desc_23_takeInit),
-            enumWitnesses: VoxSwiftEnumWitnesses()
-        )
-    )
-
-    let d24Fields = registry.allocateFields([
-        VoxSwiftFieldDescriptor(name: .staticString("0"), schemaId: 0xd9356298b81639ac, type: UnsafePointer(d2), offset: 0),
-        VoxSwiftFieldDescriptor(name: .staticString("1"), schemaId: 0xd9356298b81639ac, type: UnsafePointer(d2), offset: 0),
-        VoxSwiftFieldDescriptor(name: .staticString("2"), schemaId: 0x6d7dce914ee150e8, type: UnsafePointer(d8), offset: 0)
-    ])
-    _ = registry.defineDescriptor(
-        d24,
-        as: VoxSwiftTypeDescriptor.concrete(
-            of: (UInt64, UInt64, String).self,
-            kind: VoxSwiftTypeKindStruct,
-            primitiveKind: VoxSwiftPrimitiveUnit,
-            flags: VoxSwiftTypeFlagFixedLayout,
-            schemaId: 0xaa510ab07d34f141,
-            typeArgs: nil,
-            typeArgCount: 0,
-            fields: d24Fields,
-            fieldCount: 3,
-            variants: nil,
-            variantCount: 0,
-            witnesses: VoxSwiftValueWitnesses(destroy: vfs_swift_value_desc_24_destroy, copyInit: vfs_swift_value_desc_24_copyInit, takeInit: vfs_swift_value_desc_24_takeInit),
-            enumWitnesses: VoxSwiftEnumWitnesses()
-        )
-    )
-
-    let d25Fields = registry.allocateFields([
-        VoxSwiftFieldDescriptor(name: .staticString("0"), schemaId: 0xd9356298b81639ac, type: UnsafePointer(d2), offset: 0),
-        VoxSwiftFieldDescriptor(name: .staticString("1"), schemaId: 0xfa5d032e4ed71409, type: UnsafePointer(d16), offset: 0)
-    ])
-    _ = registry.defineDescriptor(
-        d25,
-        as: VoxSwiftTypeDescriptor.concrete(
-            of: (UInt64, SetAttributesParams).self,
-            kind: VoxSwiftTypeKindStruct,
-            primitiveKind: VoxSwiftPrimitiveUnit,
-            flags: VoxSwiftTypeFlagFixedLayout,
-            schemaId: 0xba0496aa8cee7a4c,
-            typeArgs: nil,
-            typeArgCount: 0,
-            fields: d25Fields,
-            fieldCount: 2,
-            variants: nil,
-            variantCount: 0,
-            witnesses: VoxSwiftValueWitnesses(destroy: vfs_swift_value_desc_25_destroy, copyInit: vfs_swift_value_desc_25_copyInit, takeInit: vfs_swift_value_desc_25_takeInit),
-            enumWitnesses: VoxSwiftEnumWitnesses()
-        )
-    )
-
-    _ = registry.defineDescriptor(
-        d26,
-        as: VoxSwiftTypeDescriptor.concrete(
-            of: Void.self,
-            kind: VoxSwiftTypeKindPrimitive,
-            primitiveKind: VoxSwiftPrimitiveUnit,
-            flags: VoxSwiftTypeFlagTrivial | VoxSwiftTypeFlagBitwiseMovable | VoxSwiftTypeFlagFixedLayout,
-            schemaId: 0xbc5c33249a2dc720,
-            typeArgs: nil,
-            typeArgCount: 0,
-            fields: nil,
-            fieldCount: 0,
-            variants: nil,
-            variantCount: 0,
-            witnesses: VoxSwiftValueWitnesses(destroy: vfs_swift_value_desc_26_destroy, copyInit: vfs_swift_value_desc_26_copyInit, takeInit: vfs_swift_value_desc_26_takeInit),
-            enumWitnesses: VoxSwiftEnumWitnesses()
-        )
-    )
-
-    _ = registry.defineDescriptor(
-        d27,
-        as: VoxSwiftTypeDescriptor.concrete(
-            of: String.self,
-            kind: VoxSwiftTypeKindString,
-            primitiveKind: VoxSwiftPrimitiveUnit,
-            flags: 0,
-            schemaId: 0x6d7dce914ee150e8,
-            typeArgs: nil,
-            typeArgCount: 0,
-            fields: nil,
-            fieldCount: 0,
-            variants: nil,
-            variantCount: 0,
-            witnesses: VoxSwiftValueWitnesses(destroy: vfs_swift_value_desc_27_destroy, copyInit: vfs_swift_value_desc_27_copyInit, takeInit: vfs_swift_value_desc_27_takeInit),
-            enumWitnesses: VoxSwiftEnumWitnesses()
-        )
-    )
-
-    registry.defineMethod(methodId: 0xab2b853c144d133b, argsRoot: UnsafePointer(d19), responseRoot: UnsafePointer(d4))
-    registry.defineMethod(methodId: 0xd97f57caa097adf9, argsRoot: UnsafePointer(d20), responseRoot: UnsafePointer(d6))
-    registry.defineMethod(methodId: 0xf2ba29feced65eb7, argsRoot: UnsafePointer(d21), responseRoot: UnsafePointer(d9))
-    registry.defineMethod(methodId: 0x719a43e94d147918, argsRoot: UnsafePointer(d21), responseRoot: UnsafePointer(d11))
-    registry.defineMethod(methodId: 0xc330417994d57b8a, argsRoot: UnsafePointer(d22), responseRoot: UnsafePointer(d13))
-    registry.defineMethod(methodId: 0x9b060d7cd7c1a62e, argsRoot: UnsafePointer(d23), responseRoot: UnsafePointer(d14))
-    registry.defineMethod(methodId: 0x2a1f41955c3e63a8, argsRoot: UnsafePointer(d20), responseRoot: UnsafePointer(d15))
-    registry.defineMethod(methodId: 0x5aca8524d890971d, argsRoot: UnsafePointer(d24), responseRoot: UnsafePointer(d15))
-    registry.defineMethod(methodId: 0x2086815889a62b33, argsRoot: UnsafePointer(d25), responseRoot: UnsafePointer(d15))
-    registry.defineMethod(methodId: 0xda4fc1cc055a4fcb, argsRoot: UnsafePointer(d26), responseRoot: UnsafePointer(d27))
-
-    return registry
-}()
-
-nonisolated(unsafe) public let vfs_swift_value_descriptor_registry: [UInt64: UnsafePointer<VoxSwiftTypeDescriptor>] = vfs_swift_value_descriptors.bySchemaId
-
-nonisolated(unsafe) public let vfs_swift_method_value_descriptors: [UInt64: VoxSwiftMethodValueDescriptorInfo] = vfs_swift_value_descriptors.methodById
-
-// MARK: - Vfs Client
+// MARK: - wire error type
+
+public enum Infallible: Sendable {}
+
+/// The wire error of `Result<T, VoxError<E>>`. Variant order matches the
+/// Rust `VoxError<E>` (User=0 … Indeterminate=7) so wire indices align.
+public enum VoxError<E: Sendable>: Error, Sendable {
+    case user(E)
+    case unknownMethod
+    case invalidPayload(String)
+    case cancelled
+    case connectionClosed
+    case sessionShutdown
+    case sendFailed
+    case indeterminate
+}
+
+// MARK: - phon service schemas (registry + per-method roots/descriptors/channels)
+
+nonisolated(unsafe) let vfs_lookup_ArgsDescriptor: Descriptor = Descriptor(schema: .concrete(SchemaId(0xbd977dd7da39259f)), layout: Layout(size: MemoryLayout<(UInt64, String)>.size, align: MemoryLayout<(UInt64, String)>.alignment), access: .record(RecordAccess(fields: [FieldAccess(offset: MemoryLayout<(UInt64, String)>.offset(of: \.0)!, descriptor: Descriptor(schema: .concrete(SchemaId(0xd9356298b81639ac)), layout: Layout(size: MemoryLayout<UInt64>.size, align: MemoryLayout<UInt64>.alignment), access: .scalar)), FieldAccess(offset: MemoryLayout<(UInt64, String)>.offset(of: \.1)!, descriptor: Descriptor(schema: .concrete(SchemaId(0x6d7dce914ee150e8)), layout: Layout(size: MemoryLayout<String>.size, align: MemoryLayout<String>.alignment), access: .bytes(BytesAccess(stride: 1, elemAlign: 1, witness: .string))))], construct: .inPlace)))
+nonisolated(unsafe) let vfs_lookup_ArgsDescriptorBlocks: [SchemaId: Descriptor] = [:]
+nonisolated(unsafe) let vfs_lookup_ResponseDescriptor: Descriptor = Descriptor(schema: .concrete(SchemaId(0x3a81d2ae3be3c008)), layout: Layout(size: MemoryLayout<Result<LookupResult, VoxError<Infallible>>>.size, align: MemoryLayout<Result<LookupResult, VoxError<Infallible>>>.alignment), access: .enumeration(EnumAccess(
+            tag: { ptr in switch ptr.assumingMemoryBound(to: Result<LookupResult, VoxError<Infallible>>.self).pointee { case .success: return 0; case .failure: return 1 } },
+            projectPayload: { value, _, scratch in switch value.assumingMemoryBound(to: Result<LookupResult, VoxError<Infallible>>.self).pointee { case .success(let f0): scratch.assumingMemoryBound(to: LookupResult.self).initialize(to: f0); case .failure(let f0): scratch.assumingMemoryBound(to: VoxError<Infallible>.self).initialize(to: f0) } },
+            destroyPayload: { scratch, localIndex in if localIndex == 0 { scratch.assumingMemoryBound(to: LookupResult.self).deinitialize(count: 1) } else { scratch.assumingMemoryBound(to: VoxError<Infallible>.self).deinitialize(count: 1) } },
+            inject: { slot, localIndex, scratch in
+            let v: Result<LookupResult, VoxError<Infallible>> = localIndex == 0 ? .success(scratch.assumingMemoryBound(to: LookupResult.self).move()) : .failure(scratch.assumingMemoryBound(to: VoxError<Infallible>.self).move())
+            slot.assumingMemoryBound(to: Result<LookupResult, VoxError<Infallible>>.self).initialize(to: v) },
+            variants: [VariantAccess(wireIndex: 0, payloadFields: [FieldAccess(offset: 0, descriptor: Descriptor(schema: .concrete(SchemaId(0xd009b6f4011f3606)), layout: Layout(size: MemoryLayout<LookupResult>.size, align: MemoryLayout<LookupResult>.alignment), access: .record(RecordAccess(fields: [FieldAccess(offset: MemoryLayout<LookupResult>.offset(of: \LookupResult.attrs)!, descriptor: Descriptor(schema: .concrete(SchemaId(0x6cfe043b88869048)), layout: Layout(size: MemoryLayout<ItemAttributes>.size, align: MemoryLayout<ItemAttributes>.alignment), access: .record(RecordAccess(fields: [FieldAccess(offset: MemoryLayout<ItemAttributes>.offset(of: \ItemAttributes.itemId)!, descriptor: Descriptor(schema: .concrete(SchemaId(0xd9356298b81639ac)), layout: Layout(size: MemoryLayout<UInt64>.size, align: MemoryLayout<UInt64>.alignment), access: .scalar)), FieldAccess(offset: MemoryLayout<ItemAttributes>.offset(of: \ItemAttributes.itemType)!, descriptor: Descriptor(schema: .concrete(SchemaId(0x0ad78e1b712b0663)), layout: Layout(size: MemoryLayout<ItemType>.size, align: MemoryLayout<ItemType>.alignment), access: .enumeration(EnumAccess(
+            tag: { ptr in switch ptr.assumingMemoryBound(to: ItemType.self).pointee {
+            case .file: return 0
+            case .directory: return 1
+            case .symlink: return 2
+            } },
+            projectPayload: { value, _, scratch in switch value.assumingMemoryBound(to: ItemType.self).pointee {
+            case .file: break
+            case .directory: break
+            case .symlink: break
+            } },
+            destroyPayload: { scratch, localIndex in switch localIndex {
+            default: break
+            } },
+            inject: { slot, localIndex, scratch in
+            let v: ItemType
+            switch localIndex {
+            case 0: v = .file
+            case 1: v = .directory
+            case 2: v = .symlink
+            default: fatalError("bad variant index")
+            }
+            slot.assumingMemoryBound(to: ItemType.self).initialize(to: v) },
+            variants: [VariantAccess(wireIndex: 0, payloadFields: [], payloadLayout: Layout(size: 0, align: 1)), VariantAccess(wireIndex: 1, payloadFields: [], payloadLayout: Layout(size: 0, align: 1)), VariantAccess(wireIndex: 2, payloadFields: [], payloadLayout: Layout(size: 0, align: 1))])))), FieldAccess(offset: MemoryLayout<ItemAttributes>.offset(of: \ItemAttributes.size)!, descriptor: Descriptor(schema: .concrete(SchemaId(0xd9356298b81639ac)), layout: Layout(size: MemoryLayout<UInt64>.size, align: MemoryLayout<UInt64>.alignment), access: .scalar)), FieldAccess(offset: MemoryLayout<ItemAttributes>.offset(of: \ItemAttributes.modifiedTime)!, descriptor: Descriptor(schema: .concrete(SchemaId(0xd9356298b81639ac)), layout: Layout(size: MemoryLayout<UInt64>.size, align: MemoryLayout<UInt64>.alignment), access: .scalar)), FieldAccess(offset: MemoryLayout<ItemAttributes>.offset(of: \ItemAttributes.createdTime)!, descriptor: Descriptor(schema: .concrete(SchemaId(0xd9356298b81639ac)), layout: Layout(size: MemoryLayout<UInt64>.size, align: MemoryLayout<UInt64>.alignment), access: .scalar)), FieldAccess(offset: MemoryLayout<ItemAttributes>.offset(of: \ItemAttributes.mode)!, descriptor: Descriptor(schema: .concrete(SchemaId(0x281c5be4f2ee63b4)), layout: Layout(size: MemoryLayout<UInt32>.size, align: MemoryLayout<UInt32>.alignment), access: .scalar))], construct: .inPlace)))), FieldAccess(offset: MemoryLayout<LookupResult>.offset(of: \LookupResult.error)!, descriptor: Descriptor(schema: .concrete(SchemaId(0x361f4536eee9f991)), layout: Layout(size: MemoryLayout<Int32>.size, align: MemoryLayout<Int32>.alignment), access: .scalar))], construct: .inPlace))))], payloadLayout: MemoryLayout<LookupResult>.phonLayout), VariantAccess(wireIndex: 1, payloadFields: [FieldAccess(offset: 0, descriptor: Descriptor(schema: .concrete(SchemaId(0x3032e6270c5d2644)), layout: Layout(size: MemoryLayout<VoxError<Infallible>>.size, align: MemoryLayout<VoxError<Infallible>>.alignment), access: .enumeration(EnumAccess(
+            tag: { ptr in switch ptr.assumingMemoryBound(to: VoxError<Infallible>.self).pointee {
+            case .user: return 0
+            case .unknownMethod: return 1
+            case .invalidPayload: return 2
+            case .cancelled: return 3
+            case .connectionClosed: return 4
+            case .sessionShutdown: return 5
+            case .sendFailed: return 6
+            case .indeterminate: return 7
+            } },
+            projectPayload: { value, _, scratch in switch value.assumingMemoryBound(to: VoxError<Infallible>.self).pointee {
+            case .user: fatalError("uninhabited variant payload")
+            case .unknownMethod: break
+            case .invalidPayload(let f0): scratch.advanced(by: 0).assumingMemoryBound(to: String.self).initialize(to: f0); 
+            case .cancelled: break
+            case .connectionClosed: break
+            case .sessionShutdown: break
+            case .sendFailed: break
+            case .indeterminate: break
+            } },
+            destroyPayload: { scratch, localIndex in switch localIndex {
+            case 0: break
+            case 2: scratch.advanced(by: 0).assumingMemoryBound(to: String.self).deinitialize(count: 1); 
+            default: break
+            } },
+            inject: { slot, localIndex, scratch in
+            let v: VoxError<Infallible>
+            switch localIndex {
+            case 0: fatalError("uninhabited variant payload")
+            case 1: v = .unknownMethod
+            case 2: let f0 = scratch.advanced(by: 0).assumingMemoryBound(to: String.self).move(); v = .invalidPayload(f0)
+            case 3: v = .cancelled
+            case 4: v = .connectionClosed
+            case 5: v = .sessionShutdown
+            case 6: v = .sendFailed
+            case 7: v = .indeterminate
+            default: fatalError("bad variant index")
+            }
+            slot.assumingMemoryBound(to: VoxError<Infallible>.self).initialize(to: v) },
+            variants: [VariantAccess(wireIndex: 0, payloadFields: [FieldAccess(offset: 0, descriptor: Descriptor(schema: .concrete(SchemaId(0x8bfe7856188d64f1)), layout: Layout(size: MemoryLayout<Infallible>.size, align: MemoryLayout<Infallible>.alignment), access: .record(RecordAccess(fields: [], construct: .inPlace))))], payloadLayout: MemoryLayout<Infallible>.phonLayout), VariantAccess(wireIndex: 1, payloadFields: [], payloadLayout: Layout(size: 0, align: 1)), VariantAccess(wireIndex: 2, payloadFields: [FieldAccess(offset: 0, descriptor: Descriptor(schema: .concrete(SchemaId(0x6d7dce914ee150e8)), layout: Layout(size: MemoryLayout<String>.size, align: MemoryLayout<String>.alignment), access: .bytes(BytesAccess(stride: 1, elemAlign: 1, witness: .string))))], payloadLayout: MemoryLayout<String>.phonLayout), VariantAccess(wireIndex: 3, payloadFields: [], payloadLayout: Layout(size: 0, align: 1)), VariantAccess(wireIndex: 4, payloadFields: [], payloadLayout: Layout(size: 0, align: 1)), VariantAccess(wireIndex: 5, payloadFields: [], payloadLayout: Layout(size: 0, align: 1)), VariantAccess(wireIndex: 6, payloadFields: [], payloadLayout: Layout(size: 0, align: 1)), VariantAccess(wireIndex: 7, payloadFields: [], payloadLayout: Layout(size: 0, align: 1))]))))], payloadLayout: MemoryLayout<VoxError<Infallible>>.phonLayout)])))
+nonisolated(unsafe) let vfs_lookup_ResponseDescriptorBlocks: [SchemaId: Descriptor] = [:]
+nonisolated(unsafe) let vfs_getAttributes_ArgsDescriptor: Descriptor = Descriptor(schema: .concrete(SchemaId(0xdb73db3b46e1a03f)), layout: Layout(size: MemoryLayout<(UInt64)>.size, align: MemoryLayout<(UInt64)>.alignment), access: .record(RecordAccess(fields: [FieldAccess(offset: 0, descriptor: Descriptor(schema: .concrete(SchemaId(0xd9356298b81639ac)), layout: Layout(size: MemoryLayout<UInt64>.size, align: MemoryLayout<UInt64>.alignment), access: .scalar))], construct: .inPlace)))
+nonisolated(unsafe) let vfs_getAttributes_ArgsDescriptorBlocks: [SchemaId: Descriptor] = [:]
+nonisolated(unsafe) let vfs_getAttributes_ResponseDescriptor: Descriptor = Descriptor(schema: .concrete(SchemaId(0x54458c442cc0f21a)), layout: Layout(size: MemoryLayout<Result<GetAttributesResult, VoxError<Infallible>>>.size, align: MemoryLayout<Result<GetAttributesResult, VoxError<Infallible>>>.alignment), access: .enumeration(EnumAccess(
+            tag: { ptr in switch ptr.assumingMemoryBound(to: Result<GetAttributesResult, VoxError<Infallible>>.self).pointee { case .success: return 0; case .failure: return 1 } },
+            projectPayload: { value, _, scratch in switch value.assumingMemoryBound(to: Result<GetAttributesResult, VoxError<Infallible>>.self).pointee { case .success(let f0): scratch.assumingMemoryBound(to: GetAttributesResult.self).initialize(to: f0); case .failure(let f0): scratch.assumingMemoryBound(to: VoxError<Infallible>.self).initialize(to: f0) } },
+            destroyPayload: { scratch, localIndex in if localIndex == 0 { scratch.assumingMemoryBound(to: GetAttributesResult.self).deinitialize(count: 1) } else { scratch.assumingMemoryBound(to: VoxError<Infallible>.self).deinitialize(count: 1) } },
+            inject: { slot, localIndex, scratch in
+            let v: Result<GetAttributesResult, VoxError<Infallible>> = localIndex == 0 ? .success(scratch.assumingMemoryBound(to: GetAttributesResult.self).move()) : .failure(scratch.assumingMemoryBound(to: VoxError<Infallible>.self).move())
+            slot.assumingMemoryBound(to: Result<GetAttributesResult, VoxError<Infallible>>.self).initialize(to: v) },
+            variants: [VariantAccess(wireIndex: 0, payloadFields: [FieldAccess(offset: 0, descriptor: Descriptor(schema: .concrete(SchemaId(0x209fcbf9bd43042d)), layout: Layout(size: MemoryLayout<GetAttributesResult>.size, align: MemoryLayout<GetAttributesResult>.alignment), access: .record(RecordAccess(fields: [FieldAccess(offset: MemoryLayout<GetAttributesResult>.offset(of: \GetAttributesResult.attrs)!, descriptor: Descriptor(schema: .concrete(SchemaId(0x6cfe043b88869048)), layout: Layout(size: MemoryLayout<ItemAttributes>.size, align: MemoryLayout<ItemAttributes>.alignment), access: .record(RecordAccess(fields: [FieldAccess(offset: MemoryLayout<ItemAttributes>.offset(of: \ItemAttributes.itemId)!, descriptor: Descriptor(schema: .concrete(SchemaId(0xd9356298b81639ac)), layout: Layout(size: MemoryLayout<UInt64>.size, align: MemoryLayout<UInt64>.alignment), access: .scalar)), FieldAccess(offset: MemoryLayout<ItemAttributes>.offset(of: \ItemAttributes.itemType)!, descriptor: Descriptor(schema: .concrete(SchemaId(0x0ad78e1b712b0663)), layout: Layout(size: MemoryLayout<ItemType>.size, align: MemoryLayout<ItemType>.alignment), access: .enumeration(EnumAccess(
+            tag: { ptr in switch ptr.assumingMemoryBound(to: ItemType.self).pointee {
+            case .file: return 0
+            case .directory: return 1
+            case .symlink: return 2
+            } },
+            projectPayload: { value, _, scratch in switch value.assumingMemoryBound(to: ItemType.self).pointee {
+            case .file: break
+            case .directory: break
+            case .symlink: break
+            } },
+            destroyPayload: { scratch, localIndex in switch localIndex {
+            default: break
+            } },
+            inject: { slot, localIndex, scratch in
+            let v: ItemType
+            switch localIndex {
+            case 0: v = .file
+            case 1: v = .directory
+            case 2: v = .symlink
+            default: fatalError("bad variant index")
+            }
+            slot.assumingMemoryBound(to: ItemType.self).initialize(to: v) },
+            variants: [VariantAccess(wireIndex: 0, payloadFields: [], payloadLayout: Layout(size: 0, align: 1)), VariantAccess(wireIndex: 1, payloadFields: [], payloadLayout: Layout(size: 0, align: 1)), VariantAccess(wireIndex: 2, payloadFields: [], payloadLayout: Layout(size: 0, align: 1))])))), FieldAccess(offset: MemoryLayout<ItemAttributes>.offset(of: \ItemAttributes.size)!, descriptor: Descriptor(schema: .concrete(SchemaId(0xd9356298b81639ac)), layout: Layout(size: MemoryLayout<UInt64>.size, align: MemoryLayout<UInt64>.alignment), access: .scalar)), FieldAccess(offset: MemoryLayout<ItemAttributes>.offset(of: \ItemAttributes.modifiedTime)!, descriptor: Descriptor(schema: .concrete(SchemaId(0xd9356298b81639ac)), layout: Layout(size: MemoryLayout<UInt64>.size, align: MemoryLayout<UInt64>.alignment), access: .scalar)), FieldAccess(offset: MemoryLayout<ItemAttributes>.offset(of: \ItemAttributes.createdTime)!, descriptor: Descriptor(schema: .concrete(SchemaId(0xd9356298b81639ac)), layout: Layout(size: MemoryLayout<UInt64>.size, align: MemoryLayout<UInt64>.alignment), access: .scalar)), FieldAccess(offset: MemoryLayout<ItemAttributes>.offset(of: \ItemAttributes.mode)!, descriptor: Descriptor(schema: .concrete(SchemaId(0x281c5be4f2ee63b4)), layout: Layout(size: MemoryLayout<UInt32>.size, align: MemoryLayout<UInt32>.alignment), access: .scalar))], construct: .inPlace)))), FieldAccess(offset: MemoryLayout<GetAttributesResult>.offset(of: \GetAttributesResult.error)!, descriptor: Descriptor(schema: .concrete(SchemaId(0x361f4536eee9f991)), layout: Layout(size: MemoryLayout<Int32>.size, align: MemoryLayout<Int32>.alignment), access: .scalar))], construct: .inPlace))))], payloadLayout: MemoryLayout<GetAttributesResult>.phonLayout), VariantAccess(wireIndex: 1, payloadFields: [FieldAccess(offset: 0, descriptor: Descriptor(schema: .concrete(SchemaId(0x3032e6270c5d2644)), layout: Layout(size: MemoryLayout<VoxError<Infallible>>.size, align: MemoryLayout<VoxError<Infallible>>.alignment), access: .enumeration(EnumAccess(
+            tag: { ptr in switch ptr.assumingMemoryBound(to: VoxError<Infallible>.self).pointee {
+            case .user: return 0
+            case .unknownMethod: return 1
+            case .invalidPayload: return 2
+            case .cancelled: return 3
+            case .connectionClosed: return 4
+            case .sessionShutdown: return 5
+            case .sendFailed: return 6
+            case .indeterminate: return 7
+            } },
+            projectPayload: { value, _, scratch in switch value.assumingMemoryBound(to: VoxError<Infallible>.self).pointee {
+            case .user: fatalError("uninhabited variant payload")
+            case .unknownMethod: break
+            case .invalidPayload(let f0): scratch.advanced(by: 0).assumingMemoryBound(to: String.self).initialize(to: f0); 
+            case .cancelled: break
+            case .connectionClosed: break
+            case .sessionShutdown: break
+            case .sendFailed: break
+            case .indeterminate: break
+            } },
+            destroyPayload: { scratch, localIndex in switch localIndex {
+            case 0: break
+            case 2: scratch.advanced(by: 0).assumingMemoryBound(to: String.self).deinitialize(count: 1); 
+            default: break
+            } },
+            inject: { slot, localIndex, scratch in
+            let v: VoxError<Infallible>
+            switch localIndex {
+            case 0: fatalError("uninhabited variant payload")
+            case 1: v = .unknownMethod
+            case 2: let f0 = scratch.advanced(by: 0).assumingMemoryBound(to: String.self).move(); v = .invalidPayload(f0)
+            case 3: v = .cancelled
+            case 4: v = .connectionClosed
+            case 5: v = .sessionShutdown
+            case 6: v = .sendFailed
+            case 7: v = .indeterminate
+            default: fatalError("bad variant index")
+            }
+            slot.assumingMemoryBound(to: VoxError<Infallible>.self).initialize(to: v) },
+            variants: [VariantAccess(wireIndex: 0, payloadFields: [FieldAccess(offset: 0, descriptor: Descriptor(schema: .concrete(SchemaId(0x8bfe7856188d64f1)), layout: Layout(size: MemoryLayout<Infallible>.size, align: MemoryLayout<Infallible>.alignment), access: .record(RecordAccess(fields: [], construct: .inPlace))))], payloadLayout: MemoryLayout<Infallible>.phonLayout), VariantAccess(wireIndex: 1, payloadFields: [], payloadLayout: Layout(size: 0, align: 1)), VariantAccess(wireIndex: 2, payloadFields: [FieldAccess(offset: 0, descriptor: Descriptor(schema: .concrete(SchemaId(0x6d7dce914ee150e8)), layout: Layout(size: MemoryLayout<String>.size, align: MemoryLayout<String>.alignment), access: .bytes(BytesAccess(stride: 1, elemAlign: 1, witness: .string))))], payloadLayout: MemoryLayout<String>.phonLayout), VariantAccess(wireIndex: 3, payloadFields: [], payloadLayout: Layout(size: 0, align: 1)), VariantAccess(wireIndex: 4, payloadFields: [], payloadLayout: Layout(size: 0, align: 1)), VariantAccess(wireIndex: 5, payloadFields: [], payloadLayout: Layout(size: 0, align: 1)), VariantAccess(wireIndex: 6, payloadFields: [], payloadLayout: Layout(size: 0, align: 1)), VariantAccess(wireIndex: 7, payloadFields: [], payloadLayout: Layout(size: 0, align: 1))]))))], payloadLayout: MemoryLayout<VoxError<Infallible>>.phonLayout)])))
+nonisolated(unsafe) let vfs_getAttributes_ResponseDescriptorBlocks: [SchemaId: Descriptor] = [:]
+nonisolated(unsafe) let vfs_readDir_ArgsDescriptor: Descriptor = Descriptor(schema: .concrete(SchemaId(0x373bd01794b28844)), layout: Layout(size: MemoryLayout<(UInt64, UInt64, UInt64)>.size, align: MemoryLayout<(UInt64, UInt64, UInt64)>.alignment), access: .record(RecordAccess(fields: [FieldAccess(offset: MemoryLayout<(UInt64, UInt64, UInt64)>.offset(of: \.0)!, descriptor: Descriptor(schema: .concrete(SchemaId(0xd9356298b81639ac)), layout: Layout(size: MemoryLayout<UInt64>.size, align: MemoryLayout<UInt64>.alignment), access: .scalar)), FieldAccess(offset: MemoryLayout<(UInt64, UInt64, UInt64)>.offset(of: \.1)!, descriptor: Descriptor(schema: .concrete(SchemaId(0xd9356298b81639ac)), layout: Layout(size: MemoryLayout<UInt64>.size, align: MemoryLayout<UInt64>.alignment), access: .scalar)), FieldAccess(offset: MemoryLayout<(UInt64, UInt64, UInt64)>.offset(of: \.2)!, descriptor: Descriptor(schema: .concrete(SchemaId(0xd9356298b81639ac)), layout: Layout(size: MemoryLayout<UInt64>.size, align: MemoryLayout<UInt64>.alignment), access: .scalar))], construct: .inPlace)))
+nonisolated(unsafe) let vfs_readDir_ArgsDescriptorBlocks: [SchemaId: Descriptor] = [:]
+nonisolated(unsafe) let vfs_readDir_ResponseDescriptor: Descriptor = Descriptor(schema: .concrete(SchemaId(0x8933c409f6853841)), layout: Layout(size: MemoryLayout<Result<ReadDirResult, VoxError<Infallible>>>.size, align: MemoryLayout<Result<ReadDirResult, VoxError<Infallible>>>.alignment), access: .enumeration(EnumAccess(
+            tag: { ptr in switch ptr.assumingMemoryBound(to: Result<ReadDirResult, VoxError<Infallible>>.self).pointee { case .success: return 0; case .failure: return 1 } },
+            projectPayload: { value, _, scratch in switch value.assumingMemoryBound(to: Result<ReadDirResult, VoxError<Infallible>>.self).pointee { case .success(let f0): scratch.assumingMemoryBound(to: ReadDirResult.self).initialize(to: f0); case .failure(let f0): scratch.assumingMemoryBound(to: VoxError<Infallible>.self).initialize(to: f0) } },
+            destroyPayload: { scratch, localIndex in if localIndex == 0 { scratch.assumingMemoryBound(to: ReadDirResult.self).deinitialize(count: 1) } else { scratch.assumingMemoryBound(to: VoxError<Infallible>.self).deinitialize(count: 1) } },
+            inject: { slot, localIndex, scratch in
+            let v: Result<ReadDirResult, VoxError<Infallible>> = localIndex == 0 ? .success(scratch.assumingMemoryBound(to: ReadDirResult.self).move()) : .failure(scratch.assumingMemoryBound(to: VoxError<Infallible>.self).move())
+            slot.assumingMemoryBound(to: Result<ReadDirResult, VoxError<Infallible>>.self).initialize(to: v) },
+            variants: [VariantAccess(wireIndex: 0, payloadFields: [FieldAccess(offset: 0, descriptor: Descriptor(schema: .concrete(SchemaId(0xafda26786604d3fb)), layout: Layout(size: MemoryLayout<ReadDirResult>.size, align: MemoryLayout<ReadDirResult>.alignment), access: .record(RecordAccess(fields: [FieldAccess(offset: MemoryLayout<ReadDirResult>.offset(of: \ReadDirResult.entries)!, descriptor: Descriptor(schema: .concrete(SchemaId(0x24dda76ec8b4c522)), layout: Layout(size: MemoryLayout<[DirEntry]>.size, align: MemoryLayout<[DirEntry]>.alignment), access: .sequence(SequenceAccess(element: Descriptor(schema: .concrete(SchemaId(0x51a85bceb07b2b9e)), layout: Layout(size: MemoryLayout<DirEntry>.size, align: MemoryLayout<DirEntry>.alignment), access: .record(RecordAccess(fields: [FieldAccess(offset: MemoryLayout<DirEntry>.offset(of: \DirEntry.name)!, descriptor: Descriptor(schema: .concrete(SchemaId(0x6d7dce914ee150e8)), layout: Layout(size: MemoryLayout<String>.size, align: MemoryLayout<String>.alignment), access: .bytes(BytesAccess(stride: 1, elemAlign: 1, witness: .string)))), FieldAccess(offset: MemoryLayout<DirEntry>.offset(of: \DirEntry.itemId)!, descriptor: Descriptor(schema: .concrete(SchemaId(0xd9356298b81639ac)), layout: Layout(size: MemoryLayout<UInt64>.size, align: MemoryLayout<UInt64>.alignment), access: .scalar)), FieldAccess(offset: MemoryLayout<DirEntry>.offset(of: \DirEntry.itemType)!, descriptor: Descriptor(schema: .concrete(SchemaId(0x0ad78e1b712b0663)), layout: Layout(size: MemoryLayout<ItemType>.size, align: MemoryLayout<ItemType>.alignment), access: .enumeration(EnumAccess(
+            tag: { ptr in switch ptr.assumingMemoryBound(to: ItemType.self).pointee {
+            case .file: return 0
+            case .directory: return 1
+            case .symlink: return 2
+            } },
+            projectPayload: { value, _, scratch in switch value.assumingMemoryBound(to: ItemType.self).pointee {
+            case .file: break
+            case .directory: break
+            case .symlink: break
+            } },
+            destroyPayload: { scratch, localIndex in switch localIndex {
+            default: break
+            } },
+            inject: { slot, localIndex, scratch in
+            let v: ItemType
+            switch localIndex {
+            case 0: v = .file
+            case 1: v = .directory
+            case 2: v = .symlink
+            default: fatalError("bad variant index")
+            }
+            slot.assumingMemoryBound(to: ItemType.self).initialize(to: v) },
+            variants: [VariantAccess(wireIndex: 0, payloadFields: [], payloadLayout: Layout(size: 0, align: 1)), VariantAccess(wireIndex: 1, payloadFields: [], payloadLayout: Layout(size: 0, align: 1)), VariantAccess(wireIndex: 2, payloadFields: [], payloadLayout: Layout(size: 0, align: 1))])))), FieldAccess(offset: MemoryLayout<DirEntry>.offset(of: \DirEntry.size)!, descriptor: Descriptor(schema: .concrete(SchemaId(0xd9356298b81639ac)), layout: Layout(size: MemoryLayout<UInt64>.size, align: MemoryLayout<UInt64>.alignment), access: .scalar)), FieldAccess(offset: MemoryLayout<DirEntry>.offset(of: \DirEntry.modifiedTime)!, descriptor: Descriptor(schema: .concrete(SchemaId(0xd9356298b81639ac)), layout: Layout(size: MemoryLayout<UInt64>.size, align: MemoryLayout<UInt64>.alignment), access: .scalar)), FieldAccess(offset: MemoryLayout<DirEntry>.offset(of: \DirEntry.createdTime)!, descriptor: Descriptor(schema: .concrete(SchemaId(0xd9356298b81639ac)), layout: Layout(size: MemoryLayout<UInt64>.size, align: MemoryLayout<UInt64>.alignment), access: .scalar)), FieldAccess(offset: MemoryLayout<DirEntry>.offset(of: \DirEntry.mode)!, descriptor: Descriptor(schema: .concrete(SchemaId(0x281c5be4f2ee63b4)), layout: Layout(size: MemoryLayout<UInt32>.size, align: MemoryLayout<UInt32>.alignment), access: .scalar))], construct: .inPlace))), stride: MemoryLayout<DirEntry>.stride, elemAlign: MemoryLayout<DirEntry>.alignment, witness: .of(DirEntry.self))))), FieldAccess(offset: MemoryLayout<ReadDirResult>.offset(of: \ReadDirResult.nextCookie)!, descriptor: Descriptor(schema: .concrete(SchemaId(0xd9356298b81639ac)), layout: Layout(size: MemoryLayout<UInt64>.size, align: MemoryLayout<UInt64>.alignment), access: .scalar)), FieldAccess(offset: MemoryLayout<ReadDirResult>.offset(of: \ReadDirResult.verifier)!, descriptor: Descriptor(schema: .concrete(SchemaId(0xd9356298b81639ac)), layout: Layout(size: MemoryLayout<UInt64>.size, align: MemoryLayout<UInt64>.alignment), access: .scalar)), FieldAccess(offset: MemoryLayout<ReadDirResult>.offset(of: \ReadDirResult.error)!, descriptor: Descriptor(schema: .concrete(SchemaId(0x361f4536eee9f991)), layout: Layout(size: MemoryLayout<Int32>.size, align: MemoryLayout<Int32>.alignment), access: .scalar))], construct: .inPlace))))], payloadLayout: MemoryLayout<ReadDirResult>.phonLayout), VariantAccess(wireIndex: 1, payloadFields: [FieldAccess(offset: 0, descriptor: Descriptor(schema: .concrete(SchemaId(0x3032e6270c5d2644)), layout: Layout(size: MemoryLayout<VoxError<Infallible>>.size, align: MemoryLayout<VoxError<Infallible>>.alignment), access: .enumeration(EnumAccess(
+            tag: { ptr in switch ptr.assumingMemoryBound(to: VoxError<Infallible>.self).pointee {
+            case .user: return 0
+            case .unknownMethod: return 1
+            case .invalidPayload: return 2
+            case .cancelled: return 3
+            case .connectionClosed: return 4
+            case .sessionShutdown: return 5
+            case .sendFailed: return 6
+            case .indeterminate: return 7
+            } },
+            projectPayload: { value, _, scratch in switch value.assumingMemoryBound(to: VoxError<Infallible>.self).pointee {
+            case .user: fatalError("uninhabited variant payload")
+            case .unknownMethod: break
+            case .invalidPayload(let f0): scratch.advanced(by: 0).assumingMemoryBound(to: String.self).initialize(to: f0); 
+            case .cancelled: break
+            case .connectionClosed: break
+            case .sessionShutdown: break
+            case .sendFailed: break
+            case .indeterminate: break
+            } },
+            destroyPayload: { scratch, localIndex in switch localIndex {
+            case 0: break
+            case 2: scratch.advanced(by: 0).assumingMemoryBound(to: String.self).deinitialize(count: 1); 
+            default: break
+            } },
+            inject: { slot, localIndex, scratch in
+            let v: VoxError<Infallible>
+            switch localIndex {
+            case 0: fatalError("uninhabited variant payload")
+            case 1: v = .unknownMethod
+            case 2: let f0 = scratch.advanced(by: 0).assumingMemoryBound(to: String.self).move(); v = .invalidPayload(f0)
+            case 3: v = .cancelled
+            case 4: v = .connectionClosed
+            case 5: v = .sessionShutdown
+            case 6: v = .sendFailed
+            case 7: v = .indeterminate
+            default: fatalError("bad variant index")
+            }
+            slot.assumingMemoryBound(to: VoxError<Infallible>.self).initialize(to: v) },
+            variants: [VariantAccess(wireIndex: 0, payloadFields: [FieldAccess(offset: 0, descriptor: Descriptor(schema: .concrete(SchemaId(0x8bfe7856188d64f1)), layout: Layout(size: MemoryLayout<Infallible>.size, align: MemoryLayout<Infallible>.alignment), access: .record(RecordAccess(fields: [], construct: .inPlace))))], payloadLayout: MemoryLayout<Infallible>.phonLayout), VariantAccess(wireIndex: 1, payloadFields: [], payloadLayout: Layout(size: 0, align: 1)), VariantAccess(wireIndex: 2, payloadFields: [FieldAccess(offset: 0, descriptor: Descriptor(schema: .concrete(SchemaId(0x6d7dce914ee150e8)), layout: Layout(size: MemoryLayout<String>.size, align: MemoryLayout<String>.alignment), access: .bytes(BytesAccess(stride: 1, elemAlign: 1, witness: .string))))], payloadLayout: MemoryLayout<String>.phonLayout), VariantAccess(wireIndex: 3, payloadFields: [], payloadLayout: Layout(size: 0, align: 1)), VariantAccess(wireIndex: 4, payloadFields: [], payloadLayout: Layout(size: 0, align: 1)), VariantAccess(wireIndex: 5, payloadFields: [], payloadLayout: Layout(size: 0, align: 1)), VariantAccess(wireIndex: 6, payloadFields: [], payloadLayout: Layout(size: 0, align: 1)), VariantAccess(wireIndex: 7, payloadFields: [], payloadLayout: Layout(size: 0, align: 1))]))))], payloadLayout: MemoryLayout<VoxError<Infallible>>.phonLayout)])))
+nonisolated(unsafe) let vfs_readDir_ResponseDescriptorBlocks: [SchemaId: Descriptor] = [:]
+nonisolated(unsafe) let vfs_read_ArgsDescriptor: Descriptor = Descriptor(schema: .concrete(SchemaId(0x373bd01794b28844)), layout: Layout(size: MemoryLayout<(UInt64, UInt64, UInt64)>.size, align: MemoryLayout<(UInt64, UInt64, UInt64)>.alignment), access: .record(RecordAccess(fields: [FieldAccess(offset: MemoryLayout<(UInt64, UInt64, UInt64)>.offset(of: \.0)!, descriptor: Descriptor(schema: .concrete(SchemaId(0xd9356298b81639ac)), layout: Layout(size: MemoryLayout<UInt64>.size, align: MemoryLayout<UInt64>.alignment), access: .scalar)), FieldAccess(offset: MemoryLayout<(UInt64, UInt64, UInt64)>.offset(of: \.1)!, descriptor: Descriptor(schema: .concrete(SchemaId(0xd9356298b81639ac)), layout: Layout(size: MemoryLayout<UInt64>.size, align: MemoryLayout<UInt64>.alignment), access: .scalar)), FieldAccess(offset: MemoryLayout<(UInt64, UInt64, UInt64)>.offset(of: \.2)!, descriptor: Descriptor(schema: .concrete(SchemaId(0xd9356298b81639ac)), layout: Layout(size: MemoryLayout<UInt64>.size, align: MemoryLayout<UInt64>.alignment), access: .scalar))], construct: .inPlace)))
+nonisolated(unsafe) let vfs_read_ArgsDescriptorBlocks: [SchemaId: Descriptor] = [:]
+nonisolated(unsafe) let vfs_read_ResponseDescriptor: Descriptor = Descriptor(schema: .concrete(SchemaId(0x0c569e8a025f2bf7)), layout: Layout(size: MemoryLayout<Result<ReadResult, VoxError<Infallible>>>.size, align: MemoryLayout<Result<ReadResult, VoxError<Infallible>>>.alignment), access: .enumeration(EnumAccess(
+            tag: { ptr in switch ptr.assumingMemoryBound(to: Result<ReadResult, VoxError<Infallible>>.self).pointee { case .success: return 0; case .failure: return 1 } },
+            projectPayload: { value, _, scratch in switch value.assumingMemoryBound(to: Result<ReadResult, VoxError<Infallible>>.self).pointee { case .success(let f0): scratch.assumingMemoryBound(to: ReadResult.self).initialize(to: f0); case .failure(let f0): scratch.assumingMemoryBound(to: VoxError<Infallible>.self).initialize(to: f0) } },
+            destroyPayload: { scratch, localIndex in if localIndex == 0 { scratch.assumingMemoryBound(to: ReadResult.self).deinitialize(count: 1) } else { scratch.assumingMemoryBound(to: VoxError<Infallible>.self).deinitialize(count: 1) } },
+            inject: { slot, localIndex, scratch in
+            let v: Result<ReadResult, VoxError<Infallible>> = localIndex == 0 ? .success(scratch.assumingMemoryBound(to: ReadResult.self).move()) : .failure(scratch.assumingMemoryBound(to: VoxError<Infallible>.self).move())
+            slot.assumingMemoryBound(to: Result<ReadResult, VoxError<Infallible>>.self).initialize(to: v) },
+            variants: [VariantAccess(wireIndex: 0, payloadFields: [FieldAccess(offset: 0, descriptor: Descriptor(schema: .concrete(SchemaId(0x18f20b532d4ba7c4)), layout: Layout(size: MemoryLayout<ReadResult>.size, align: MemoryLayout<ReadResult>.alignment), access: .record(RecordAccess(fields: [FieldAccess(offset: MemoryLayout<ReadResult>.offset(of: \ReadResult.data)!, descriptor: Descriptor(schema: .concrete(SchemaId(0xaa0667df4299d151)), layout: Layout(size: MemoryLayout<Data>.size, align: MemoryLayout<Data>.alignment), access: .bytes(BytesAccess(stride: 1, elemAlign: 1, witness: .data)))), FieldAccess(offset: MemoryLayout<ReadResult>.offset(of: \ReadResult.error)!, descriptor: Descriptor(schema: .concrete(SchemaId(0x361f4536eee9f991)), layout: Layout(size: MemoryLayout<Int32>.size, align: MemoryLayout<Int32>.alignment), access: .scalar))], construct: .inPlace))))], payloadLayout: MemoryLayout<ReadResult>.phonLayout), VariantAccess(wireIndex: 1, payloadFields: [FieldAccess(offset: 0, descriptor: Descriptor(schema: .concrete(SchemaId(0x3032e6270c5d2644)), layout: Layout(size: MemoryLayout<VoxError<Infallible>>.size, align: MemoryLayout<VoxError<Infallible>>.alignment), access: .enumeration(EnumAccess(
+            tag: { ptr in switch ptr.assumingMemoryBound(to: VoxError<Infallible>.self).pointee {
+            case .user: return 0
+            case .unknownMethod: return 1
+            case .invalidPayload: return 2
+            case .cancelled: return 3
+            case .connectionClosed: return 4
+            case .sessionShutdown: return 5
+            case .sendFailed: return 6
+            case .indeterminate: return 7
+            } },
+            projectPayload: { value, _, scratch in switch value.assumingMemoryBound(to: VoxError<Infallible>.self).pointee {
+            case .user: fatalError("uninhabited variant payload")
+            case .unknownMethod: break
+            case .invalidPayload(let f0): scratch.advanced(by: 0).assumingMemoryBound(to: String.self).initialize(to: f0); 
+            case .cancelled: break
+            case .connectionClosed: break
+            case .sessionShutdown: break
+            case .sendFailed: break
+            case .indeterminate: break
+            } },
+            destroyPayload: { scratch, localIndex in switch localIndex {
+            case 0: break
+            case 2: scratch.advanced(by: 0).assumingMemoryBound(to: String.self).deinitialize(count: 1); 
+            default: break
+            } },
+            inject: { slot, localIndex, scratch in
+            let v: VoxError<Infallible>
+            switch localIndex {
+            case 0: fatalError("uninhabited variant payload")
+            case 1: v = .unknownMethod
+            case 2: let f0 = scratch.advanced(by: 0).assumingMemoryBound(to: String.self).move(); v = .invalidPayload(f0)
+            case 3: v = .cancelled
+            case 4: v = .connectionClosed
+            case 5: v = .sessionShutdown
+            case 6: v = .sendFailed
+            case 7: v = .indeterminate
+            default: fatalError("bad variant index")
+            }
+            slot.assumingMemoryBound(to: VoxError<Infallible>.self).initialize(to: v) },
+            variants: [VariantAccess(wireIndex: 0, payloadFields: [FieldAccess(offset: 0, descriptor: Descriptor(schema: .concrete(SchemaId(0x8bfe7856188d64f1)), layout: Layout(size: MemoryLayout<Infallible>.size, align: MemoryLayout<Infallible>.alignment), access: .record(RecordAccess(fields: [], construct: .inPlace))))], payloadLayout: MemoryLayout<Infallible>.phonLayout), VariantAccess(wireIndex: 1, payloadFields: [], payloadLayout: Layout(size: 0, align: 1)), VariantAccess(wireIndex: 2, payloadFields: [FieldAccess(offset: 0, descriptor: Descriptor(schema: .concrete(SchemaId(0x6d7dce914ee150e8)), layout: Layout(size: MemoryLayout<String>.size, align: MemoryLayout<String>.alignment), access: .bytes(BytesAccess(stride: 1, elemAlign: 1, witness: .string))))], payloadLayout: MemoryLayout<String>.phonLayout), VariantAccess(wireIndex: 3, payloadFields: [], payloadLayout: Layout(size: 0, align: 1)), VariantAccess(wireIndex: 4, payloadFields: [], payloadLayout: Layout(size: 0, align: 1)), VariantAccess(wireIndex: 5, payloadFields: [], payloadLayout: Layout(size: 0, align: 1)), VariantAccess(wireIndex: 6, payloadFields: [], payloadLayout: Layout(size: 0, align: 1)), VariantAccess(wireIndex: 7, payloadFields: [], payloadLayout: Layout(size: 0, align: 1))]))))], payloadLayout: MemoryLayout<VoxError<Infallible>>.phonLayout)])))
+nonisolated(unsafe) let vfs_read_ResponseDescriptorBlocks: [SchemaId: Descriptor] = [:]
+nonisolated(unsafe) let vfs_write_ArgsDescriptor: Descriptor = Descriptor(schema: .concrete(SchemaId(0x96046ae85aacc237)), layout: Layout(size: MemoryLayout<(UInt64, UInt64, Data)>.size, align: MemoryLayout<(UInt64, UInt64, Data)>.alignment), access: .record(RecordAccess(fields: [FieldAccess(offset: MemoryLayout<(UInt64, UInt64, Data)>.offset(of: \.0)!, descriptor: Descriptor(schema: .concrete(SchemaId(0xd9356298b81639ac)), layout: Layout(size: MemoryLayout<UInt64>.size, align: MemoryLayout<UInt64>.alignment), access: .scalar)), FieldAccess(offset: MemoryLayout<(UInt64, UInt64, Data)>.offset(of: \.1)!, descriptor: Descriptor(schema: .concrete(SchemaId(0xd9356298b81639ac)), layout: Layout(size: MemoryLayout<UInt64>.size, align: MemoryLayout<UInt64>.alignment), access: .scalar)), FieldAccess(offset: MemoryLayout<(UInt64, UInt64, Data)>.offset(of: \.2)!, descriptor: Descriptor(schema: .concrete(SchemaId(0xaa0667df4299d151)), layout: Layout(size: MemoryLayout<Data>.size, align: MemoryLayout<Data>.alignment), access: .bytes(BytesAccess(stride: 1, elemAlign: 1, witness: .data))))], construct: .inPlace)))
+nonisolated(unsafe) let vfs_write_ArgsDescriptorBlocks: [SchemaId: Descriptor] = [:]
+nonisolated(unsafe) let vfs_write_ResponseDescriptor: Descriptor = Descriptor(schema: .concrete(SchemaId(0x76e97bc65f90930e)), layout: Layout(size: MemoryLayout<Result<WriteResult, VoxError<Infallible>>>.size, align: MemoryLayout<Result<WriteResult, VoxError<Infallible>>>.alignment), access: .enumeration(EnumAccess(
+            tag: { ptr in switch ptr.assumingMemoryBound(to: Result<WriteResult, VoxError<Infallible>>.self).pointee { case .success: return 0; case .failure: return 1 } },
+            projectPayload: { value, _, scratch in switch value.assumingMemoryBound(to: Result<WriteResult, VoxError<Infallible>>.self).pointee { case .success(let f0): scratch.assumingMemoryBound(to: WriteResult.self).initialize(to: f0); case .failure(let f0): scratch.assumingMemoryBound(to: VoxError<Infallible>.self).initialize(to: f0) } },
+            destroyPayload: { scratch, localIndex in if localIndex == 0 { scratch.assumingMemoryBound(to: WriteResult.self).deinitialize(count: 1) } else { scratch.assumingMemoryBound(to: VoxError<Infallible>.self).deinitialize(count: 1) } },
+            inject: { slot, localIndex, scratch in
+            let v: Result<WriteResult, VoxError<Infallible>> = localIndex == 0 ? .success(scratch.assumingMemoryBound(to: WriteResult.self).move()) : .failure(scratch.assumingMemoryBound(to: VoxError<Infallible>.self).move())
+            slot.assumingMemoryBound(to: Result<WriteResult, VoxError<Infallible>>.self).initialize(to: v) },
+            variants: [VariantAccess(wireIndex: 0, payloadFields: [FieldAccess(offset: 0, descriptor: Descriptor(schema: .concrete(SchemaId(0xbb84612fe7996d64)), layout: Layout(size: MemoryLayout<WriteResult>.size, align: MemoryLayout<WriteResult>.alignment), access: .record(RecordAccess(fields: [FieldAccess(offset: MemoryLayout<WriteResult>.offset(of: \WriteResult.bytesWritten)!, descriptor: Descriptor(schema: .concrete(SchemaId(0xd9356298b81639ac)), layout: Layout(size: MemoryLayout<UInt64>.size, align: MemoryLayout<UInt64>.alignment), access: .scalar)), FieldAccess(offset: MemoryLayout<WriteResult>.offset(of: \WriteResult.error)!, descriptor: Descriptor(schema: .concrete(SchemaId(0x361f4536eee9f991)), layout: Layout(size: MemoryLayout<Int32>.size, align: MemoryLayout<Int32>.alignment), access: .scalar))], construct: .inPlace))))], payloadLayout: MemoryLayout<WriteResult>.phonLayout), VariantAccess(wireIndex: 1, payloadFields: [FieldAccess(offset: 0, descriptor: Descriptor(schema: .concrete(SchemaId(0x3032e6270c5d2644)), layout: Layout(size: MemoryLayout<VoxError<Infallible>>.size, align: MemoryLayout<VoxError<Infallible>>.alignment), access: .enumeration(EnumAccess(
+            tag: { ptr in switch ptr.assumingMemoryBound(to: VoxError<Infallible>.self).pointee {
+            case .user: return 0
+            case .unknownMethod: return 1
+            case .invalidPayload: return 2
+            case .cancelled: return 3
+            case .connectionClosed: return 4
+            case .sessionShutdown: return 5
+            case .sendFailed: return 6
+            case .indeterminate: return 7
+            } },
+            projectPayload: { value, _, scratch in switch value.assumingMemoryBound(to: VoxError<Infallible>.self).pointee {
+            case .user: fatalError("uninhabited variant payload")
+            case .unknownMethod: break
+            case .invalidPayload(let f0): scratch.advanced(by: 0).assumingMemoryBound(to: String.self).initialize(to: f0); 
+            case .cancelled: break
+            case .connectionClosed: break
+            case .sessionShutdown: break
+            case .sendFailed: break
+            case .indeterminate: break
+            } },
+            destroyPayload: { scratch, localIndex in switch localIndex {
+            case 0: break
+            case 2: scratch.advanced(by: 0).assumingMemoryBound(to: String.self).deinitialize(count: 1); 
+            default: break
+            } },
+            inject: { slot, localIndex, scratch in
+            let v: VoxError<Infallible>
+            switch localIndex {
+            case 0: fatalError("uninhabited variant payload")
+            case 1: v = .unknownMethod
+            case 2: let f0 = scratch.advanced(by: 0).assumingMemoryBound(to: String.self).move(); v = .invalidPayload(f0)
+            case 3: v = .cancelled
+            case 4: v = .connectionClosed
+            case 5: v = .sessionShutdown
+            case 6: v = .sendFailed
+            case 7: v = .indeterminate
+            default: fatalError("bad variant index")
+            }
+            slot.assumingMemoryBound(to: VoxError<Infallible>.self).initialize(to: v) },
+            variants: [VariantAccess(wireIndex: 0, payloadFields: [FieldAccess(offset: 0, descriptor: Descriptor(schema: .concrete(SchemaId(0x8bfe7856188d64f1)), layout: Layout(size: MemoryLayout<Infallible>.size, align: MemoryLayout<Infallible>.alignment), access: .record(RecordAccess(fields: [], construct: .inPlace))))], payloadLayout: MemoryLayout<Infallible>.phonLayout), VariantAccess(wireIndex: 1, payloadFields: [], payloadLayout: Layout(size: 0, align: 1)), VariantAccess(wireIndex: 2, payloadFields: [FieldAccess(offset: 0, descriptor: Descriptor(schema: .concrete(SchemaId(0x6d7dce914ee150e8)), layout: Layout(size: MemoryLayout<String>.size, align: MemoryLayout<String>.alignment), access: .bytes(BytesAccess(stride: 1, elemAlign: 1, witness: .string))))], payloadLayout: MemoryLayout<String>.phonLayout), VariantAccess(wireIndex: 3, payloadFields: [], payloadLayout: Layout(size: 0, align: 1)), VariantAccess(wireIndex: 4, payloadFields: [], payloadLayout: Layout(size: 0, align: 1)), VariantAccess(wireIndex: 5, payloadFields: [], payloadLayout: Layout(size: 0, align: 1)), VariantAccess(wireIndex: 6, payloadFields: [], payloadLayout: Layout(size: 0, align: 1)), VariantAccess(wireIndex: 7, payloadFields: [], payloadLayout: Layout(size: 0, align: 1))]))))], payloadLayout: MemoryLayout<VoxError<Infallible>>.phonLayout)])))
+nonisolated(unsafe) let vfs_write_ResponseDescriptorBlocks: [SchemaId: Descriptor] = [:]
+nonisolated(unsafe) let vfs_create_ArgsDescriptor: Descriptor = Descriptor(schema: .concrete(SchemaId(0xde5b6d03173d96c0)), layout: Layout(size: MemoryLayout<(UInt64, String, ItemType, UInt32)>.size, align: MemoryLayout<(UInt64, String, ItemType, UInt32)>.alignment), access: .record(RecordAccess(fields: [FieldAccess(offset: MemoryLayout<(UInt64, String, ItemType, UInt32)>.offset(of: \.0)!, descriptor: Descriptor(schema: .concrete(SchemaId(0xd9356298b81639ac)), layout: Layout(size: MemoryLayout<UInt64>.size, align: MemoryLayout<UInt64>.alignment), access: .scalar)), FieldAccess(offset: MemoryLayout<(UInt64, String, ItemType, UInt32)>.offset(of: \.1)!, descriptor: Descriptor(schema: .concrete(SchemaId(0x6d7dce914ee150e8)), layout: Layout(size: MemoryLayout<String>.size, align: MemoryLayout<String>.alignment), access: .bytes(BytesAccess(stride: 1, elemAlign: 1, witness: .string)))), FieldAccess(offset: MemoryLayout<(UInt64, String, ItemType, UInt32)>.offset(of: \.2)!, descriptor: Descriptor(schema: .concrete(SchemaId(0x0ad78e1b712b0663)), layout: Layout(size: MemoryLayout<ItemType>.size, align: MemoryLayout<ItemType>.alignment), access: .enumeration(EnumAccess(
+            tag: { ptr in switch ptr.assumingMemoryBound(to: ItemType.self).pointee {
+            case .file: return 0
+            case .directory: return 1
+            case .symlink: return 2
+            } },
+            projectPayload: { value, _, scratch in switch value.assumingMemoryBound(to: ItemType.self).pointee {
+            case .file: break
+            case .directory: break
+            case .symlink: break
+            } },
+            destroyPayload: { scratch, localIndex in switch localIndex {
+            default: break
+            } },
+            inject: { slot, localIndex, scratch in
+            let v: ItemType
+            switch localIndex {
+            case 0: v = .file
+            case 1: v = .directory
+            case 2: v = .symlink
+            default: fatalError("bad variant index")
+            }
+            slot.assumingMemoryBound(to: ItemType.self).initialize(to: v) },
+            variants: [VariantAccess(wireIndex: 0, payloadFields: [], payloadLayout: Layout(size: 0, align: 1)), VariantAccess(wireIndex: 1, payloadFields: [], payloadLayout: Layout(size: 0, align: 1)), VariantAccess(wireIndex: 2, payloadFields: [], payloadLayout: Layout(size: 0, align: 1))])))), FieldAccess(offset: MemoryLayout<(UInt64, String, ItemType, UInt32)>.offset(of: \.3)!, descriptor: Descriptor(schema: .concrete(SchemaId(0x281c5be4f2ee63b4)), layout: Layout(size: MemoryLayout<UInt32>.size, align: MemoryLayout<UInt32>.alignment), access: .scalar))], construct: .inPlace)))
+nonisolated(unsafe) let vfs_create_ArgsDescriptorBlocks: [SchemaId: Descriptor] = [:]
+nonisolated(unsafe) let vfs_create_ResponseDescriptor: Descriptor = Descriptor(schema: .concrete(SchemaId(0xd3fa4ad375051b9b)), layout: Layout(size: MemoryLayout<Result<CreateResult, VoxError<Infallible>>>.size, align: MemoryLayout<Result<CreateResult, VoxError<Infallible>>>.alignment), access: .enumeration(EnumAccess(
+            tag: { ptr in switch ptr.assumingMemoryBound(to: Result<CreateResult, VoxError<Infallible>>.self).pointee { case .success: return 0; case .failure: return 1 } },
+            projectPayload: { value, _, scratch in switch value.assumingMemoryBound(to: Result<CreateResult, VoxError<Infallible>>.self).pointee { case .success(let f0): scratch.assumingMemoryBound(to: CreateResult.self).initialize(to: f0); case .failure(let f0): scratch.assumingMemoryBound(to: VoxError<Infallible>.self).initialize(to: f0) } },
+            destroyPayload: { scratch, localIndex in if localIndex == 0 { scratch.assumingMemoryBound(to: CreateResult.self).deinitialize(count: 1) } else { scratch.assumingMemoryBound(to: VoxError<Infallible>.self).deinitialize(count: 1) } },
+            inject: { slot, localIndex, scratch in
+            let v: Result<CreateResult, VoxError<Infallible>> = localIndex == 0 ? .success(scratch.assumingMemoryBound(to: CreateResult.self).move()) : .failure(scratch.assumingMemoryBound(to: VoxError<Infallible>.self).move())
+            slot.assumingMemoryBound(to: Result<CreateResult, VoxError<Infallible>>.self).initialize(to: v) },
+            variants: [VariantAccess(wireIndex: 0, payloadFields: [FieldAccess(offset: 0, descriptor: Descriptor(schema: .concrete(SchemaId(0xad488235c6eee3cd)), layout: Layout(size: MemoryLayout<CreateResult>.size, align: MemoryLayout<CreateResult>.alignment), access: .record(RecordAccess(fields: [FieldAccess(offset: MemoryLayout<CreateResult>.offset(of: \CreateResult.itemId)!, descriptor: Descriptor(schema: .concrete(SchemaId(0xd9356298b81639ac)), layout: Layout(size: MemoryLayout<UInt64>.size, align: MemoryLayout<UInt64>.alignment), access: .scalar)), FieldAccess(offset: MemoryLayout<CreateResult>.offset(of: \CreateResult.error)!, descriptor: Descriptor(schema: .concrete(SchemaId(0x361f4536eee9f991)), layout: Layout(size: MemoryLayout<Int32>.size, align: MemoryLayout<Int32>.alignment), access: .scalar))], construct: .inPlace))))], payloadLayout: MemoryLayout<CreateResult>.phonLayout), VariantAccess(wireIndex: 1, payloadFields: [FieldAccess(offset: 0, descriptor: Descriptor(schema: .concrete(SchemaId(0x3032e6270c5d2644)), layout: Layout(size: MemoryLayout<VoxError<Infallible>>.size, align: MemoryLayout<VoxError<Infallible>>.alignment), access: .enumeration(EnumAccess(
+            tag: { ptr in switch ptr.assumingMemoryBound(to: VoxError<Infallible>.self).pointee {
+            case .user: return 0
+            case .unknownMethod: return 1
+            case .invalidPayload: return 2
+            case .cancelled: return 3
+            case .connectionClosed: return 4
+            case .sessionShutdown: return 5
+            case .sendFailed: return 6
+            case .indeterminate: return 7
+            } },
+            projectPayload: { value, _, scratch in switch value.assumingMemoryBound(to: VoxError<Infallible>.self).pointee {
+            case .user: fatalError("uninhabited variant payload")
+            case .unknownMethod: break
+            case .invalidPayload(let f0): scratch.advanced(by: 0).assumingMemoryBound(to: String.self).initialize(to: f0); 
+            case .cancelled: break
+            case .connectionClosed: break
+            case .sessionShutdown: break
+            case .sendFailed: break
+            case .indeterminate: break
+            } },
+            destroyPayload: { scratch, localIndex in switch localIndex {
+            case 0: break
+            case 2: scratch.advanced(by: 0).assumingMemoryBound(to: String.self).deinitialize(count: 1); 
+            default: break
+            } },
+            inject: { slot, localIndex, scratch in
+            let v: VoxError<Infallible>
+            switch localIndex {
+            case 0: fatalError("uninhabited variant payload")
+            case 1: v = .unknownMethod
+            case 2: let f0 = scratch.advanced(by: 0).assumingMemoryBound(to: String.self).move(); v = .invalidPayload(f0)
+            case 3: v = .cancelled
+            case 4: v = .connectionClosed
+            case 5: v = .sessionShutdown
+            case 6: v = .sendFailed
+            case 7: v = .indeterminate
+            default: fatalError("bad variant index")
+            }
+            slot.assumingMemoryBound(to: VoxError<Infallible>.self).initialize(to: v) },
+            variants: [VariantAccess(wireIndex: 0, payloadFields: [FieldAccess(offset: 0, descriptor: Descriptor(schema: .concrete(SchemaId(0x8bfe7856188d64f1)), layout: Layout(size: MemoryLayout<Infallible>.size, align: MemoryLayout<Infallible>.alignment), access: .record(RecordAccess(fields: [], construct: .inPlace))))], payloadLayout: MemoryLayout<Infallible>.phonLayout), VariantAccess(wireIndex: 1, payloadFields: [], payloadLayout: Layout(size: 0, align: 1)), VariantAccess(wireIndex: 2, payloadFields: [FieldAccess(offset: 0, descriptor: Descriptor(schema: .concrete(SchemaId(0x6d7dce914ee150e8)), layout: Layout(size: MemoryLayout<String>.size, align: MemoryLayout<String>.alignment), access: .bytes(BytesAccess(stride: 1, elemAlign: 1, witness: .string))))], payloadLayout: MemoryLayout<String>.phonLayout), VariantAccess(wireIndex: 3, payloadFields: [], payloadLayout: Layout(size: 0, align: 1)), VariantAccess(wireIndex: 4, payloadFields: [], payloadLayout: Layout(size: 0, align: 1)), VariantAccess(wireIndex: 5, payloadFields: [], payloadLayout: Layout(size: 0, align: 1)), VariantAccess(wireIndex: 6, payloadFields: [], payloadLayout: Layout(size: 0, align: 1)), VariantAccess(wireIndex: 7, payloadFields: [], payloadLayout: Layout(size: 0, align: 1))]))))], payloadLayout: MemoryLayout<VoxError<Infallible>>.phonLayout)])))
+nonisolated(unsafe) let vfs_create_ResponseDescriptorBlocks: [SchemaId: Descriptor] = [:]
+nonisolated(unsafe) let vfs_delete_ArgsDescriptor: Descriptor = Descriptor(schema: .concrete(SchemaId(0xdb73db3b46e1a03f)), layout: Layout(size: MemoryLayout<(UInt64)>.size, align: MemoryLayout<(UInt64)>.alignment), access: .record(RecordAccess(fields: [FieldAccess(offset: 0, descriptor: Descriptor(schema: .concrete(SchemaId(0xd9356298b81639ac)), layout: Layout(size: MemoryLayout<UInt64>.size, align: MemoryLayout<UInt64>.alignment), access: .scalar))], construct: .inPlace)))
+nonisolated(unsafe) let vfs_delete_ArgsDescriptorBlocks: [SchemaId: Descriptor] = [:]
+nonisolated(unsafe) let vfs_delete_ResponseDescriptor: Descriptor = Descriptor(schema: .concrete(SchemaId(0xe20f9d0564afad42)), layout: Layout(size: MemoryLayout<Result<VfsResult, VoxError<Infallible>>>.size, align: MemoryLayout<Result<VfsResult, VoxError<Infallible>>>.alignment), access: .enumeration(EnumAccess(
+            tag: { ptr in switch ptr.assumingMemoryBound(to: Result<VfsResult, VoxError<Infallible>>.self).pointee { case .success: return 0; case .failure: return 1 } },
+            projectPayload: { value, _, scratch in switch value.assumingMemoryBound(to: Result<VfsResult, VoxError<Infallible>>.self).pointee { case .success(let f0): scratch.assumingMemoryBound(to: VfsResult.self).initialize(to: f0); case .failure(let f0): scratch.assumingMemoryBound(to: VoxError<Infallible>.self).initialize(to: f0) } },
+            destroyPayload: { scratch, localIndex in if localIndex == 0 { scratch.assumingMemoryBound(to: VfsResult.self).deinitialize(count: 1) } else { scratch.assumingMemoryBound(to: VoxError<Infallible>.self).deinitialize(count: 1) } },
+            inject: { slot, localIndex, scratch in
+            let v: Result<VfsResult, VoxError<Infallible>> = localIndex == 0 ? .success(scratch.assumingMemoryBound(to: VfsResult.self).move()) : .failure(scratch.assumingMemoryBound(to: VoxError<Infallible>.self).move())
+            slot.assumingMemoryBound(to: Result<VfsResult, VoxError<Infallible>>.self).initialize(to: v) },
+            variants: [VariantAccess(wireIndex: 0, payloadFields: [FieldAccess(offset: 0, descriptor: Descriptor(schema: .concrete(SchemaId(0x913891b444d17a61)), layout: Layout(size: MemoryLayout<VfsResult>.size, align: MemoryLayout<VfsResult>.alignment), access: .record(RecordAccess(fields: [FieldAccess(offset: MemoryLayout<VfsResult>.offset(of: \VfsResult.error)!, descriptor: Descriptor(schema: .concrete(SchemaId(0x361f4536eee9f991)), layout: Layout(size: MemoryLayout<Int32>.size, align: MemoryLayout<Int32>.alignment), access: .scalar))], construct: .inPlace))))], payloadLayout: MemoryLayout<VfsResult>.phonLayout), VariantAccess(wireIndex: 1, payloadFields: [FieldAccess(offset: 0, descriptor: Descriptor(schema: .concrete(SchemaId(0x3032e6270c5d2644)), layout: Layout(size: MemoryLayout<VoxError<Infallible>>.size, align: MemoryLayout<VoxError<Infallible>>.alignment), access: .enumeration(EnumAccess(
+            tag: { ptr in switch ptr.assumingMemoryBound(to: VoxError<Infallible>.self).pointee {
+            case .user: return 0
+            case .unknownMethod: return 1
+            case .invalidPayload: return 2
+            case .cancelled: return 3
+            case .connectionClosed: return 4
+            case .sessionShutdown: return 5
+            case .sendFailed: return 6
+            case .indeterminate: return 7
+            } },
+            projectPayload: { value, _, scratch in switch value.assumingMemoryBound(to: VoxError<Infallible>.self).pointee {
+            case .user: fatalError("uninhabited variant payload")
+            case .unknownMethod: break
+            case .invalidPayload(let f0): scratch.advanced(by: 0).assumingMemoryBound(to: String.self).initialize(to: f0); 
+            case .cancelled: break
+            case .connectionClosed: break
+            case .sessionShutdown: break
+            case .sendFailed: break
+            case .indeterminate: break
+            } },
+            destroyPayload: { scratch, localIndex in switch localIndex {
+            case 0: break
+            case 2: scratch.advanced(by: 0).assumingMemoryBound(to: String.self).deinitialize(count: 1); 
+            default: break
+            } },
+            inject: { slot, localIndex, scratch in
+            let v: VoxError<Infallible>
+            switch localIndex {
+            case 0: fatalError("uninhabited variant payload")
+            case 1: v = .unknownMethod
+            case 2: let f0 = scratch.advanced(by: 0).assumingMemoryBound(to: String.self).move(); v = .invalidPayload(f0)
+            case 3: v = .cancelled
+            case 4: v = .connectionClosed
+            case 5: v = .sessionShutdown
+            case 6: v = .sendFailed
+            case 7: v = .indeterminate
+            default: fatalError("bad variant index")
+            }
+            slot.assumingMemoryBound(to: VoxError<Infallible>.self).initialize(to: v) },
+            variants: [VariantAccess(wireIndex: 0, payloadFields: [FieldAccess(offset: 0, descriptor: Descriptor(schema: .concrete(SchemaId(0x8bfe7856188d64f1)), layout: Layout(size: MemoryLayout<Infallible>.size, align: MemoryLayout<Infallible>.alignment), access: .record(RecordAccess(fields: [], construct: .inPlace))))], payloadLayout: MemoryLayout<Infallible>.phonLayout), VariantAccess(wireIndex: 1, payloadFields: [], payloadLayout: Layout(size: 0, align: 1)), VariantAccess(wireIndex: 2, payloadFields: [FieldAccess(offset: 0, descriptor: Descriptor(schema: .concrete(SchemaId(0x6d7dce914ee150e8)), layout: Layout(size: MemoryLayout<String>.size, align: MemoryLayout<String>.alignment), access: .bytes(BytesAccess(stride: 1, elemAlign: 1, witness: .string))))], payloadLayout: MemoryLayout<String>.phonLayout), VariantAccess(wireIndex: 3, payloadFields: [], payloadLayout: Layout(size: 0, align: 1)), VariantAccess(wireIndex: 4, payloadFields: [], payloadLayout: Layout(size: 0, align: 1)), VariantAccess(wireIndex: 5, payloadFields: [], payloadLayout: Layout(size: 0, align: 1)), VariantAccess(wireIndex: 6, payloadFields: [], payloadLayout: Layout(size: 0, align: 1)), VariantAccess(wireIndex: 7, payloadFields: [], payloadLayout: Layout(size: 0, align: 1))]))))], payloadLayout: MemoryLayout<VoxError<Infallible>>.phonLayout)])))
+nonisolated(unsafe) let vfs_delete_ResponseDescriptorBlocks: [SchemaId: Descriptor] = [:]
+nonisolated(unsafe) let vfs_rename_ArgsDescriptor: Descriptor = Descriptor(schema: .concrete(SchemaId(0xbd27f8160767ea93)), layout: Layout(size: MemoryLayout<(UInt64, UInt64, String)>.size, align: MemoryLayout<(UInt64, UInt64, String)>.alignment), access: .record(RecordAccess(fields: [FieldAccess(offset: MemoryLayout<(UInt64, UInt64, String)>.offset(of: \.0)!, descriptor: Descriptor(schema: .concrete(SchemaId(0xd9356298b81639ac)), layout: Layout(size: MemoryLayout<UInt64>.size, align: MemoryLayout<UInt64>.alignment), access: .scalar)), FieldAccess(offset: MemoryLayout<(UInt64, UInt64, String)>.offset(of: \.1)!, descriptor: Descriptor(schema: .concrete(SchemaId(0xd9356298b81639ac)), layout: Layout(size: MemoryLayout<UInt64>.size, align: MemoryLayout<UInt64>.alignment), access: .scalar)), FieldAccess(offset: MemoryLayout<(UInt64, UInt64, String)>.offset(of: \.2)!, descriptor: Descriptor(schema: .concrete(SchemaId(0x6d7dce914ee150e8)), layout: Layout(size: MemoryLayout<String>.size, align: MemoryLayout<String>.alignment), access: .bytes(BytesAccess(stride: 1, elemAlign: 1, witness: .string))))], construct: .inPlace)))
+nonisolated(unsafe) let vfs_rename_ArgsDescriptorBlocks: [SchemaId: Descriptor] = [:]
+nonisolated(unsafe) let vfs_rename_ResponseDescriptor: Descriptor = Descriptor(schema: .concrete(SchemaId(0xe20f9d0564afad42)), layout: Layout(size: MemoryLayout<Result<VfsResult, VoxError<Infallible>>>.size, align: MemoryLayout<Result<VfsResult, VoxError<Infallible>>>.alignment), access: .enumeration(EnumAccess(
+            tag: { ptr in switch ptr.assumingMemoryBound(to: Result<VfsResult, VoxError<Infallible>>.self).pointee { case .success: return 0; case .failure: return 1 } },
+            projectPayload: { value, _, scratch in switch value.assumingMemoryBound(to: Result<VfsResult, VoxError<Infallible>>.self).pointee { case .success(let f0): scratch.assumingMemoryBound(to: VfsResult.self).initialize(to: f0); case .failure(let f0): scratch.assumingMemoryBound(to: VoxError<Infallible>.self).initialize(to: f0) } },
+            destroyPayload: { scratch, localIndex in if localIndex == 0 { scratch.assumingMemoryBound(to: VfsResult.self).deinitialize(count: 1) } else { scratch.assumingMemoryBound(to: VoxError<Infallible>.self).deinitialize(count: 1) } },
+            inject: { slot, localIndex, scratch in
+            let v: Result<VfsResult, VoxError<Infallible>> = localIndex == 0 ? .success(scratch.assumingMemoryBound(to: VfsResult.self).move()) : .failure(scratch.assumingMemoryBound(to: VoxError<Infallible>.self).move())
+            slot.assumingMemoryBound(to: Result<VfsResult, VoxError<Infallible>>.self).initialize(to: v) },
+            variants: [VariantAccess(wireIndex: 0, payloadFields: [FieldAccess(offset: 0, descriptor: Descriptor(schema: .concrete(SchemaId(0x913891b444d17a61)), layout: Layout(size: MemoryLayout<VfsResult>.size, align: MemoryLayout<VfsResult>.alignment), access: .record(RecordAccess(fields: [FieldAccess(offset: MemoryLayout<VfsResult>.offset(of: \VfsResult.error)!, descriptor: Descriptor(schema: .concrete(SchemaId(0x361f4536eee9f991)), layout: Layout(size: MemoryLayout<Int32>.size, align: MemoryLayout<Int32>.alignment), access: .scalar))], construct: .inPlace))))], payloadLayout: MemoryLayout<VfsResult>.phonLayout), VariantAccess(wireIndex: 1, payloadFields: [FieldAccess(offset: 0, descriptor: Descriptor(schema: .concrete(SchemaId(0x3032e6270c5d2644)), layout: Layout(size: MemoryLayout<VoxError<Infallible>>.size, align: MemoryLayout<VoxError<Infallible>>.alignment), access: .enumeration(EnumAccess(
+            tag: { ptr in switch ptr.assumingMemoryBound(to: VoxError<Infallible>.self).pointee {
+            case .user: return 0
+            case .unknownMethod: return 1
+            case .invalidPayload: return 2
+            case .cancelled: return 3
+            case .connectionClosed: return 4
+            case .sessionShutdown: return 5
+            case .sendFailed: return 6
+            case .indeterminate: return 7
+            } },
+            projectPayload: { value, _, scratch in switch value.assumingMemoryBound(to: VoxError<Infallible>.self).pointee {
+            case .user: fatalError("uninhabited variant payload")
+            case .unknownMethod: break
+            case .invalidPayload(let f0): scratch.advanced(by: 0).assumingMemoryBound(to: String.self).initialize(to: f0); 
+            case .cancelled: break
+            case .connectionClosed: break
+            case .sessionShutdown: break
+            case .sendFailed: break
+            case .indeterminate: break
+            } },
+            destroyPayload: { scratch, localIndex in switch localIndex {
+            case 0: break
+            case 2: scratch.advanced(by: 0).assumingMemoryBound(to: String.self).deinitialize(count: 1); 
+            default: break
+            } },
+            inject: { slot, localIndex, scratch in
+            let v: VoxError<Infallible>
+            switch localIndex {
+            case 0: fatalError("uninhabited variant payload")
+            case 1: v = .unknownMethod
+            case 2: let f0 = scratch.advanced(by: 0).assumingMemoryBound(to: String.self).move(); v = .invalidPayload(f0)
+            case 3: v = .cancelled
+            case 4: v = .connectionClosed
+            case 5: v = .sessionShutdown
+            case 6: v = .sendFailed
+            case 7: v = .indeterminate
+            default: fatalError("bad variant index")
+            }
+            slot.assumingMemoryBound(to: VoxError<Infallible>.self).initialize(to: v) },
+            variants: [VariantAccess(wireIndex: 0, payloadFields: [FieldAccess(offset: 0, descriptor: Descriptor(schema: .concrete(SchemaId(0x8bfe7856188d64f1)), layout: Layout(size: MemoryLayout<Infallible>.size, align: MemoryLayout<Infallible>.alignment), access: .record(RecordAccess(fields: [], construct: .inPlace))))], payloadLayout: MemoryLayout<Infallible>.phonLayout), VariantAccess(wireIndex: 1, payloadFields: [], payloadLayout: Layout(size: 0, align: 1)), VariantAccess(wireIndex: 2, payloadFields: [FieldAccess(offset: 0, descriptor: Descriptor(schema: .concrete(SchemaId(0x6d7dce914ee150e8)), layout: Layout(size: MemoryLayout<String>.size, align: MemoryLayout<String>.alignment), access: .bytes(BytesAccess(stride: 1, elemAlign: 1, witness: .string))))], payloadLayout: MemoryLayout<String>.phonLayout), VariantAccess(wireIndex: 3, payloadFields: [], payloadLayout: Layout(size: 0, align: 1)), VariantAccess(wireIndex: 4, payloadFields: [], payloadLayout: Layout(size: 0, align: 1)), VariantAccess(wireIndex: 5, payloadFields: [], payloadLayout: Layout(size: 0, align: 1)), VariantAccess(wireIndex: 6, payloadFields: [], payloadLayout: Layout(size: 0, align: 1)), VariantAccess(wireIndex: 7, payloadFields: [], payloadLayout: Layout(size: 0, align: 1))]))))], payloadLayout: MemoryLayout<VoxError<Infallible>>.phonLayout)])))
+nonisolated(unsafe) let vfs_rename_ResponseDescriptorBlocks: [SchemaId: Descriptor] = [:]
+nonisolated(unsafe) let vfs_setAttributes_ArgsDescriptor: Descriptor = Descriptor(schema: .concrete(SchemaId(0x520b7af70f1bcc79)), layout: Layout(size: MemoryLayout<(UInt64, SetAttributesParams)>.size, align: MemoryLayout<(UInt64, SetAttributesParams)>.alignment), access: .record(RecordAccess(fields: [FieldAccess(offset: MemoryLayout<(UInt64, SetAttributesParams)>.offset(of: \.0)!, descriptor: Descriptor(schema: .concrete(SchemaId(0xd9356298b81639ac)), layout: Layout(size: MemoryLayout<UInt64>.size, align: MemoryLayout<UInt64>.alignment), access: .scalar)), FieldAccess(offset: MemoryLayout<(UInt64, SetAttributesParams)>.offset(of: \.1)!, descriptor: Descriptor(schema: .concrete(SchemaId(0x588f0e34e94c74db)), layout: Layout(size: MemoryLayout<SetAttributesParams>.size, align: MemoryLayout<SetAttributesParams>.alignment), access: .record(RecordAccess(fields: [FieldAccess(offset: MemoryLayout<SetAttributesParams>.offset(of: \SetAttributesParams.mode)!, descriptor: Descriptor(schema: .concrete(SchemaId(0x204c22815e2e921d)), layout: Layout(size: MemoryLayout<UInt32?>.size, align: MemoryLayout<UInt32?>.alignment), access: .option(OptionAccess(witness: .of(UInt32.self), some: Descriptor(schema: .concrete(SchemaId(0x281c5be4f2ee63b4)), layout: Layout(size: MemoryLayout<UInt32>.size, align: MemoryLayout<UInt32>.alignment), access: .scalar))))), FieldAccess(offset: MemoryLayout<SetAttributesParams>.offset(of: \SetAttributesParams.modifiedTime)!, descriptor: Descriptor(schema: .concrete(SchemaId(0x1558460a4da2721d)), layout: Layout(size: MemoryLayout<UInt64?>.size, align: MemoryLayout<UInt64?>.alignment), access: .option(OptionAccess(witness: .of(UInt64.self), some: Descriptor(schema: .concrete(SchemaId(0xd9356298b81639ac)), layout: Layout(size: MemoryLayout<UInt64>.size, align: MemoryLayout<UInt64>.alignment), access: .scalar))))), FieldAccess(offset: MemoryLayout<SetAttributesParams>.offset(of: \SetAttributesParams.size)!, descriptor: Descriptor(schema: .concrete(SchemaId(0x1558460a4da2721d)), layout: Layout(size: MemoryLayout<UInt64?>.size, align: MemoryLayout<UInt64?>.alignment), access: .option(OptionAccess(witness: .of(UInt64.self), some: Descriptor(schema: .concrete(SchemaId(0xd9356298b81639ac)), layout: Layout(size: MemoryLayout<UInt64>.size, align: MemoryLayout<UInt64>.alignment), access: .scalar)))))], construct: .inPlace))))], construct: .inPlace)))
+nonisolated(unsafe) let vfs_setAttributes_ArgsDescriptorBlocks: [SchemaId: Descriptor] = [:]
+nonisolated(unsafe) let vfs_setAttributes_ResponseDescriptor: Descriptor = Descriptor(schema: .concrete(SchemaId(0xe20f9d0564afad42)), layout: Layout(size: MemoryLayout<Result<VfsResult, VoxError<Infallible>>>.size, align: MemoryLayout<Result<VfsResult, VoxError<Infallible>>>.alignment), access: .enumeration(EnumAccess(
+            tag: { ptr in switch ptr.assumingMemoryBound(to: Result<VfsResult, VoxError<Infallible>>.self).pointee { case .success: return 0; case .failure: return 1 } },
+            projectPayload: { value, _, scratch in switch value.assumingMemoryBound(to: Result<VfsResult, VoxError<Infallible>>.self).pointee { case .success(let f0): scratch.assumingMemoryBound(to: VfsResult.self).initialize(to: f0); case .failure(let f0): scratch.assumingMemoryBound(to: VoxError<Infallible>.self).initialize(to: f0) } },
+            destroyPayload: { scratch, localIndex in if localIndex == 0 { scratch.assumingMemoryBound(to: VfsResult.self).deinitialize(count: 1) } else { scratch.assumingMemoryBound(to: VoxError<Infallible>.self).deinitialize(count: 1) } },
+            inject: { slot, localIndex, scratch in
+            let v: Result<VfsResult, VoxError<Infallible>> = localIndex == 0 ? .success(scratch.assumingMemoryBound(to: VfsResult.self).move()) : .failure(scratch.assumingMemoryBound(to: VoxError<Infallible>.self).move())
+            slot.assumingMemoryBound(to: Result<VfsResult, VoxError<Infallible>>.self).initialize(to: v) },
+            variants: [VariantAccess(wireIndex: 0, payloadFields: [FieldAccess(offset: 0, descriptor: Descriptor(schema: .concrete(SchemaId(0x913891b444d17a61)), layout: Layout(size: MemoryLayout<VfsResult>.size, align: MemoryLayout<VfsResult>.alignment), access: .record(RecordAccess(fields: [FieldAccess(offset: MemoryLayout<VfsResult>.offset(of: \VfsResult.error)!, descriptor: Descriptor(schema: .concrete(SchemaId(0x361f4536eee9f991)), layout: Layout(size: MemoryLayout<Int32>.size, align: MemoryLayout<Int32>.alignment), access: .scalar))], construct: .inPlace))))], payloadLayout: MemoryLayout<VfsResult>.phonLayout), VariantAccess(wireIndex: 1, payloadFields: [FieldAccess(offset: 0, descriptor: Descriptor(schema: .concrete(SchemaId(0x3032e6270c5d2644)), layout: Layout(size: MemoryLayout<VoxError<Infallible>>.size, align: MemoryLayout<VoxError<Infallible>>.alignment), access: .enumeration(EnumAccess(
+            tag: { ptr in switch ptr.assumingMemoryBound(to: VoxError<Infallible>.self).pointee {
+            case .user: return 0
+            case .unknownMethod: return 1
+            case .invalidPayload: return 2
+            case .cancelled: return 3
+            case .connectionClosed: return 4
+            case .sessionShutdown: return 5
+            case .sendFailed: return 6
+            case .indeterminate: return 7
+            } },
+            projectPayload: { value, _, scratch in switch value.assumingMemoryBound(to: VoxError<Infallible>.self).pointee {
+            case .user: fatalError("uninhabited variant payload")
+            case .unknownMethod: break
+            case .invalidPayload(let f0): scratch.advanced(by: 0).assumingMemoryBound(to: String.self).initialize(to: f0); 
+            case .cancelled: break
+            case .connectionClosed: break
+            case .sessionShutdown: break
+            case .sendFailed: break
+            case .indeterminate: break
+            } },
+            destroyPayload: { scratch, localIndex in switch localIndex {
+            case 0: break
+            case 2: scratch.advanced(by: 0).assumingMemoryBound(to: String.self).deinitialize(count: 1); 
+            default: break
+            } },
+            inject: { slot, localIndex, scratch in
+            let v: VoxError<Infallible>
+            switch localIndex {
+            case 0: fatalError("uninhabited variant payload")
+            case 1: v = .unknownMethod
+            case 2: let f0 = scratch.advanced(by: 0).assumingMemoryBound(to: String.self).move(); v = .invalidPayload(f0)
+            case 3: v = .cancelled
+            case 4: v = .connectionClosed
+            case 5: v = .sessionShutdown
+            case 6: v = .sendFailed
+            case 7: v = .indeterminate
+            default: fatalError("bad variant index")
+            }
+            slot.assumingMemoryBound(to: VoxError<Infallible>.self).initialize(to: v) },
+            variants: [VariantAccess(wireIndex: 0, payloadFields: [FieldAccess(offset: 0, descriptor: Descriptor(schema: .concrete(SchemaId(0x8bfe7856188d64f1)), layout: Layout(size: MemoryLayout<Infallible>.size, align: MemoryLayout<Infallible>.alignment), access: .record(RecordAccess(fields: [], construct: .inPlace))))], payloadLayout: MemoryLayout<Infallible>.phonLayout), VariantAccess(wireIndex: 1, payloadFields: [], payloadLayout: Layout(size: 0, align: 1)), VariantAccess(wireIndex: 2, payloadFields: [FieldAccess(offset: 0, descriptor: Descriptor(schema: .concrete(SchemaId(0x6d7dce914ee150e8)), layout: Layout(size: MemoryLayout<String>.size, align: MemoryLayout<String>.alignment), access: .bytes(BytesAccess(stride: 1, elemAlign: 1, witness: .string))))], payloadLayout: MemoryLayout<String>.phonLayout), VariantAccess(wireIndex: 3, payloadFields: [], payloadLayout: Layout(size: 0, align: 1)), VariantAccess(wireIndex: 4, payloadFields: [], payloadLayout: Layout(size: 0, align: 1)), VariantAccess(wireIndex: 5, payloadFields: [], payloadLayout: Layout(size: 0, align: 1)), VariantAccess(wireIndex: 6, payloadFields: [], payloadLayout: Layout(size: 0, align: 1)), VariantAccess(wireIndex: 7, payloadFields: [], payloadLayout: Layout(size: 0, align: 1))]))))], payloadLayout: MemoryLayout<VoxError<Infallible>>.phonLayout)])))
+nonisolated(unsafe) let vfs_setAttributes_ResponseDescriptorBlocks: [SchemaId: Descriptor] = [:]
+nonisolated(unsafe) let vfs_ping_ArgsDescriptor: Descriptor = Descriptor(schema: .concrete(SchemaId(0xbc5c33249a2dc720)), layout: Layout(size: MemoryLayout<Void>.size, align: MemoryLayout<Void>.alignment), access: .scalar)
+nonisolated(unsafe) let vfs_ping_ArgsDescriptorBlocks: [SchemaId: Descriptor] = [:]
+nonisolated(unsafe) let vfs_ping_ResponseDescriptor: Descriptor = Descriptor(schema: .concrete(SchemaId(0xa40be1c5eb244dd8)), layout: Layout(size: MemoryLayout<Result<String, VoxError<Infallible>>>.size, align: MemoryLayout<Result<String, VoxError<Infallible>>>.alignment), access: .enumeration(EnumAccess(
+            tag: { ptr in switch ptr.assumingMemoryBound(to: Result<String, VoxError<Infallible>>.self).pointee { case .success: return 0; case .failure: return 1 } },
+            projectPayload: { value, _, scratch in switch value.assumingMemoryBound(to: Result<String, VoxError<Infallible>>.self).pointee { case .success(let f0): scratch.assumingMemoryBound(to: String.self).initialize(to: f0); case .failure(let f0): scratch.assumingMemoryBound(to: VoxError<Infallible>.self).initialize(to: f0) } },
+            destroyPayload: { scratch, localIndex in if localIndex == 0 { scratch.assumingMemoryBound(to: String.self).deinitialize(count: 1) } else { scratch.assumingMemoryBound(to: VoxError<Infallible>.self).deinitialize(count: 1) } },
+            inject: { slot, localIndex, scratch in
+            let v: Result<String, VoxError<Infallible>> = localIndex == 0 ? .success(scratch.assumingMemoryBound(to: String.self).move()) : .failure(scratch.assumingMemoryBound(to: VoxError<Infallible>.self).move())
+            slot.assumingMemoryBound(to: Result<String, VoxError<Infallible>>.self).initialize(to: v) },
+            variants: [VariantAccess(wireIndex: 0, payloadFields: [FieldAccess(offset: 0, descriptor: Descriptor(schema: .concrete(SchemaId(0x6d7dce914ee150e8)), layout: Layout(size: MemoryLayout<String>.size, align: MemoryLayout<String>.alignment), access: .bytes(BytesAccess(stride: 1, elemAlign: 1, witness: .string))))], payloadLayout: MemoryLayout<String>.phonLayout), VariantAccess(wireIndex: 1, payloadFields: [FieldAccess(offset: 0, descriptor: Descriptor(schema: .concrete(SchemaId(0x3032e6270c5d2644)), layout: Layout(size: MemoryLayout<VoxError<Infallible>>.size, align: MemoryLayout<VoxError<Infallible>>.alignment), access: .enumeration(EnumAccess(
+            tag: { ptr in switch ptr.assumingMemoryBound(to: VoxError<Infallible>.self).pointee {
+            case .user: return 0
+            case .unknownMethod: return 1
+            case .invalidPayload: return 2
+            case .cancelled: return 3
+            case .connectionClosed: return 4
+            case .sessionShutdown: return 5
+            case .sendFailed: return 6
+            case .indeterminate: return 7
+            } },
+            projectPayload: { value, _, scratch in switch value.assumingMemoryBound(to: VoxError<Infallible>.self).pointee {
+            case .user: fatalError("uninhabited variant payload")
+            case .unknownMethod: break
+            case .invalidPayload(let f0): scratch.advanced(by: 0).assumingMemoryBound(to: String.self).initialize(to: f0); 
+            case .cancelled: break
+            case .connectionClosed: break
+            case .sessionShutdown: break
+            case .sendFailed: break
+            case .indeterminate: break
+            } },
+            destroyPayload: { scratch, localIndex in switch localIndex {
+            case 0: break
+            case 2: scratch.advanced(by: 0).assumingMemoryBound(to: String.self).deinitialize(count: 1); 
+            default: break
+            } },
+            inject: { slot, localIndex, scratch in
+            let v: VoxError<Infallible>
+            switch localIndex {
+            case 0: fatalError("uninhabited variant payload")
+            case 1: v = .unknownMethod
+            case 2: let f0 = scratch.advanced(by: 0).assumingMemoryBound(to: String.self).move(); v = .invalidPayload(f0)
+            case 3: v = .cancelled
+            case 4: v = .connectionClosed
+            case 5: v = .sessionShutdown
+            case 6: v = .sendFailed
+            case 7: v = .indeterminate
+            default: fatalError("bad variant index")
+            }
+            slot.assumingMemoryBound(to: VoxError<Infallible>.self).initialize(to: v) },
+            variants: [VariantAccess(wireIndex: 0, payloadFields: [FieldAccess(offset: 0, descriptor: Descriptor(schema: .concrete(SchemaId(0x8bfe7856188d64f1)), layout: Layout(size: MemoryLayout<Infallible>.size, align: MemoryLayout<Infallible>.alignment), access: .record(RecordAccess(fields: [], construct: .inPlace))))], payloadLayout: MemoryLayout<Infallible>.phonLayout), VariantAccess(wireIndex: 1, payloadFields: [], payloadLayout: Layout(size: 0, align: 1)), VariantAccess(wireIndex: 2, payloadFields: [FieldAccess(offset: 0, descriptor: Descriptor(schema: .concrete(SchemaId(0x6d7dce914ee150e8)), layout: Layout(size: MemoryLayout<String>.size, align: MemoryLayout<String>.alignment), access: .bytes(BytesAccess(stride: 1, elemAlign: 1, witness: .string))))], payloadLayout: MemoryLayout<String>.phonLayout), VariantAccess(wireIndex: 3, payloadFields: [], payloadLayout: Layout(size: 0, align: 1)), VariantAccess(wireIndex: 4, payloadFields: [], payloadLayout: Layout(size: 0, align: 1)), VariantAccess(wireIndex: 5, payloadFields: [], payloadLayout: Layout(size: 0, align: 1)), VariantAccess(wireIndex: 6, payloadFields: [], payloadLayout: Layout(size: 0, align: 1)), VariantAccess(wireIndex: 7, payloadFields: [], payloadLayout: Layout(size: 0, align: 1))]))))], payloadLayout: MemoryLayout<VoxError<Infallible>>.phonLayout)])))
+nonisolated(unsafe) let vfs_ping_ResponseDescriptorBlocks: [SchemaId: Descriptor] = [:]
+
+public let vfsMethods: [UInt64: PhonMethodSchemas] = [
+    0xab2b853c144d133b: PhonMethodSchemas(
+        argsRoot: SchemaId(0xbd977dd7da39259f),
+        argsSchemaClosure: [159, 37, 57, 218, 215, 125, 151, 189, 1, 0, 0, 0, 215, 0, 0, 0, 22, 6, 0, 0, 0, 83, 99, 104, 101, 109, 97, 3, 0, 0, 0, 2, 0, 0, 0, 105, 100, 5, 159, 37, 57, 218, 215, 125, 151, 189, 11, 0, 0, 0, 116, 121, 112, 101, 95, 112, 97, 114, 97, 109, 115, 17, 0, 0, 0, 0, 4, 0, 0, 0, 107, 105, 110, 100, 23, 5, 0, 0, 0, 84, 117, 112, 108, 101, 22, 5, 0, 0, 0, 84, 117, 112, 108, 101, 1, 0, 0, 0, 8, 0, 0, 0, 101, 108, 101, 109, 101, 110, 116, 115, 17, 2, 0, 0, 0, 23, 8, 0, 0, 0, 67, 111, 110, 99, 114, 101, 116, 101, 22, 8, 0, 0, 0, 67, 111, 110, 99, 114, 101, 116, 101, 2, 0, 0, 0, 2, 0, 0, 0, 105, 100, 5, 172, 57, 22, 184, 152, 98, 53, 217, 4, 0, 0, 0, 97, 114, 103, 115, 17, 0, 0, 0, 0, 23, 8, 0, 0, 0, 67, 111, 110, 99, 114, 101, 116, 101, 22, 8, 0, 0, 0, 67, 111, 110, 99, 114, 101, 116, 101, 2, 0, 0, 0, 2, 0, 0, 0, 105, 100, 5, 232, 80, 225, 78, 145, 206, 125, 109, 4, 0, 0, 0, 97, 114, 103, 115, 17, 0, 0, 0, 0],
+        argsDescriptor: vfs_lookup_ArgsDescriptor,
+        argsDescriptorBlocks: vfs_lookup_ArgsDescriptorBlocks,
+        okRoot: SchemaId(0xd009b6f4011f3606),
+        responseRoot: SchemaId(0x3a81d2ae3be3c008),
+        responseSchemaClosure: [8, 192, 227, 59, 174, 210, 129, 58, 6, 0, 0, 0, 113, 1, 0, 0, 22, 6, 0, 0, 0, 83, 99, 104, 101, 109, 97, 3, 0, 0, 0, 2, 0, 0, 0, 105, 100, 5, 8, 192, 227, 59, 174, 210, 129, 58, 11, 0, 0, 0, 116, 121, 112, 101, 95, 112, 97, 114, 97, 109, 115, 17, 0, 0, 0, 0, 4, 0, 0, 0, 107, 105, 110, 100, 23, 4, 0, 0, 0, 69, 110, 117, 109, 22, 4, 0, 0, 0, 69, 110, 117, 109, 2, 0, 0, 0, 4, 0, 0, 0, 110, 97, 109, 101, 15, 6, 0, 0, 0, 82, 101, 115, 117, 108, 116, 8, 0, 0, 0, 118, 97, 114, 105, 97, 110, 116, 115, 17, 2, 0, 0, 0, 22, 7, 0, 0, 0, 86, 97, 114, 105, 97, 110, 116, 3, 0, 0, 0, 4, 0, 0, 0, 110, 97, 109, 101, 15, 2, 0, 0, 0, 79, 107, 5, 0, 0, 0, 105, 110, 100, 101, 120, 4, 0, 0, 0, 0, 7, 0, 0, 0, 112, 97, 121, 108, 111, 97, 100, 23, 7, 0, 0, 0, 78, 101, 119, 116, 121, 112, 101, 23, 8, 0, 0, 0, 67, 111, 110, 99, 114, 101, 116, 101, 22, 8, 0, 0, 0, 67, 111, 110, 99, 114, 101, 116, 101, 2, 0, 0, 0, 2, 0, 0, 0, 105, 100, 5, 6, 54, 31, 1, 244, 182, 9, 208, 4, 0, 0, 0, 97, 114, 103, 115, 17, 0, 0, 0, 0, 22, 7, 0, 0, 0, 86, 97, 114, 105, 97, 110, 116, 3, 0, 0, 0, 4, 0, 0, 0, 110, 97, 109, 101, 15, 3, 0, 0, 0, 69, 114, 114, 5, 0, 0, 0, 105, 110, 100, 101, 120, 4, 1, 0, 0, 0, 7, 0, 0, 0, 112, 97, 121, 108, 111, 97, 100, 23, 7, 0, 0, 0, 78, 101, 119, 116, 121, 112, 101, 23, 8, 0, 0, 0, 67, 111, 110, 99, 114, 101, 116, 101, 22, 8, 0, 0, 0, 67, 111, 110, 99, 114, 101, 116, 101, 2, 0, 0, 0, 2, 0, 0, 0, 105, 100, 5, 68, 38, 93, 12, 39, 230, 50, 48, 4, 0, 0, 0, 97, 114, 103, 115, 17, 0, 0, 0, 0, 96, 1, 0, 0, 22, 6, 0, 0, 0, 83, 99, 104, 101, 109, 97, 3, 0, 0, 0, 2, 0, 0, 0, 105, 100, 5, 6, 54, 31, 1, 244, 182, 9, 208, 11, 0, 0, 0, 116, 121, 112, 101, 95, 112, 97, 114, 97, 109, 115, 17, 0, 0, 0, 0, 4, 0, 0, 0, 107, 105, 110, 100, 23, 6, 0, 0, 0, 83, 116, 114, 117, 99, 116, 22, 6, 0, 0, 0, 83, 116, 114, 117, 99, 116, 2, 0, 0, 0, 4, 0, 0, 0, 110, 97, 109, 101, 15, 12, 0, 0, 0, 76, 111, 111, 107, 117, 112, 82, 101, 115, 117, 108, 116, 6, 0, 0, 0, 102, 105, 101, 108, 100, 115, 17, 2, 0, 0, 0, 22, 5, 0, 0, 0, 70, 105, 101, 108, 100, 3, 0, 0, 0, 4, 0, 0, 0, 110, 97, 109, 101, 15, 5, 0, 0, 0, 97, 116, 116, 114, 115, 6, 0, 0, 0, 115, 99, 104, 101, 109, 97, 23, 8, 0, 0, 0, 67, 111, 110, 99, 114, 101, 116, 101, 22, 8, 0, 0, 0, 67, 111, 110, 99, 114, 101, 116, 101, 2, 0, 0, 0, 2, 0, 0, 0, 105, 100, 5, 72, 144, 134, 136, 59, 4, 254, 108, 4, 0, 0, 0, 97, 114, 103, 115, 17, 0, 0, 0, 0, 8, 0, 0, 0, 114, 101, 113, 117, 105, 114, 101, 100, 1, 1, 22, 5, 0, 0, 0, 70, 105, 101, 108, 100, 3, 0, 0, 0, 4, 0, 0, 0, 110, 97, 109, 101, 15, 5, 0, 0, 0, 101, 114, 114, 111, 114, 6, 0, 0, 0, 115, 99, 104, 101, 109, 97, 23, 8, 0, 0, 0, 67, 111, 110, 99, 114, 101, 116, 101, 22, 8, 0, 0, 0, 67, 111, 110, 99, 114, 101, 116, 101, 2, 0, 0, 0, 2, 0, 0, 0, 105, 100, 5, 145, 249, 233, 238, 54, 69, 31, 54, 4, 0, 0, 0, 97, 114, 103, 115, 17, 0, 0, 0, 0, 8, 0, 0, 0, 114, 101, 113, 117, 105, 114, 101, 100, 1, 1, 61, 3, 0, 0, 22, 6, 0, 0, 0, 83, 99, 104, 101, 109, 97, 3, 0, 0, 0, 2, 0, 0, 0, 105, 100, 5, 72, 144, 134, 136, 59, 4, 254, 108, 11, 0, 0, 0, 116, 121, 112, 101, 95, 112, 97, 114, 97, 109, 115, 17, 0, 0, 0, 0, 4, 0, 0, 0, 107, 105, 110, 100, 23, 6, 0, 0, 0, 83, 116, 114, 117, 99, 116, 22, 6, 0, 0, 0, 83, 116, 114, 117, 99, 116, 2, 0, 0, 0, 4, 0, 0, 0, 110, 97, 109, 101, 15, 14, 0, 0, 0, 73, 116, 101, 109, 65, 116, 116, 114, 105, 98, 117, 116, 101, 115, 6, 0, 0, 0, 102, 105, 101, 108, 100, 115, 17, 6, 0, 0, 0, 22, 5, 0, 0, 0, 70, 105, 101, 108, 100, 3, 0, 0, 0, 4, 0, 0, 0, 110, 97, 109, 101, 15, 7, 0, 0, 0, 105, 116, 101, 109, 95, 105, 100, 6, 0, 0, 0, 115, 99, 104, 101, 109, 97, 23, 8, 0, 0, 0, 67, 111, 110, 99, 114, 101, 116, 101, 22, 8, 0, 0, 0, 67, 111, 110, 99, 114, 101, 116, 101, 2, 0, 0, 0, 2, 0, 0, 0, 105, 100, 5, 172, 57, 22, 184, 152, 98, 53, 217, 4, 0, 0, 0, 97, 114, 103, 115, 17, 0, 0, 0, 0, 8, 0, 0, 0, 114, 101, 113, 117, 105, 114, 101, 100, 1, 1, 22, 5, 0, 0, 0, 70, 105, 101, 108, 100, 3, 0, 0, 0, 4, 0, 0, 0, 110, 97, 109, 101, 15, 9, 0, 0, 0, 105, 116, 101, 109, 95, 116, 121, 112, 101, 6, 0, 0, 0, 115, 99, 104, 101, 109, 97, 23, 8, 0, 0, 0, 67, 111, 110, 99, 114, 101, 116, 101, 22, 8, 0, 0, 0, 67, 111, 110, 99, 114, 101, 116, 101, 2, 0, 0, 0, 2, 0, 0, 0, 105, 100, 5, 99, 6, 43, 113, 27, 142, 215, 10, 4, 0, 0, 0, 97, 114, 103, 115, 17, 0, 0, 0, 0, 8, 0, 0, 0, 114, 101, 113, 117, 105, 114, 101, 100, 1, 1, 22, 5, 0, 0, 0, 70, 105, 101, 108, 100, 3, 0, 0, 0, 4, 0, 0, 0, 110, 97, 109, 101, 15, 4, 0, 0, 0, 115, 105, 122, 101, 6, 0, 0, 0, 115, 99, 104, 101, 109, 97, 23, 8, 0, 0, 0, 67, 111, 110, 99, 114, 101, 116, 101, 22, 8, 0, 0, 0, 67, 111, 110, 99, 114, 101, 116, 101, 2, 0, 0, 0, 2, 0, 0, 0, 105, 100, 5, 172, 57, 22, 184, 152, 98, 53, 217, 4, 0, 0, 0, 97, 114, 103, 115, 17, 0, 0, 0, 0, 8, 0, 0, 0, 114, 101, 113, 117, 105, 114, 101, 100, 1, 1, 22, 5, 0, 0, 0, 70, 105, 101, 108, 100, 3, 0, 0, 0, 4, 0, 0, 0, 110, 97, 109, 101, 15, 13, 0, 0, 0, 109, 111, 100, 105, 102, 105, 101, 100, 95, 116, 105, 109, 101, 6, 0, 0, 0, 115, 99, 104, 101, 109, 97, 23, 8, 0, 0, 0, 67, 111, 110, 99, 114, 101, 116, 101, 22, 8, 0, 0, 0, 67, 111, 110, 99, 114, 101, 116, 101, 2, 0, 0, 0, 2, 0, 0, 0, 105, 100, 5, 172, 57, 22, 184, 152, 98, 53, 217, 4, 0, 0, 0, 97, 114, 103, 115, 17, 0, 0, 0, 0, 8, 0, 0, 0, 114, 101, 113, 117, 105, 114, 101, 100, 1, 1, 22, 5, 0, 0, 0, 70, 105, 101, 108, 100, 3, 0, 0, 0, 4, 0, 0, 0, 110, 97, 109, 101, 15, 12, 0, 0, 0, 99, 114, 101, 97, 116, 101, 100, 95, 116, 105, 109, 101, 6, 0, 0, 0, 115, 99, 104, 101, 109, 97, 23, 8, 0, 0, 0, 67, 111, 110, 99, 114, 101, 116, 101, 22, 8, 0, 0, 0, 67, 111, 110, 99, 114, 101, 116, 101, 2, 0, 0, 0, 2, 0, 0, 0, 105, 100, 5, 172, 57, 22, 184, 152, 98, 53, 217, 4, 0, 0, 0, 97, 114, 103, 115, 17, 0, 0, 0, 0, 8, 0, 0, 0, 114, 101, 113, 117, 105, 114, 101, 100, 1, 1, 22, 5, 0, 0, 0, 70, 105, 101, 108, 100, 3, 0, 0, 0, 4, 0, 0, 0, 110, 97, 109, 101, 15, 4, 0, 0, 0, 109, 111, 100, 101, 6, 0, 0, 0, 115, 99, 104, 101, 109, 97, 23, 8, 0, 0, 0, 67, 111, 110, 99, 114, 101, 116, 101, 22, 8, 0, 0, 0, 67, 111, 110, 99, 114, 101, 116, 101, 2, 0, 0, 0, 2, 0, 0, 0, 105, 100, 5, 180, 99, 238, 242, 228, 91, 28, 40, 4, 0, 0, 0, 97, 114, 103, 115, 17, 0, 0, 0, 0, 8, 0, 0, 0, 114, 101, 113, 117, 105, 114, 101, 100, 1, 1, 74, 1, 0, 0, 22, 6, 0, 0, 0, 83, 99, 104, 101, 109, 97, 3, 0, 0, 0, 2, 0, 0, 0, 105, 100, 5, 99, 6, 43, 113, 27, 142, 215, 10, 11, 0, 0, 0, 116, 121, 112, 101, 95, 112, 97, 114, 97, 109, 115, 17, 0, 0, 0, 0, 4, 0, 0, 0, 107, 105, 110, 100, 23, 4, 0, 0, 0, 69, 110, 117, 109, 22, 4, 0, 0, 0, 69, 110, 117, 109, 2, 0, 0, 0, 4, 0, 0, 0, 110, 97, 109, 101, 15, 8, 0, 0, 0, 73, 116, 101, 109, 84, 121, 112, 101, 8, 0, 0, 0, 118, 97, 114, 105, 97, 110, 116, 115, 17, 3, 0, 0, 0, 22, 7, 0, 0, 0, 86, 97, 114, 105, 97, 110, 116, 3, 0, 0, 0, 4, 0, 0, 0, 110, 97, 109, 101, 15, 4, 0, 0, 0, 70, 105, 108, 101, 5, 0, 0, 0, 105, 110, 100, 101, 120, 4, 0, 0, 0, 0, 7, 0, 0, 0, 112, 97, 121, 108, 111, 97, 100, 23, 4, 0, 0, 0, 85, 110, 105, 116, 0, 22, 7, 0, 0, 0, 86, 97, 114, 105, 97, 110, 116, 3, 0, 0, 0, 4, 0, 0, 0, 110, 97, 109, 101, 15, 9, 0, 0, 0, 68, 105, 114, 101, 99, 116, 111, 114, 121, 5, 0, 0, 0, 105, 110, 100, 101, 120, 4, 1, 0, 0, 0, 7, 0, 0, 0, 112, 97, 121, 108, 111, 97, 100, 23, 4, 0, 0, 0, 85, 110, 105, 116, 0, 22, 7, 0, 0, 0, 86, 97, 114, 105, 97, 110, 116, 3, 0, 0, 0, 4, 0, 0, 0, 110, 97, 109, 101, 15, 7, 0, 0, 0, 83, 121, 109, 108, 105, 110, 107, 5, 0, 0, 0, 105, 110, 100, 101, 120, 4, 2, 0, 0, 0, 7, 0, 0, 0, 112, 97, 121, 108, 111, 97, 100, 23, 4, 0, 0, 0, 85, 110, 105, 116, 0, 76, 3, 0, 0, 22, 6, 0, 0, 0, 83, 99, 104, 101, 109, 97, 3, 0, 0, 0, 2, 0, 0, 0, 105, 100, 5, 68, 38, 93, 12, 39, 230, 50, 48, 11, 0, 0, 0, 116, 121, 112, 101, 95, 112, 97, 114, 97, 109, 115, 17, 0, 0, 0, 0, 4, 0, 0, 0, 107, 105, 110, 100, 23, 4, 0, 0, 0, 69, 110, 117, 109, 22, 4, 0, 0, 0, 69, 110, 117, 109, 2, 0, 0, 0, 4, 0, 0, 0, 110, 97, 109, 101, 15, 8, 0, 0, 0, 86, 111, 120, 69, 114, 114, 111, 114, 8, 0, 0, 0, 118, 97, 114, 105, 97, 110, 116, 115, 17, 8, 0, 0, 0, 22, 7, 0, 0, 0, 86, 97, 114, 105, 97, 110, 116, 3, 0, 0, 0, 4, 0, 0, 0, 110, 97, 109, 101, 15, 4, 0, 0, 0, 85, 115, 101, 114, 5, 0, 0, 0, 105, 110, 100, 101, 120, 4, 0, 0, 0, 0, 7, 0, 0, 0, 112, 97, 121, 108, 111, 97, 100, 23, 7, 0, 0, 0, 78, 101, 119, 116, 121, 112, 101, 23, 8, 0, 0, 0, 67, 111, 110, 99, 114, 101, 116, 101, 22, 8, 0, 0, 0, 67, 111, 110, 99, 114, 101, 116, 101, 2, 0, 0, 0, 2, 0, 0, 0, 105, 100, 5, 241, 100, 141, 24, 86, 120, 254, 139, 4, 0, 0, 0, 97, 114, 103, 115, 17, 0, 0, 0, 0, 22, 7, 0, 0, 0, 86, 97, 114, 105, 97, 110, 116, 3, 0, 0, 0, 4, 0, 0, 0, 110, 97, 109, 101, 15, 13, 0, 0, 0, 85, 110, 107, 110, 111, 119, 110, 77, 101, 116, 104, 111, 100, 5, 0, 0, 0, 105, 110, 100, 101, 120, 4, 1, 0, 0, 0, 7, 0, 0, 0, 112, 97, 121, 108, 111, 97, 100, 23, 4, 0, 0, 0, 85, 110, 105, 116, 0, 22, 7, 0, 0, 0, 86, 97, 114, 105, 97, 110, 116, 3, 0, 0, 0, 4, 0, 0, 0, 110, 97, 109, 101, 15, 14, 0, 0, 0, 73, 110, 118, 97, 108, 105, 100, 80, 97, 121, 108, 111, 97, 100, 5, 0, 0, 0, 105, 110, 100, 101, 120, 4, 2, 0, 0, 0, 7, 0, 0, 0, 112, 97, 121, 108, 111, 97, 100, 23, 7, 0, 0, 0, 78, 101, 119, 116, 121, 112, 101, 23, 8, 0, 0, 0, 67, 111, 110, 99, 114, 101, 116, 101, 22, 8, 0, 0, 0, 67, 111, 110, 99, 114, 101, 116, 101, 2, 0, 0, 0, 2, 0, 0, 0, 105, 100, 5, 232, 80, 225, 78, 145, 206, 125, 109, 4, 0, 0, 0, 97, 114, 103, 115, 17, 0, 0, 0, 0, 22, 7, 0, 0, 0, 86, 97, 114, 105, 97, 110, 116, 3, 0, 0, 0, 4, 0, 0, 0, 110, 97, 109, 101, 15, 9, 0, 0, 0, 67, 97, 110, 99, 101, 108, 108, 101, 100, 5, 0, 0, 0, 105, 110, 100, 101, 120, 4, 3, 0, 0, 0, 7, 0, 0, 0, 112, 97, 121, 108, 111, 97, 100, 23, 4, 0, 0, 0, 85, 110, 105, 116, 0, 22, 7, 0, 0, 0, 86, 97, 114, 105, 97, 110, 116, 3, 0, 0, 0, 4, 0, 0, 0, 110, 97, 109, 101, 15, 16, 0, 0, 0, 67, 111, 110, 110, 101, 99, 116, 105, 111, 110, 67, 108, 111, 115, 101, 100, 5, 0, 0, 0, 105, 110, 100, 101, 120, 4, 4, 0, 0, 0, 7, 0, 0, 0, 112, 97, 121, 108, 111, 97, 100, 23, 4, 0, 0, 0, 85, 110, 105, 116, 0, 22, 7, 0, 0, 0, 86, 97, 114, 105, 97, 110, 116, 3, 0, 0, 0, 4, 0, 0, 0, 110, 97, 109, 101, 15, 15, 0, 0, 0, 83, 101, 115, 115, 105, 111, 110, 83, 104, 117, 116, 100, 111, 119, 110, 5, 0, 0, 0, 105, 110, 100, 101, 120, 4, 5, 0, 0, 0, 7, 0, 0, 0, 112, 97, 121, 108, 111, 97, 100, 23, 4, 0, 0, 0, 85, 110, 105, 116, 0, 22, 7, 0, 0, 0, 86, 97, 114, 105, 97, 110, 116, 3, 0, 0, 0, 4, 0, 0, 0, 110, 97, 109, 101, 15, 10, 0, 0, 0, 83, 101, 110, 100, 70, 97, 105, 108, 101, 100, 5, 0, 0, 0, 105, 110, 100, 101, 120, 4, 6, 0, 0, 0, 7, 0, 0, 0, 112, 97, 121, 108, 111, 97, 100, 23, 4, 0, 0, 0, 85, 110, 105, 116, 0, 22, 7, 0, 0, 0, 86, 97, 114, 105, 97, 110, 116, 3, 0, 0, 0, 4, 0, 0, 0, 110, 97, 109, 101, 15, 13, 0, 0, 0, 73, 110, 100, 101, 116, 101, 114, 109, 105, 110, 97, 116, 101, 5, 0, 0, 0, 105, 110, 100, 101, 120, 4, 7, 0, 0, 0, 7, 0, 0, 0, 112, 97, 121, 108, 111, 97, 100, 23, 4, 0, 0, 0, 85, 110, 105, 116, 0, 122, 0, 0, 0, 22, 6, 0, 0, 0, 83, 99, 104, 101, 109, 97, 3, 0, 0, 0, 2, 0, 0, 0, 105, 100, 5, 241, 100, 141, 24, 86, 120, 254, 139, 11, 0, 0, 0, 116, 121, 112, 101, 95, 112, 97, 114, 97, 109, 115, 17, 0, 0, 0, 0, 4, 0, 0, 0, 107, 105, 110, 100, 23, 6, 0, 0, 0, 83, 116, 114, 117, 99, 116, 22, 6, 0, 0, 0, 83, 116, 114, 117, 99, 116, 2, 0, 0, 0, 4, 0, 0, 0, 110, 97, 109, 101, 15, 10, 0, 0, 0, 73, 110, 102, 97, 108, 108, 105, 98, 108, 101, 6, 0, 0, 0, 102, 105, 101, 108, 100, 115, 17, 0, 0, 0, 0],
+        responseDescriptor: vfs_lookup_ResponseDescriptor,
+        responseDescriptorBlocks: vfs_lookup_ResponseDescriptorBlocks,
+        channels: []),
+    0xd97f57caa097adf9: PhonMethodSchemas(
+        argsRoot: SchemaId(0xdb73db3b46e1a03f),
+        argsSchemaClosure: [63, 160, 225, 70, 59, 219, 115, 219, 1, 0, 0, 0, 157, 0, 0, 0, 22, 6, 0, 0, 0, 83, 99, 104, 101, 109, 97, 3, 0, 0, 0, 2, 0, 0, 0, 105, 100, 5, 63, 160, 225, 70, 59, 219, 115, 219, 11, 0, 0, 0, 116, 121, 112, 101, 95, 112, 97, 114, 97, 109, 115, 17, 0, 0, 0, 0, 4, 0, 0, 0, 107, 105, 110, 100, 23, 5, 0, 0, 0, 84, 117, 112, 108, 101, 22, 5, 0, 0, 0, 84, 117, 112, 108, 101, 1, 0, 0, 0, 8, 0, 0, 0, 101, 108, 101, 109, 101, 110, 116, 115, 17, 1, 0, 0, 0, 23, 8, 0, 0, 0, 67, 111, 110, 99, 114, 101, 116, 101, 22, 8, 0, 0, 0, 67, 111, 110, 99, 114, 101, 116, 101, 2, 0, 0, 0, 2, 0, 0, 0, 105, 100, 5, 172, 57, 22, 184, 152, 98, 53, 217, 4, 0, 0, 0, 97, 114, 103, 115, 17, 0, 0, 0, 0],
+        argsDescriptor: vfs_getAttributes_ArgsDescriptor,
+        argsDescriptorBlocks: vfs_getAttributes_ArgsDescriptorBlocks,
+        okRoot: SchemaId(0x209fcbf9bd43042d),
+        responseRoot: SchemaId(0x54458c442cc0f21a),
+        responseSchemaClosure: [26, 242, 192, 44, 68, 140, 69, 84, 6, 0, 0, 0, 113, 1, 0, 0, 22, 6, 0, 0, 0, 83, 99, 104, 101, 109, 97, 3, 0, 0, 0, 2, 0, 0, 0, 105, 100, 5, 26, 242, 192, 44, 68, 140, 69, 84, 11, 0, 0, 0, 116, 121, 112, 101, 95, 112, 97, 114, 97, 109, 115, 17, 0, 0, 0, 0, 4, 0, 0, 0, 107, 105, 110, 100, 23, 4, 0, 0, 0, 69, 110, 117, 109, 22, 4, 0, 0, 0, 69, 110, 117, 109, 2, 0, 0, 0, 4, 0, 0, 0, 110, 97, 109, 101, 15, 6, 0, 0, 0, 82, 101, 115, 117, 108, 116, 8, 0, 0, 0, 118, 97, 114, 105, 97, 110, 116, 115, 17, 2, 0, 0, 0, 22, 7, 0, 0, 0, 86, 97, 114, 105, 97, 110, 116, 3, 0, 0, 0, 4, 0, 0, 0, 110, 97, 109, 101, 15, 2, 0, 0, 0, 79, 107, 5, 0, 0, 0, 105, 110, 100, 101, 120, 4, 0, 0, 0, 0, 7, 0, 0, 0, 112, 97, 121, 108, 111, 97, 100, 23, 7, 0, 0, 0, 78, 101, 119, 116, 121, 112, 101, 23, 8, 0, 0, 0, 67, 111, 110, 99, 114, 101, 116, 101, 22, 8, 0, 0, 0, 67, 111, 110, 99, 114, 101, 116, 101, 2, 0, 0, 0, 2, 0, 0, 0, 105, 100, 5, 45, 4, 67, 189, 249, 203, 159, 32, 4, 0, 0, 0, 97, 114, 103, 115, 17, 0, 0, 0, 0, 22, 7, 0, 0, 0, 86, 97, 114, 105, 97, 110, 116, 3, 0, 0, 0, 4, 0, 0, 0, 110, 97, 109, 101, 15, 3, 0, 0, 0, 69, 114, 114, 5, 0, 0, 0, 105, 110, 100, 101, 120, 4, 1, 0, 0, 0, 7, 0, 0, 0, 112, 97, 121, 108, 111, 97, 100, 23, 7, 0, 0, 0, 78, 101, 119, 116, 121, 112, 101, 23, 8, 0, 0, 0, 67, 111, 110, 99, 114, 101, 116, 101, 22, 8, 0, 0, 0, 67, 111, 110, 99, 114, 101, 116, 101, 2, 0, 0, 0, 2, 0, 0, 0, 105, 100, 5, 68, 38, 93, 12, 39, 230, 50, 48, 4, 0, 0, 0, 97, 114, 103, 115, 17, 0, 0, 0, 0, 103, 1, 0, 0, 22, 6, 0, 0, 0, 83, 99, 104, 101, 109, 97, 3, 0, 0, 0, 2, 0, 0, 0, 105, 100, 5, 45, 4, 67, 189, 249, 203, 159, 32, 11, 0, 0, 0, 116, 121, 112, 101, 95, 112, 97, 114, 97, 109, 115, 17, 0, 0, 0, 0, 4, 0, 0, 0, 107, 105, 110, 100, 23, 6, 0, 0, 0, 83, 116, 114, 117, 99, 116, 22, 6, 0, 0, 0, 83, 116, 114, 117, 99, 116, 2, 0, 0, 0, 4, 0, 0, 0, 110, 97, 109, 101, 15, 19, 0, 0, 0, 71, 101, 116, 65, 116, 116, 114, 105, 98, 117, 116, 101, 115, 82, 101, 115, 117, 108, 116, 6, 0, 0, 0, 102, 105, 101, 108, 100, 115, 17, 2, 0, 0, 0, 22, 5, 0, 0, 0, 70, 105, 101, 108, 100, 3, 0, 0, 0, 4, 0, 0, 0, 110, 97, 109, 101, 15, 5, 0, 0, 0, 97, 116, 116, 114, 115, 6, 0, 0, 0, 115, 99, 104, 101, 109, 97, 23, 8, 0, 0, 0, 67, 111, 110, 99, 114, 101, 116, 101, 22, 8, 0, 0, 0, 67, 111, 110, 99, 114, 101, 116, 101, 2, 0, 0, 0, 2, 0, 0, 0, 105, 100, 5, 72, 144, 134, 136, 59, 4, 254, 108, 4, 0, 0, 0, 97, 114, 103, 115, 17, 0, 0, 0, 0, 8, 0, 0, 0, 114, 101, 113, 117, 105, 114, 101, 100, 1, 1, 22, 5, 0, 0, 0, 70, 105, 101, 108, 100, 3, 0, 0, 0, 4, 0, 0, 0, 110, 97, 109, 101, 15, 5, 0, 0, 0, 101, 114, 114, 111, 114, 6, 0, 0, 0, 115, 99, 104, 101, 109, 97, 23, 8, 0, 0, 0, 67, 111, 110, 99, 114, 101, 116, 101, 22, 8, 0, 0, 0, 67, 111, 110, 99, 114, 101, 116, 101, 2, 0, 0, 0, 2, 0, 0, 0, 105, 100, 5, 145, 249, 233, 238, 54, 69, 31, 54, 4, 0, 0, 0, 97, 114, 103, 115, 17, 0, 0, 0, 0, 8, 0, 0, 0, 114, 101, 113, 117, 105, 114, 101, 100, 1, 1, 61, 3, 0, 0, 22, 6, 0, 0, 0, 83, 99, 104, 101, 109, 97, 3, 0, 0, 0, 2, 0, 0, 0, 105, 100, 5, 72, 144, 134, 136, 59, 4, 254, 108, 11, 0, 0, 0, 116, 121, 112, 101, 95, 112, 97, 114, 97, 109, 115, 17, 0, 0, 0, 0, 4, 0, 0, 0, 107, 105, 110, 100, 23, 6, 0, 0, 0, 83, 116, 114, 117, 99, 116, 22, 6, 0, 0, 0, 83, 116, 114, 117, 99, 116, 2, 0, 0, 0, 4, 0, 0, 0, 110, 97, 109, 101, 15, 14, 0, 0, 0, 73, 116, 101, 109, 65, 116, 116, 114, 105, 98, 117, 116, 101, 115, 6, 0, 0, 0, 102, 105, 101, 108, 100, 115, 17, 6, 0, 0, 0, 22, 5, 0, 0, 0, 70, 105, 101, 108, 100, 3, 0, 0, 0, 4, 0, 0, 0, 110, 97, 109, 101, 15, 7, 0, 0, 0, 105, 116, 101, 109, 95, 105, 100, 6, 0, 0, 0, 115, 99, 104, 101, 109, 97, 23, 8, 0, 0, 0, 67, 111, 110, 99, 114, 101, 116, 101, 22, 8, 0, 0, 0, 67, 111, 110, 99, 114, 101, 116, 101, 2, 0, 0, 0, 2, 0, 0, 0, 105, 100, 5, 172, 57, 22, 184, 152, 98, 53, 217, 4, 0, 0, 0, 97, 114, 103, 115, 17, 0, 0, 0, 0, 8, 0, 0, 0, 114, 101, 113, 117, 105, 114, 101, 100, 1, 1, 22, 5, 0, 0, 0, 70, 105, 101, 108, 100, 3, 0, 0, 0, 4, 0, 0, 0, 110, 97, 109, 101, 15, 9, 0, 0, 0, 105, 116, 101, 109, 95, 116, 121, 112, 101, 6, 0, 0, 0, 115, 99, 104, 101, 109, 97, 23, 8, 0, 0, 0, 67, 111, 110, 99, 114, 101, 116, 101, 22, 8, 0, 0, 0, 67, 111, 110, 99, 114, 101, 116, 101, 2, 0, 0, 0, 2, 0, 0, 0, 105, 100, 5, 99, 6, 43, 113, 27, 142, 215, 10, 4, 0, 0, 0, 97, 114, 103, 115, 17, 0, 0, 0, 0, 8, 0, 0, 0, 114, 101, 113, 117, 105, 114, 101, 100, 1, 1, 22, 5, 0, 0, 0, 70, 105, 101, 108, 100, 3, 0, 0, 0, 4, 0, 0, 0, 110, 97, 109, 101, 15, 4, 0, 0, 0, 115, 105, 122, 101, 6, 0, 0, 0, 115, 99, 104, 101, 109, 97, 23, 8, 0, 0, 0, 67, 111, 110, 99, 114, 101, 116, 101, 22, 8, 0, 0, 0, 67, 111, 110, 99, 114, 101, 116, 101, 2, 0, 0, 0, 2, 0, 0, 0, 105, 100, 5, 172, 57, 22, 184, 152, 98, 53, 217, 4, 0, 0, 0, 97, 114, 103, 115, 17, 0, 0, 0, 0, 8, 0, 0, 0, 114, 101, 113, 117, 105, 114, 101, 100, 1, 1, 22, 5, 0, 0, 0, 70, 105, 101, 108, 100, 3, 0, 0, 0, 4, 0, 0, 0, 110, 97, 109, 101, 15, 13, 0, 0, 0, 109, 111, 100, 105, 102, 105, 101, 100, 95, 116, 105, 109, 101, 6, 0, 0, 0, 115, 99, 104, 101, 109, 97, 23, 8, 0, 0, 0, 67, 111, 110, 99, 114, 101, 116, 101, 22, 8, 0, 0, 0, 67, 111, 110, 99, 114, 101, 116, 101, 2, 0, 0, 0, 2, 0, 0, 0, 105, 100, 5, 172, 57, 22, 184, 152, 98, 53, 217, 4, 0, 0, 0, 97, 114, 103, 115, 17, 0, 0, 0, 0, 8, 0, 0, 0, 114, 101, 113, 117, 105, 114, 101, 100, 1, 1, 22, 5, 0, 0, 0, 70, 105, 101, 108, 100, 3, 0, 0, 0, 4, 0, 0, 0, 110, 97, 109, 101, 15, 12, 0, 0, 0, 99, 114, 101, 97, 116, 101, 100, 95, 116, 105, 109, 101, 6, 0, 0, 0, 115, 99, 104, 101, 109, 97, 23, 8, 0, 0, 0, 67, 111, 110, 99, 114, 101, 116, 101, 22, 8, 0, 0, 0, 67, 111, 110, 99, 114, 101, 116, 101, 2, 0, 0, 0, 2, 0, 0, 0, 105, 100, 5, 172, 57, 22, 184, 152, 98, 53, 217, 4, 0, 0, 0, 97, 114, 103, 115, 17, 0, 0, 0, 0, 8, 0, 0, 0, 114, 101, 113, 117, 105, 114, 101, 100, 1, 1, 22, 5, 0, 0, 0, 70, 105, 101, 108, 100, 3, 0, 0, 0, 4, 0, 0, 0, 110, 97, 109, 101, 15, 4, 0, 0, 0, 109, 111, 100, 101, 6, 0, 0, 0, 115, 99, 104, 101, 109, 97, 23, 8, 0, 0, 0, 67, 111, 110, 99, 114, 101, 116, 101, 22, 8, 0, 0, 0, 67, 111, 110, 99, 114, 101, 116, 101, 2, 0, 0, 0, 2, 0, 0, 0, 105, 100, 5, 180, 99, 238, 242, 228, 91, 28, 40, 4, 0, 0, 0, 97, 114, 103, 115, 17, 0, 0, 0, 0, 8, 0, 0, 0, 114, 101, 113, 117, 105, 114, 101, 100, 1, 1, 74, 1, 0, 0, 22, 6, 0, 0, 0, 83, 99, 104, 101, 109, 97, 3, 0, 0, 0, 2, 0, 0, 0, 105, 100, 5, 99, 6, 43, 113, 27, 142, 215, 10, 11, 0, 0, 0, 116, 121, 112, 101, 95, 112, 97, 114, 97, 109, 115, 17, 0, 0, 0, 0, 4, 0, 0, 0, 107, 105, 110, 100, 23, 4, 0, 0, 0, 69, 110, 117, 109, 22, 4, 0, 0, 0, 69, 110, 117, 109, 2, 0, 0, 0, 4, 0, 0, 0, 110, 97, 109, 101, 15, 8, 0, 0, 0, 73, 116, 101, 109, 84, 121, 112, 101, 8, 0, 0, 0, 118, 97, 114, 105, 97, 110, 116, 115, 17, 3, 0, 0, 0, 22, 7, 0, 0, 0, 86, 97, 114, 105, 97, 110, 116, 3, 0, 0, 0, 4, 0, 0, 0, 110, 97, 109, 101, 15, 4, 0, 0, 0, 70, 105, 108, 101, 5, 0, 0, 0, 105, 110, 100, 101, 120, 4, 0, 0, 0, 0, 7, 0, 0, 0, 112, 97, 121, 108, 111, 97, 100, 23, 4, 0, 0, 0, 85, 110, 105, 116, 0, 22, 7, 0, 0, 0, 86, 97, 114, 105, 97, 110, 116, 3, 0, 0, 0, 4, 0, 0, 0, 110, 97, 109, 101, 15, 9, 0, 0, 0, 68, 105, 114, 101, 99, 116, 111, 114, 121, 5, 0, 0, 0, 105, 110, 100, 101, 120, 4, 1, 0, 0, 0, 7, 0, 0, 0, 112, 97, 121, 108, 111, 97, 100, 23, 4, 0, 0, 0, 85, 110, 105, 116, 0, 22, 7, 0, 0, 0, 86, 97, 114, 105, 97, 110, 116, 3, 0, 0, 0, 4, 0, 0, 0, 110, 97, 109, 101, 15, 7, 0, 0, 0, 83, 121, 109, 108, 105, 110, 107, 5, 0, 0, 0, 105, 110, 100, 101, 120, 4, 2, 0, 0, 0, 7, 0, 0, 0, 112, 97, 121, 108, 111, 97, 100, 23, 4, 0, 0, 0, 85, 110, 105, 116, 0, 76, 3, 0, 0, 22, 6, 0, 0, 0, 83, 99, 104, 101, 109, 97, 3, 0, 0, 0, 2, 0, 0, 0, 105, 100, 5, 68, 38, 93, 12, 39, 230, 50, 48, 11, 0, 0, 0, 116, 121, 112, 101, 95, 112, 97, 114, 97, 109, 115, 17, 0, 0, 0, 0, 4, 0, 0, 0, 107, 105, 110, 100, 23, 4, 0, 0, 0, 69, 110, 117, 109, 22, 4, 0, 0, 0, 69, 110, 117, 109, 2, 0, 0, 0, 4, 0, 0, 0, 110, 97, 109, 101, 15, 8, 0, 0, 0, 86, 111, 120, 69, 114, 114, 111, 114, 8, 0, 0, 0, 118, 97, 114, 105, 97, 110, 116, 115, 17, 8, 0, 0, 0, 22, 7, 0, 0, 0, 86, 97, 114, 105, 97, 110, 116, 3, 0, 0, 0, 4, 0, 0, 0, 110, 97, 109, 101, 15, 4, 0, 0, 0, 85, 115, 101, 114, 5, 0, 0, 0, 105, 110, 100, 101, 120, 4, 0, 0, 0, 0, 7, 0, 0, 0, 112, 97, 121, 108, 111, 97, 100, 23, 7, 0, 0, 0, 78, 101, 119, 116, 121, 112, 101, 23, 8, 0, 0, 0, 67, 111, 110, 99, 114, 101, 116, 101, 22, 8, 0, 0, 0, 67, 111, 110, 99, 114, 101, 116, 101, 2, 0, 0, 0, 2, 0, 0, 0, 105, 100, 5, 241, 100, 141, 24, 86, 120, 254, 139, 4, 0, 0, 0, 97, 114, 103, 115, 17, 0, 0, 0, 0, 22, 7, 0, 0, 0, 86, 97, 114, 105, 97, 110, 116, 3, 0, 0, 0, 4, 0, 0, 0, 110, 97, 109, 101, 15, 13, 0, 0, 0, 85, 110, 107, 110, 111, 119, 110, 77, 101, 116, 104, 111, 100, 5, 0, 0, 0, 105, 110, 100, 101, 120, 4, 1, 0, 0, 0, 7, 0, 0, 0, 112, 97, 121, 108, 111, 97, 100, 23, 4, 0, 0, 0, 85, 110, 105, 116, 0, 22, 7, 0, 0, 0, 86, 97, 114, 105, 97, 110, 116, 3, 0, 0, 0, 4, 0, 0, 0, 110, 97, 109, 101, 15, 14, 0, 0, 0, 73, 110, 118, 97, 108, 105, 100, 80, 97, 121, 108, 111, 97, 100, 5, 0, 0, 0, 105, 110, 100, 101, 120, 4, 2, 0, 0, 0, 7, 0, 0, 0, 112, 97, 121, 108, 111, 97, 100, 23, 7, 0, 0, 0, 78, 101, 119, 116, 121, 112, 101, 23, 8, 0, 0, 0, 67, 111, 110, 99, 114, 101, 116, 101, 22, 8, 0, 0, 0, 67, 111, 110, 99, 114, 101, 116, 101, 2, 0, 0, 0, 2, 0, 0, 0, 105, 100, 5, 232, 80, 225, 78, 145, 206, 125, 109, 4, 0, 0, 0, 97, 114, 103, 115, 17, 0, 0, 0, 0, 22, 7, 0, 0, 0, 86, 97, 114, 105, 97, 110, 116, 3, 0, 0, 0, 4, 0, 0, 0, 110, 97, 109, 101, 15, 9, 0, 0, 0, 67, 97, 110, 99, 101, 108, 108, 101, 100, 5, 0, 0, 0, 105, 110, 100, 101, 120, 4, 3, 0, 0, 0, 7, 0, 0, 0, 112, 97, 121, 108, 111, 97, 100, 23, 4, 0, 0, 0, 85, 110, 105, 116, 0, 22, 7, 0, 0, 0, 86, 97, 114, 105, 97, 110, 116, 3, 0, 0, 0, 4, 0, 0, 0, 110, 97, 109, 101, 15, 16, 0, 0, 0, 67, 111, 110, 110, 101, 99, 116, 105, 111, 110, 67, 108, 111, 115, 101, 100, 5, 0, 0, 0, 105, 110, 100, 101, 120, 4, 4, 0, 0, 0, 7, 0, 0, 0, 112, 97, 121, 108, 111, 97, 100, 23, 4, 0, 0, 0, 85, 110, 105, 116, 0, 22, 7, 0, 0, 0, 86, 97, 114, 105, 97, 110, 116, 3, 0, 0, 0, 4, 0, 0, 0, 110, 97, 109, 101, 15, 15, 0, 0, 0, 83, 101, 115, 115, 105, 111, 110, 83, 104, 117, 116, 100, 111, 119, 110, 5, 0, 0, 0, 105, 110, 100, 101, 120, 4, 5, 0, 0, 0, 7, 0, 0, 0, 112, 97, 121, 108, 111, 97, 100, 23, 4, 0, 0, 0, 85, 110, 105, 116, 0, 22, 7, 0, 0, 0, 86, 97, 114, 105, 97, 110, 116, 3, 0, 0, 0, 4, 0, 0, 0, 110, 97, 109, 101, 15, 10, 0, 0, 0, 83, 101, 110, 100, 70, 97, 105, 108, 101, 100, 5, 0, 0, 0, 105, 110, 100, 101, 120, 4, 6, 0, 0, 0, 7, 0, 0, 0, 112, 97, 121, 108, 111, 97, 100, 23, 4, 0, 0, 0, 85, 110, 105, 116, 0, 22, 7, 0, 0, 0, 86, 97, 114, 105, 97, 110, 116, 3, 0, 0, 0, 4, 0, 0, 0, 110, 97, 109, 101, 15, 13, 0, 0, 0, 73, 110, 100, 101, 116, 101, 114, 109, 105, 110, 97, 116, 101, 5, 0, 0, 0, 105, 110, 100, 101, 120, 4, 7, 0, 0, 0, 7, 0, 0, 0, 112, 97, 121, 108, 111, 97, 100, 23, 4, 0, 0, 0, 85, 110, 105, 116, 0, 122, 0, 0, 0, 22, 6, 0, 0, 0, 83, 99, 104, 101, 109, 97, 3, 0, 0, 0, 2, 0, 0, 0, 105, 100, 5, 241, 100, 141, 24, 86, 120, 254, 139, 11, 0, 0, 0, 116, 121, 112, 101, 95, 112, 97, 114, 97, 109, 115, 17, 0, 0, 0, 0, 4, 0, 0, 0, 107, 105, 110, 100, 23, 6, 0, 0, 0, 83, 116, 114, 117, 99, 116, 22, 6, 0, 0, 0, 83, 116, 114, 117, 99, 116, 2, 0, 0, 0, 4, 0, 0, 0, 110, 97, 109, 101, 15, 10, 0, 0, 0, 73, 110, 102, 97, 108, 108, 105, 98, 108, 101, 6, 0, 0, 0, 102, 105, 101, 108, 100, 115, 17, 0, 0, 0, 0],
+        responseDescriptor: vfs_getAttributes_ResponseDescriptor,
+        responseDescriptorBlocks: vfs_getAttributes_ResponseDescriptorBlocks,
+        channels: []),
+    0xf2ba29feced65eb7: PhonMethodSchemas(
+        argsRoot: SchemaId(0x373bd01794b28844),
+        argsSchemaClosure: [68, 136, 178, 148, 23, 208, 59, 55, 1, 0, 0, 0, 17, 1, 0, 0, 22, 6, 0, 0, 0, 83, 99, 104, 101, 109, 97, 3, 0, 0, 0, 2, 0, 0, 0, 105, 100, 5, 68, 136, 178, 148, 23, 208, 59, 55, 11, 0, 0, 0, 116, 121, 112, 101, 95, 112, 97, 114, 97, 109, 115, 17, 0, 0, 0, 0, 4, 0, 0, 0, 107, 105, 110, 100, 23, 5, 0, 0, 0, 84, 117, 112, 108, 101, 22, 5, 0, 0, 0, 84, 117, 112, 108, 101, 1, 0, 0, 0, 8, 0, 0, 0, 101, 108, 101, 109, 101, 110, 116, 115, 17, 3, 0, 0, 0, 23, 8, 0, 0, 0, 67, 111, 110, 99, 114, 101, 116, 101, 22, 8, 0, 0, 0, 67, 111, 110, 99, 114, 101, 116, 101, 2, 0, 0, 0, 2, 0, 0, 0, 105, 100, 5, 172, 57, 22, 184, 152, 98, 53, 217, 4, 0, 0, 0, 97, 114, 103, 115, 17, 0, 0, 0, 0, 23, 8, 0, 0, 0, 67, 111, 110, 99, 114, 101, 116, 101, 22, 8, 0, 0, 0, 67, 111, 110, 99, 114, 101, 116, 101, 2, 0, 0, 0, 2, 0, 0, 0, 105, 100, 5, 172, 57, 22, 184, 152, 98, 53, 217, 4, 0, 0, 0, 97, 114, 103, 115, 17, 0, 0, 0, 0, 23, 8, 0, 0, 0, 67, 111, 110, 99, 114, 101, 116, 101, 22, 8, 0, 0, 0, 67, 111, 110, 99, 114, 101, 116, 101, 2, 0, 0, 0, 2, 0, 0, 0, 105, 100, 5, 172, 57, 22, 184, 152, 98, 53, 217, 4, 0, 0, 0, 97, 114, 103, 115, 17, 0, 0, 0, 0],
+        argsDescriptor: vfs_readDir_ArgsDescriptor,
+        argsDescriptorBlocks: vfs_readDir_ArgsDescriptorBlocks,
+        okRoot: SchemaId(0xafda26786604d3fb),
+        responseRoot: SchemaId(0x8933c409f6853841),
+        responseSchemaClosure: [65, 56, 133, 246, 9, 196, 51, 137, 7, 0, 0, 0, 113, 1, 0, 0, 22, 6, 0, 0, 0, 83, 99, 104, 101, 109, 97, 3, 0, 0, 0, 2, 0, 0, 0, 105, 100, 5, 65, 56, 133, 246, 9, 196, 51, 137, 11, 0, 0, 0, 116, 121, 112, 101, 95, 112, 97, 114, 97, 109, 115, 17, 0, 0, 0, 0, 4, 0, 0, 0, 107, 105, 110, 100, 23, 4, 0, 0, 0, 69, 110, 117, 109, 22, 4, 0, 0, 0, 69, 110, 117, 109, 2, 0, 0, 0, 4, 0, 0, 0, 110, 97, 109, 101, 15, 6, 0, 0, 0, 82, 101, 115, 117, 108, 116, 8, 0, 0, 0, 118, 97, 114, 105, 97, 110, 116, 115, 17, 2, 0, 0, 0, 22, 7, 0, 0, 0, 86, 97, 114, 105, 97, 110, 116, 3, 0, 0, 0, 4, 0, 0, 0, 110, 97, 109, 101, 15, 2, 0, 0, 0, 79, 107, 5, 0, 0, 0, 105, 110, 100, 101, 120, 4, 0, 0, 0, 0, 7, 0, 0, 0, 112, 97, 121, 108, 111, 97, 100, 23, 7, 0, 0, 0, 78, 101, 119, 116, 121, 112, 101, 23, 8, 0, 0, 0, 67, 111, 110, 99, 114, 101, 116, 101, 22, 8, 0, 0, 0, 67, 111, 110, 99, 114, 101, 116, 101, 2, 0, 0, 0, 2, 0, 0, 0, 105, 100, 5, 251, 211, 4, 102, 120, 38, 218, 175, 4, 0, 0, 0, 97, 114, 103, 115, 17, 0, 0, 0, 0, 22, 7, 0, 0, 0, 86, 97, 114, 105, 97, 110, 116, 3, 0, 0, 0, 4, 0, 0, 0, 110, 97, 109, 101, 15, 3, 0, 0, 0, 69, 114, 114, 5, 0, 0, 0, 105, 110, 100, 101, 120, 4, 1, 0, 0, 0, 7, 0, 0, 0, 112, 97, 121, 108, 111, 97, 100, 23, 7, 0, 0, 0, 78, 101, 119, 116, 121, 112, 101, 23, 8, 0, 0, 0, 67, 111, 110, 99, 114, 101, 116, 101, 22, 8, 0, 0, 0, 67, 111, 110, 99, 114, 101, 116, 101, 2, 0, 0, 0, 2, 0, 0, 0, 105, 100, 5, 68, 38, 93, 12, 39, 230, 50, 48, 4, 0, 0, 0, 97, 114, 103, 115, 17, 0, 0, 0, 0, 80, 2, 0, 0, 22, 6, 0, 0, 0, 83, 99, 104, 101, 109, 97, 3, 0, 0, 0, 2, 0, 0, 0, 105, 100, 5, 251, 211, 4, 102, 120, 38, 218, 175, 11, 0, 0, 0, 116, 121, 112, 101, 95, 112, 97, 114, 97, 109, 115, 17, 0, 0, 0, 0, 4, 0, 0, 0, 107, 105, 110, 100, 23, 6, 0, 0, 0, 83, 116, 114, 117, 99, 116, 22, 6, 0, 0, 0, 83, 116, 114, 117, 99, 116, 2, 0, 0, 0, 4, 0, 0, 0, 110, 97, 109, 101, 15, 13, 0, 0, 0, 82, 101, 97, 100, 68, 105, 114, 82, 101, 115, 117, 108, 116, 6, 0, 0, 0, 102, 105, 101, 108, 100, 115, 17, 4, 0, 0, 0, 22, 5, 0, 0, 0, 70, 105, 101, 108, 100, 3, 0, 0, 0, 4, 0, 0, 0, 110, 97, 109, 101, 15, 7, 0, 0, 0, 101, 110, 116, 114, 105, 101, 115, 6, 0, 0, 0, 115, 99, 104, 101, 109, 97, 23, 8, 0, 0, 0, 67, 111, 110, 99, 114, 101, 116, 101, 22, 8, 0, 0, 0, 67, 111, 110, 99, 114, 101, 116, 101, 2, 0, 0, 0, 2, 0, 0, 0, 105, 100, 5, 34, 197, 180, 200, 110, 167, 221, 36, 4, 0, 0, 0, 97, 114, 103, 115, 17, 0, 0, 0, 0, 8, 0, 0, 0, 114, 101, 113, 117, 105, 114, 101, 100, 1, 1, 22, 5, 0, 0, 0, 70, 105, 101, 108, 100, 3, 0, 0, 0, 4, 0, 0, 0, 110, 97, 109, 101, 15, 11, 0, 0, 0, 110, 101, 120, 116, 95, 99, 111, 111, 107, 105, 101, 6, 0, 0, 0, 115, 99, 104, 101, 109, 97, 23, 8, 0, 0, 0, 67, 111, 110, 99, 114, 101, 116, 101, 22, 8, 0, 0, 0, 67, 111, 110, 99, 114, 101, 116, 101, 2, 0, 0, 0, 2, 0, 0, 0, 105, 100, 5, 172, 57, 22, 184, 152, 98, 53, 217, 4, 0, 0, 0, 97, 114, 103, 115, 17, 0, 0, 0, 0, 8, 0, 0, 0, 114, 101, 113, 117, 105, 114, 101, 100, 1, 1, 22, 5, 0, 0, 0, 70, 105, 101, 108, 100, 3, 0, 0, 0, 4, 0, 0, 0, 110, 97, 109, 101, 15, 8, 0, 0, 0, 118, 101, 114, 105, 102, 105, 101, 114, 6, 0, 0, 0, 115, 99, 104, 101, 109, 97, 23, 8, 0, 0, 0, 67, 111, 110, 99, 114, 101, 116, 101, 22, 8, 0, 0, 0, 67, 111, 110, 99, 114, 101, 116, 101, 2, 0, 0, 0, 2, 0, 0, 0, 105, 100, 5, 172, 57, 22, 184, 152, 98, 53, 217, 4, 0, 0, 0, 97, 114, 103, 115, 17, 0, 0, 0, 0, 8, 0, 0, 0, 114, 101, 113, 117, 105, 114, 101, 100, 1, 1, 22, 5, 0, 0, 0, 70, 105, 101, 108, 100, 3, 0, 0, 0, 4, 0, 0, 0, 110, 97, 109, 101, 15, 5, 0, 0, 0, 101, 114, 114, 111, 114, 6, 0, 0, 0, 115, 99, 104, 101, 109, 97, 23, 8, 0, 0, 0, 67, 111, 110, 99, 114, 101, 116, 101, 22, 8, 0, 0, 0, 67, 111, 110, 99, 114, 101, 116, 101, 2, 0, 0, 0, 2, 0, 0, 0, 105, 100, 5, 145, 249, 233, 238, 54, 69, 31, 54, 4, 0, 0, 0, 97, 114, 103, 115, 17, 0, 0, 0, 0, 8, 0, 0, 0, 114, 101, 113, 117, 105, 114, 101, 100, 1, 1, 168, 3, 0, 0, 22, 6, 0, 0, 0, 83, 99, 104, 101, 109, 97, 3, 0, 0, 0, 2, 0, 0, 0, 105, 100, 5, 158, 43, 123, 176, 206, 91, 168, 81, 11, 0, 0, 0, 116, 121, 112, 101, 95, 112, 97, 114, 97, 109, 115, 17, 0, 0, 0, 0, 4, 0, 0, 0, 107, 105, 110, 100, 23, 6, 0, 0, 0, 83, 116, 114, 117, 99, 116, 22, 6, 0, 0, 0, 83, 116, 114, 117, 99, 116, 2, 0, 0, 0, 4, 0, 0, 0, 110, 97, 109, 101, 15, 8, 0, 0, 0, 68, 105, 114, 69, 110, 116, 114, 121, 6, 0, 0, 0, 102, 105, 101, 108, 100, 115, 17, 7, 0, 0, 0, 22, 5, 0, 0, 0, 70, 105, 101, 108, 100, 3, 0, 0, 0, 4, 0, 0, 0, 110, 97, 109, 101, 15, 4, 0, 0, 0, 110, 97, 109, 101, 6, 0, 0, 0, 115, 99, 104, 101, 109, 97, 23, 8, 0, 0, 0, 67, 111, 110, 99, 114, 101, 116, 101, 22, 8, 0, 0, 0, 67, 111, 110, 99, 114, 101, 116, 101, 2, 0, 0, 0, 2, 0, 0, 0, 105, 100, 5, 232, 80, 225, 78, 145, 206, 125, 109, 4, 0, 0, 0, 97, 114, 103, 115, 17, 0, 0, 0, 0, 8, 0, 0, 0, 114, 101, 113, 117, 105, 114, 101, 100, 1, 1, 22, 5, 0, 0, 0, 70, 105, 101, 108, 100, 3, 0, 0, 0, 4, 0, 0, 0, 110, 97, 109, 101, 15, 7, 0, 0, 0, 105, 116, 101, 109, 95, 105, 100, 6, 0, 0, 0, 115, 99, 104, 101, 109, 97, 23, 8, 0, 0, 0, 67, 111, 110, 99, 114, 101, 116, 101, 22, 8, 0, 0, 0, 67, 111, 110, 99, 114, 101, 116, 101, 2, 0, 0, 0, 2, 0, 0, 0, 105, 100, 5, 172, 57, 22, 184, 152, 98, 53, 217, 4, 0, 0, 0, 97, 114, 103, 115, 17, 0, 0, 0, 0, 8, 0, 0, 0, 114, 101, 113, 117, 105, 114, 101, 100, 1, 1, 22, 5, 0, 0, 0, 70, 105, 101, 108, 100, 3, 0, 0, 0, 4, 0, 0, 0, 110, 97, 109, 101, 15, 9, 0, 0, 0, 105, 116, 101, 109, 95, 116, 121, 112, 101, 6, 0, 0, 0, 115, 99, 104, 101, 109, 97, 23, 8, 0, 0, 0, 67, 111, 110, 99, 114, 101, 116, 101, 22, 8, 0, 0, 0, 67, 111, 110, 99, 114, 101, 116, 101, 2, 0, 0, 0, 2, 0, 0, 0, 105, 100, 5, 99, 6, 43, 113, 27, 142, 215, 10, 4, 0, 0, 0, 97, 114, 103, 115, 17, 0, 0, 0, 0, 8, 0, 0, 0, 114, 101, 113, 117, 105, 114, 101, 100, 1, 1, 22, 5, 0, 0, 0, 70, 105, 101, 108, 100, 3, 0, 0, 0, 4, 0, 0, 0, 110, 97, 109, 101, 15, 4, 0, 0, 0, 115, 105, 122, 101, 6, 0, 0, 0, 115, 99, 104, 101, 109, 97, 23, 8, 0, 0, 0, 67, 111, 110, 99, 114, 101, 116, 101, 22, 8, 0, 0, 0, 67, 111, 110, 99, 114, 101, 116, 101, 2, 0, 0, 0, 2, 0, 0, 0, 105, 100, 5, 172, 57, 22, 184, 152, 98, 53, 217, 4, 0, 0, 0, 97, 114, 103, 115, 17, 0, 0, 0, 0, 8, 0, 0, 0, 114, 101, 113, 117, 105, 114, 101, 100, 1, 1, 22, 5, 0, 0, 0, 70, 105, 101, 108, 100, 3, 0, 0, 0, 4, 0, 0, 0, 110, 97, 109, 101, 15, 13, 0, 0, 0, 109, 111, 100, 105, 102, 105, 101, 100, 95, 116, 105, 109, 101, 6, 0, 0, 0, 115, 99, 104, 101, 109, 97, 23, 8, 0, 0, 0, 67, 111, 110, 99, 114, 101, 116, 101, 22, 8, 0, 0, 0, 67, 111, 110, 99, 114, 101, 116, 101, 2, 0, 0, 0, 2, 0, 0, 0, 105, 100, 5, 172, 57, 22, 184, 152, 98, 53, 217, 4, 0, 0, 0, 97, 114, 103, 115, 17, 0, 0, 0, 0, 8, 0, 0, 0, 114, 101, 113, 117, 105, 114, 101, 100, 1, 1, 22, 5, 0, 0, 0, 70, 105, 101, 108, 100, 3, 0, 0, 0, 4, 0, 0, 0, 110, 97, 109, 101, 15, 12, 0, 0, 0, 99, 114, 101, 97, 116, 101, 100, 95, 116, 105, 109, 101, 6, 0, 0, 0, 115, 99, 104, 101, 109, 97, 23, 8, 0, 0, 0, 67, 111, 110, 99, 114, 101, 116, 101, 22, 8, 0, 0, 0, 67, 111, 110, 99, 114, 101, 116, 101, 2, 0, 0, 0, 2, 0, 0, 0, 105, 100, 5, 172, 57, 22, 184, 152, 98, 53, 217, 4, 0, 0, 0, 97, 114, 103, 115, 17, 0, 0, 0, 0, 8, 0, 0, 0, 114, 101, 113, 117, 105, 114, 101, 100, 1, 1, 22, 5, 0, 0, 0, 70, 105, 101, 108, 100, 3, 0, 0, 0, 4, 0, 0, 0, 110, 97, 109, 101, 15, 4, 0, 0, 0, 109, 111, 100, 101, 6, 0, 0, 0, 115, 99, 104, 101, 109, 97, 23, 8, 0, 0, 0, 67, 111, 110, 99, 114, 101, 116, 101, 22, 8, 0, 0, 0, 67, 111, 110, 99, 114, 101, 116, 101, 2, 0, 0, 0, 2, 0, 0, 0, 105, 100, 5, 180, 99, 238, 242, 228, 91, 28, 40, 4, 0, 0, 0, 97, 114, 103, 115, 17, 0, 0, 0, 0, 8, 0, 0, 0, 114, 101, 113, 117, 105, 114, 101, 100, 1, 1, 74, 1, 0, 0, 22, 6, 0, 0, 0, 83, 99, 104, 101, 109, 97, 3, 0, 0, 0, 2, 0, 0, 0, 105, 100, 5, 99, 6, 43, 113, 27, 142, 215, 10, 11, 0, 0, 0, 116, 121, 112, 101, 95, 112, 97, 114, 97, 109, 115, 17, 0, 0, 0, 0, 4, 0, 0, 0, 107, 105, 110, 100, 23, 4, 0, 0, 0, 69, 110, 117, 109, 22, 4, 0, 0, 0, 69, 110, 117, 109, 2, 0, 0, 0, 4, 0, 0, 0, 110, 97, 109, 101, 15, 8, 0, 0, 0, 73, 116, 101, 109, 84, 121, 112, 101, 8, 0, 0, 0, 118, 97, 114, 105, 97, 110, 116, 115, 17, 3, 0, 0, 0, 22, 7, 0, 0, 0, 86, 97, 114, 105, 97, 110, 116, 3, 0, 0, 0, 4, 0, 0, 0, 110, 97, 109, 101, 15, 4, 0, 0, 0, 70, 105, 108, 101, 5, 0, 0, 0, 105, 110, 100, 101, 120, 4, 0, 0, 0, 0, 7, 0, 0, 0, 112, 97, 121, 108, 111, 97, 100, 23, 4, 0, 0, 0, 85, 110, 105, 116, 0, 22, 7, 0, 0, 0, 86, 97, 114, 105, 97, 110, 116, 3, 0, 0, 0, 4, 0, 0, 0, 110, 97, 109, 101, 15, 9, 0, 0, 0, 68, 105, 114, 101, 99, 116, 111, 114, 121, 5, 0, 0, 0, 105, 110, 100, 101, 120, 4, 1, 0, 0, 0, 7, 0, 0, 0, 112, 97, 121, 108, 111, 97, 100, 23, 4, 0, 0, 0, 85, 110, 105, 116, 0, 22, 7, 0, 0, 0, 86, 97, 114, 105, 97, 110, 116, 3, 0, 0, 0, 4, 0, 0, 0, 110, 97, 109, 101, 15, 7, 0, 0, 0, 83, 121, 109, 108, 105, 110, 107, 5, 0, 0, 0, 105, 110, 100, 101, 120, 4, 2, 0, 0, 0, 7, 0, 0, 0, 112, 97, 121, 108, 111, 97, 100, 23, 4, 0, 0, 0, 85, 110, 105, 116, 0, 149, 0, 0, 0, 22, 6, 0, 0, 0, 83, 99, 104, 101, 109, 97, 3, 0, 0, 0, 2, 0, 0, 0, 105, 100, 5, 34, 197, 180, 200, 110, 167, 221, 36, 11, 0, 0, 0, 116, 121, 112, 101, 95, 112, 97, 114, 97, 109, 115, 17, 0, 0, 0, 0, 4, 0, 0, 0, 107, 105, 110, 100, 23, 4, 0, 0, 0, 76, 105, 115, 116, 22, 4, 0, 0, 0, 76, 105, 115, 116, 1, 0, 0, 0, 7, 0, 0, 0, 101, 108, 101, 109, 101, 110, 116, 23, 8, 0, 0, 0, 67, 111, 110, 99, 114, 101, 116, 101, 22, 8, 0, 0, 0, 67, 111, 110, 99, 114, 101, 116, 101, 2, 0, 0, 0, 2, 0, 0, 0, 105, 100, 5, 158, 43, 123, 176, 206, 91, 168, 81, 4, 0, 0, 0, 97, 114, 103, 115, 17, 0, 0, 0, 0, 76, 3, 0, 0, 22, 6, 0, 0, 0, 83, 99, 104, 101, 109, 97, 3, 0, 0, 0, 2, 0, 0, 0, 105, 100, 5, 68, 38, 93, 12, 39, 230, 50, 48, 11, 0, 0, 0, 116, 121, 112, 101, 95, 112, 97, 114, 97, 109, 115, 17, 0, 0, 0, 0, 4, 0, 0, 0, 107, 105, 110, 100, 23, 4, 0, 0, 0, 69, 110, 117, 109, 22, 4, 0, 0, 0, 69, 110, 117, 109, 2, 0, 0, 0, 4, 0, 0, 0, 110, 97, 109, 101, 15, 8, 0, 0, 0, 86, 111, 120, 69, 114, 114, 111, 114, 8, 0, 0, 0, 118, 97, 114, 105, 97, 110, 116, 115, 17, 8, 0, 0, 0, 22, 7, 0, 0, 0, 86, 97, 114, 105, 97, 110, 116, 3, 0, 0, 0, 4, 0, 0, 0, 110, 97, 109, 101, 15, 4, 0, 0, 0, 85, 115, 101, 114, 5, 0, 0, 0, 105, 110, 100, 101, 120, 4, 0, 0, 0, 0, 7, 0, 0, 0, 112, 97, 121, 108, 111, 97, 100, 23, 7, 0, 0, 0, 78, 101, 119, 116, 121, 112, 101, 23, 8, 0, 0, 0, 67, 111, 110, 99, 114, 101, 116, 101, 22, 8, 0, 0, 0, 67, 111, 110, 99, 114, 101, 116, 101, 2, 0, 0, 0, 2, 0, 0, 0, 105, 100, 5, 241, 100, 141, 24, 86, 120, 254, 139, 4, 0, 0, 0, 97, 114, 103, 115, 17, 0, 0, 0, 0, 22, 7, 0, 0, 0, 86, 97, 114, 105, 97, 110, 116, 3, 0, 0, 0, 4, 0, 0, 0, 110, 97, 109, 101, 15, 13, 0, 0, 0, 85, 110, 107, 110, 111, 119, 110, 77, 101, 116, 104, 111, 100, 5, 0, 0, 0, 105, 110, 100, 101, 120, 4, 1, 0, 0, 0, 7, 0, 0, 0, 112, 97, 121, 108, 111, 97, 100, 23, 4, 0, 0, 0, 85, 110, 105, 116, 0, 22, 7, 0, 0, 0, 86, 97, 114, 105, 97, 110, 116, 3, 0, 0, 0, 4, 0, 0, 0, 110, 97, 109, 101, 15, 14, 0, 0, 0, 73, 110, 118, 97, 108, 105, 100, 80, 97, 121, 108, 111, 97, 100, 5, 0, 0, 0, 105, 110, 100, 101, 120, 4, 2, 0, 0, 0, 7, 0, 0, 0, 112, 97, 121, 108, 111, 97, 100, 23, 7, 0, 0, 0, 78, 101, 119, 116, 121, 112, 101, 23, 8, 0, 0, 0, 67, 111, 110, 99, 114, 101, 116, 101, 22, 8, 0, 0, 0, 67, 111, 110, 99, 114, 101, 116, 101, 2, 0, 0, 0, 2, 0, 0, 0, 105, 100, 5, 232, 80, 225, 78, 145, 206, 125, 109, 4, 0, 0, 0, 97, 114, 103, 115, 17, 0, 0, 0, 0, 22, 7, 0, 0, 0, 86, 97, 114, 105, 97, 110, 116, 3, 0, 0, 0, 4, 0, 0, 0, 110, 97, 109, 101, 15, 9, 0, 0, 0, 67, 97, 110, 99, 101, 108, 108, 101, 100, 5, 0, 0, 0, 105, 110, 100, 101, 120, 4, 3, 0, 0, 0, 7, 0, 0, 0, 112, 97, 121, 108, 111, 97, 100, 23, 4, 0, 0, 0, 85, 110, 105, 116, 0, 22, 7, 0, 0, 0, 86, 97, 114, 105, 97, 110, 116, 3, 0, 0, 0, 4, 0, 0, 0, 110, 97, 109, 101, 15, 16, 0, 0, 0, 67, 111, 110, 110, 101, 99, 116, 105, 111, 110, 67, 108, 111, 115, 101, 100, 5, 0, 0, 0, 105, 110, 100, 101, 120, 4, 4, 0, 0, 0, 7, 0, 0, 0, 112, 97, 121, 108, 111, 97, 100, 23, 4, 0, 0, 0, 85, 110, 105, 116, 0, 22, 7, 0, 0, 0, 86, 97, 114, 105, 97, 110, 116, 3, 0, 0, 0, 4, 0, 0, 0, 110, 97, 109, 101, 15, 15, 0, 0, 0, 83, 101, 115, 115, 105, 111, 110, 83, 104, 117, 116, 100, 111, 119, 110, 5, 0, 0, 0, 105, 110, 100, 101, 120, 4, 5, 0, 0, 0, 7, 0, 0, 0, 112, 97, 121, 108, 111, 97, 100, 23, 4, 0, 0, 0, 85, 110, 105, 116, 0, 22, 7, 0, 0, 0, 86, 97, 114, 105, 97, 110, 116, 3, 0, 0, 0, 4, 0, 0, 0, 110, 97, 109, 101, 15, 10, 0, 0, 0, 83, 101, 110, 100, 70, 97, 105, 108, 101, 100, 5, 0, 0, 0, 105, 110, 100, 101, 120, 4, 6, 0, 0, 0, 7, 0, 0, 0, 112, 97, 121, 108, 111, 97, 100, 23, 4, 0, 0, 0, 85, 110, 105, 116, 0, 22, 7, 0, 0, 0, 86, 97, 114, 105, 97, 110, 116, 3, 0, 0, 0, 4, 0, 0, 0, 110, 97, 109, 101, 15, 13, 0, 0, 0, 73, 110, 100, 101, 116, 101, 114, 109, 105, 110, 97, 116, 101, 5, 0, 0, 0, 105, 110, 100, 101, 120, 4, 7, 0, 0, 0, 7, 0, 0, 0, 112, 97, 121, 108, 111, 97, 100, 23, 4, 0, 0, 0, 85, 110, 105, 116, 0, 122, 0, 0, 0, 22, 6, 0, 0, 0, 83, 99, 104, 101, 109, 97, 3, 0, 0, 0, 2, 0, 0, 0, 105, 100, 5, 241, 100, 141, 24, 86, 120, 254, 139, 11, 0, 0, 0, 116, 121, 112, 101, 95, 112, 97, 114, 97, 109, 115, 17, 0, 0, 0, 0, 4, 0, 0, 0, 107, 105, 110, 100, 23, 6, 0, 0, 0, 83, 116, 114, 117, 99, 116, 22, 6, 0, 0, 0, 83, 116, 114, 117, 99, 116, 2, 0, 0, 0, 4, 0, 0, 0, 110, 97, 109, 101, 15, 10, 0, 0, 0, 73, 110, 102, 97, 108, 108, 105, 98, 108, 101, 6, 0, 0, 0, 102, 105, 101, 108, 100, 115, 17, 0, 0, 0, 0],
+        responseDescriptor: vfs_readDir_ResponseDescriptor,
+        responseDescriptorBlocks: vfs_readDir_ResponseDescriptorBlocks,
+        channels: []),
+    0x719a43e94d147918: PhonMethodSchemas(
+        argsRoot: SchemaId(0x373bd01794b28844),
+        argsSchemaClosure: [68, 136, 178, 148, 23, 208, 59, 55, 1, 0, 0, 0, 17, 1, 0, 0, 22, 6, 0, 0, 0, 83, 99, 104, 101, 109, 97, 3, 0, 0, 0, 2, 0, 0, 0, 105, 100, 5, 68, 136, 178, 148, 23, 208, 59, 55, 11, 0, 0, 0, 116, 121, 112, 101, 95, 112, 97, 114, 97, 109, 115, 17, 0, 0, 0, 0, 4, 0, 0, 0, 107, 105, 110, 100, 23, 5, 0, 0, 0, 84, 117, 112, 108, 101, 22, 5, 0, 0, 0, 84, 117, 112, 108, 101, 1, 0, 0, 0, 8, 0, 0, 0, 101, 108, 101, 109, 101, 110, 116, 115, 17, 3, 0, 0, 0, 23, 8, 0, 0, 0, 67, 111, 110, 99, 114, 101, 116, 101, 22, 8, 0, 0, 0, 67, 111, 110, 99, 114, 101, 116, 101, 2, 0, 0, 0, 2, 0, 0, 0, 105, 100, 5, 172, 57, 22, 184, 152, 98, 53, 217, 4, 0, 0, 0, 97, 114, 103, 115, 17, 0, 0, 0, 0, 23, 8, 0, 0, 0, 67, 111, 110, 99, 114, 101, 116, 101, 22, 8, 0, 0, 0, 67, 111, 110, 99, 114, 101, 116, 101, 2, 0, 0, 0, 2, 0, 0, 0, 105, 100, 5, 172, 57, 22, 184, 152, 98, 53, 217, 4, 0, 0, 0, 97, 114, 103, 115, 17, 0, 0, 0, 0, 23, 8, 0, 0, 0, 67, 111, 110, 99, 114, 101, 116, 101, 22, 8, 0, 0, 0, 67, 111, 110, 99, 114, 101, 116, 101, 2, 0, 0, 0, 2, 0, 0, 0, 105, 100, 5, 172, 57, 22, 184, 152, 98, 53, 217, 4, 0, 0, 0, 97, 114, 103, 115, 17, 0, 0, 0, 0],
+        argsDescriptor: vfs_read_ArgsDescriptor,
+        argsDescriptorBlocks: vfs_read_ArgsDescriptorBlocks,
+        okRoot: SchemaId(0x18f20b532d4ba7c4),
+        responseRoot: SchemaId(0x0c569e8a025f2bf7),
+        responseSchemaClosure: [247, 43, 95, 2, 138, 158, 86, 12, 5, 0, 0, 0, 113, 1, 0, 0, 22, 6, 0, 0, 0, 83, 99, 104, 101, 109, 97, 3, 0, 0, 0, 2, 0, 0, 0, 105, 100, 5, 247, 43, 95, 2, 138, 158, 86, 12, 11, 0, 0, 0, 116, 121, 112, 101, 95, 112, 97, 114, 97, 109, 115, 17, 0, 0, 0, 0, 4, 0, 0, 0, 107, 105, 110, 100, 23, 4, 0, 0, 0, 69, 110, 117, 109, 22, 4, 0, 0, 0, 69, 110, 117, 109, 2, 0, 0, 0, 4, 0, 0, 0, 110, 97, 109, 101, 15, 6, 0, 0, 0, 82, 101, 115, 117, 108, 116, 8, 0, 0, 0, 118, 97, 114, 105, 97, 110, 116, 115, 17, 2, 0, 0, 0, 22, 7, 0, 0, 0, 86, 97, 114, 105, 97, 110, 116, 3, 0, 0, 0, 4, 0, 0, 0, 110, 97, 109, 101, 15, 2, 0, 0, 0, 79, 107, 5, 0, 0, 0, 105, 110, 100, 101, 120, 4, 0, 0, 0, 0, 7, 0, 0, 0, 112, 97, 121, 108, 111, 97, 100, 23, 7, 0, 0, 0, 78, 101, 119, 116, 121, 112, 101, 23, 8, 0, 0, 0, 67, 111, 110, 99, 114, 101, 116, 101, 22, 8, 0, 0, 0, 67, 111, 110, 99, 114, 101, 116, 101, 2, 0, 0, 0, 2, 0, 0, 0, 105, 100, 5, 196, 167, 75, 45, 83, 11, 242, 24, 4, 0, 0, 0, 97, 114, 103, 115, 17, 0, 0, 0, 0, 22, 7, 0, 0, 0, 86, 97, 114, 105, 97, 110, 116, 3, 0, 0, 0, 4, 0, 0, 0, 110, 97, 109, 101, 15, 3, 0, 0, 0, 69, 114, 114, 5, 0, 0, 0, 105, 110, 100, 101, 120, 4, 1, 0, 0, 0, 7, 0, 0, 0, 112, 97, 121, 108, 111, 97, 100, 23, 7, 0, 0, 0, 78, 101, 119, 116, 121, 112, 101, 23, 8, 0, 0, 0, 67, 111, 110, 99, 114, 101, 116, 101, 22, 8, 0, 0, 0, 67, 111, 110, 99, 114, 101, 116, 101, 2, 0, 0, 0, 2, 0, 0, 0, 105, 100, 5, 68, 38, 93, 12, 39, 230, 50, 48, 4, 0, 0, 0, 97, 114, 103, 115, 17, 0, 0, 0, 0, 93, 1, 0, 0, 22, 6, 0, 0, 0, 83, 99, 104, 101, 109, 97, 3, 0, 0, 0, 2, 0, 0, 0, 105, 100, 5, 196, 167, 75, 45, 83, 11, 242, 24, 11, 0, 0, 0, 116, 121, 112, 101, 95, 112, 97, 114, 97, 109, 115, 17, 0, 0, 0, 0, 4, 0, 0, 0, 107, 105, 110, 100, 23, 6, 0, 0, 0, 83, 116, 114, 117, 99, 116, 22, 6, 0, 0, 0, 83, 116, 114, 117, 99, 116, 2, 0, 0, 0, 4, 0, 0, 0, 110, 97, 109, 101, 15, 10, 0, 0, 0, 82, 101, 97, 100, 82, 101, 115, 117, 108, 116, 6, 0, 0, 0, 102, 105, 101, 108, 100, 115, 17, 2, 0, 0, 0, 22, 5, 0, 0, 0, 70, 105, 101, 108, 100, 3, 0, 0, 0, 4, 0, 0, 0, 110, 97, 109, 101, 15, 4, 0, 0, 0, 100, 97, 116, 97, 6, 0, 0, 0, 115, 99, 104, 101, 109, 97, 23, 8, 0, 0, 0, 67, 111, 110, 99, 114, 101, 116, 101, 22, 8, 0, 0, 0, 67, 111, 110, 99, 114, 101, 116, 101, 2, 0, 0, 0, 2, 0, 0, 0, 105, 100, 5, 81, 209, 153, 66, 223, 103, 6, 170, 4, 0, 0, 0, 97, 114, 103, 115, 17, 0, 0, 0, 0, 8, 0, 0, 0, 114, 101, 113, 117, 105, 114, 101, 100, 1, 1, 22, 5, 0, 0, 0, 70, 105, 101, 108, 100, 3, 0, 0, 0, 4, 0, 0, 0, 110, 97, 109, 101, 15, 5, 0, 0, 0, 101, 114, 114, 111, 114, 6, 0, 0, 0, 115, 99, 104, 101, 109, 97, 23, 8, 0, 0, 0, 67, 111, 110, 99, 114, 101, 116, 101, 22, 8, 0, 0, 0, 67, 111, 110, 99, 114, 101, 116, 101, 2, 0, 0, 0, 2, 0, 0, 0, 105, 100, 5, 145, 249, 233, 238, 54, 69, 31, 54, 4, 0, 0, 0, 97, 114, 103, 115, 17, 0, 0, 0, 0, 8, 0, 0, 0, 114, 101, 113, 117, 105, 114, 101, 100, 1, 1, 149, 0, 0, 0, 22, 6, 0, 0, 0, 83, 99, 104, 101, 109, 97, 3, 0, 0, 0, 2, 0, 0, 0, 105, 100, 5, 81, 209, 153, 66, 223, 103, 6, 170, 11, 0, 0, 0, 116, 121, 112, 101, 95, 112, 97, 114, 97, 109, 115, 17, 0, 0, 0, 0, 4, 0, 0, 0, 107, 105, 110, 100, 23, 4, 0, 0, 0, 76, 105, 115, 116, 22, 4, 0, 0, 0, 76, 105, 115, 116, 1, 0, 0, 0, 7, 0, 0, 0, 101, 108, 101, 109, 101, 110, 116, 23, 8, 0, 0, 0, 67, 111, 110, 99, 114, 101, 116, 101, 22, 8, 0, 0, 0, 67, 111, 110, 99, 114, 101, 116, 101, 2, 0, 0, 0, 2, 0, 0, 0, 105, 100, 5, 32, 15, 77, 49, 242, 84, 141, 44, 4, 0, 0, 0, 97, 114, 103, 115, 17, 0, 0, 0, 0, 76, 3, 0, 0, 22, 6, 0, 0, 0, 83, 99, 104, 101, 109, 97, 3, 0, 0, 0, 2, 0, 0, 0, 105, 100, 5, 68, 38, 93, 12, 39, 230, 50, 48, 11, 0, 0, 0, 116, 121, 112, 101, 95, 112, 97, 114, 97, 109, 115, 17, 0, 0, 0, 0, 4, 0, 0, 0, 107, 105, 110, 100, 23, 4, 0, 0, 0, 69, 110, 117, 109, 22, 4, 0, 0, 0, 69, 110, 117, 109, 2, 0, 0, 0, 4, 0, 0, 0, 110, 97, 109, 101, 15, 8, 0, 0, 0, 86, 111, 120, 69, 114, 114, 111, 114, 8, 0, 0, 0, 118, 97, 114, 105, 97, 110, 116, 115, 17, 8, 0, 0, 0, 22, 7, 0, 0, 0, 86, 97, 114, 105, 97, 110, 116, 3, 0, 0, 0, 4, 0, 0, 0, 110, 97, 109, 101, 15, 4, 0, 0, 0, 85, 115, 101, 114, 5, 0, 0, 0, 105, 110, 100, 101, 120, 4, 0, 0, 0, 0, 7, 0, 0, 0, 112, 97, 121, 108, 111, 97, 100, 23, 7, 0, 0, 0, 78, 101, 119, 116, 121, 112, 101, 23, 8, 0, 0, 0, 67, 111, 110, 99, 114, 101, 116, 101, 22, 8, 0, 0, 0, 67, 111, 110, 99, 114, 101, 116, 101, 2, 0, 0, 0, 2, 0, 0, 0, 105, 100, 5, 241, 100, 141, 24, 86, 120, 254, 139, 4, 0, 0, 0, 97, 114, 103, 115, 17, 0, 0, 0, 0, 22, 7, 0, 0, 0, 86, 97, 114, 105, 97, 110, 116, 3, 0, 0, 0, 4, 0, 0, 0, 110, 97, 109, 101, 15, 13, 0, 0, 0, 85, 110, 107, 110, 111, 119, 110, 77, 101, 116, 104, 111, 100, 5, 0, 0, 0, 105, 110, 100, 101, 120, 4, 1, 0, 0, 0, 7, 0, 0, 0, 112, 97, 121, 108, 111, 97, 100, 23, 4, 0, 0, 0, 85, 110, 105, 116, 0, 22, 7, 0, 0, 0, 86, 97, 114, 105, 97, 110, 116, 3, 0, 0, 0, 4, 0, 0, 0, 110, 97, 109, 101, 15, 14, 0, 0, 0, 73, 110, 118, 97, 108, 105, 100, 80, 97, 121, 108, 111, 97, 100, 5, 0, 0, 0, 105, 110, 100, 101, 120, 4, 2, 0, 0, 0, 7, 0, 0, 0, 112, 97, 121, 108, 111, 97, 100, 23, 7, 0, 0, 0, 78, 101, 119, 116, 121, 112, 101, 23, 8, 0, 0, 0, 67, 111, 110, 99, 114, 101, 116, 101, 22, 8, 0, 0, 0, 67, 111, 110, 99, 114, 101, 116, 101, 2, 0, 0, 0, 2, 0, 0, 0, 105, 100, 5, 232, 80, 225, 78, 145, 206, 125, 109, 4, 0, 0, 0, 97, 114, 103, 115, 17, 0, 0, 0, 0, 22, 7, 0, 0, 0, 86, 97, 114, 105, 97, 110, 116, 3, 0, 0, 0, 4, 0, 0, 0, 110, 97, 109, 101, 15, 9, 0, 0, 0, 67, 97, 110, 99, 101, 108, 108, 101, 100, 5, 0, 0, 0, 105, 110, 100, 101, 120, 4, 3, 0, 0, 0, 7, 0, 0, 0, 112, 97, 121, 108, 111, 97, 100, 23, 4, 0, 0, 0, 85, 110, 105, 116, 0, 22, 7, 0, 0, 0, 86, 97, 114, 105, 97, 110, 116, 3, 0, 0, 0, 4, 0, 0, 0, 110, 97, 109, 101, 15, 16, 0, 0, 0, 67, 111, 110, 110, 101, 99, 116, 105, 111, 110, 67, 108, 111, 115, 101, 100, 5, 0, 0, 0, 105, 110, 100, 101, 120, 4, 4, 0, 0, 0, 7, 0, 0, 0, 112, 97, 121, 108, 111, 97, 100, 23, 4, 0, 0, 0, 85, 110, 105, 116, 0, 22, 7, 0, 0, 0, 86, 97, 114, 105, 97, 110, 116, 3, 0, 0, 0, 4, 0, 0, 0, 110, 97, 109, 101, 15, 15, 0, 0, 0, 83, 101, 115, 115, 105, 111, 110, 83, 104, 117, 116, 100, 111, 119, 110, 5, 0, 0, 0, 105, 110, 100, 101, 120, 4, 5, 0, 0, 0, 7, 0, 0, 0, 112, 97, 121, 108, 111, 97, 100, 23, 4, 0, 0, 0, 85, 110, 105, 116, 0, 22, 7, 0, 0, 0, 86, 97, 114, 105, 97, 110, 116, 3, 0, 0, 0, 4, 0, 0, 0, 110, 97, 109, 101, 15, 10, 0, 0, 0, 83, 101, 110, 100, 70, 97, 105, 108, 101, 100, 5, 0, 0, 0, 105, 110, 100, 101, 120, 4, 6, 0, 0, 0, 7, 0, 0, 0, 112, 97, 121, 108, 111, 97, 100, 23, 4, 0, 0, 0, 85, 110, 105, 116, 0, 22, 7, 0, 0, 0, 86, 97, 114, 105, 97, 110, 116, 3, 0, 0, 0, 4, 0, 0, 0, 110, 97, 109, 101, 15, 13, 0, 0, 0, 73, 110, 100, 101, 116, 101, 114, 109, 105, 110, 97, 116, 101, 5, 0, 0, 0, 105, 110, 100, 101, 120, 4, 7, 0, 0, 0, 7, 0, 0, 0, 112, 97, 121, 108, 111, 97, 100, 23, 4, 0, 0, 0, 85, 110, 105, 116, 0, 122, 0, 0, 0, 22, 6, 0, 0, 0, 83, 99, 104, 101, 109, 97, 3, 0, 0, 0, 2, 0, 0, 0, 105, 100, 5, 241, 100, 141, 24, 86, 120, 254, 139, 11, 0, 0, 0, 116, 121, 112, 101, 95, 112, 97, 114, 97, 109, 115, 17, 0, 0, 0, 0, 4, 0, 0, 0, 107, 105, 110, 100, 23, 6, 0, 0, 0, 83, 116, 114, 117, 99, 116, 22, 6, 0, 0, 0, 83, 116, 114, 117, 99, 116, 2, 0, 0, 0, 4, 0, 0, 0, 110, 97, 109, 101, 15, 10, 0, 0, 0, 73, 110, 102, 97, 108, 108, 105, 98, 108, 101, 6, 0, 0, 0, 102, 105, 101, 108, 100, 115, 17, 0, 0, 0, 0],
+        responseDescriptor: vfs_read_ResponseDescriptor,
+        responseDescriptorBlocks: vfs_read_ResponseDescriptorBlocks,
+        channels: []),
+    0xc330417994d57b8a: PhonMethodSchemas(
+        argsRoot: SchemaId(0x96046ae85aacc237),
+        argsSchemaClosure: [55, 194, 172, 90, 232, 106, 4, 150, 2, 0, 0, 0, 17, 1, 0, 0, 22, 6, 0, 0, 0, 83, 99, 104, 101, 109, 97, 3, 0, 0, 0, 2, 0, 0, 0, 105, 100, 5, 55, 194, 172, 90, 232, 106, 4, 150, 11, 0, 0, 0, 116, 121, 112, 101, 95, 112, 97, 114, 97, 109, 115, 17, 0, 0, 0, 0, 4, 0, 0, 0, 107, 105, 110, 100, 23, 5, 0, 0, 0, 84, 117, 112, 108, 101, 22, 5, 0, 0, 0, 84, 117, 112, 108, 101, 1, 0, 0, 0, 8, 0, 0, 0, 101, 108, 101, 109, 101, 110, 116, 115, 17, 3, 0, 0, 0, 23, 8, 0, 0, 0, 67, 111, 110, 99, 114, 101, 116, 101, 22, 8, 0, 0, 0, 67, 111, 110, 99, 114, 101, 116, 101, 2, 0, 0, 0, 2, 0, 0, 0, 105, 100, 5, 172, 57, 22, 184, 152, 98, 53, 217, 4, 0, 0, 0, 97, 114, 103, 115, 17, 0, 0, 0, 0, 23, 8, 0, 0, 0, 67, 111, 110, 99, 114, 101, 116, 101, 22, 8, 0, 0, 0, 67, 111, 110, 99, 114, 101, 116, 101, 2, 0, 0, 0, 2, 0, 0, 0, 105, 100, 5, 172, 57, 22, 184, 152, 98, 53, 217, 4, 0, 0, 0, 97, 114, 103, 115, 17, 0, 0, 0, 0, 23, 8, 0, 0, 0, 67, 111, 110, 99, 114, 101, 116, 101, 22, 8, 0, 0, 0, 67, 111, 110, 99, 114, 101, 116, 101, 2, 0, 0, 0, 2, 0, 0, 0, 105, 100, 5, 81, 209, 153, 66, 223, 103, 6, 170, 4, 0, 0, 0, 97, 114, 103, 115, 17, 0, 0, 0, 0, 149, 0, 0, 0, 22, 6, 0, 0, 0, 83, 99, 104, 101, 109, 97, 3, 0, 0, 0, 2, 0, 0, 0, 105, 100, 5, 81, 209, 153, 66, 223, 103, 6, 170, 11, 0, 0, 0, 116, 121, 112, 101, 95, 112, 97, 114, 97, 109, 115, 17, 0, 0, 0, 0, 4, 0, 0, 0, 107, 105, 110, 100, 23, 4, 0, 0, 0, 76, 105, 115, 116, 22, 4, 0, 0, 0, 76, 105, 115, 116, 1, 0, 0, 0, 7, 0, 0, 0, 101, 108, 101, 109, 101, 110, 116, 23, 8, 0, 0, 0, 67, 111, 110, 99, 114, 101, 116, 101, 22, 8, 0, 0, 0, 67, 111, 110, 99, 114, 101, 116, 101, 2, 0, 0, 0, 2, 0, 0, 0, 105, 100, 5, 32, 15, 77, 49, 242, 84, 141, 44, 4, 0, 0, 0, 97, 114, 103, 115, 17, 0, 0, 0, 0],
+        argsDescriptor: vfs_write_ArgsDescriptor,
+        argsDescriptorBlocks: vfs_write_ArgsDescriptorBlocks,
+        okRoot: SchemaId(0xbb84612fe7996d64),
+        responseRoot: SchemaId(0x76e97bc65f90930e),
+        responseSchemaClosure: [14, 147, 144, 95, 198, 123, 233, 118, 4, 0, 0, 0, 113, 1, 0, 0, 22, 6, 0, 0, 0, 83, 99, 104, 101, 109, 97, 3, 0, 0, 0, 2, 0, 0, 0, 105, 100, 5, 14, 147, 144, 95, 198, 123, 233, 118, 11, 0, 0, 0, 116, 121, 112, 101, 95, 112, 97, 114, 97, 109, 115, 17, 0, 0, 0, 0, 4, 0, 0, 0, 107, 105, 110, 100, 23, 4, 0, 0, 0, 69, 110, 117, 109, 22, 4, 0, 0, 0, 69, 110, 117, 109, 2, 0, 0, 0, 4, 0, 0, 0, 110, 97, 109, 101, 15, 6, 0, 0, 0, 82, 101, 115, 117, 108, 116, 8, 0, 0, 0, 118, 97, 114, 105, 97, 110, 116, 115, 17, 2, 0, 0, 0, 22, 7, 0, 0, 0, 86, 97, 114, 105, 97, 110, 116, 3, 0, 0, 0, 4, 0, 0, 0, 110, 97, 109, 101, 15, 2, 0, 0, 0, 79, 107, 5, 0, 0, 0, 105, 110, 100, 101, 120, 4, 0, 0, 0, 0, 7, 0, 0, 0, 112, 97, 121, 108, 111, 97, 100, 23, 7, 0, 0, 0, 78, 101, 119, 116, 121, 112, 101, 23, 8, 0, 0, 0, 67, 111, 110, 99, 114, 101, 116, 101, 22, 8, 0, 0, 0, 67, 111, 110, 99, 114, 101, 116, 101, 2, 0, 0, 0, 2, 0, 0, 0, 105, 100, 5, 100, 109, 153, 231, 47, 97, 132, 187, 4, 0, 0, 0, 97, 114, 103, 115, 17, 0, 0, 0, 0, 22, 7, 0, 0, 0, 86, 97, 114, 105, 97, 110, 116, 3, 0, 0, 0, 4, 0, 0, 0, 110, 97, 109, 101, 15, 3, 0, 0, 0, 69, 114, 114, 5, 0, 0, 0, 105, 110, 100, 101, 120, 4, 1, 0, 0, 0, 7, 0, 0, 0, 112, 97, 121, 108, 111, 97, 100, 23, 7, 0, 0, 0, 78, 101, 119, 116, 121, 112, 101, 23, 8, 0, 0, 0, 67, 111, 110, 99, 114, 101, 116, 101, 22, 8, 0, 0, 0, 67, 111, 110, 99, 114, 101, 116, 101, 2, 0, 0, 0, 2, 0, 0, 0, 105, 100, 5, 68, 38, 93, 12, 39, 230, 50, 48, 4, 0, 0, 0, 97, 114, 103, 115, 17, 0, 0, 0, 0, 103, 1, 0, 0, 22, 6, 0, 0, 0, 83, 99, 104, 101, 109, 97, 3, 0, 0, 0, 2, 0, 0, 0, 105, 100, 5, 100, 109, 153, 231, 47, 97, 132, 187, 11, 0, 0, 0, 116, 121, 112, 101, 95, 112, 97, 114, 97, 109, 115, 17, 0, 0, 0, 0, 4, 0, 0, 0, 107, 105, 110, 100, 23, 6, 0, 0, 0, 83, 116, 114, 117, 99, 116, 22, 6, 0, 0, 0, 83, 116, 114, 117, 99, 116, 2, 0, 0, 0, 4, 0, 0, 0, 110, 97, 109, 101, 15, 11, 0, 0, 0, 87, 114, 105, 116, 101, 82, 101, 115, 117, 108, 116, 6, 0, 0, 0, 102, 105, 101, 108, 100, 115, 17, 2, 0, 0, 0, 22, 5, 0, 0, 0, 70, 105, 101, 108, 100, 3, 0, 0, 0, 4, 0, 0, 0, 110, 97, 109, 101, 15, 13, 0, 0, 0, 98, 121, 116, 101, 115, 95, 119, 114, 105, 116, 116, 101, 110, 6, 0, 0, 0, 115, 99, 104, 101, 109, 97, 23, 8, 0, 0, 0, 67, 111, 110, 99, 114, 101, 116, 101, 22, 8, 0, 0, 0, 67, 111, 110, 99, 114, 101, 116, 101, 2, 0, 0, 0, 2, 0, 0, 0, 105, 100, 5, 172, 57, 22, 184, 152, 98, 53, 217, 4, 0, 0, 0, 97, 114, 103, 115, 17, 0, 0, 0, 0, 8, 0, 0, 0, 114, 101, 113, 117, 105, 114, 101, 100, 1, 1, 22, 5, 0, 0, 0, 70, 105, 101, 108, 100, 3, 0, 0, 0, 4, 0, 0, 0, 110, 97, 109, 101, 15, 5, 0, 0, 0, 101, 114, 114, 111, 114, 6, 0, 0, 0, 115, 99, 104, 101, 109, 97, 23, 8, 0, 0, 0, 67, 111, 110, 99, 114, 101, 116, 101, 22, 8, 0, 0, 0, 67, 111, 110, 99, 114, 101, 116, 101, 2, 0, 0, 0, 2, 0, 0, 0, 105, 100, 5, 145, 249, 233, 238, 54, 69, 31, 54, 4, 0, 0, 0, 97, 114, 103, 115, 17, 0, 0, 0, 0, 8, 0, 0, 0, 114, 101, 113, 117, 105, 114, 101, 100, 1, 1, 76, 3, 0, 0, 22, 6, 0, 0, 0, 83, 99, 104, 101, 109, 97, 3, 0, 0, 0, 2, 0, 0, 0, 105, 100, 5, 68, 38, 93, 12, 39, 230, 50, 48, 11, 0, 0, 0, 116, 121, 112, 101, 95, 112, 97, 114, 97, 109, 115, 17, 0, 0, 0, 0, 4, 0, 0, 0, 107, 105, 110, 100, 23, 4, 0, 0, 0, 69, 110, 117, 109, 22, 4, 0, 0, 0, 69, 110, 117, 109, 2, 0, 0, 0, 4, 0, 0, 0, 110, 97, 109, 101, 15, 8, 0, 0, 0, 86, 111, 120, 69, 114, 114, 111, 114, 8, 0, 0, 0, 118, 97, 114, 105, 97, 110, 116, 115, 17, 8, 0, 0, 0, 22, 7, 0, 0, 0, 86, 97, 114, 105, 97, 110, 116, 3, 0, 0, 0, 4, 0, 0, 0, 110, 97, 109, 101, 15, 4, 0, 0, 0, 85, 115, 101, 114, 5, 0, 0, 0, 105, 110, 100, 101, 120, 4, 0, 0, 0, 0, 7, 0, 0, 0, 112, 97, 121, 108, 111, 97, 100, 23, 7, 0, 0, 0, 78, 101, 119, 116, 121, 112, 101, 23, 8, 0, 0, 0, 67, 111, 110, 99, 114, 101, 116, 101, 22, 8, 0, 0, 0, 67, 111, 110, 99, 114, 101, 116, 101, 2, 0, 0, 0, 2, 0, 0, 0, 105, 100, 5, 241, 100, 141, 24, 86, 120, 254, 139, 4, 0, 0, 0, 97, 114, 103, 115, 17, 0, 0, 0, 0, 22, 7, 0, 0, 0, 86, 97, 114, 105, 97, 110, 116, 3, 0, 0, 0, 4, 0, 0, 0, 110, 97, 109, 101, 15, 13, 0, 0, 0, 85, 110, 107, 110, 111, 119, 110, 77, 101, 116, 104, 111, 100, 5, 0, 0, 0, 105, 110, 100, 101, 120, 4, 1, 0, 0, 0, 7, 0, 0, 0, 112, 97, 121, 108, 111, 97, 100, 23, 4, 0, 0, 0, 85, 110, 105, 116, 0, 22, 7, 0, 0, 0, 86, 97, 114, 105, 97, 110, 116, 3, 0, 0, 0, 4, 0, 0, 0, 110, 97, 109, 101, 15, 14, 0, 0, 0, 73, 110, 118, 97, 108, 105, 100, 80, 97, 121, 108, 111, 97, 100, 5, 0, 0, 0, 105, 110, 100, 101, 120, 4, 2, 0, 0, 0, 7, 0, 0, 0, 112, 97, 121, 108, 111, 97, 100, 23, 7, 0, 0, 0, 78, 101, 119, 116, 121, 112, 101, 23, 8, 0, 0, 0, 67, 111, 110, 99, 114, 101, 116, 101, 22, 8, 0, 0, 0, 67, 111, 110, 99, 114, 101, 116, 101, 2, 0, 0, 0, 2, 0, 0, 0, 105, 100, 5, 232, 80, 225, 78, 145, 206, 125, 109, 4, 0, 0, 0, 97, 114, 103, 115, 17, 0, 0, 0, 0, 22, 7, 0, 0, 0, 86, 97, 114, 105, 97, 110, 116, 3, 0, 0, 0, 4, 0, 0, 0, 110, 97, 109, 101, 15, 9, 0, 0, 0, 67, 97, 110, 99, 101, 108, 108, 101, 100, 5, 0, 0, 0, 105, 110, 100, 101, 120, 4, 3, 0, 0, 0, 7, 0, 0, 0, 112, 97, 121, 108, 111, 97, 100, 23, 4, 0, 0, 0, 85, 110, 105, 116, 0, 22, 7, 0, 0, 0, 86, 97, 114, 105, 97, 110, 116, 3, 0, 0, 0, 4, 0, 0, 0, 110, 97, 109, 101, 15, 16, 0, 0, 0, 67, 111, 110, 110, 101, 99, 116, 105, 111, 110, 67, 108, 111, 115, 101, 100, 5, 0, 0, 0, 105, 110, 100, 101, 120, 4, 4, 0, 0, 0, 7, 0, 0, 0, 112, 97, 121, 108, 111, 97, 100, 23, 4, 0, 0, 0, 85, 110, 105, 116, 0, 22, 7, 0, 0, 0, 86, 97, 114, 105, 97, 110, 116, 3, 0, 0, 0, 4, 0, 0, 0, 110, 97, 109, 101, 15, 15, 0, 0, 0, 83, 101, 115, 115, 105, 111, 110, 83, 104, 117, 116, 100, 111, 119, 110, 5, 0, 0, 0, 105, 110, 100, 101, 120, 4, 5, 0, 0, 0, 7, 0, 0, 0, 112, 97, 121, 108, 111, 97, 100, 23, 4, 0, 0, 0, 85, 110, 105, 116, 0, 22, 7, 0, 0, 0, 86, 97, 114, 105, 97, 110, 116, 3, 0, 0, 0, 4, 0, 0, 0, 110, 97, 109, 101, 15, 10, 0, 0, 0, 83, 101, 110, 100, 70, 97, 105, 108, 101, 100, 5, 0, 0, 0, 105, 110, 100, 101, 120, 4, 6, 0, 0, 0, 7, 0, 0, 0, 112, 97, 121, 108, 111, 97, 100, 23, 4, 0, 0, 0, 85, 110, 105, 116, 0, 22, 7, 0, 0, 0, 86, 97, 114, 105, 97, 110, 116, 3, 0, 0, 0, 4, 0, 0, 0, 110, 97, 109, 101, 15, 13, 0, 0, 0, 73, 110, 100, 101, 116, 101, 114, 109, 105, 110, 97, 116, 101, 5, 0, 0, 0, 105, 110, 100, 101, 120, 4, 7, 0, 0, 0, 7, 0, 0, 0, 112, 97, 121, 108, 111, 97, 100, 23, 4, 0, 0, 0, 85, 110, 105, 116, 0, 122, 0, 0, 0, 22, 6, 0, 0, 0, 83, 99, 104, 101, 109, 97, 3, 0, 0, 0, 2, 0, 0, 0, 105, 100, 5, 241, 100, 141, 24, 86, 120, 254, 139, 11, 0, 0, 0, 116, 121, 112, 101, 95, 112, 97, 114, 97, 109, 115, 17, 0, 0, 0, 0, 4, 0, 0, 0, 107, 105, 110, 100, 23, 6, 0, 0, 0, 83, 116, 114, 117, 99, 116, 22, 6, 0, 0, 0, 83, 116, 114, 117, 99, 116, 2, 0, 0, 0, 4, 0, 0, 0, 110, 97, 109, 101, 15, 10, 0, 0, 0, 73, 110, 102, 97, 108, 108, 105, 98, 108, 101, 6, 0, 0, 0, 102, 105, 101, 108, 100, 115, 17, 0, 0, 0, 0],
+        responseDescriptor: vfs_write_ResponseDescriptor,
+        responseDescriptorBlocks: vfs_write_ResponseDescriptorBlocks,
+        channels: []),
+    0x9b060d7cd7c1a62e: PhonMethodSchemas(
+        argsRoot: SchemaId(0xde5b6d03173d96c0),
+        argsSchemaClosure: [192, 150, 61, 23, 3, 109, 91, 222, 2, 0, 0, 0, 75, 1, 0, 0, 22, 6, 0, 0, 0, 83, 99, 104, 101, 109, 97, 3, 0, 0, 0, 2, 0, 0, 0, 105, 100, 5, 192, 150, 61, 23, 3, 109, 91, 222, 11, 0, 0, 0, 116, 121, 112, 101, 95, 112, 97, 114, 97, 109, 115, 17, 0, 0, 0, 0, 4, 0, 0, 0, 107, 105, 110, 100, 23, 5, 0, 0, 0, 84, 117, 112, 108, 101, 22, 5, 0, 0, 0, 84, 117, 112, 108, 101, 1, 0, 0, 0, 8, 0, 0, 0, 101, 108, 101, 109, 101, 110, 116, 115, 17, 4, 0, 0, 0, 23, 8, 0, 0, 0, 67, 111, 110, 99, 114, 101, 116, 101, 22, 8, 0, 0, 0, 67, 111, 110, 99, 114, 101, 116, 101, 2, 0, 0, 0, 2, 0, 0, 0, 105, 100, 5, 172, 57, 22, 184, 152, 98, 53, 217, 4, 0, 0, 0, 97, 114, 103, 115, 17, 0, 0, 0, 0, 23, 8, 0, 0, 0, 67, 111, 110, 99, 114, 101, 116, 101, 22, 8, 0, 0, 0, 67, 111, 110, 99, 114, 101, 116, 101, 2, 0, 0, 0, 2, 0, 0, 0, 105, 100, 5, 232, 80, 225, 78, 145, 206, 125, 109, 4, 0, 0, 0, 97, 114, 103, 115, 17, 0, 0, 0, 0, 23, 8, 0, 0, 0, 67, 111, 110, 99, 114, 101, 116, 101, 22, 8, 0, 0, 0, 67, 111, 110, 99, 114, 101, 116, 101, 2, 0, 0, 0, 2, 0, 0, 0, 105, 100, 5, 99, 6, 43, 113, 27, 142, 215, 10, 4, 0, 0, 0, 97, 114, 103, 115, 17, 0, 0, 0, 0, 23, 8, 0, 0, 0, 67, 111, 110, 99, 114, 101, 116, 101, 22, 8, 0, 0, 0, 67, 111, 110, 99, 114, 101, 116, 101, 2, 0, 0, 0, 2, 0, 0, 0, 105, 100, 5, 180, 99, 238, 242, 228, 91, 28, 40, 4, 0, 0, 0, 97, 114, 103, 115, 17, 0, 0, 0, 0, 74, 1, 0, 0, 22, 6, 0, 0, 0, 83, 99, 104, 101, 109, 97, 3, 0, 0, 0, 2, 0, 0, 0, 105, 100, 5, 99, 6, 43, 113, 27, 142, 215, 10, 11, 0, 0, 0, 116, 121, 112, 101, 95, 112, 97, 114, 97, 109, 115, 17, 0, 0, 0, 0, 4, 0, 0, 0, 107, 105, 110, 100, 23, 4, 0, 0, 0, 69, 110, 117, 109, 22, 4, 0, 0, 0, 69, 110, 117, 109, 2, 0, 0, 0, 4, 0, 0, 0, 110, 97, 109, 101, 15, 8, 0, 0, 0, 73, 116, 101, 109, 84, 121, 112, 101, 8, 0, 0, 0, 118, 97, 114, 105, 97, 110, 116, 115, 17, 3, 0, 0, 0, 22, 7, 0, 0, 0, 86, 97, 114, 105, 97, 110, 116, 3, 0, 0, 0, 4, 0, 0, 0, 110, 97, 109, 101, 15, 4, 0, 0, 0, 70, 105, 108, 101, 5, 0, 0, 0, 105, 110, 100, 101, 120, 4, 0, 0, 0, 0, 7, 0, 0, 0, 112, 97, 121, 108, 111, 97, 100, 23, 4, 0, 0, 0, 85, 110, 105, 116, 0, 22, 7, 0, 0, 0, 86, 97, 114, 105, 97, 110, 116, 3, 0, 0, 0, 4, 0, 0, 0, 110, 97, 109, 101, 15, 9, 0, 0, 0, 68, 105, 114, 101, 99, 116, 111, 114, 121, 5, 0, 0, 0, 105, 110, 100, 101, 120, 4, 1, 0, 0, 0, 7, 0, 0, 0, 112, 97, 121, 108, 111, 97, 100, 23, 4, 0, 0, 0, 85, 110, 105, 116, 0, 22, 7, 0, 0, 0, 86, 97, 114, 105, 97, 110, 116, 3, 0, 0, 0, 4, 0, 0, 0, 110, 97, 109, 101, 15, 7, 0, 0, 0, 83, 121, 109, 108, 105, 110, 107, 5, 0, 0, 0, 105, 110, 100, 101, 120, 4, 2, 0, 0, 0, 7, 0, 0, 0, 112, 97, 121, 108, 111, 97, 100, 23, 4, 0, 0, 0, 85, 110, 105, 116, 0],
+        argsDescriptor: vfs_create_ArgsDescriptor,
+        argsDescriptorBlocks: vfs_create_ArgsDescriptorBlocks,
+        okRoot: SchemaId(0xad488235c6eee3cd),
+        responseRoot: SchemaId(0xd3fa4ad375051b9b),
+        responseSchemaClosure: [155, 27, 5, 117, 211, 74, 250, 211, 4, 0, 0, 0, 113, 1, 0, 0, 22, 6, 0, 0, 0, 83, 99, 104, 101, 109, 97, 3, 0, 0, 0, 2, 0, 0, 0, 105, 100, 5, 155, 27, 5, 117, 211, 74, 250, 211, 11, 0, 0, 0, 116, 121, 112, 101, 95, 112, 97, 114, 97, 109, 115, 17, 0, 0, 0, 0, 4, 0, 0, 0, 107, 105, 110, 100, 23, 4, 0, 0, 0, 69, 110, 117, 109, 22, 4, 0, 0, 0, 69, 110, 117, 109, 2, 0, 0, 0, 4, 0, 0, 0, 110, 97, 109, 101, 15, 6, 0, 0, 0, 82, 101, 115, 117, 108, 116, 8, 0, 0, 0, 118, 97, 114, 105, 97, 110, 116, 115, 17, 2, 0, 0, 0, 22, 7, 0, 0, 0, 86, 97, 114, 105, 97, 110, 116, 3, 0, 0, 0, 4, 0, 0, 0, 110, 97, 109, 101, 15, 2, 0, 0, 0, 79, 107, 5, 0, 0, 0, 105, 110, 100, 101, 120, 4, 0, 0, 0, 0, 7, 0, 0, 0, 112, 97, 121, 108, 111, 97, 100, 23, 7, 0, 0, 0, 78, 101, 119, 116, 121, 112, 101, 23, 8, 0, 0, 0, 67, 111, 110, 99, 114, 101, 116, 101, 22, 8, 0, 0, 0, 67, 111, 110, 99, 114, 101, 116, 101, 2, 0, 0, 0, 2, 0, 0, 0, 105, 100, 5, 205, 227, 238, 198, 53, 130, 72, 173, 4, 0, 0, 0, 97, 114, 103, 115, 17, 0, 0, 0, 0, 22, 7, 0, 0, 0, 86, 97, 114, 105, 97, 110, 116, 3, 0, 0, 0, 4, 0, 0, 0, 110, 97, 109, 101, 15, 3, 0, 0, 0, 69, 114, 114, 5, 0, 0, 0, 105, 110, 100, 101, 120, 4, 1, 0, 0, 0, 7, 0, 0, 0, 112, 97, 121, 108, 111, 97, 100, 23, 7, 0, 0, 0, 78, 101, 119, 116, 121, 112, 101, 23, 8, 0, 0, 0, 67, 111, 110, 99, 114, 101, 116, 101, 22, 8, 0, 0, 0, 67, 111, 110, 99, 114, 101, 116, 101, 2, 0, 0, 0, 2, 0, 0, 0, 105, 100, 5, 68, 38, 93, 12, 39, 230, 50, 48, 4, 0, 0, 0, 97, 114, 103, 115, 17, 0, 0, 0, 0, 98, 1, 0, 0, 22, 6, 0, 0, 0, 83, 99, 104, 101, 109, 97, 3, 0, 0, 0, 2, 0, 0, 0, 105, 100, 5, 205, 227, 238, 198, 53, 130, 72, 173, 11, 0, 0, 0, 116, 121, 112, 101, 95, 112, 97, 114, 97, 109, 115, 17, 0, 0, 0, 0, 4, 0, 0, 0, 107, 105, 110, 100, 23, 6, 0, 0, 0, 83, 116, 114, 117, 99, 116, 22, 6, 0, 0, 0, 83, 116, 114, 117, 99, 116, 2, 0, 0, 0, 4, 0, 0, 0, 110, 97, 109, 101, 15, 12, 0, 0, 0, 67, 114, 101, 97, 116, 101, 82, 101, 115, 117, 108, 116, 6, 0, 0, 0, 102, 105, 101, 108, 100, 115, 17, 2, 0, 0, 0, 22, 5, 0, 0, 0, 70, 105, 101, 108, 100, 3, 0, 0, 0, 4, 0, 0, 0, 110, 97, 109, 101, 15, 7, 0, 0, 0, 105, 116, 101, 109, 95, 105, 100, 6, 0, 0, 0, 115, 99, 104, 101, 109, 97, 23, 8, 0, 0, 0, 67, 111, 110, 99, 114, 101, 116, 101, 22, 8, 0, 0, 0, 67, 111, 110, 99, 114, 101, 116, 101, 2, 0, 0, 0, 2, 0, 0, 0, 105, 100, 5, 172, 57, 22, 184, 152, 98, 53, 217, 4, 0, 0, 0, 97, 114, 103, 115, 17, 0, 0, 0, 0, 8, 0, 0, 0, 114, 101, 113, 117, 105, 114, 101, 100, 1, 1, 22, 5, 0, 0, 0, 70, 105, 101, 108, 100, 3, 0, 0, 0, 4, 0, 0, 0, 110, 97, 109, 101, 15, 5, 0, 0, 0, 101, 114, 114, 111, 114, 6, 0, 0, 0, 115, 99, 104, 101, 109, 97, 23, 8, 0, 0, 0, 67, 111, 110, 99, 114, 101, 116, 101, 22, 8, 0, 0, 0, 67, 111, 110, 99, 114, 101, 116, 101, 2, 0, 0, 0, 2, 0, 0, 0, 105, 100, 5, 145, 249, 233, 238, 54, 69, 31, 54, 4, 0, 0, 0, 97, 114, 103, 115, 17, 0, 0, 0, 0, 8, 0, 0, 0, 114, 101, 113, 117, 105, 114, 101, 100, 1, 1, 76, 3, 0, 0, 22, 6, 0, 0, 0, 83, 99, 104, 101, 109, 97, 3, 0, 0, 0, 2, 0, 0, 0, 105, 100, 5, 68, 38, 93, 12, 39, 230, 50, 48, 11, 0, 0, 0, 116, 121, 112, 101, 95, 112, 97, 114, 97, 109, 115, 17, 0, 0, 0, 0, 4, 0, 0, 0, 107, 105, 110, 100, 23, 4, 0, 0, 0, 69, 110, 117, 109, 22, 4, 0, 0, 0, 69, 110, 117, 109, 2, 0, 0, 0, 4, 0, 0, 0, 110, 97, 109, 101, 15, 8, 0, 0, 0, 86, 111, 120, 69, 114, 114, 111, 114, 8, 0, 0, 0, 118, 97, 114, 105, 97, 110, 116, 115, 17, 8, 0, 0, 0, 22, 7, 0, 0, 0, 86, 97, 114, 105, 97, 110, 116, 3, 0, 0, 0, 4, 0, 0, 0, 110, 97, 109, 101, 15, 4, 0, 0, 0, 85, 115, 101, 114, 5, 0, 0, 0, 105, 110, 100, 101, 120, 4, 0, 0, 0, 0, 7, 0, 0, 0, 112, 97, 121, 108, 111, 97, 100, 23, 7, 0, 0, 0, 78, 101, 119, 116, 121, 112, 101, 23, 8, 0, 0, 0, 67, 111, 110, 99, 114, 101, 116, 101, 22, 8, 0, 0, 0, 67, 111, 110, 99, 114, 101, 116, 101, 2, 0, 0, 0, 2, 0, 0, 0, 105, 100, 5, 241, 100, 141, 24, 86, 120, 254, 139, 4, 0, 0, 0, 97, 114, 103, 115, 17, 0, 0, 0, 0, 22, 7, 0, 0, 0, 86, 97, 114, 105, 97, 110, 116, 3, 0, 0, 0, 4, 0, 0, 0, 110, 97, 109, 101, 15, 13, 0, 0, 0, 85, 110, 107, 110, 111, 119, 110, 77, 101, 116, 104, 111, 100, 5, 0, 0, 0, 105, 110, 100, 101, 120, 4, 1, 0, 0, 0, 7, 0, 0, 0, 112, 97, 121, 108, 111, 97, 100, 23, 4, 0, 0, 0, 85, 110, 105, 116, 0, 22, 7, 0, 0, 0, 86, 97, 114, 105, 97, 110, 116, 3, 0, 0, 0, 4, 0, 0, 0, 110, 97, 109, 101, 15, 14, 0, 0, 0, 73, 110, 118, 97, 108, 105, 100, 80, 97, 121, 108, 111, 97, 100, 5, 0, 0, 0, 105, 110, 100, 101, 120, 4, 2, 0, 0, 0, 7, 0, 0, 0, 112, 97, 121, 108, 111, 97, 100, 23, 7, 0, 0, 0, 78, 101, 119, 116, 121, 112, 101, 23, 8, 0, 0, 0, 67, 111, 110, 99, 114, 101, 116, 101, 22, 8, 0, 0, 0, 67, 111, 110, 99, 114, 101, 116, 101, 2, 0, 0, 0, 2, 0, 0, 0, 105, 100, 5, 232, 80, 225, 78, 145, 206, 125, 109, 4, 0, 0, 0, 97, 114, 103, 115, 17, 0, 0, 0, 0, 22, 7, 0, 0, 0, 86, 97, 114, 105, 97, 110, 116, 3, 0, 0, 0, 4, 0, 0, 0, 110, 97, 109, 101, 15, 9, 0, 0, 0, 67, 97, 110, 99, 101, 108, 108, 101, 100, 5, 0, 0, 0, 105, 110, 100, 101, 120, 4, 3, 0, 0, 0, 7, 0, 0, 0, 112, 97, 121, 108, 111, 97, 100, 23, 4, 0, 0, 0, 85, 110, 105, 116, 0, 22, 7, 0, 0, 0, 86, 97, 114, 105, 97, 110, 116, 3, 0, 0, 0, 4, 0, 0, 0, 110, 97, 109, 101, 15, 16, 0, 0, 0, 67, 111, 110, 110, 101, 99, 116, 105, 111, 110, 67, 108, 111, 115, 101, 100, 5, 0, 0, 0, 105, 110, 100, 101, 120, 4, 4, 0, 0, 0, 7, 0, 0, 0, 112, 97, 121, 108, 111, 97, 100, 23, 4, 0, 0, 0, 85, 110, 105, 116, 0, 22, 7, 0, 0, 0, 86, 97, 114, 105, 97, 110, 116, 3, 0, 0, 0, 4, 0, 0, 0, 110, 97, 109, 101, 15, 15, 0, 0, 0, 83, 101, 115, 115, 105, 111, 110, 83, 104, 117, 116, 100, 111, 119, 110, 5, 0, 0, 0, 105, 110, 100, 101, 120, 4, 5, 0, 0, 0, 7, 0, 0, 0, 112, 97, 121, 108, 111, 97, 100, 23, 4, 0, 0, 0, 85, 110, 105, 116, 0, 22, 7, 0, 0, 0, 86, 97, 114, 105, 97, 110, 116, 3, 0, 0, 0, 4, 0, 0, 0, 110, 97, 109, 101, 15, 10, 0, 0, 0, 83, 101, 110, 100, 70, 97, 105, 108, 101, 100, 5, 0, 0, 0, 105, 110, 100, 101, 120, 4, 6, 0, 0, 0, 7, 0, 0, 0, 112, 97, 121, 108, 111, 97, 100, 23, 4, 0, 0, 0, 85, 110, 105, 116, 0, 22, 7, 0, 0, 0, 86, 97, 114, 105, 97, 110, 116, 3, 0, 0, 0, 4, 0, 0, 0, 110, 97, 109, 101, 15, 13, 0, 0, 0, 73, 110, 100, 101, 116, 101, 114, 109, 105, 110, 97, 116, 101, 5, 0, 0, 0, 105, 110, 100, 101, 120, 4, 7, 0, 0, 0, 7, 0, 0, 0, 112, 97, 121, 108, 111, 97, 100, 23, 4, 0, 0, 0, 85, 110, 105, 116, 0, 122, 0, 0, 0, 22, 6, 0, 0, 0, 83, 99, 104, 101, 109, 97, 3, 0, 0, 0, 2, 0, 0, 0, 105, 100, 5, 241, 100, 141, 24, 86, 120, 254, 139, 11, 0, 0, 0, 116, 121, 112, 101, 95, 112, 97, 114, 97, 109, 115, 17, 0, 0, 0, 0, 4, 0, 0, 0, 107, 105, 110, 100, 23, 6, 0, 0, 0, 83, 116, 114, 117, 99, 116, 22, 6, 0, 0, 0, 83, 116, 114, 117, 99, 116, 2, 0, 0, 0, 4, 0, 0, 0, 110, 97, 109, 101, 15, 10, 0, 0, 0, 73, 110, 102, 97, 108, 108, 105, 98, 108, 101, 6, 0, 0, 0, 102, 105, 101, 108, 100, 115, 17, 0, 0, 0, 0],
+        responseDescriptor: vfs_create_ResponseDescriptor,
+        responseDescriptorBlocks: vfs_create_ResponseDescriptorBlocks,
+        channels: []),
+    0x2a1f41955c3e63a8: PhonMethodSchemas(
+        argsRoot: SchemaId(0xdb73db3b46e1a03f),
+        argsSchemaClosure: [63, 160, 225, 70, 59, 219, 115, 219, 1, 0, 0, 0, 157, 0, 0, 0, 22, 6, 0, 0, 0, 83, 99, 104, 101, 109, 97, 3, 0, 0, 0, 2, 0, 0, 0, 105, 100, 5, 63, 160, 225, 70, 59, 219, 115, 219, 11, 0, 0, 0, 116, 121, 112, 101, 95, 112, 97, 114, 97, 109, 115, 17, 0, 0, 0, 0, 4, 0, 0, 0, 107, 105, 110, 100, 23, 5, 0, 0, 0, 84, 117, 112, 108, 101, 22, 5, 0, 0, 0, 84, 117, 112, 108, 101, 1, 0, 0, 0, 8, 0, 0, 0, 101, 108, 101, 109, 101, 110, 116, 115, 17, 1, 0, 0, 0, 23, 8, 0, 0, 0, 67, 111, 110, 99, 114, 101, 116, 101, 22, 8, 0, 0, 0, 67, 111, 110, 99, 114, 101, 116, 101, 2, 0, 0, 0, 2, 0, 0, 0, 105, 100, 5, 172, 57, 22, 184, 152, 98, 53, 217, 4, 0, 0, 0, 97, 114, 103, 115, 17, 0, 0, 0, 0],
+        argsDescriptor: vfs_delete_ArgsDescriptor,
+        argsDescriptorBlocks: vfs_delete_ArgsDescriptorBlocks,
+        okRoot: SchemaId(0x913891b444d17a61),
+        responseRoot: SchemaId(0xe20f9d0564afad42),
+        responseSchemaClosure: [66, 173, 175, 100, 5, 157, 15, 226, 4, 0, 0, 0, 113, 1, 0, 0, 22, 6, 0, 0, 0, 83, 99, 104, 101, 109, 97, 3, 0, 0, 0, 2, 0, 0, 0, 105, 100, 5, 66, 173, 175, 100, 5, 157, 15, 226, 11, 0, 0, 0, 116, 121, 112, 101, 95, 112, 97, 114, 97, 109, 115, 17, 0, 0, 0, 0, 4, 0, 0, 0, 107, 105, 110, 100, 23, 4, 0, 0, 0, 69, 110, 117, 109, 22, 4, 0, 0, 0, 69, 110, 117, 109, 2, 0, 0, 0, 4, 0, 0, 0, 110, 97, 109, 101, 15, 6, 0, 0, 0, 82, 101, 115, 117, 108, 116, 8, 0, 0, 0, 118, 97, 114, 105, 97, 110, 116, 115, 17, 2, 0, 0, 0, 22, 7, 0, 0, 0, 86, 97, 114, 105, 97, 110, 116, 3, 0, 0, 0, 4, 0, 0, 0, 110, 97, 109, 101, 15, 2, 0, 0, 0, 79, 107, 5, 0, 0, 0, 105, 110, 100, 101, 120, 4, 0, 0, 0, 0, 7, 0, 0, 0, 112, 97, 121, 108, 111, 97, 100, 23, 7, 0, 0, 0, 78, 101, 119, 116, 121, 112, 101, 23, 8, 0, 0, 0, 67, 111, 110, 99, 114, 101, 116, 101, 22, 8, 0, 0, 0, 67, 111, 110, 99, 114, 101, 116, 101, 2, 0, 0, 0, 2, 0, 0, 0, 105, 100, 5, 97, 122, 209, 68, 180, 145, 56, 145, 4, 0, 0, 0, 97, 114, 103, 115, 17, 0, 0, 0, 0, 22, 7, 0, 0, 0, 86, 97, 114, 105, 97, 110, 116, 3, 0, 0, 0, 4, 0, 0, 0, 110, 97, 109, 101, 15, 3, 0, 0, 0, 69, 114, 114, 5, 0, 0, 0, 105, 110, 100, 101, 120, 4, 1, 0, 0, 0, 7, 0, 0, 0, 112, 97, 121, 108, 111, 97, 100, 23, 7, 0, 0, 0, 78, 101, 119, 116, 121, 112, 101, 23, 8, 0, 0, 0, 67, 111, 110, 99, 114, 101, 116, 101, 22, 8, 0, 0, 0, 67, 111, 110, 99, 114, 101, 116, 101, 2, 0, 0, 0, 2, 0, 0, 0, 105, 100, 5, 68, 38, 93, 12, 39, 230, 50, 48, 4, 0, 0, 0, 97, 114, 103, 115, 17, 0, 0, 0, 0, 235, 0, 0, 0, 22, 6, 0, 0, 0, 83, 99, 104, 101, 109, 97, 3, 0, 0, 0, 2, 0, 0, 0, 105, 100, 5, 97, 122, 209, 68, 180, 145, 56, 145, 11, 0, 0, 0, 116, 121, 112, 101, 95, 112, 97, 114, 97, 109, 115, 17, 0, 0, 0, 0, 4, 0, 0, 0, 107, 105, 110, 100, 23, 6, 0, 0, 0, 83, 116, 114, 117, 99, 116, 22, 6, 0, 0, 0, 83, 116, 114, 117, 99, 116, 2, 0, 0, 0, 4, 0, 0, 0, 110, 97, 109, 101, 15, 9, 0, 0, 0, 86, 102, 115, 82, 101, 115, 117, 108, 116, 6, 0, 0, 0, 102, 105, 101, 108, 100, 115, 17, 1, 0, 0, 0, 22, 5, 0, 0, 0, 70, 105, 101, 108, 100, 3, 0, 0, 0, 4, 0, 0, 0, 110, 97, 109, 101, 15, 5, 0, 0, 0, 101, 114, 114, 111, 114, 6, 0, 0, 0, 115, 99, 104, 101, 109, 97, 23, 8, 0, 0, 0, 67, 111, 110, 99, 114, 101, 116, 101, 22, 8, 0, 0, 0, 67, 111, 110, 99, 114, 101, 116, 101, 2, 0, 0, 0, 2, 0, 0, 0, 105, 100, 5, 145, 249, 233, 238, 54, 69, 31, 54, 4, 0, 0, 0, 97, 114, 103, 115, 17, 0, 0, 0, 0, 8, 0, 0, 0, 114, 101, 113, 117, 105, 114, 101, 100, 1, 1, 76, 3, 0, 0, 22, 6, 0, 0, 0, 83, 99, 104, 101, 109, 97, 3, 0, 0, 0, 2, 0, 0, 0, 105, 100, 5, 68, 38, 93, 12, 39, 230, 50, 48, 11, 0, 0, 0, 116, 121, 112, 101, 95, 112, 97, 114, 97, 109, 115, 17, 0, 0, 0, 0, 4, 0, 0, 0, 107, 105, 110, 100, 23, 4, 0, 0, 0, 69, 110, 117, 109, 22, 4, 0, 0, 0, 69, 110, 117, 109, 2, 0, 0, 0, 4, 0, 0, 0, 110, 97, 109, 101, 15, 8, 0, 0, 0, 86, 111, 120, 69, 114, 114, 111, 114, 8, 0, 0, 0, 118, 97, 114, 105, 97, 110, 116, 115, 17, 8, 0, 0, 0, 22, 7, 0, 0, 0, 86, 97, 114, 105, 97, 110, 116, 3, 0, 0, 0, 4, 0, 0, 0, 110, 97, 109, 101, 15, 4, 0, 0, 0, 85, 115, 101, 114, 5, 0, 0, 0, 105, 110, 100, 101, 120, 4, 0, 0, 0, 0, 7, 0, 0, 0, 112, 97, 121, 108, 111, 97, 100, 23, 7, 0, 0, 0, 78, 101, 119, 116, 121, 112, 101, 23, 8, 0, 0, 0, 67, 111, 110, 99, 114, 101, 116, 101, 22, 8, 0, 0, 0, 67, 111, 110, 99, 114, 101, 116, 101, 2, 0, 0, 0, 2, 0, 0, 0, 105, 100, 5, 241, 100, 141, 24, 86, 120, 254, 139, 4, 0, 0, 0, 97, 114, 103, 115, 17, 0, 0, 0, 0, 22, 7, 0, 0, 0, 86, 97, 114, 105, 97, 110, 116, 3, 0, 0, 0, 4, 0, 0, 0, 110, 97, 109, 101, 15, 13, 0, 0, 0, 85, 110, 107, 110, 111, 119, 110, 77, 101, 116, 104, 111, 100, 5, 0, 0, 0, 105, 110, 100, 101, 120, 4, 1, 0, 0, 0, 7, 0, 0, 0, 112, 97, 121, 108, 111, 97, 100, 23, 4, 0, 0, 0, 85, 110, 105, 116, 0, 22, 7, 0, 0, 0, 86, 97, 114, 105, 97, 110, 116, 3, 0, 0, 0, 4, 0, 0, 0, 110, 97, 109, 101, 15, 14, 0, 0, 0, 73, 110, 118, 97, 108, 105, 100, 80, 97, 121, 108, 111, 97, 100, 5, 0, 0, 0, 105, 110, 100, 101, 120, 4, 2, 0, 0, 0, 7, 0, 0, 0, 112, 97, 121, 108, 111, 97, 100, 23, 7, 0, 0, 0, 78, 101, 119, 116, 121, 112, 101, 23, 8, 0, 0, 0, 67, 111, 110, 99, 114, 101, 116, 101, 22, 8, 0, 0, 0, 67, 111, 110, 99, 114, 101, 116, 101, 2, 0, 0, 0, 2, 0, 0, 0, 105, 100, 5, 232, 80, 225, 78, 145, 206, 125, 109, 4, 0, 0, 0, 97, 114, 103, 115, 17, 0, 0, 0, 0, 22, 7, 0, 0, 0, 86, 97, 114, 105, 97, 110, 116, 3, 0, 0, 0, 4, 0, 0, 0, 110, 97, 109, 101, 15, 9, 0, 0, 0, 67, 97, 110, 99, 101, 108, 108, 101, 100, 5, 0, 0, 0, 105, 110, 100, 101, 120, 4, 3, 0, 0, 0, 7, 0, 0, 0, 112, 97, 121, 108, 111, 97, 100, 23, 4, 0, 0, 0, 85, 110, 105, 116, 0, 22, 7, 0, 0, 0, 86, 97, 114, 105, 97, 110, 116, 3, 0, 0, 0, 4, 0, 0, 0, 110, 97, 109, 101, 15, 16, 0, 0, 0, 67, 111, 110, 110, 101, 99, 116, 105, 111, 110, 67, 108, 111, 115, 101, 100, 5, 0, 0, 0, 105, 110, 100, 101, 120, 4, 4, 0, 0, 0, 7, 0, 0, 0, 112, 97, 121, 108, 111, 97, 100, 23, 4, 0, 0, 0, 85, 110, 105, 116, 0, 22, 7, 0, 0, 0, 86, 97, 114, 105, 97, 110, 116, 3, 0, 0, 0, 4, 0, 0, 0, 110, 97, 109, 101, 15, 15, 0, 0, 0, 83, 101, 115, 115, 105, 111, 110, 83, 104, 117, 116, 100, 111, 119, 110, 5, 0, 0, 0, 105, 110, 100, 101, 120, 4, 5, 0, 0, 0, 7, 0, 0, 0, 112, 97, 121, 108, 111, 97, 100, 23, 4, 0, 0, 0, 85, 110, 105, 116, 0, 22, 7, 0, 0, 0, 86, 97, 114, 105, 97, 110, 116, 3, 0, 0, 0, 4, 0, 0, 0, 110, 97, 109, 101, 15, 10, 0, 0, 0, 83, 101, 110, 100, 70, 97, 105, 108, 101, 100, 5, 0, 0, 0, 105, 110, 100, 101, 120, 4, 6, 0, 0, 0, 7, 0, 0, 0, 112, 97, 121, 108, 111, 97, 100, 23, 4, 0, 0, 0, 85, 110, 105, 116, 0, 22, 7, 0, 0, 0, 86, 97, 114, 105, 97, 110, 116, 3, 0, 0, 0, 4, 0, 0, 0, 110, 97, 109, 101, 15, 13, 0, 0, 0, 73, 110, 100, 101, 116, 101, 114, 109, 105, 110, 97, 116, 101, 5, 0, 0, 0, 105, 110, 100, 101, 120, 4, 7, 0, 0, 0, 7, 0, 0, 0, 112, 97, 121, 108, 111, 97, 100, 23, 4, 0, 0, 0, 85, 110, 105, 116, 0, 122, 0, 0, 0, 22, 6, 0, 0, 0, 83, 99, 104, 101, 109, 97, 3, 0, 0, 0, 2, 0, 0, 0, 105, 100, 5, 241, 100, 141, 24, 86, 120, 254, 139, 11, 0, 0, 0, 116, 121, 112, 101, 95, 112, 97, 114, 97, 109, 115, 17, 0, 0, 0, 0, 4, 0, 0, 0, 107, 105, 110, 100, 23, 6, 0, 0, 0, 83, 116, 114, 117, 99, 116, 22, 6, 0, 0, 0, 83, 116, 114, 117, 99, 116, 2, 0, 0, 0, 4, 0, 0, 0, 110, 97, 109, 101, 15, 10, 0, 0, 0, 73, 110, 102, 97, 108, 108, 105, 98, 108, 101, 6, 0, 0, 0, 102, 105, 101, 108, 100, 115, 17, 0, 0, 0, 0],
+        responseDescriptor: vfs_delete_ResponseDescriptor,
+        responseDescriptorBlocks: vfs_delete_ResponseDescriptorBlocks,
+        channels: []),
+    0x5aca8524d890971d: PhonMethodSchemas(
+        argsRoot: SchemaId(0xbd27f8160767ea93),
+        argsSchemaClosure: [147, 234, 103, 7, 22, 248, 39, 189, 1, 0, 0, 0, 17, 1, 0, 0, 22, 6, 0, 0, 0, 83, 99, 104, 101, 109, 97, 3, 0, 0, 0, 2, 0, 0, 0, 105, 100, 5, 147, 234, 103, 7, 22, 248, 39, 189, 11, 0, 0, 0, 116, 121, 112, 101, 95, 112, 97, 114, 97, 109, 115, 17, 0, 0, 0, 0, 4, 0, 0, 0, 107, 105, 110, 100, 23, 5, 0, 0, 0, 84, 117, 112, 108, 101, 22, 5, 0, 0, 0, 84, 117, 112, 108, 101, 1, 0, 0, 0, 8, 0, 0, 0, 101, 108, 101, 109, 101, 110, 116, 115, 17, 3, 0, 0, 0, 23, 8, 0, 0, 0, 67, 111, 110, 99, 114, 101, 116, 101, 22, 8, 0, 0, 0, 67, 111, 110, 99, 114, 101, 116, 101, 2, 0, 0, 0, 2, 0, 0, 0, 105, 100, 5, 172, 57, 22, 184, 152, 98, 53, 217, 4, 0, 0, 0, 97, 114, 103, 115, 17, 0, 0, 0, 0, 23, 8, 0, 0, 0, 67, 111, 110, 99, 114, 101, 116, 101, 22, 8, 0, 0, 0, 67, 111, 110, 99, 114, 101, 116, 101, 2, 0, 0, 0, 2, 0, 0, 0, 105, 100, 5, 172, 57, 22, 184, 152, 98, 53, 217, 4, 0, 0, 0, 97, 114, 103, 115, 17, 0, 0, 0, 0, 23, 8, 0, 0, 0, 67, 111, 110, 99, 114, 101, 116, 101, 22, 8, 0, 0, 0, 67, 111, 110, 99, 114, 101, 116, 101, 2, 0, 0, 0, 2, 0, 0, 0, 105, 100, 5, 232, 80, 225, 78, 145, 206, 125, 109, 4, 0, 0, 0, 97, 114, 103, 115, 17, 0, 0, 0, 0],
+        argsDescriptor: vfs_rename_ArgsDescriptor,
+        argsDescriptorBlocks: vfs_rename_ArgsDescriptorBlocks,
+        okRoot: SchemaId(0x913891b444d17a61),
+        responseRoot: SchemaId(0xe20f9d0564afad42),
+        responseSchemaClosure: [66, 173, 175, 100, 5, 157, 15, 226, 4, 0, 0, 0, 113, 1, 0, 0, 22, 6, 0, 0, 0, 83, 99, 104, 101, 109, 97, 3, 0, 0, 0, 2, 0, 0, 0, 105, 100, 5, 66, 173, 175, 100, 5, 157, 15, 226, 11, 0, 0, 0, 116, 121, 112, 101, 95, 112, 97, 114, 97, 109, 115, 17, 0, 0, 0, 0, 4, 0, 0, 0, 107, 105, 110, 100, 23, 4, 0, 0, 0, 69, 110, 117, 109, 22, 4, 0, 0, 0, 69, 110, 117, 109, 2, 0, 0, 0, 4, 0, 0, 0, 110, 97, 109, 101, 15, 6, 0, 0, 0, 82, 101, 115, 117, 108, 116, 8, 0, 0, 0, 118, 97, 114, 105, 97, 110, 116, 115, 17, 2, 0, 0, 0, 22, 7, 0, 0, 0, 86, 97, 114, 105, 97, 110, 116, 3, 0, 0, 0, 4, 0, 0, 0, 110, 97, 109, 101, 15, 2, 0, 0, 0, 79, 107, 5, 0, 0, 0, 105, 110, 100, 101, 120, 4, 0, 0, 0, 0, 7, 0, 0, 0, 112, 97, 121, 108, 111, 97, 100, 23, 7, 0, 0, 0, 78, 101, 119, 116, 121, 112, 101, 23, 8, 0, 0, 0, 67, 111, 110, 99, 114, 101, 116, 101, 22, 8, 0, 0, 0, 67, 111, 110, 99, 114, 101, 116, 101, 2, 0, 0, 0, 2, 0, 0, 0, 105, 100, 5, 97, 122, 209, 68, 180, 145, 56, 145, 4, 0, 0, 0, 97, 114, 103, 115, 17, 0, 0, 0, 0, 22, 7, 0, 0, 0, 86, 97, 114, 105, 97, 110, 116, 3, 0, 0, 0, 4, 0, 0, 0, 110, 97, 109, 101, 15, 3, 0, 0, 0, 69, 114, 114, 5, 0, 0, 0, 105, 110, 100, 101, 120, 4, 1, 0, 0, 0, 7, 0, 0, 0, 112, 97, 121, 108, 111, 97, 100, 23, 7, 0, 0, 0, 78, 101, 119, 116, 121, 112, 101, 23, 8, 0, 0, 0, 67, 111, 110, 99, 114, 101, 116, 101, 22, 8, 0, 0, 0, 67, 111, 110, 99, 114, 101, 116, 101, 2, 0, 0, 0, 2, 0, 0, 0, 105, 100, 5, 68, 38, 93, 12, 39, 230, 50, 48, 4, 0, 0, 0, 97, 114, 103, 115, 17, 0, 0, 0, 0, 235, 0, 0, 0, 22, 6, 0, 0, 0, 83, 99, 104, 101, 109, 97, 3, 0, 0, 0, 2, 0, 0, 0, 105, 100, 5, 97, 122, 209, 68, 180, 145, 56, 145, 11, 0, 0, 0, 116, 121, 112, 101, 95, 112, 97, 114, 97, 109, 115, 17, 0, 0, 0, 0, 4, 0, 0, 0, 107, 105, 110, 100, 23, 6, 0, 0, 0, 83, 116, 114, 117, 99, 116, 22, 6, 0, 0, 0, 83, 116, 114, 117, 99, 116, 2, 0, 0, 0, 4, 0, 0, 0, 110, 97, 109, 101, 15, 9, 0, 0, 0, 86, 102, 115, 82, 101, 115, 117, 108, 116, 6, 0, 0, 0, 102, 105, 101, 108, 100, 115, 17, 1, 0, 0, 0, 22, 5, 0, 0, 0, 70, 105, 101, 108, 100, 3, 0, 0, 0, 4, 0, 0, 0, 110, 97, 109, 101, 15, 5, 0, 0, 0, 101, 114, 114, 111, 114, 6, 0, 0, 0, 115, 99, 104, 101, 109, 97, 23, 8, 0, 0, 0, 67, 111, 110, 99, 114, 101, 116, 101, 22, 8, 0, 0, 0, 67, 111, 110, 99, 114, 101, 116, 101, 2, 0, 0, 0, 2, 0, 0, 0, 105, 100, 5, 145, 249, 233, 238, 54, 69, 31, 54, 4, 0, 0, 0, 97, 114, 103, 115, 17, 0, 0, 0, 0, 8, 0, 0, 0, 114, 101, 113, 117, 105, 114, 101, 100, 1, 1, 76, 3, 0, 0, 22, 6, 0, 0, 0, 83, 99, 104, 101, 109, 97, 3, 0, 0, 0, 2, 0, 0, 0, 105, 100, 5, 68, 38, 93, 12, 39, 230, 50, 48, 11, 0, 0, 0, 116, 121, 112, 101, 95, 112, 97, 114, 97, 109, 115, 17, 0, 0, 0, 0, 4, 0, 0, 0, 107, 105, 110, 100, 23, 4, 0, 0, 0, 69, 110, 117, 109, 22, 4, 0, 0, 0, 69, 110, 117, 109, 2, 0, 0, 0, 4, 0, 0, 0, 110, 97, 109, 101, 15, 8, 0, 0, 0, 86, 111, 120, 69, 114, 114, 111, 114, 8, 0, 0, 0, 118, 97, 114, 105, 97, 110, 116, 115, 17, 8, 0, 0, 0, 22, 7, 0, 0, 0, 86, 97, 114, 105, 97, 110, 116, 3, 0, 0, 0, 4, 0, 0, 0, 110, 97, 109, 101, 15, 4, 0, 0, 0, 85, 115, 101, 114, 5, 0, 0, 0, 105, 110, 100, 101, 120, 4, 0, 0, 0, 0, 7, 0, 0, 0, 112, 97, 121, 108, 111, 97, 100, 23, 7, 0, 0, 0, 78, 101, 119, 116, 121, 112, 101, 23, 8, 0, 0, 0, 67, 111, 110, 99, 114, 101, 116, 101, 22, 8, 0, 0, 0, 67, 111, 110, 99, 114, 101, 116, 101, 2, 0, 0, 0, 2, 0, 0, 0, 105, 100, 5, 241, 100, 141, 24, 86, 120, 254, 139, 4, 0, 0, 0, 97, 114, 103, 115, 17, 0, 0, 0, 0, 22, 7, 0, 0, 0, 86, 97, 114, 105, 97, 110, 116, 3, 0, 0, 0, 4, 0, 0, 0, 110, 97, 109, 101, 15, 13, 0, 0, 0, 85, 110, 107, 110, 111, 119, 110, 77, 101, 116, 104, 111, 100, 5, 0, 0, 0, 105, 110, 100, 101, 120, 4, 1, 0, 0, 0, 7, 0, 0, 0, 112, 97, 121, 108, 111, 97, 100, 23, 4, 0, 0, 0, 85, 110, 105, 116, 0, 22, 7, 0, 0, 0, 86, 97, 114, 105, 97, 110, 116, 3, 0, 0, 0, 4, 0, 0, 0, 110, 97, 109, 101, 15, 14, 0, 0, 0, 73, 110, 118, 97, 108, 105, 100, 80, 97, 121, 108, 111, 97, 100, 5, 0, 0, 0, 105, 110, 100, 101, 120, 4, 2, 0, 0, 0, 7, 0, 0, 0, 112, 97, 121, 108, 111, 97, 100, 23, 7, 0, 0, 0, 78, 101, 119, 116, 121, 112, 101, 23, 8, 0, 0, 0, 67, 111, 110, 99, 114, 101, 116, 101, 22, 8, 0, 0, 0, 67, 111, 110, 99, 114, 101, 116, 101, 2, 0, 0, 0, 2, 0, 0, 0, 105, 100, 5, 232, 80, 225, 78, 145, 206, 125, 109, 4, 0, 0, 0, 97, 114, 103, 115, 17, 0, 0, 0, 0, 22, 7, 0, 0, 0, 86, 97, 114, 105, 97, 110, 116, 3, 0, 0, 0, 4, 0, 0, 0, 110, 97, 109, 101, 15, 9, 0, 0, 0, 67, 97, 110, 99, 101, 108, 108, 101, 100, 5, 0, 0, 0, 105, 110, 100, 101, 120, 4, 3, 0, 0, 0, 7, 0, 0, 0, 112, 97, 121, 108, 111, 97, 100, 23, 4, 0, 0, 0, 85, 110, 105, 116, 0, 22, 7, 0, 0, 0, 86, 97, 114, 105, 97, 110, 116, 3, 0, 0, 0, 4, 0, 0, 0, 110, 97, 109, 101, 15, 16, 0, 0, 0, 67, 111, 110, 110, 101, 99, 116, 105, 111, 110, 67, 108, 111, 115, 101, 100, 5, 0, 0, 0, 105, 110, 100, 101, 120, 4, 4, 0, 0, 0, 7, 0, 0, 0, 112, 97, 121, 108, 111, 97, 100, 23, 4, 0, 0, 0, 85, 110, 105, 116, 0, 22, 7, 0, 0, 0, 86, 97, 114, 105, 97, 110, 116, 3, 0, 0, 0, 4, 0, 0, 0, 110, 97, 109, 101, 15, 15, 0, 0, 0, 83, 101, 115, 115, 105, 111, 110, 83, 104, 117, 116, 100, 111, 119, 110, 5, 0, 0, 0, 105, 110, 100, 101, 120, 4, 5, 0, 0, 0, 7, 0, 0, 0, 112, 97, 121, 108, 111, 97, 100, 23, 4, 0, 0, 0, 85, 110, 105, 116, 0, 22, 7, 0, 0, 0, 86, 97, 114, 105, 97, 110, 116, 3, 0, 0, 0, 4, 0, 0, 0, 110, 97, 109, 101, 15, 10, 0, 0, 0, 83, 101, 110, 100, 70, 97, 105, 108, 101, 100, 5, 0, 0, 0, 105, 110, 100, 101, 120, 4, 6, 0, 0, 0, 7, 0, 0, 0, 112, 97, 121, 108, 111, 97, 100, 23, 4, 0, 0, 0, 85, 110, 105, 116, 0, 22, 7, 0, 0, 0, 86, 97, 114, 105, 97, 110, 116, 3, 0, 0, 0, 4, 0, 0, 0, 110, 97, 109, 101, 15, 13, 0, 0, 0, 73, 110, 100, 101, 116, 101, 114, 109, 105, 110, 97, 116, 101, 5, 0, 0, 0, 105, 110, 100, 101, 120, 4, 7, 0, 0, 0, 7, 0, 0, 0, 112, 97, 121, 108, 111, 97, 100, 23, 4, 0, 0, 0, 85, 110, 105, 116, 0, 122, 0, 0, 0, 22, 6, 0, 0, 0, 83, 99, 104, 101, 109, 97, 3, 0, 0, 0, 2, 0, 0, 0, 105, 100, 5, 241, 100, 141, 24, 86, 120, 254, 139, 11, 0, 0, 0, 116, 121, 112, 101, 95, 112, 97, 114, 97, 109, 115, 17, 0, 0, 0, 0, 4, 0, 0, 0, 107, 105, 110, 100, 23, 6, 0, 0, 0, 83, 116, 114, 117, 99, 116, 22, 6, 0, 0, 0, 83, 116, 114, 117, 99, 116, 2, 0, 0, 0, 4, 0, 0, 0, 110, 97, 109, 101, 15, 10, 0, 0, 0, 73, 110, 102, 97, 108, 108, 105, 98, 108, 101, 6, 0, 0, 0, 102, 105, 101, 108, 100, 115, 17, 0, 0, 0, 0],
+        responseDescriptor: vfs_rename_ResponseDescriptor,
+        responseDescriptorBlocks: vfs_rename_ResponseDescriptorBlocks,
+        channels: []),
+    0x2086815889a62b33: PhonMethodSchemas(
+        argsRoot: SchemaId(0x520b7af70f1bcc79),
+        argsSchemaClosure: [121, 204, 27, 15, 247, 122, 11, 82, 4, 0, 0, 0, 215, 0, 0, 0, 22, 6, 0, 0, 0, 83, 99, 104, 101, 109, 97, 3, 0, 0, 0, 2, 0, 0, 0, 105, 100, 5, 121, 204, 27, 15, 247, 122, 11, 82, 11, 0, 0, 0, 116, 121, 112, 101, 95, 112, 97, 114, 97, 109, 115, 17, 0, 0, 0, 0, 4, 0, 0, 0, 107, 105, 110, 100, 23, 5, 0, 0, 0, 84, 117, 112, 108, 101, 22, 5, 0, 0, 0, 84, 117, 112, 108, 101, 1, 0, 0, 0, 8, 0, 0, 0, 101, 108, 101, 109, 101, 110, 116, 115, 17, 2, 0, 0, 0, 23, 8, 0, 0, 0, 67, 111, 110, 99, 114, 101, 116, 101, 22, 8, 0, 0, 0, 67, 111, 110, 99, 114, 101, 116, 101, 2, 0, 0, 0, 2, 0, 0, 0, 105, 100, 5, 172, 57, 22, 184, 152, 98, 53, 217, 4, 0, 0, 0, 97, 114, 103, 115, 17, 0, 0, 0, 0, 23, 8, 0, 0, 0, 67, 111, 110, 99, 114, 101, 116, 101, 22, 8, 0, 0, 0, 67, 111, 110, 99, 114, 101, 116, 101, 2, 0, 0, 0, 2, 0, 0, 0, 105, 100, 5, 219, 116, 76, 233, 52, 14, 143, 88, 4, 0, 0, 0, 97, 114, 103, 115, 17, 0, 0, 0, 0, 223, 1, 0, 0, 22, 6, 0, 0, 0, 83, 99, 104, 101, 109, 97, 3, 0, 0, 0, 2, 0, 0, 0, 105, 100, 5, 219, 116, 76, 233, 52, 14, 143, 88, 11, 0, 0, 0, 116, 121, 112, 101, 95, 112, 97, 114, 97, 109, 115, 17, 0, 0, 0, 0, 4, 0, 0, 0, 107, 105, 110, 100, 23, 6, 0, 0, 0, 83, 116, 114, 117, 99, 116, 22, 6, 0, 0, 0, 83, 116, 114, 117, 99, 116, 2, 0, 0, 0, 4, 0, 0, 0, 110, 97, 109, 101, 15, 19, 0, 0, 0, 83, 101, 116, 65, 116, 116, 114, 105, 98, 117, 116, 101, 115, 80, 97, 114, 97, 109, 115, 6, 0, 0, 0, 102, 105, 101, 108, 100, 115, 17, 3, 0, 0, 0, 22, 5, 0, 0, 0, 70, 105, 101, 108, 100, 3, 0, 0, 0, 4, 0, 0, 0, 110, 97, 109, 101, 15, 4, 0, 0, 0, 109, 111, 100, 101, 6, 0, 0, 0, 115, 99, 104, 101, 109, 97, 23, 8, 0, 0, 0, 67, 111, 110, 99, 114, 101, 116, 101, 22, 8, 0, 0, 0, 67, 111, 110, 99, 114, 101, 116, 101, 2, 0, 0, 0, 2, 0, 0, 0, 105, 100, 5, 29, 146, 46, 94, 129, 34, 76, 32, 4, 0, 0, 0, 97, 114, 103, 115, 17, 0, 0, 0, 0, 8, 0, 0, 0, 114, 101, 113, 117, 105, 114, 101, 100, 1, 0, 22, 5, 0, 0, 0, 70, 105, 101, 108, 100, 3, 0, 0, 0, 4, 0, 0, 0, 110, 97, 109, 101, 15, 13, 0, 0, 0, 109, 111, 100, 105, 102, 105, 101, 100, 95, 116, 105, 109, 101, 6, 0, 0, 0, 115, 99, 104, 101, 109, 97, 23, 8, 0, 0, 0, 67, 111, 110, 99, 114, 101, 116, 101, 22, 8, 0, 0, 0, 67, 111, 110, 99, 114, 101, 116, 101, 2, 0, 0, 0, 2, 0, 0, 0, 105, 100, 5, 29, 114, 162, 77, 10, 70, 88, 21, 4, 0, 0, 0, 97, 114, 103, 115, 17, 0, 0, 0, 0, 8, 0, 0, 0, 114, 101, 113, 117, 105, 114, 101, 100, 1, 0, 22, 5, 0, 0, 0, 70, 105, 101, 108, 100, 3, 0, 0, 0, 4, 0, 0, 0, 110, 97, 109, 101, 15, 4, 0, 0, 0, 115, 105, 122, 101, 6, 0, 0, 0, 115, 99, 104, 101, 109, 97, 23, 8, 0, 0, 0, 67, 111, 110, 99, 114, 101, 116, 101, 22, 8, 0, 0, 0, 67, 111, 110, 99, 114, 101, 116, 101, 2, 0, 0, 0, 2, 0, 0, 0, 105, 100, 5, 29, 114, 162, 77, 10, 70, 88, 21, 4, 0, 0, 0, 97, 114, 103, 115, 17, 0, 0, 0, 0, 8, 0, 0, 0, 114, 101, 113, 117, 105, 114, 101, 100, 1, 0, 153, 0, 0, 0, 22, 6, 0, 0, 0, 83, 99, 104, 101, 109, 97, 3, 0, 0, 0, 2, 0, 0, 0, 105, 100, 5, 29, 146, 46, 94, 129, 34, 76, 32, 11, 0, 0, 0, 116, 121, 112, 101, 95, 112, 97, 114, 97, 109, 115, 17, 0, 0, 0, 0, 4, 0, 0, 0, 107, 105, 110, 100, 23, 6, 0, 0, 0, 79, 112, 116, 105, 111, 110, 22, 6, 0, 0, 0, 79, 112, 116, 105, 111, 110, 1, 0, 0, 0, 7, 0, 0, 0, 101, 108, 101, 109, 101, 110, 116, 23, 8, 0, 0, 0, 67, 111, 110, 99, 114, 101, 116, 101, 22, 8, 0, 0, 0, 67, 111, 110, 99, 114, 101, 116, 101, 2, 0, 0, 0, 2, 0, 0, 0, 105, 100, 5, 180, 99, 238, 242, 228, 91, 28, 40, 4, 0, 0, 0, 97, 114, 103, 115, 17, 0, 0, 0, 0, 153, 0, 0, 0, 22, 6, 0, 0, 0, 83, 99, 104, 101, 109, 97, 3, 0, 0, 0, 2, 0, 0, 0, 105, 100, 5, 29, 114, 162, 77, 10, 70, 88, 21, 11, 0, 0, 0, 116, 121, 112, 101, 95, 112, 97, 114, 97, 109, 115, 17, 0, 0, 0, 0, 4, 0, 0, 0, 107, 105, 110, 100, 23, 6, 0, 0, 0, 79, 112, 116, 105, 111, 110, 22, 6, 0, 0, 0, 79, 112, 116, 105, 111, 110, 1, 0, 0, 0, 7, 0, 0, 0, 101, 108, 101, 109, 101, 110, 116, 23, 8, 0, 0, 0, 67, 111, 110, 99, 114, 101, 116, 101, 22, 8, 0, 0, 0, 67, 111, 110, 99, 114, 101, 116, 101, 2, 0, 0, 0, 2, 0, 0, 0, 105, 100, 5, 172, 57, 22, 184, 152, 98, 53, 217, 4, 0, 0, 0, 97, 114, 103, 115, 17, 0, 0, 0, 0],
+        argsDescriptor: vfs_setAttributes_ArgsDescriptor,
+        argsDescriptorBlocks: vfs_setAttributes_ArgsDescriptorBlocks,
+        okRoot: SchemaId(0x913891b444d17a61),
+        responseRoot: SchemaId(0xe20f9d0564afad42),
+        responseSchemaClosure: [66, 173, 175, 100, 5, 157, 15, 226, 4, 0, 0, 0, 113, 1, 0, 0, 22, 6, 0, 0, 0, 83, 99, 104, 101, 109, 97, 3, 0, 0, 0, 2, 0, 0, 0, 105, 100, 5, 66, 173, 175, 100, 5, 157, 15, 226, 11, 0, 0, 0, 116, 121, 112, 101, 95, 112, 97, 114, 97, 109, 115, 17, 0, 0, 0, 0, 4, 0, 0, 0, 107, 105, 110, 100, 23, 4, 0, 0, 0, 69, 110, 117, 109, 22, 4, 0, 0, 0, 69, 110, 117, 109, 2, 0, 0, 0, 4, 0, 0, 0, 110, 97, 109, 101, 15, 6, 0, 0, 0, 82, 101, 115, 117, 108, 116, 8, 0, 0, 0, 118, 97, 114, 105, 97, 110, 116, 115, 17, 2, 0, 0, 0, 22, 7, 0, 0, 0, 86, 97, 114, 105, 97, 110, 116, 3, 0, 0, 0, 4, 0, 0, 0, 110, 97, 109, 101, 15, 2, 0, 0, 0, 79, 107, 5, 0, 0, 0, 105, 110, 100, 101, 120, 4, 0, 0, 0, 0, 7, 0, 0, 0, 112, 97, 121, 108, 111, 97, 100, 23, 7, 0, 0, 0, 78, 101, 119, 116, 121, 112, 101, 23, 8, 0, 0, 0, 67, 111, 110, 99, 114, 101, 116, 101, 22, 8, 0, 0, 0, 67, 111, 110, 99, 114, 101, 116, 101, 2, 0, 0, 0, 2, 0, 0, 0, 105, 100, 5, 97, 122, 209, 68, 180, 145, 56, 145, 4, 0, 0, 0, 97, 114, 103, 115, 17, 0, 0, 0, 0, 22, 7, 0, 0, 0, 86, 97, 114, 105, 97, 110, 116, 3, 0, 0, 0, 4, 0, 0, 0, 110, 97, 109, 101, 15, 3, 0, 0, 0, 69, 114, 114, 5, 0, 0, 0, 105, 110, 100, 101, 120, 4, 1, 0, 0, 0, 7, 0, 0, 0, 112, 97, 121, 108, 111, 97, 100, 23, 7, 0, 0, 0, 78, 101, 119, 116, 121, 112, 101, 23, 8, 0, 0, 0, 67, 111, 110, 99, 114, 101, 116, 101, 22, 8, 0, 0, 0, 67, 111, 110, 99, 114, 101, 116, 101, 2, 0, 0, 0, 2, 0, 0, 0, 105, 100, 5, 68, 38, 93, 12, 39, 230, 50, 48, 4, 0, 0, 0, 97, 114, 103, 115, 17, 0, 0, 0, 0, 235, 0, 0, 0, 22, 6, 0, 0, 0, 83, 99, 104, 101, 109, 97, 3, 0, 0, 0, 2, 0, 0, 0, 105, 100, 5, 97, 122, 209, 68, 180, 145, 56, 145, 11, 0, 0, 0, 116, 121, 112, 101, 95, 112, 97, 114, 97, 109, 115, 17, 0, 0, 0, 0, 4, 0, 0, 0, 107, 105, 110, 100, 23, 6, 0, 0, 0, 83, 116, 114, 117, 99, 116, 22, 6, 0, 0, 0, 83, 116, 114, 117, 99, 116, 2, 0, 0, 0, 4, 0, 0, 0, 110, 97, 109, 101, 15, 9, 0, 0, 0, 86, 102, 115, 82, 101, 115, 117, 108, 116, 6, 0, 0, 0, 102, 105, 101, 108, 100, 115, 17, 1, 0, 0, 0, 22, 5, 0, 0, 0, 70, 105, 101, 108, 100, 3, 0, 0, 0, 4, 0, 0, 0, 110, 97, 109, 101, 15, 5, 0, 0, 0, 101, 114, 114, 111, 114, 6, 0, 0, 0, 115, 99, 104, 101, 109, 97, 23, 8, 0, 0, 0, 67, 111, 110, 99, 114, 101, 116, 101, 22, 8, 0, 0, 0, 67, 111, 110, 99, 114, 101, 116, 101, 2, 0, 0, 0, 2, 0, 0, 0, 105, 100, 5, 145, 249, 233, 238, 54, 69, 31, 54, 4, 0, 0, 0, 97, 114, 103, 115, 17, 0, 0, 0, 0, 8, 0, 0, 0, 114, 101, 113, 117, 105, 114, 101, 100, 1, 1, 76, 3, 0, 0, 22, 6, 0, 0, 0, 83, 99, 104, 101, 109, 97, 3, 0, 0, 0, 2, 0, 0, 0, 105, 100, 5, 68, 38, 93, 12, 39, 230, 50, 48, 11, 0, 0, 0, 116, 121, 112, 101, 95, 112, 97, 114, 97, 109, 115, 17, 0, 0, 0, 0, 4, 0, 0, 0, 107, 105, 110, 100, 23, 4, 0, 0, 0, 69, 110, 117, 109, 22, 4, 0, 0, 0, 69, 110, 117, 109, 2, 0, 0, 0, 4, 0, 0, 0, 110, 97, 109, 101, 15, 8, 0, 0, 0, 86, 111, 120, 69, 114, 114, 111, 114, 8, 0, 0, 0, 118, 97, 114, 105, 97, 110, 116, 115, 17, 8, 0, 0, 0, 22, 7, 0, 0, 0, 86, 97, 114, 105, 97, 110, 116, 3, 0, 0, 0, 4, 0, 0, 0, 110, 97, 109, 101, 15, 4, 0, 0, 0, 85, 115, 101, 114, 5, 0, 0, 0, 105, 110, 100, 101, 120, 4, 0, 0, 0, 0, 7, 0, 0, 0, 112, 97, 121, 108, 111, 97, 100, 23, 7, 0, 0, 0, 78, 101, 119, 116, 121, 112, 101, 23, 8, 0, 0, 0, 67, 111, 110, 99, 114, 101, 116, 101, 22, 8, 0, 0, 0, 67, 111, 110, 99, 114, 101, 116, 101, 2, 0, 0, 0, 2, 0, 0, 0, 105, 100, 5, 241, 100, 141, 24, 86, 120, 254, 139, 4, 0, 0, 0, 97, 114, 103, 115, 17, 0, 0, 0, 0, 22, 7, 0, 0, 0, 86, 97, 114, 105, 97, 110, 116, 3, 0, 0, 0, 4, 0, 0, 0, 110, 97, 109, 101, 15, 13, 0, 0, 0, 85, 110, 107, 110, 111, 119, 110, 77, 101, 116, 104, 111, 100, 5, 0, 0, 0, 105, 110, 100, 101, 120, 4, 1, 0, 0, 0, 7, 0, 0, 0, 112, 97, 121, 108, 111, 97, 100, 23, 4, 0, 0, 0, 85, 110, 105, 116, 0, 22, 7, 0, 0, 0, 86, 97, 114, 105, 97, 110, 116, 3, 0, 0, 0, 4, 0, 0, 0, 110, 97, 109, 101, 15, 14, 0, 0, 0, 73, 110, 118, 97, 108, 105, 100, 80, 97, 121, 108, 111, 97, 100, 5, 0, 0, 0, 105, 110, 100, 101, 120, 4, 2, 0, 0, 0, 7, 0, 0, 0, 112, 97, 121, 108, 111, 97, 100, 23, 7, 0, 0, 0, 78, 101, 119, 116, 121, 112, 101, 23, 8, 0, 0, 0, 67, 111, 110, 99, 114, 101, 116, 101, 22, 8, 0, 0, 0, 67, 111, 110, 99, 114, 101, 116, 101, 2, 0, 0, 0, 2, 0, 0, 0, 105, 100, 5, 232, 80, 225, 78, 145, 206, 125, 109, 4, 0, 0, 0, 97, 114, 103, 115, 17, 0, 0, 0, 0, 22, 7, 0, 0, 0, 86, 97, 114, 105, 97, 110, 116, 3, 0, 0, 0, 4, 0, 0, 0, 110, 97, 109, 101, 15, 9, 0, 0, 0, 67, 97, 110, 99, 101, 108, 108, 101, 100, 5, 0, 0, 0, 105, 110, 100, 101, 120, 4, 3, 0, 0, 0, 7, 0, 0, 0, 112, 97, 121, 108, 111, 97, 100, 23, 4, 0, 0, 0, 85, 110, 105, 116, 0, 22, 7, 0, 0, 0, 86, 97, 114, 105, 97, 110, 116, 3, 0, 0, 0, 4, 0, 0, 0, 110, 97, 109, 101, 15, 16, 0, 0, 0, 67, 111, 110, 110, 101, 99, 116, 105, 111, 110, 67, 108, 111, 115, 101, 100, 5, 0, 0, 0, 105, 110, 100, 101, 120, 4, 4, 0, 0, 0, 7, 0, 0, 0, 112, 97, 121, 108, 111, 97, 100, 23, 4, 0, 0, 0, 85, 110, 105, 116, 0, 22, 7, 0, 0, 0, 86, 97, 114, 105, 97, 110, 116, 3, 0, 0, 0, 4, 0, 0, 0, 110, 97, 109, 101, 15, 15, 0, 0, 0, 83, 101, 115, 115, 105, 111, 110, 83, 104, 117, 116, 100, 111, 119, 110, 5, 0, 0, 0, 105, 110, 100, 101, 120, 4, 5, 0, 0, 0, 7, 0, 0, 0, 112, 97, 121, 108, 111, 97, 100, 23, 4, 0, 0, 0, 85, 110, 105, 116, 0, 22, 7, 0, 0, 0, 86, 97, 114, 105, 97, 110, 116, 3, 0, 0, 0, 4, 0, 0, 0, 110, 97, 109, 101, 15, 10, 0, 0, 0, 83, 101, 110, 100, 70, 97, 105, 108, 101, 100, 5, 0, 0, 0, 105, 110, 100, 101, 120, 4, 6, 0, 0, 0, 7, 0, 0, 0, 112, 97, 121, 108, 111, 97, 100, 23, 4, 0, 0, 0, 85, 110, 105, 116, 0, 22, 7, 0, 0, 0, 86, 97, 114, 105, 97, 110, 116, 3, 0, 0, 0, 4, 0, 0, 0, 110, 97, 109, 101, 15, 13, 0, 0, 0, 73, 110, 100, 101, 116, 101, 114, 109, 105, 110, 97, 116, 101, 5, 0, 0, 0, 105, 110, 100, 101, 120, 4, 7, 0, 0, 0, 7, 0, 0, 0, 112, 97, 121, 108, 111, 97, 100, 23, 4, 0, 0, 0, 85, 110, 105, 116, 0, 122, 0, 0, 0, 22, 6, 0, 0, 0, 83, 99, 104, 101, 109, 97, 3, 0, 0, 0, 2, 0, 0, 0, 105, 100, 5, 241, 100, 141, 24, 86, 120, 254, 139, 11, 0, 0, 0, 116, 121, 112, 101, 95, 112, 97, 114, 97, 109, 115, 17, 0, 0, 0, 0, 4, 0, 0, 0, 107, 105, 110, 100, 23, 6, 0, 0, 0, 83, 116, 114, 117, 99, 116, 22, 6, 0, 0, 0, 83, 116, 114, 117, 99, 116, 2, 0, 0, 0, 4, 0, 0, 0, 110, 97, 109, 101, 15, 10, 0, 0, 0, 73, 110, 102, 97, 108, 108, 105, 98, 108, 101, 6, 0, 0, 0, 102, 105, 101, 108, 100, 115, 17, 0, 0, 0, 0],
+        responseDescriptor: vfs_setAttributes_ResponseDescriptor,
+        responseDescriptorBlocks: vfs_setAttributes_ResponseDescriptorBlocks,
+        channels: []),
+    0xda4fc1cc055a4fcb: PhonMethodSchemas(
+        argsRoot: SchemaId(0xbc5c33249a2dc720),
+        argsSchemaClosure: [32, 199, 45, 154, 36, 51, 92, 188, 0, 0, 0, 0],
+        argsDescriptor: vfs_ping_ArgsDescriptor,
+        argsDescriptorBlocks: vfs_ping_ArgsDescriptorBlocks,
+        okRoot: SchemaId(0x6d7dce914ee150e8),
+        responseRoot: SchemaId(0xa40be1c5eb244dd8),
+        responseSchemaClosure: [216, 77, 36, 235, 197, 225, 11, 164, 3, 0, 0, 0, 113, 1, 0, 0, 22, 6, 0, 0, 0, 83, 99, 104, 101, 109, 97, 3, 0, 0, 0, 2, 0, 0, 0, 105, 100, 5, 216, 77, 36, 235, 197, 225, 11, 164, 11, 0, 0, 0, 116, 121, 112, 101, 95, 112, 97, 114, 97, 109, 115, 17, 0, 0, 0, 0, 4, 0, 0, 0, 107, 105, 110, 100, 23, 4, 0, 0, 0, 69, 110, 117, 109, 22, 4, 0, 0, 0, 69, 110, 117, 109, 2, 0, 0, 0, 4, 0, 0, 0, 110, 97, 109, 101, 15, 6, 0, 0, 0, 82, 101, 115, 117, 108, 116, 8, 0, 0, 0, 118, 97, 114, 105, 97, 110, 116, 115, 17, 2, 0, 0, 0, 22, 7, 0, 0, 0, 86, 97, 114, 105, 97, 110, 116, 3, 0, 0, 0, 4, 0, 0, 0, 110, 97, 109, 101, 15, 2, 0, 0, 0, 79, 107, 5, 0, 0, 0, 105, 110, 100, 101, 120, 4, 0, 0, 0, 0, 7, 0, 0, 0, 112, 97, 121, 108, 111, 97, 100, 23, 7, 0, 0, 0, 78, 101, 119, 116, 121, 112, 101, 23, 8, 0, 0, 0, 67, 111, 110, 99, 114, 101, 116, 101, 22, 8, 0, 0, 0, 67, 111, 110, 99, 114, 101, 116, 101, 2, 0, 0, 0, 2, 0, 0, 0, 105, 100, 5, 232, 80, 225, 78, 145, 206, 125, 109, 4, 0, 0, 0, 97, 114, 103, 115, 17, 0, 0, 0, 0, 22, 7, 0, 0, 0, 86, 97, 114, 105, 97, 110, 116, 3, 0, 0, 0, 4, 0, 0, 0, 110, 97, 109, 101, 15, 3, 0, 0, 0, 69, 114, 114, 5, 0, 0, 0, 105, 110, 100, 101, 120, 4, 1, 0, 0, 0, 7, 0, 0, 0, 112, 97, 121, 108, 111, 97, 100, 23, 7, 0, 0, 0, 78, 101, 119, 116, 121, 112, 101, 23, 8, 0, 0, 0, 67, 111, 110, 99, 114, 101, 116, 101, 22, 8, 0, 0, 0, 67, 111, 110, 99, 114, 101, 116, 101, 2, 0, 0, 0, 2, 0, 0, 0, 105, 100, 5, 68, 38, 93, 12, 39, 230, 50, 48, 4, 0, 0, 0, 97, 114, 103, 115, 17, 0, 0, 0, 0, 76, 3, 0, 0, 22, 6, 0, 0, 0, 83, 99, 104, 101, 109, 97, 3, 0, 0, 0, 2, 0, 0, 0, 105, 100, 5, 68, 38, 93, 12, 39, 230, 50, 48, 11, 0, 0, 0, 116, 121, 112, 101, 95, 112, 97, 114, 97, 109, 115, 17, 0, 0, 0, 0, 4, 0, 0, 0, 107, 105, 110, 100, 23, 4, 0, 0, 0, 69, 110, 117, 109, 22, 4, 0, 0, 0, 69, 110, 117, 109, 2, 0, 0, 0, 4, 0, 0, 0, 110, 97, 109, 101, 15, 8, 0, 0, 0, 86, 111, 120, 69, 114, 114, 111, 114, 8, 0, 0, 0, 118, 97, 114, 105, 97, 110, 116, 115, 17, 8, 0, 0, 0, 22, 7, 0, 0, 0, 86, 97, 114, 105, 97, 110, 116, 3, 0, 0, 0, 4, 0, 0, 0, 110, 97, 109, 101, 15, 4, 0, 0, 0, 85, 115, 101, 114, 5, 0, 0, 0, 105, 110, 100, 101, 120, 4, 0, 0, 0, 0, 7, 0, 0, 0, 112, 97, 121, 108, 111, 97, 100, 23, 7, 0, 0, 0, 78, 101, 119, 116, 121, 112, 101, 23, 8, 0, 0, 0, 67, 111, 110, 99, 114, 101, 116, 101, 22, 8, 0, 0, 0, 67, 111, 110, 99, 114, 101, 116, 101, 2, 0, 0, 0, 2, 0, 0, 0, 105, 100, 5, 241, 100, 141, 24, 86, 120, 254, 139, 4, 0, 0, 0, 97, 114, 103, 115, 17, 0, 0, 0, 0, 22, 7, 0, 0, 0, 86, 97, 114, 105, 97, 110, 116, 3, 0, 0, 0, 4, 0, 0, 0, 110, 97, 109, 101, 15, 13, 0, 0, 0, 85, 110, 107, 110, 111, 119, 110, 77, 101, 116, 104, 111, 100, 5, 0, 0, 0, 105, 110, 100, 101, 120, 4, 1, 0, 0, 0, 7, 0, 0, 0, 112, 97, 121, 108, 111, 97, 100, 23, 4, 0, 0, 0, 85, 110, 105, 116, 0, 22, 7, 0, 0, 0, 86, 97, 114, 105, 97, 110, 116, 3, 0, 0, 0, 4, 0, 0, 0, 110, 97, 109, 101, 15, 14, 0, 0, 0, 73, 110, 118, 97, 108, 105, 100, 80, 97, 121, 108, 111, 97, 100, 5, 0, 0, 0, 105, 110, 100, 101, 120, 4, 2, 0, 0, 0, 7, 0, 0, 0, 112, 97, 121, 108, 111, 97, 100, 23, 7, 0, 0, 0, 78, 101, 119, 116, 121, 112, 101, 23, 8, 0, 0, 0, 67, 111, 110, 99, 114, 101, 116, 101, 22, 8, 0, 0, 0, 67, 111, 110, 99, 114, 101, 116, 101, 2, 0, 0, 0, 2, 0, 0, 0, 105, 100, 5, 232, 80, 225, 78, 145, 206, 125, 109, 4, 0, 0, 0, 97, 114, 103, 115, 17, 0, 0, 0, 0, 22, 7, 0, 0, 0, 86, 97, 114, 105, 97, 110, 116, 3, 0, 0, 0, 4, 0, 0, 0, 110, 97, 109, 101, 15, 9, 0, 0, 0, 67, 97, 110, 99, 101, 108, 108, 101, 100, 5, 0, 0, 0, 105, 110, 100, 101, 120, 4, 3, 0, 0, 0, 7, 0, 0, 0, 112, 97, 121, 108, 111, 97, 100, 23, 4, 0, 0, 0, 85, 110, 105, 116, 0, 22, 7, 0, 0, 0, 86, 97, 114, 105, 97, 110, 116, 3, 0, 0, 0, 4, 0, 0, 0, 110, 97, 109, 101, 15, 16, 0, 0, 0, 67, 111, 110, 110, 101, 99, 116, 105, 111, 110, 67, 108, 111, 115, 101, 100, 5, 0, 0, 0, 105, 110, 100, 101, 120, 4, 4, 0, 0, 0, 7, 0, 0, 0, 112, 97, 121, 108, 111, 97, 100, 23, 4, 0, 0, 0, 85, 110, 105, 116, 0, 22, 7, 0, 0, 0, 86, 97, 114, 105, 97, 110, 116, 3, 0, 0, 0, 4, 0, 0, 0, 110, 97, 109, 101, 15, 15, 0, 0, 0, 83, 101, 115, 115, 105, 111, 110, 83, 104, 117, 116, 100, 111, 119, 110, 5, 0, 0, 0, 105, 110, 100, 101, 120, 4, 5, 0, 0, 0, 7, 0, 0, 0, 112, 97, 121, 108, 111, 97, 100, 23, 4, 0, 0, 0, 85, 110, 105, 116, 0, 22, 7, 0, 0, 0, 86, 97, 114, 105, 97, 110, 116, 3, 0, 0, 0, 4, 0, 0, 0, 110, 97, 109, 101, 15, 10, 0, 0, 0, 83, 101, 110, 100, 70, 97, 105, 108, 101, 100, 5, 0, 0, 0, 105, 110, 100, 101, 120, 4, 6, 0, 0, 0, 7, 0, 0, 0, 112, 97, 121, 108, 111, 97, 100, 23, 4, 0, 0, 0, 85, 110, 105, 116, 0, 22, 7, 0, 0, 0, 86, 97, 114, 105, 97, 110, 116, 3, 0, 0, 0, 4, 0, 0, 0, 110, 97, 109, 101, 15, 13, 0, 0, 0, 73, 110, 100, 101, 116, 101, 114, 109, 105, 110, 97, 116, 101, 5, 0, 0, 0, 105, 110, 100, 101, 120, 4, 7, 0, 0, 0, 7, 0, 0, 0, 112, 97, 121, 108, 111, 97, 100, 23, 4, 0, 0, 0, 85, 110, 105, 116, 0, 122, 0, 0, 0, 22, 6, 0, 0, 0, 83, 99, 104, 101, 109, 97, 3, 0, 0, 0, 2, 0, 0, 0, 105, 100, 5, 241, 100, 141, 24, 86, 120, 254, 139, 11, 0, 0, 0, 116, 121, 112, 101, 95, 112, 97, 114, 97, 109, 115, 17, 0, 0, 0, 0, 4, 0, 0, 0, 107, 105, 110, 100, 23, 6, 0, 0, 0, 83, 116, 114, 117, 99, 116, 22, 6, 0, 0, 0, 83, 116, 114, 117, 99, 116, 2, 0, 0, 0, 4, 0, 0, 0, 110, 97, 109, 101, 15, 10, 0, 0, 0, 73, 110, 102, 97, 108, 108, 105, 98, 108, 101, 6, 0, 0, 0, 102, 105, 101, 108, 100, 115, 17, 0, 0, 0, 0],
+        responseDescriptor: vfs_ping_ResponseDescriptor,
+        responseDescriptorBlocks: vfs_ping_ResponseDescriptorBlocks,
+        channels: []),
+]
+
+nonisolated(unsafe) public let vfsRegistry: Registry = buildServiceRegistry(vfsMethods)
+
+// MARK: - per-method encode programs
+
+nonisolated(unsafe) let vfs_lookup_ArgsEncodeProgram: Lowered = try! lowerTyped(vfs_lookup_ArgsDescriptor, vfsRegistry, vfs_lookup_ArgsDescriptorBlocks)
+nonisolated(unsafe) let vfs_lookup_ResponseEncodeProgram: Lowered = try! lowerTyped(vfs_lookup_ResponseDescriptor, vfsRegistry, vfs_lookup_ResponseDescriptorBlocks)
+let vfs_lookup_ArgsEncoder = VoxTypedEncoder(vfs_lookup_ArgsEncodeProgram)
+let vfs_lookup_ResponseEncoder = VoxTypedEncoder(vfs_lookup_ResponseEncodeProgram)
+nonisolated(unsafe) let vfs_getAttributes_ArgsEncodeProgram: Lowered = try! lowerTyped(vfs_getAttributes_ArgsDescriptor, vfsRegistry, vfs_getAttributes_ArgsDescriptorBlocks)
+nonisolated(unsafe) let vfs_getAttributes_ResponseEncodeProgram: Lowered = try! lowerTyped(vfs_getAttributes_ResponseDescriptor, vfsRegistry, vfs_getAttributes_ResponseDescriptorBlocks)
+let vfs_getAttributes_ArgsEncoder = VoxTypedEncoder(vfs_getAttributes_ArgsEncodeProgram)
+let vfs_getAttributes_ResponseEncoder = VoxTypedEncoder(vfs_getAttributes_ResponseEncodeProgram)
+nonisolated(unsafe) let vfs_readDir_ArgsEncodeProgram: Lowered = try! lowerTyped(vfs_readDir_ArgsDescriptor, vfsRegistry, vfs_readDir_ArgsDescriptorBlocks)
+nonisolated(unsafe) let vfs_readDir_ResponseEncodeProgram: Lowered = try! lowerTyped(vfs_readDir_ResponseDescriptor, vfsRegistry, vfs_readDir_ResponseDescriptorBlocks)
+let vfs_readDir_ArgsEncoder = VoxTypedEncoder(vfs_readDir_ArgsEncodeProgram)
+let vfs_readDir_ResponseEncoder = VoxTypedEncoder(vfs_readDir_ResponseEncodeProgram)
+nonisolated(unsafe) let vfs_read_ArgsEncodeProgram: Lowered = try! lowerTyped(vfs_read_ArgsDescriptor, vfsRegistry, vfs_read_ArgsDescriptorBlocks)
+nonisolated(unsafe) let vfs_read_ResponseEncodeProgram: Lowered = try! lowerTyped(vfs_read_ResponseDescriptor, vfsRegistry, vfs_read_ResponseDescriptorBlocks)
+let vfs_read_ArgsEncoder = VoxTypedEncoder(vfs_read_ArgsEncodeProgram)
+let vfs_read_ResponseEncoder = VoxTypedEncoder(vfs_read_ResponseEncodeProgram)
+nonisolated(unsafe) let vfs_write_ArgsEncodeProgram: Lowered = try! lowerTyped(vfs_write_ArgsDescriptor, vfsRegistry, vfs_write_ArgsDescriptorBlocks)
+nonisolated(unsafe) let vfs_write_ResponseEncodeProgram: Lowered = try! lowerTyped(vfs_write_ResponseDescriptor, vfsRegistry, vfs_write_ResponseDescriptorBlocks)
+let vfs_write_ArgsEncoder = VoxTypedEncoder(vfs_write_ArgsEncodeProgram)
+let vfs_write_ResponseEncoder = VoxTypedEncoder(vfs_write_ResponseEncodeProgram)
+nonisolated(unsafe) let vfs_create_ArgsEncodeProgram: Lowered = try! lowerTyped(vfs_create_ArgsDescriptor, vfsRegistry, vfs_create_ArgsDescriptorBlocks)
+nonisolated(unsafe) let vfs_create_ResponseEncodeProgram: Lowered = try! lowerTyped(vfs_create_ResponseDescriptor, vfsRegistry, vfs_create_ResponseDescriptorBlocks)
+let vfs_create_ArgsEncoder = VoxTypedEncoder(vfs_create_ArgsEncodeProgram)
+let vfs_create_ResponseEncoder = VoxTypedEncoder(vfs_create_ResponseEncodeProgram)
+nonisolated(unsafe) let vfs_delete_ArgsEncodeProgram: Lowered = try! lowerTyped(vfs_delete_ArgsDescriptor, vfsRegistry, vfs_delete_ArgsDescriptorBlocks)
+nonisolated(unsafe) let vfs_delete_ResponseEncodeProgram: Lowered = try! lowerTyped(vfs_delete_ResponseDescriptor, vfsRegistry, vfs_delete_ResponseDescriptorBlocks)
+let vfs_delete_ArgsEncoder = VoxTypedEncoder(vfs_delete_ArgsEncodeProgram)
+let vfs_delete_ResponseEncoder = VoxTypedEncoder(vfs_delete_ResponseEncodeProgram)
+nonisolated(unsafe) let vfs_rename_ArgsEncodeProgram: Lowered = try! lowerTyped(vfs_rename_ArgsDescriptor, vfsRegistry, vfs_rename_ArgsDescriptorBlocks)
+nonisolated(unsafe) let vfs_rename_ResponseEncodeProgram: Lowered = try! lowerTyped(vfs_rename_ResponseDescriptor, vfsRegistry, vfs_rename_ResponseDescriptorBlocks)
+let vfs_rename_ArgsEncoder = VoxTypedEncoder(vfs_rename_ArgsEncodeProgram)
+let vfs_rename_ResponseEncoder = VoxTypedEncoder(vfs_rename_ResponseEncodeProgram)
+nonisolated(unsafe) let vfs_setAttributes_ArgsEncodeProgram: Lowered = try! lowerTyped(vfs_setAttributes_ArgsDescriptor, vfsRegistry, vfs_setAttributes_ArgsDescriptorBlocks)
+nonisolated(unsafe) let vfs_setAttributes_ResponseEncodeProgram: Lowered = try! lowerTyped(vfs_setAttributes_ResponseDescriptor, vfsRegistry, vfs_setAttributes_ResponseDescriptorBlocks)
+let vfs_setAttributes_ArgsEncoder = VoxTypedEncoder(vfs_setAttributes_ArgsEncodeProgram)
+let vfs_setAttributes_ResponseEncoder = VoxTypedEncoder(vfs_setAttributes_ResponseEncodeProgram)
+nonisolated(unsafe) let vfs_ping_ArgsEncodeProgram: Lowered = try! lowerTyped(vfs_ping_ArgsDescriptor, vfsRegistry, vfs_ping_ArgsDescriptorBlocks)
+nonisolated(unsafe) let vfs_ping_ResponseEncodeProgram: Lowered = try! lowerTyped(vfs_ping_ResponseDescriptor, vfsRegistry, vfs_ping_ResponseDescriptorBlocks)
+let vfs_ping_ArgsEncoder = VoxTypedEncoder(vfs_ping_ArgsEncodeProgram)
+let vfs_ping_ResponseEncoder = VoxTypedEncoder(vfs_ping_ResponseEncodeProgram)
 
 ///  The VFS service trait - defines the RPC interface between client and server.
-public protocol VfsCaller {
+public protocol VfsCaller: Sendable {
     ///  Look up an item by name in a parent directory.
     func lookup(parentId: UInt64, name: String) async throws -> LookupResult
     ///  Get attributes for an item.
@@ -1602,194 +952,166 @@ public final class VfsClient: VfsCaller, Sendable {
     }
 
     public func lookup(parentId: UInt64, name: String) async throws -> LookupResult {
-        var buffer = ByteBufferAllocator().buffer(capacity: 64)
-        encodeVarint(parentId, into: &buffer)
-        encodeString(name, into: &buffer)
-        let payload = buffer.readBytes(length: buffer.readableBytes) ?? []
-        let schemaInfo = ClientSchemaInfo(methodInfo: vfs_method_schemas[0xab2b853c144d133b]!, schemaRegistry: vfs_schema_registry)
-        let response = try await connection.call(methodId: 0xab2b853c144d133b, metadata: [], payload: payload, retry: .volatile, timeout: timeout, prepareRetry: nil, finalizeChannels: nil, schemaInfo: schemaInfo)
-        return try decodeInfallibleResponse(response) { buf in
-            let __result_attrs_itemId = try decodeVarint(from: &buf)
-            let ___result_attrs_itemType_disc = try decodeVarint(from: &buf)
-            let __result_attrs_itemType: ItemType
-            switch ___result_attrs_itemType_disc {
-            case 0:
-                __result_attrs_itemType = .file
-            case 1:
-                __result_attrs_itemType = .directory
-            case 2:
-                __result_attrs_itemType = .symlink
-            default:
-                throw VoxError.decodeError("unknown enum variant")
-            }
-            let __result_attrs_size = try decodeVarint(from: &buf)
-            let __result_attrs_modifiedTime = try decodeVarint(from: &buf)
-            let __result_attrs_createdTime = try decodeVarint(from: &buf)
-            let __result_attrs_mode = try decodeU32(from: &buf)
-            let _result_attrs = ItemAttributes(itemId: __result_attrs_itemId, itemType: __result_attrs_itemType, size: __result_attrs_size, modifiedTime: __result_attrs_modifiedTime, createdTime: __result_attrs_createdTime, mode: __result_attrs_mode)
-            let _result_error = try decodeI32(from: &buf)
-            let result = LookupResult(attrs: _result_attrs, error: _result_error)
-            return result
+        let payload = encodeVoxTyped((parentId, name), vfs_lookup_ArgsEncoder)
+        let response = try await connection.call(
+            methodId: 0xab2b853c144d133b, metadata: .null, payload: payload, timeout: timeout,
+            finalizeChannels: nil,
+            schemaInfo: ClientSchemaInfo(methodSchemas: vfsMethods[0xab2b853c144d133b]!, registry: vfsRegistry))
+        guard let respDecoder = connection.schemaReceiveTracker.buildDecodeFn(0xab2b853c144d133b, .response, readerDescriptor: vfs_lookup_ResponseDescriptor, readerBlocks: vfs_lookup_ResponseDescriptorBlocks, local: vfsRegistry) else {
+            throw VoxError<Infallible>.invalidPayload("no response schema advertised")
+        }
+        let result: Result<LookupResult, VoxError<Infallible>> = try decodeVoxTyped(respDecoder, response)
+        switch result {
+        case .success(let value): return value
+        case .failure(let error): throw error
         }
     }
 
     public func getAttributes(itemId: UInt64) async throws -> GetAttributesResult {
-        var buffer = ByteBufferAllocator().buffer(capacity: 64)
-        encodeVarint(itemId, into: &buffer)
-        let payload = buffer.readBytes(length: buffer.readableBytes) ?? []
-        let schemaInfo = ClientSchemaInfo(methodInfo: vfs_method_schemas[0xd97f57caa097adf9]!, schemaRegistry: vfs_schema_registry)
-        let response = try await connection.call(methodId: 0xd97f57caa097adf9, metadata: [], payload: payload, retry: .volatile, timeout: timeout, prepareRetry: nil, finalizeChannels: nil, schemaInfo: schemaInfo)
-        return try decodeInfallibleResponse(response) { buf in
-            let __result_attrs_itemId = try decodeVarint(from: &buf)
-            let ___result_attrs_itemType_disc = try decodeVarint(from: &buf)
-            let __result_attrs_itemType: ItemType
-            switch ___result_attrs_itemType_disc {
-            case 0:
-                __result_attrs_itemType = .file
-            case 1:
-                __result_attrs_itemType = .directory
-            case 2:
-                __result_attrs_itemType = .symlink
-            default:
-                throw VoxError.decodeError("unknown enum variant")
-            }
-            let __result_attrs_size = try decodeVarint(from: &buf)
-            let __result_attrs_modifiedTime = try decodeVarint(from: &buf)
-            let __result_attrs_createdTime = try decodeVarint(from: &buf)
-            let __result_attrs_mode = try decodeU32(from: &buf)
-            let _result_attrs = ItemAttributes(itemId: __result_attrs_itemId, itemType: __result_attrs_itemType, size: __result_attrs_size, modifiedTime: __result_attrs_modifiedTime, createdTime: __result_attrs_createdTime, mode: __result_attrs_mode)
-            let _result_error = try decodeI32(from: &buf)
-            let result = GetAttributesResult(attrs: _result_attrs, error: _result_error)
-            return result
+        let payload = encodeVoxTyped(itemId, vfs_getAttributes_ArgsEncoder)
+        let response = try await connection.call(
+            methodId: 0xd97f57caa097adf9, metadata: .null, payload: payload, timeout: timeout,
+            finalizeChannels: nil,
+            schemaInfo: ClientSchemaInfo(methodSchemas: vfsMethods[0xd97f57caa097adf9]!, registry: vfsRegistry))
+        guard let respDecoder = connection.schemaReceiveTracker.buildDecodeFn(0xd97f57caa097adf9, .response, readerDescriptor: vfs_getAttributes_ResponseDescriptor, readerBlocks: vfs_getAttributes_ResponseDescriptorBlocks, local: vfsRegistry) else {
+            throw VoxError<Infallible>.invalidPayload("no response schema advertised")
+        }
+        let result: Result<GetAttributesResult, VoxError<Infallible>> = try decodeVoxTyped(respDecoder, response)
+        switch result {
+        case .success(let value): return value
+        case .failure(let error): throw error
         }
     }
 
     public func readDir(itemId: UInt64, cookie: UInt64, verifier: UInt64) async throws -> ReadDirResult {
-        var buffer = ByteBufferAllocator().buffer(capacity: 64)
-        encodeVarint(itemId, into: &buffer)
-        encodeVarint(cookie, into: &buffer)
-        encodeVarint(verifier, into: &buffer)
-        let payload = buffer.readBytes(length: buffer.readableBytes) ?? []
-        let schemaInfo = ClientSchemaInfo(methodInfo: vfs_method_schemas[0xf2ba29feced65eb7]!, schemaRegistry: vfs_schema_registry)
-        let response = try await connection.call(methodId: 0xf2ba29feced65eb7, metadata: [], payload: payload, retry: .volatile, timeout: timeout, prepareRetry: nil, finalizeChannels: nil, schemaInfo: schemaInfo)
-        return try decodeInfallibleResponse(response) { buf in
-            let _result_entries = try decodeVec(from: &buf, decoder: { buf in try decodeDirEntry(from: &buf) })
-            let _result_nextCookie = try decodeVarint(from: &buf)
-            let _result_verifier = try decodeVarint(from: &buf)
-            let _result_error = try decodeI32(from: &buf)
-            let result = ReadDirResult(entries: _result_entries, nextCookie: _result_nextCookie, verifier: _result_verifier, error: _result_error)
-            return result
+        let payload = encodeVoxTyped((itemId, cookie, verifier), vfs_readDir_ArgsEncoder)
+        let response = try await connection.call(
+            methodId: 0xf2ba29feced65eb7, metadata: .null, payload: payload, timeout: timeout,
+            finalizeChannels: nil,
+            schemaInfo: ClientSchemaInfo(methodSchemas: vfsMethods[0xf2ba29feced65eb7]!, registry: vfsRegistry))
+        guard let respDecoder = connection.schemaReceiveTracker.buildDecodeFn(0xf2ba29feced65eb7, .response, readerDescriptor: vfs_readDir_ResponseDescriptor, readerBlocks: vfs_readDir_ResponseDescriptorBlocks, local: vfsRegistry) else {
+            throw VoxError<Infallible>.invalidPayload("no response schema advertised")
+        }
+        let result: Result<ReadDirResult, VoxError<Infallible>> = try decodeVoxTyped(respDecoder, response)
+        switch result {
+        case .success(let value): return value
+        case .failure(let error): throw error
         }
     }
 
     public func read(itemId: UInt64, offset: UInt64, len: UInt64) async throws -> ReadResult {
-        var buffer = ByteBufferAllocator().buffer(capacity: 64)
-        encodeVarint(itemId, into: &buffer)
-        encodeVarint(offset, into: &buffer)
-        encodeVarint(len, into: &buffer)
-        let payload = buffer.readBytes(length: buffer.readableBytes) ?? []
-        let schemaInfo = ClientSchemaInfo(methodInfo: vfs_method_schemas[0x719a43e94d147918]!, schemaRegistry: vfs_schema_registry)
-        let response = try await connection.call(methodId: 0x719a43e94d147918, metadata: [], payload: payload, retry: .volatile, timeout: timeout, prepareRetry: nil, finalizeChannels: nil, schemaInfo: schemaInfo)
-        return try decodeInfallibleResponse(response) { buf in
-            var __result_data_buf = try decodeBytes(from: &buf)
-            let _result_data = Data(__result_data_buf.readBytes(length: __result_data_buf.readableBytes) ?? [])
-            let _result_error = try decodeI32(from: &buf)
-            let result = ReadResult(data: _result_data, error: _result_error)
-            return result
+        let payload = encodeVoxTyped((itemId, offset, len), vfs_read_ArgsEncoder)
+        let response = try await connection.call(
+            methodId: 0x719a43e94d147918, metadata: .null, payload: payload, timeout: timeout,
+            finalizeChannels: nil,
+            schemaInfo: ClientSchemaInfo(methodSchemas: vfsMethods[0x719a43e94d147918]!, registry: vfsRegistry))
+        guard let respDecoder = connection.schemaReceiveTracker.buildDecodeFn(0x719a43e94d147918, .response, readerDescriptor: vfs_read_ResponseDescriptor, readerBlocks: vfs_read_ResponseDescriptorBlocks, local: vfsRegistry) else {
+            throw VoxError<Infallible>.invalidPayload("no response schema advertised")
+        }
+        let result: Result<ReadResult, VoxError<Infallible>> = try decodeVoxTyped(respDecoder, response)
+        switch result {
+        case .success(let value): return value
+        case .failure(let error): throw error
         }
     }
 
     public func write(itemId: UInt64, offset: UInt64, data: Data) async throws -> WriteResult {
-        var buffer = ByteBufferAllocator().buffer(capacity: 64)
-        encodeVarint(itemId, into: &buffer)
-        encodeVarint(offset, into: &buffer)
-        encodeByteSeq(data, into: &buffer)
-        let payload = buffer.readBytes(length: buffer.readableBytes) ?? []
-        let schemaInfo = ClientSchemaInfo(methodInfo: vfs_method_schemas[0xc330417994d57b8a]!, schemaRegistry: vfs_schema_registry)
-        let response = try await connection.call(methodId: 0xc330417994d57b8a, metadata: [], payload: payload, retry: .volatile, timeout: timeout, prepareRetry: nil, finalizeChannels: nil, schemaInfo: schemaInfo)
-        return try decodeInfallibleResponse(response) { buf in
-            let _result_bytesWritten = try decodeVarint(from: &buf)
-            let _result_error = try decodeI32(from: &buf)
-            let result = WriteResult(bytesWritten: _result_bytesWritten, error: _result_error)
-            return result
+        let payload = encodeVoxTyped((itemId, offset, data), vfs_write_ArgsEncoder)
+        let response = try await connection.call(
+            methodId: 0xc330417994d57b8a, metadata: .null, payload: payload, timeout: timeout,
+            finalizeChannels: nil,
+            schemaInfo: ClientSchemaInfo(methodSchemas: vfsMethods[0xc330417994d57b8a]!, registry: vfsRegistry))
+        guard let respDecoder = connection.schemaReceiveTracker.buildDecodeFn(0xc330417994d57b8a, .response, readerDescriptor: vfs_write_ResponseDescriptor, readerBlocks: vfs_write_ResponseDescriptorBlocks, local: vfsRegistry) else {
+            throw VoxError<Infallible>.invalidPayload("no response schema advertised")
+        }
+        let result: Result<WriteResult, VoxError<Infallible>> = try decodeVoxTyped(respDecoder, response)
+        switch result {
+        case .success(let value): return value
+        case .failure(let error): throw error
         }
     }
 
     public func create(parentId: UInt64, name: String, itemType: ItemType, mode: UInt32) async throws -> CreateResult {
-        var buffer = ByteBufferAllocator().buffer(capacity: 64)
-        encodeVarint(parentId, into: &buffer)
-        encodeString(name, into: &buffer)
-        encodeItemType(itemType, into: &buffer)
-        encodeU32(mode, into: &buffer)
-        let payload = buffer.readBytes(length: buffer.readableBytes) ?? []
-        let schemaInfo = ClientSchemaInfo(methodInfo: vfs_method_schemas[0x9b060d7cd7c1a62e]!, schemaRegistry: vfs_schema_registry)
-        let response = try await connection.call(methodId: 0x9b060d7cd7c1a62e, metadata: [], payload: payload, retry: .volatile, timeout: timeout, prepareRetry: nil, finalizeChannels: nil, schemaInfo: schemaInfo)
-        return try decodeInfallibleResponse(response) { buf in
-            let _result_itemId = try decodeVarint(from: &buf)
-            let _result_error = try decodeI32(from: &buf)
-            let result = CreateResult(itemId: _result_itemId, error: _result_error)
-            return result
+        let payload = encodeVoxTyped((parentId, name, itemType, mode), vfs_create_ArgsEncoder)
+        let response = try await connection.call(
+            methodId: 0x9b060d7cd7c1a62e, metadata: .null, payload: payload, timeout: timeout,
+            finalizeChannels: nil,
+            schemaInfo: ClientSchemaInfo(methodSchemas: vfsMethods[0x9b060d7cd7c1a62e]!, registry: vfsRegistry))
+        guard let respDecoder = connection.schemaReceiveTracker.buildDecodeFn(0x9b060d7cd7c1a62e, .response, readerDescriptor: vfs_create_ResponseDescriptor, readerBlocks: vfs_create_ResponseDescriptorBlocks, local: vfsRegistry) else {
+            throw VoxError<Infallible>.invalidPayload("no response schema advertised")
+        }
+        let result: Result<CreateResult, VoxError<Infallible>> = try decodeVoxTyped(respDecoder, response)
+        switch result {
+        case .success(let value): return value
+        case .failure(let error): throw error
         }
     }
 
     public func delete(itemId: UInt64) async throws -> VfsResult {
-        var buffer = ByteBufferAllocator().buffer(capacity: 64)
-        encodeVarint(itemId, into: &buffer)
-        let payload = buffer.readBytes(length: buffer.readableBytes) ?? []
-        let schemaInfo = ClientSchemaInfo(methodInfo: vfs_method_schemas[0x2a1f41955c3e63a8]!, schemaRegistry: vfs_schema_registry)
-        let response = try await connection.call(methodId: 0x2a1f41955c3e63a8, metadata: [], payload: payload, retry: .volatile, timeout: timeout, prepareRetry: nil, finalizeChannels: nil, schemaInfo: schemaInfo)
-        return try decodeInfallibleResponse(response) { buf in
-            let _result_error = try decodeI32(from: &buf)
-            let result = VfsResult(error: _result_error)
-            return result
+        let payload = encodeVoxTyped(itemId, vfs_delete_ArgsEncoder)
+        let response = try await connection.call(
+            methodId: 0x2a1f41955c3e63a8, metadata: .null, payload: payload, timeout: timeout,
+            finalizeChannels: nil,
+            schemaInfo: ClientSchemaInfo(methodSchemas: vfsMethods[0x2a1f41955c3e63a8]!, registry: vfsRegistry))
+        guard let respDecoder = connection.schemaReceiveTracker.buildDecodeFn(0x2a1f41955c3e63a8, .response, readerDescriptor: vfs_delete_ResponseDescriptor, readerBlocks: vfs_delete_ResponseDescriptorBlocks, local: vfsRegistry) else {
+            throw VoxError<Infallible>.invalidPayload("no response schema advertised")
+        }
+        let result: Result<VfsResult, VoxError<Infallible>> = try decodeVoxTyped(respDecoder, response)
+        switch result {
+        case .success(let value): return value
+        case .failure(let error): throw error
         }
     }
 
     public func rename(itemId: UInt64, newParentId: UInt64, newName: String) async throws -> VfsResult {
-        var buffer = ByteBufferAllocator().buffer(capacity: 64)
-        encodeVarint(itemId, into: &buffer)
-        encodeVarint(newParentId, into: &buffer)
-        encodeString(newName, into: &buffer)
-        let payload = buffer.readBytes(length: buffer.readableBytes) ?? []
-        let schemaInfo = ClientSchemaInfo(methodInfo: vfs_method_schemas[0x5aca8524d890971d]!, schemaRegistry: vfs_schema_registry)
-        let response = try await connection.call(methodId: 0x5aca8524d890971d, metadata: [], payload: payload, retry: .volatile, timeout: timeout, prepareRetry: nil, finalizeChannels: nil, schemaInfo: schemaInfo)
-        return try decodeInfallibleResponse(response) { buf in
-            let _result_error = try decodeI32(from: &buf)
-            let result = VfsResult(error: _result_error)
-            return result
+        let payload = encodeVoxTyped((itemId, newParentId, newName), vfs_rename_ArgsEncoder)
+        let response = try await connection.call(
+            methodId: 0x5aca8524d890971d, metadata: .null, payload: payload, timeout: timeout,
+            finalizeChannels: nil,
+            schemaInfo: ClientSchemaInfo(methodSchemas: vfsMethods[0x5aca8524d890971d]!, registry: vfsRegistry))
+        guard let respDecoder = connection.schemaReceiveTracker.buildDecodeFn(0x5aca8524d890971d, .response, readerDescriptor: vfs_rename_ResponseDescriptor, readerBlocks: vfs_rename_ResponseDescriptorBlocks, local: vfsRegistry) else {
+            throw VoxError<Infallible>.invalidPayload("no response schema advertised")
+        }
+        let result: Result<VfsResult, VoxError<Infallible>> = try decodeVoxTyped(respDecoder, response)
+        switch result {
+        case .success(let value): return value
+        case .failure(let error): throw error
         }
     }
 
     public func setAttributes(itemId: UInt64, params: SetAttributesParams) async throws -> VfsResult {
-        var buffer = ByteBufferAllocator().buffer(capacity: 64)
-        encodeVarint(itemId, into: &buffer)
-        encodeSetAttributesParams(params, into: &buffer)
-        let payload = buffer.readBytes(length: buffer.readableBytes) ?? []
-        let schemaInfo = ClientSchemaInfo(methodInfo: vfs_method_schemas[0x2086815889a62b33]!, schemaRegistry: vfs_schema_registry)
-        let response = try await connection.call(methodId: 0x2086815889a62b33, metadata: [], payload: payload, retry: .volatile, timeout: timeout, prepareRetry: nil, finalizeChannels: nil, schemaInfo: schemaInfo)
-        return try decodeInfallibleResponse(response) { buf in
-            let _result_error = try decodeI32(from: &buf)
-            let result = VfsResult(error: _result_error)
-            return result
+        let payload = encodeVoxTyped((itemId, params), vfs_setAttributes_ArgsEncoder)
+        let response = try await connection.call(
+            methodId: 0x2086815889a62b33, metadata: .null, payload: payload, timeout: timeout,
+            finalizeChannels: nil,
+            schemaInfo: ClientSchemaInfo(methodSchemas: vfsMethods[0x2086815889a62b33]!, registry: vfsRegistry))
+        guard let respDecoder = connection.schemaReceiveTracker.buildDecodeFn(0x2086815889a62b33, .response, readerDescriptor: vfs_setAttributes_ResponseDescriptor, readerBlocks: vfs_setAttributes_ResponseDescriptorBlocks, local: vfsRegistry) else {
+            throw VoxError<Infallible>.invalidPayload("no response schema advertised")
+        }
+        let result: Result<VfsResult, VoxError<Infallible>> = try decodeVoxTyped(respDecoder, response)
+        switch result {
+        case .success(let value): return value
+        case .failure(let error): throw error
         }
     }
 
     public func ping() async throws -> String {
         let payload: [UInt8] = []
-        let schemaInfo = ClientSchemaInfo(methodInfo: vfs_method_schemas[0xda4fc1cc055a4fcb]!, schemaRegistry: vfs_schema_registry)
-        let response = try await connection.call(methodId: 0xda4fc1cc055a4fcb, metadata: [], payload: payload, retry: .volatile, timeout: timeout, prepareRetry: nil, finalizeChannels: nil, schemaInfo: schemaInfo)
-        return try decodeInfallibleResponse(response) { buf in
-            let result = try decodeString(from: &buf)
-            return result
+        let response = try await connection.call(
+            methodId: 0xda4fc1cc055a4fcb, metadata: .null, payload: payload, timeout: timeout,
+            finalizeChannels: nil,
+            schemaInfo: ClientSchemaInfo(methodSchemas: vfsMethods[0xda4fc1cc055a4fcb]!, registry: vfsRegistry))
+        guard let respDecoder = connection.schemaReceiveTracker.buildDecodeFn(0xda4fc1cc055a4fcb, .response, readerDescriptor: vfs_ping_ResponseDescriptor, readerBlocks: vfs_ping_ResponseDescriptorBlocks, local: vfsRegistry) else {
+            throw VoxError<Infallible>.invalidPayload("no response schema advertised")
+        }
+        let result: Result<String, VoxError<Infallible>> = try decodeVoxTyped(respDecoder, response)
+        switch result {
+        case .success(let value): return value
+        case .failure(let error): throw error
         }
     }
-}
 
-extension VfsClient: ExpectedRootClient {
-    public static let voxServiceName = "Vfs"
 }
-
-// MARK: - Vfs Server
 
 ///  The VFS service trait - defines the RPC interface between client and server.
 public protocol VfsHandler: Sendable {
@@ -1819,407 +1141,241 @@ public protocol VfsHandler: Sendable {
 
 public final class VfsDispatcher: ServiceDispatcher {
     private let handler: VfsHandler
-    private let schemaRegistry: [UInt64: Schema]
-    private let methodSchemas: [UInt64: MethodSchemaInfo]
+    public init(handler: VfsHandler) { self.handler = handler }
 
-    public init(handler: VfsHandler, schemaRegistry: [UInt64: Schema] = vfs_schema_registry, methodSchemas: [UInt64: MethodSchemaInfo] = vfs_method_schemas) {
-        self.handler = handler
-        self.schemaRegistry = schemaRegistry
-        self.methodSchemas = methodSchemas
+    public func encodeVoxError(_ error: VoxRuntimeError) -> [UInt8] {
+        let wire: VoxError<Infallible>
+        switch error {
+        case .unknownMethod, .notImplemented: wire = .unknownMethod
+        case .invalidPayload(let s), .decodeError(let s), .encodeError(let s): wire = .invalidPayload(s)
+        case .cancelled: wire = .cancelled
+        case .connectionClosed: wire = .connectionClosed
+        case .timeout, .indeterminate: wire = .indeterminate
+        }
+        let r: Result<LookupResult, VoxError<Infallible>> = .failure(wire)
+        return encodeVoxTyped(r, vfs_lookup_ResponseEncoder)
     }
 
-    public func dispatch(methodId: UInt64, payload: [UInt8], requestId: UInt64, registry: ChannelRegistry, schemaSendTracker _: SchemaSendTracker, taskTx: @escaping @Sendable (TaskMessage) -> Void) async {
-        var buffer = ByteBufferAllocator().buffer(capacity: payload.count)
-        buffer.writeBytes(payload)
-        let taskSender: TaskSender = taskTx
+    public func preregister(methodId: UInt64, payload: [UInt8], channels: [UInt64], registry: ChannelRegistry) async {
+        for id in channels { await registry.markKnown(id) }
+    }
+
+    public func dispatch(methodId: UInt64, payload: [UInt8], requestId: UInt64, channels: [UInt64], registry: ChannelRegistry, schemaSendTracker: SchemaSendTracker, schemaReceiveTracker: SchemaTracker, taskTx: @escaping @Sendable (TaskMessage) -> Void) async {
         switch methodId {
-        case 0xab2b853c144d133b:
-            await dispatch_lookup(methodId: methodId, requestId: requestId, buffer: &buffer, registry: registry, taskSender: taskSender)
-        case 0xd97f57caa097adf9:
-            await dispatch_getAttributes(methodId: methodId, requestId: requestId, buffer: &buffer, registry: registry, taskSender: taskSender)
-        case 0xf2ba29feced65eb7:
-            await dispatch_readDir(methodId: methodId, requestId: requestId, buffer: &buffer, registry: registry, taskSender: taskSender)
-        case 0x719a43e94d147918:
-            await dispatch_read(methodId: methodId, requestId: requestId, buffer: &buffer, registry: registry, taskSender: taskSender)
-        case 0xc330417994d57b8a:
-            await dispatch_write(methodId: methodId, requestId: requestId, buffer: &buffer, registry: registry, taskSender: taskSender)
-        case 0x9b060d7cd7c1a62e:
-            await dispatch_create(methodId: methodId, requestId: requestId, buffer: &buffer, registry: registry, taskSender: taskSender)
-        case 0x2a1f41955c3e63a8:
-            await dispatch_delete(methodId: methodId, requestId: requestId, buffer: &buffer, registry: registry, taskSender: taskSender)
-        case 0x5aca8524d890971d:
-            await dispatch_rename(methodId: methodId, requestId: requestId, buffer: &buffer, registry: registry, taskSender: taskSender)
-        case 0x2086815889a62b33:
-            await dispatch_setAttributes(methodId: methodId, requestId: requestId, buffer: &buffer, registry: registry, taskSender: taskSender)
-        case 0xda4fc1cc055a4fcb:
-            await dispatch_ping(methodId: methodId, requestId: requestId, buffer: &buffer, registry: registry, taskSender: taskSender)
-        default:
-            taskSender(.response(requestId: requestId, payload: encodeUnknownMethodError()))
+        case 0xab2b853c144d133b: await dispatch_lookup(payload: payload, requestId: requestId, schemaSendTracker: schemaSendTracker, schemaReceiveTracker: schemaReceiveTracker, taskTx: taskTx)
+        case 0xd97f57caa097adf9: await dispatch_getAttributes(payload: payload, requestId: requestId, schemaSendTracker: schemaSendTracker, schemaReceiveTracker: schemaReceiveTracker, taskTx: taskTx)
+        case 0xf2ba29feced65eb7: await dispatch_readDir(payload: payload, requestId: requestId, schemaSendTracker: schemaSendTracker, schemaReceiveTracker: schemaReceiveTracker, taskTx: taskTx)
+        case 0x719a43e94d147918: await dispatch_read(payload: payload, requestId: requestId, schemaSendTracker: schemaSendTracker, schemaReceiveTracker: schemaReceiveTracker, taskTx: taskTx)
+        case 0xc330417994d57b8a: await dispatch_write(payload: payload, requestId: requestId, schemaSendTracker: schemaSendTracker, schemaReceiveTracker: schemaReceiveTracker, taskTx: taskTx)
+        case 0x9b060d7cd7c1a62e: await dispatch_create(payload: payload, requestId: requestId, schemaSendTracker: schemaSendTracker, schemaReceiveTracker: schemaReceiveTracker, taskTx: taskTx)
+        case 0x2a1f41955c3e63a8: await dispatch_delete(payload: payload, requestId: requestId, schemaSendTracker: schemaSendTracker, schemaReceiveTracker: schemaReceiveTracker, taskTx: taskTx)
+        case 0x5aca8524d890971d: await dispatch_rename(payload: payload, requestId: requestId, schemaSendTracker: schemaSendTracker, schemaReceiveTracker: schemaReceiveTracker, taskTx: taskTx)
+        case 0x2086815889a62b33: await dispatch_setAttributes(payload: payload, requestId: requestId, schemaSendTracker: schemaSendTracker, schemaReceiveTracker: schemaReceiveTracker, taskTx: taskTx)
+        case 0xda4fc1cc055a4fcb: await dispatch_ping(payload: payload, requestId: requestId, schemaSendTracker: schemaSendTracker, schemaReceiveTracker: schemaReceiveTracker, taskTx: taskTx)
+        default: taskTx(.response(requestId: requestId, payload: encodeVoxError(.unknownMethod), methodId: methodId))
         }
     }
 
-    public func retryPolicy(methodId: UInt64) -> RetryPolicy {
-        switch methodId {
-        case 0xab2b853c144d133b:
-            return .volatile
-        case 0xd97f57caa097adf9:
-            return .volatile
-        case 0xf2ba29feced65eb7:
-            return .volatile
-        case 0x719a43e94d147918:
-            return .volatile
-        case 0xc330417994d57b8a:
-            return .volatile
-        case 0x9b060d7cd7c1a62e:
-            return .volatile
-        case 0x2a1f41955c3e63a8:
-            return .volatile
-        case 0x5aca8524d890971d:
-            return .volatile
-        case 0x2086815889a62b33:
-            return .volatile
-        case 0xda4fc1cc055a4fcb:
-            return .volatile
-        default:
-            return .volatile
-        }
-    }
-
-    /// Pre-register Rx channel IDs from request payloads.
-    /// Call this synchronously before spawning the dispatch task to avoid
-    /// race conditions where Data arrives before channels are registered.
-    public func preregister(methodId: UInt64, payload: [UInt8], registry: ChannelRegistry) async {
-        var buffer = ByteBufferAllocator().buffer(capacity: payload.count)
-        buffer.writeBytes(payload)
-        switch methodId {
-        default:
-            break
-        }
-    }
-
-    private func dispatch_lookup(methodId: UInt64, requestId: UInt64, buffer: inout ByteBuffer, registry: IncomingChannelRegistry, taskSender: @escaping TaskSender) async {
-        guard let methodInfo = methodSchemas[methodId] else {
-            taskSender(.response(requestId: requestId, payload: encodeUnknownMethodError()))
+    private func dispatch_lookup(payload: [UInt8], requestId: UInt64, schemaSendTracker: SchemaSendTracker, schemaReceiveTracker: SchemaTracker, taskTx: @escaping @Sendable (TaskMessage) -> Void) async {
+        guard let argsDecoder = schemaReceiveTracker.buildDecodeFn(0xab2b853c144d133b, .args, readerDescriptor: vfs_lookup_ArgsDescriptor, readerBlocks: vfs_lookup_ArgsDescriptorBlocks, local: vfsRegistry) else {
+            taskTx(.response(requestId: requestId, payload: encodeVoxError(.invalidPayload("no args schema advertised")), methodId: 0xab2b853c144d133b, responseSchemaClosure: vfsMethods[0xab2b853c144d133b]!.responseSchemaClosure))
             return
         }
-        let responseSchemaPayload = methodInfo.buildPayload(direction: .response, registry: schemaRegistry)
-        do {
-            let parentId = try decodeVarint(from: &buffer)
-            let name = try decodeString(from: &buffer)
-            do {
-                let result = try await handler.lookup(parentId: parentId, name: name)
-                let _encoded = encodeResultOk(result, encoder: { val, buf in encodeLookupResult(val, into: &buf) })
-                taskSender(.response(requestId: requestId, payload: _encoded, methodId: methodId, schemaPayload: responseSchemaPayload))
-            } catch {
-                taskSender(.response(requestId: requestId, payload: encodeInvalidPayloadError(reason: String(describing: error)), methodId: methodId, schemaPayload: responseSchemaPayload))
-            }
-        } catch {
-            taskSender(.response(requestId: requestId, payload: encodeInvalidPayloadError(reason: String(describing: error)), methodId: methodId, schemaPayload: responseSchemaPayload))
-        }
-    }
-
-    private func dispatch_getAttributes(methodId: UInt64, requestId: UInt64, buffer: inout ByteBuffer, registry: IncomingChannelRegistry, taskSender: @escaping TaskSender) async {
-        guard let methodInfo = methodSchemas[methodId] else {
-            taskSender(.response(requestId: requestId, payload: encodeUnknownMethodError()))
+        let args: (UInt64, String)
+        do { args = try decodeVoxTyped(argsDecoder, payload) } catch {
+            taskTx(.response(requestId: requestId, payload: encodeVoxError(.invalidPayload("decode args")), methodId: 0xab2b853c144d133b, responseSchemaClosure: vfsMethods[0xab2b853c144d133b]!.responseSchemaClosure))
             return
         }
-        let responseSchemaPayload = methodInfo.buildPayload(direction: .response, registry: schemaRegistry)
+        let voxResult: Result<LookupResult, VoxError<Infallible>>
         do {
-            let itemId = try decodeVarint(from: &buffer)
-            do {
-                let result = try await handler.getAttributes(itemId: itemId)
-                let _encoded = encodeResultOk(result, encoder: { val, buf in encodeGetAttributesResult(val, into: &buf) })
-                taskSender(.response(requestId: requestId, payload: _encoded, methodId: methodId, schemaPayload: responseSchemaPayload))
-            } catch {
-                taskSender(.response(requestId: requestId, payload: encodeInvalidPayloadError(reason: String(describing: error)), methodId: methodId, schemaPayload: responseSchemaPayload))
-            }
+            let voxValue = try await handler.lookup(parentId: args.0, name: args.1)
+            voxResult = .success(voxValue)
         } catch {
-            taskSender(.response(requestId: requestId, payload: encodeInvalidPayloadError(reason: String(describing: error)), methodId: methodId, schemaPayload: responseSchemaPayload))
+            voxResult = .failure(.indeterminate)
         }
+        let respPayload = encodeVoxTyped(voxResult, vfs_lookup_ResponseEncoder)
+        taskTx(.response(requestId: requestId, payload: respPayload, methodId: 0xab2b853c144d133b, responseSchemaClosure: vfsMethods[0xab2b853c144d133b]!.responseSchemaClosure))
     }
 
-    private func dispatch_readDir(methodId: UInt64, requestId: UInt64, buffer: inout ByteBuffer, registry: IncomingChannelRegistry, taskSender: @escaping TaskSender) async {
-        guard let methodInfo = methodSchemas[methodId] else {
-            taskSender(.response(requestId: requestId, payload: encodeUnknownMethodError()))
+    private func dispatch_getAttributes(payload: [UInt8], requestId: UInt64, schemaSendTracker: SchemaSendTracker, schemaReceiveTracker: SchemaTracker, taskTx: @escaping @Sendable (TaskMessage) -> Void) async {
+        guard let argsDecoder = schemaReceiveTracker.buildDecodeFn(0xd97f57caa097adf9, .args, readerDescriptor: vfs_getAttributes_ArgsDescriptor, readerBlocks: vfs_getAttributes_ArgsDescriptorBlocks, local: vfsRegistry) else {
+            taskTx(.response(requestId: requestId, payload: encodeVoxError(.invalidPayload("no args schema advertised")), methodId: 0xd97f57caa097adf9, responseSchemaClosure: vfsMethods[0xd97f57caa097adf9]!.responseSchemaClosure))
             return
         }
-        let responseSchemaPayload = methodInfo.buildPayload(direction: .response, registry: schemaRegistry)
-        do {
-            let itemId = try decodeVarint(from: &buffer)
-            let cookie = try decodeVarint(from: &buffer)
-            let verifier = try decodeVarint(from: &buffer)
-            do {
-                let result = try await handler.readDir(itemId: itemId, cookie: cookie, verifier: verifier)
-                let _encoded = encodeResultOk(result, encoder: { val, buf in encodeReadDirResult(val, into: &buf) })
-                taskSender(.response(requestId: requestId, payload: _encoded, methodId: methodId, schemaPayload: responseSchemaPayload))
-            } catch {
-                taskSender(.response(requestId: requestId, payload: encodeInvalidPayloadError(reason: String(describing: error)), methodId: methodId, schemaPayload: responseSchemaPayload))
-            }
-        } catch {
-            taskSender(.response(requestId: requestId, payload: encodeInvalidPayloadError(reason: String(describing: error)), methodId: methodId, schemaPayload: responseSchemaPayload))
+        let args: (UInt64)
+        do { args = try decodeVoxTyped(argsDecoder, payload) } catch {
+            taskTx(.response(requestId: requestId, payload: encodeVoxError(.invalidPayload("decode args")), methodId: 0xd97f57caa097adf9, responseSchemaClosure: vfsMethods[0xd97f57caa097adf9]!.responseSchemaClosure))
+            return
         }
+        let voxResult: Result<GetAttributesResult, VoxError<Infallible>>
+        do {
+            let voxValue = try await handler.getAttributes(itemId: args)
+            voxResult = .success(voxValue)
+        } catch {
+            voxResult = .failure(.indeterminate)
+        }
+        let respPayload = encodeVoxTyped(voxResult, vfs_getAttributes_ResponseEncoder)
+        taskTx(.response(requestId: requestId, payload: respPayload, methodId: 0xd97f57caa097adf9, responseSchemaClosure: vfsMethods[0xd97f57caa097adf9]!.responseSchemaClosure))
     }
 
-    private func dispatch_read(methodId: UInt64, requestId: UInt64, buffer: inout ByteBuffer, registry: IncomingChannelRegistry, taskSender: @escaping TaskSender) async {
-        guard let methodInfo = methodSchemas[methodId] else {
-            taskSender(.response(requestId: requestId, payload: encodeUnknownMethodError()))
+    private func dispatch_readDir(payload: [UInt8], requestId: UInt64, schemaSendTracker: SchemaSendTracker, schemaReceiveTracker: SchemaTracker, taskTx: @escaping @Sendable (TaskMessage) -> Void) async {
+        guard let argsDecoder = schemaReceiveTracker.buildDecodeFn(0xf2ba29feced65eb7, .args, readerDescriptor: vfs_readDir_ArgsDescriptor, readerBlocks: vfs_readDir_ArgsDescriptorBlocks, local: vfsRegistry) else {
+            taskTx(.response(requestId: requestId, payload: encodeVoxError(.invalidPayload("no args schema advertised")), methodId: 0xf2ba29feced65eb7, responseSchemaClosure: vfsMethods[0xf2ba29feced65eb7]!.responseSchemaClosure))
             return
         }
-        let responseSchemaPayload = methodInfo.buildPayload(direction: .response, registry: schemaRegistry)
-        do {
-            let itemId = try decodeVarint(from: &buffer)
-            let offset = try decodeVarint(from: &buffer)
-            let len = try decodeVarint(from: &buffer)
-            do {
-                let result = try await handler.read(itemId: itemId, offset: offset, len: len)
-                let _encoded = encodeResultOk(result, encoder: { val, buf in encodeReadResult(val, into: &buf) })
-                taskSender(.response(requestId: requestId, payload: _encoded, methodId: methodId, schemaPayload: responseSchemaPayload))
-            } catch {
-                taskSender(.response(requestId: requestId, payload: encodeInvalidPayloadError(reason: String(describing: error)), methodId: methodId, schemaPayload: responseSchemaPayload))
-            }
-        } catch {
-            taskSender(.response(requestId: requestId, payload: encodeInvalidPayloadError(reason: String(describing: error)), methodId: methodId, schemaPayload: responseSchemaPayload))
+        let args: (UInt64, UInt64, UInt64)
+        do { args = try decodeVoxTyped(argsDecoder, payload) } catch {
+            taskTx(.response(requestId: requestId, payload: encodeVoxError(.invalidPayload("decode args")), methodId: 0xf2ba29feced65eb7, responseSchemaClosure: vfsMethods[0xf2ba29feced65eb7]!.responseSchemaClosure))
+            return
         }
+        let voxResult: Result<ReadDirResult, VoxError<Infallible>>
+        do {
+            let voxValue = try await handler.readDir(itemId: args.0, cookie: args.1, verifier: args.2)
+            voxResult = .success(voxValue)
+        } catch {
+            voxResult = .failure(.indeterminate)
+        }
+        let respPayload = encodeVoxTyped(voxResult, vfs_readDir_ResponseEncoder)
+        taskTx(.response(requestId: requestId, payload: respPayload, methodId: 0xf2ba29feced65eb7, responseSchemaClosure: vfsMethods[0xf2ba29feced65eb7]!.responseSchemaClosure))
     }
 
-    private func dispatch_write(methodId: UInt64, requestId: UInt64, buffer: inout ByteBuffer, registry: IncomingChannelRegistry, taskSender: @escaping TaskSender) async {
-        guard let methodInfo = methodSchemas[methodId] else {
-            taskSender(.response(requestId: requestId, payload: encodeUnknownMethodError()))
+    private func dispatch_read(payload: [UInt8], requestId: UInt64, schemaSendTracker: SchemaSendTracker, schemaReceiveTracker: SchemaTracker, taskTx: @escaping @Sendable (TaskMessage) -> Void) async {
+        guard let argsDecoder = schemaReceiveTracker.buildDecodeFn(0x719a43e94d147918, .args, readerDescriptor: vfs_read_ArgsDescriptor, readerBlocks: vfs_read_ArgsDescriptorBlocks, local: vfsRegistry) else {
+            taskTx(.response(requestId: requestId, payload: encodeVoxError(.invalidPayload("no args schema advertised")), methodId: 0x719a43e94d147918, responseSchemaClosure: vfsMethods[0x719a43e94d147918]!.responseSchemaClosure))
             return
         }
-        let responseSchemaPayload = methodInfo.buildPayload(direction: .response, registry: schemaRegistry)
-        do {
-            let itemId = try decodeVarint(from: &buffer)
-            let offset = try decodeVarint(from: &buffer)
-            var _data_buf = try decodeBytes(from: &buffer)
-            let data = Data(_data_buf.readBytes(length: _data_buf.readableBytes) ?? [])
-            do {
-                let result = try await handler.write(itemId: itemId, offset: offset, data: data)
-                let _encoded = encodeResultOk(result, encoder: { val, buf in encodeWriteResult(val, into: &buf) })
-                taskSender(.response(requestId: requestId, payload: _encoded, methodId: methodId, schemaPayload: responseSchemaPayload))
-            } catch {
-                taskSender(.response(requestId: requestId, payload: encodeInvalidPayloadError(reason: String(describing: error)), methodId: methodId, schemaPayload: responseSchemaPayload))
-            }
-        } catch {
-            taskSender(.response(requestId: requestId, payload: encodeInvalidPayloadError(reason: String(describing: error)), methodId: methodId, schemaPayload: responseSchemaPayload))
+        let args: (UInt64, UInt64, UInt64)
+        do { args = try decodeVoxTyped(argsDecoder, payload) } catch {
+            taskTx(.response(requestId: requestId, payload: encodeVoxError(.invalidPayload("decode args")), methodId: 0x719a43e94d147918, responseSchemaClosure: vfsMethods[0x719a43e94d147918]!.responseSchemaClosure))
+            return
         }
+        let voxResult: Result<ReadResult, VoxError<Infallible>>
+        do {
+            let voxValue = try await handler.read(itemId: args.0, offset: args.1, len: args.2)
+            voxResult = .success(voxValue)
+        } catch {
+            voxResult = .failure(.indeterminate)
+        }
+        let respPayload = encodeVoxTyped(voxResult, vfs_read_ResponseEncoder)
+        taskTx(.response(requestId: requestId, payload: respPayload, methodId: 0x719a43e94d147918, responseSchemaClosure: vfsMethods[0x719a43e94d147918]!.responseSchemaClosure))
     }
 
-    private func dispatch_create(methodId: UInt64, requestId: UInt64, buffer: inout ByteBuffer, registry: IncomingChannelRegistry, taskSender: @escaping TaskSender) async {
-        guard let methodInfo = methodSchemas[methodId] else {
-            taskSender(.response(requestId: requestId, payload: encodeUnknownMethodError()))
+    private func dispatch_write(payload: [UInt8], requestId: UInt64, schemaSendTracker: SchemaSendTracker, schemaReceiveTracker: SchemaTracker, taskTx: @escaping @Sendable (TaskMessage) -> Void) async {
+        guard let argsDecoder = schemaReceiveTracker.buildDecodeFn(0xc330417994d57b8a, .args, readerDescriptor: vfs_write_ArgsDescriptor, readerBlocks: vfs_write_ArgsDescriptorBlocks, local: vfsRegistry) else {
+            taskTx(.response(requestId: requestId, payload: encodeVoxError(.invalidPayload("no args schema advertised")), methodId: 0xc330417994d57b8a, responseSchemaClosure: vfsMethods[0xc330417994d57b8a]!.responseSchemaClosure))
             return
         }
-        let responseSchemaPayload = methodInfo.buildPayload(direction: .response, registry: schemaRegistry)
-        do {
-            let parentId = try decodeVarint(from: &buffer)
-            let name = try decodeString(from: &buffer)
-            let _itemType_disc = try decodeVarint(from: &buffer)
-            let itemType: ItemType
-            switch _itemType_disc {
-            case 0:
-                itemType = .file
-            case 1:
-                itemType = .directory
-            case 2:
-                itemType = .symlink
-            default:
-                throw VoxError.decodeError("unknown enum variant")
-            }
-            let mode = try decodeU32(from: &buffer)
-            do {
-                let result = try await handler.create(parentId: parentId, name: name, itemType: itemType, mode: mode)
-                let _encoded = encodeResultOk(result, encoder: { val, buf in encodeCreateResult(val, into: &buf) })
-                taskSender(.response(requestId: requestId, payload: _encoded, methodId: methodId, schemaPayload: responseSchemaPayload))
-            } catch {
-                taskSender(.response(requestId: requestId, payload: encodeInvalidPayloadError(reason: String(describing: error)), methodId: methodId, schemaPayload: responseSchemaPayload))
-            }
-        } catch {
-            taskSender(.response(requestId: requestId, payload: encodeInvalidPayloadError(reason: String(describing: error)), methodId: methodId, schemaPayload: responseSchemaPayload))
+        let args: (UInt64, UInt64, Data)
+        do { args = try decodeVoxTyped(argsDecoder, payload) } catch {
+            taskTx(.response(requestId: requestId, payload: encodeVoxError(.invalidPayload("decode args")), methodId: 0xc330417994d57b8a, responseSchemaClosure: vfsMethods[0xc330417994d57b8a]!.responseSchemaClosure))
+            return
         }
+        let voxResult: Result<WriteResult, VoxError<Infallible>>
+        do {
+            let voxValue = try await handler.write(itemId: args.0, offset: args.1, data: args.2)
+            voxResult = .success(voxValue)
+        } catch {
+            voxResult = .failure(.indeterminate)
+        }
+        let respPayload = encodeVoxTyped(voxResult, vfs_write_ResponseEncoder)
+        taskTx(.response(requestId: requestId, payload: respPayload, methodId: 0xc330417994d57b8a, responseSchemaClosure: vfsMethods[0xc330417994d57b8a]!.responseSchemaClosure))
     }
 
-    private func dispatch_delete(methodId: UInt64, requestId: UInt64, buffer: inout ByteBuffer, registry: IncomingChannelRegistry, taskSender: @escaping TaskSender) async {
-        guard let methodInfo = methodSchemas[methodId] else {
-            taskSender(.response(requestId: requestId, payload: encodeUnknownMethodError()))
+    private func dispatch_create(payload: [UInt8], requestId: UInt64, schemaSendTracker: SchemaSendTracker, schemaReceiveTracker: SchemaTracker, taskTx: @escaping @Sendable (TaskMessage) -> Void) async {
+        guard let argsDecoder = schemaReceiveTracker.buildDecodeFn(0x9b060d7cd7c1a62e, .args, readerDescriptor: vfs_create_ArgsDescriptor, readerBlocks: vfs_create_ArgsDescriptorBlocks, local: vfsRegistry) else {
+            taskTx(.response(requestId: requestId, payload: encodeVoxError(.invalidPayload("no args schema advertised")), methodId: 0x9b060d7cd7c1a62e, responseSchemaClosure: vfsMethods[0x9b060d7cd7c1a62e]!.responseSchemaClosure))
             return
         }
-        let responseSchemaPayload = methodInfo.buildPayload(direction: .response, registry: schemaRegistry)
-        do {
-            let itemId = try decodeVarint(from: &buffer)
-            do {
-                let result = try await handler.delete(itemId: itemId)
-                let _encoded = encodeResultOk(result, encoder: { val, buf in encodeVfsResult(val, into: &buf) })
-                taskSender(.response(requestId: requestId, payload: _encoded, methodId: methodId, schemaPayload: responseSchemaPayload))
-            } catch {
-                taskSender(.response(requestId: requestId, payload: encodeInvalidPayloadError(reason: String(describing: error)), methodId: methodId, schemaPayload: responseSchemaPayload))
-            }
-        } catch {
-            taskSender(.response(requestId: requestId, payload: encodeInvalidPayloadError(reason: String(describing: error)), methodId: methodId, schemaPayload: responseSchemaPayload))
+        let args: (UInt64, String, ItemType, UInt32)
+        do { args = try decodeVoxTyped(argsDecoder, payload) } catch {
+            taskTx(.response(requestId: requestId, payload: encodeVoxError(.invalidPayload("decode args")), methodId: 0x9b060d7cd7c1a62e, responseSchemaClosure: vfsMethods[0x9b060d7cd7c1a62e]!.responseSchemaClosure))
+            return
         }
+        let voxResult: Result<CreateResult, VoxError<Infallible>>
+        do {
+            let voxValue = try await handler.create(parentId: args.0, name: args.1, itemType: args.2, mode: args.3)
+            voxResult = .success(voxValue)
+        } catch {
+            voxResult = .failure(.indeterminate)
+        }
+        let respPayload = encodeVoxTyped(voxResult, vfs_create_ResponseEncoder)
+        taskTx(.response(requestId: requestId, payload: respPayload, methodId: 0x9b060d7cd7c1a62e, responseSchemaClosure: vfsMethods[0x9b060d7cd7c1a62e]!.responseSchemaClosure))
     }
 
-    private func dispatch_rename(methodId: UInt64, requestId: UInt64, buffer: inout ByteBuffer, registry: IncomingChannelRegistry, taskSender: @escaping TaskSender) async {
-        guard let methodInfo = methodSchemas[methodId] else {
-            taskSender(.response(requestId: requestId, payload: encodeUnknownMethodError()))
+    private func dispatch_delete(payload: [UInt8], requestId: UInt64, schemaSendTracker: SchemaSendTracker, schemaReceiveTracker: SchemaTracker, taskTx: @escaping @Sendable (TaskMessage) -> Void) async {
+        guard let argsDecoder = schemaReceiveTracker.buildDecodeFn(0x2a1f41955c3e63a8, .args, readerDescriptor: vfs_delete_ArgsDescriptor, readerBlocks: vfs_delete_ArgsDescriptorBlocks, local: vfsRegistry) else {
+            taskTx(.response(requestId: requestId, payload: encodeVoxError(.invalidPayload("no args schema advertised")), methodId: 0x2a1f41955c3e63a8, responseSchemaClosure: vfsMethods[0x2a1f41955c3e63a8]!.responseSchemaClosure))
             return
         }
-        let responseSchemaPayload = methodInfo.buildPayload(direction: .response, registry: schemaRegistry)
-        do {
-            let itemId = try decodeVarint(from: &buffer)
-            let newParentId = try decodeVarint(from: &buffer)
-            let newName = try decodeString(from: &buffer)
-            do {
-                let result = try await handler.rename(itemId: itemId, newParentId: newParentId, newName: newName)
-                let _encoded = encodeResultOk(result, encoder: { val, buf in encodeVfsResult(val, into: &buf) })
-                taskSender(.response(requestId: requestId, payload: _encoded, methodId: methodId, schemaPayload: responseSchemaPayload))
-            } catch {
-                taskSender(.response(requestId: requestId, payload: encodeInvalidPayloadError(reason: String(describing: error)), methodId: methodId, schemaPayload: responseSchemaPayload))
-            }
-        } catch {
-            taskSender(.response(requestId: requestId, payload: encodeInvalidPayloadError(reason: String(describing: error)), methodId: methodId, schemaPayload: responseSchemaPayload))
+        let args: (UInt64)
+        do { args = try decodeVoxTyped(argsDecoder, payload) } catch {
+            taskTx(.response(requestId: requestId, payload: encodeVoxError(.invalidPayload("decode args")), methodId: 0x2a1f41955c3e63a8, responseSchemaClosure: vfsMethods[0x2a1f41955c3e63a8]!.responseSchemaClosure))
+            return
         }
+        let voxResult: Result<VfsResult, VoxError<Infallible>>
+        do {
+            let voxValue = try await handler.delete(itemId: args)
+            voxResult = .success(voxValue)
+        } catch {
+            voxResult = .failure(.indeterminate)
+        }
+        let respPayload = encodeVoxTyped(voxResult, vfs_delete_ResponseEncoder)
+        taskTx(.response(requestId: requestId, payload: respPayload, methodId: 0x2a1f41955c3e63a8, responseSchemaClosure: vfsMethods[0x2a1f41955c3e63a8]!.responseSchemaClosure))
     }
 
-    private func dispatch_setAttributes(methodId: UInt64, requestId: UInt64, buffer: inout ByteBuffer, registry: IncomingChannelRegistry, taskSender: @escaping TaskSender) async {
-        guard let methodInfo = methodSchemas[methodId] else {
-            taskSender(.response(requestId: requestId, payload: encodeUnknownMethodError()))
+    private func dispatch_rename(payload: [UInt8], requestId: UInt64, schemaSendTracker: SchemaSendTracker, schemaReceiveTracker: SchemaTracker, taskTx: @escaping @Sendable (TaskMessage) -> Void) async {
+        guard let argsDecoder = schemaReceiveTracker.buildDecodeFn(0x5aca8524d890971d, .args, readerDescriptor: vfs_rename_ArgsDescriptor, readerBlocks: vfs_rename_ArgsDescriptorBlocks, local: vfsRegistry) else {
+            taskTx(.response(requestId: requestId, payload: encodeVoxError(.invalidPayload("no args schema advertised")), methodId: 0x5aca8524d890971d, responseSchemaClosure: vfsMethods[0x5aca8524d890971d]!.responseSchemaClosure))
             return
         }
-        let responseSchemaPayload = methodInfo.buildPayload(direction: .response, registry: schemaRegistry)
-        do {
-            let itemId = try decodeVarint(from: &buffer)
-            let _params_mode = try decodeOption(from: &buffer, decoder: { buf in try decodeU32(from: &buf) })
-            let _params_modifiedTime = try decodeOption(from: &buffer, decoder: { buf in try decodeVarint(from: &buf) })
-            let _params_size = try decodeOption(from: &buffer, decoder: { buf in try decodeVarint(from: &buf) })
-            let params = SetAttributesParams(mode: _params_mode, modifiedTime: _params_modifiedTime, size: _params_size)
-            do {
-                let result = try await handler.setAttributes(itemId: itemId, params: params)
-                let _encoded = encodeResultOk(result, encoder: { val, buf in encodeVfsResult(val, into: &buf) })
-                taskSender(.response(requestId: requestId, payload: _encoded, methodId: methodId, schemaPayload: responseSchemaPayload))
-            } catch {
-                taskSender(.response(requestId: requestId, payload: encodeInvalidPayloadError(reason: String(describing: error)), methodId: methodId, schemaPayload: responseSchemaPayload))
-            }
-        } catch {
-            taskSender(.response(requestId: requestId, payload: encodeInvalidPayloadError(reason: String(describing: error)), methodId: methodId, schemaPayload: responseSchemaPayload))
+        let args: (UInt64, UInt64, String)
+        do { args = try decodeVoxTyped(argsDecoder, payload) } catch {
+            taskTx(.response(requestId: requestId, payload: encodeVoxError(.invalidPayload("decode args")), methodId: 0x5aca8524d890971d, responseSchemaClosure: vfsMethods[0x5aca8524d890971d]!.responseSchemaClosure))
+            return
         }
+        let voxResult: Result<VfsResult, VoxError<Infallible>>
+        do {
+            let voxValue = try await handler.rename(itemId: args.0, newParentId: args.1, newName: args.2)
+            voxResult = .success(voxValue)
+        } catch {
+            voxResult = .failure(.indeterminate)
+        }
+        let respPayload = encodeVoxTyped(voxResult, vfs_rename_ResponseEncoder)
+        taskTx(.response(requestId: requestId, payload: respPayload, methodId: 0x5aca8524d890971d, responseSchemaClosure: vfsMethods[0x5aca8524d890971d]!.responseSchemaClosure))
     }
 
-    private func dispatch_ping(methodId: UInt64, requestId: UInt64, buffer: inout ByteBuffer, registry: IncomingChannelRegistry, taskSender: @escaping TaskSender) async {
-        guard let methodInfo = methodSchemas[methodId] else {
-            taskSender(.response(requestId: requestId, payload: encodeUnknownMethodError()))
+    private func dispatch_setAttributes(payload: [UInt8], requestId: UInt64, schemaSendTracker: SchemaSendTracker, schemaReceiveTracker: SchemaTracker, taskTx: @escaping @Sendable (TaskMessage) -> Void) async {
+        guard let argsDecoder = schemaReceiveTracker.buildDecodeFn(0x2086815889a62b33, .args, readerDescriptor: vfs_setAttributes_ArgsDescriptor, readerBlocks: vfs_setAttributes_ArgsDescriptorBlocks, local: vfsRegistry) else {
+            taskTx(.response(requestId: requestId, payload: encodeVoxError(.invalidPayload("no args schema advertised")), methodId: 0x2086815889a62b33, responseSchemaClosure: vfsMethods[0x2086815889a62b33]!.responseSchemaClosure))
             return
         }
-        let responseSchemaPayload = methodInfo.buildPayload(direction: .response, registry: schemaRegistry)
-        do {
-            do {
-                let result = try await handler.ping()
-                let _encoded = encodeResultOk(result, encoder: { val, buf in encodeString(val, into: &buf) })
-                taskSender(.response(requestId: requestId, payload: _encoded, methodId: methodId, schemaPayload: responseSchemaPayload))
-            } catch {
-                taskSender(.response(requestId: requestId, payload: encodeInvalidPayloadError(reason: String(describing: error)), methodId: methodId, schemaPayload: responseSchemaPayload))
-            }
-        } catch {
-            taskSender(.response(requestId: requestId, payload: encodeInvalidPayloadError(reason: String(describing: error)), methodId: methodId, schemaPayload: responseSchemaPayload))
+        let args: (UInt64, SetAttributesParams)
+        do { args = try decodeVoxTyped(argsDecoder, payload) } catch {
+            taskTx(.response(requestId: requestId, payload: encodeVoxError(.invalidPayload("decode args")), methodId: 0x2086815889a62b33, responseSchemaClosure: vfsMethods[0x2086815889a62b33]!.responseSchemaClosure))
+            return
         }
+        let voxResult: Result<VfsResult, VoxError<Infallible>>
+        do {
+            let voxValue = try await handler.setAttributes(itemId: args.0, params: args.1)
+            voxResult = .success(voxValue)
+        } catch {
+            voxResult = .failure(.indeterminate)
+        }
+        let respPayload = encodeVoxTyped(voxResult, vfs_setAttributes_ResponseEncoder)
+        taskTx(.response(requestId: requestId, payload: respPayload, methodId: 0x2086815889a62b33, responseSchemaClosure: vfsMethods[0x2086815889a62b33]!.responseSchemaClosure))
+    }
+
+    private func dispatch_ping(payload: [UInt8], requestId: UInt64, schemaSendTracker: SchemaSendTracker, schemaReceiveTracker: SchemaTracker, taskTx: @escaping @Sendable (TaskMessage) -> Void) async {
+        let voxResult: Result<String, VoxError<Infallible>>
+        do {
+            let voxValue = try await handler.ping()
+            voxResult = .success(voxValue)
+        } catch {
+            voxResult = .failure(.indeterminate)
+        }
+        let respPayload = encodeVoxTyped(voxResult, vfs_ping_ResponseEncoder)
+        taskTx(.response(requestId: requestId, payload: respPayload, methodId: 0xda4fc1cc055a4fcb, responseSchemaClosure: vfsMethods[0xda4fc1cc055a4fcb]!.responseSchemaClosure))
     }
 
 }
-
-// MARK: - Vfs Schemas
-
-/// Global schema registry containing all schemas for this service.
-nonisolated(unsafe) public let vfs_schema_registry: [UInt64: Schema] = [
-    0x0a96b404b4d79d67: Schema(id: 0x0a96b404b4d79d67, typeParams: ["T"], kind: .list(element: .var(name: "T"))),
-    0x0abe5d9b06f825da: Schema(id: 0x0abe5d9b06f825da, typeParams: [], kind: .struct(name: "ReadResult", fields: [FieldSchema(name: "data", typeRef: .concrete(0xba8125876d6388b4), required: true), FieldSchema(name: "error", typeRef: .concrete(0x361f4536eee9f991), required: true)])),
-    0x178367a87f66fb46: Schema(id: 0x178367a87f66fb46, typeParams: [], kind: .primitive(.bool)),
-    0x281c5be4f2ee63b4: Schema(id: 0x281c5be4f2ee63b4, typeParams: [], kind: .primitive(.u32)),
-    0x2c1d30ab16671dd0: Schema(id: 0x2c1d30ab16671dd0, typeParams: [], kind: .struct(name: "ReadDirResult", fields: [FieldSchema(name: "entries", typeRef: .generic(0x0a96b404b4d79d67, args: [.concrete(0xf428edeadbdd9e2c)]), required: true), FieldSchema(name: "next_cookie", typeRef: .concrete(0xd9356298b81639ac), required: true), FieldSchema(name: "verifier", typeRef: .concrete(0xd9356298b81639ac), required: true), FieldSchema(name: "error", typeRef: .concrete(0x361f4536eee9f991), required: true)])),
-    0x2ef062292a4e82d5: Schema(id: 0x2ef062292a4e82d5, typeParams: [], kind: .struct(name: "CreateResult", fields: [FieldSchema(name: "item_id", typeRef: .concrete(0xd9356298b81639ac), required: true), FieldSchema(name: "error", typeRef: .concrete(0x361f4536eee9f991), required: true)])),
-    0x361f4536eee9f991: Schema(id: 0x361f4536eee9f991, typeParams: [], kind: .primitive(.i32)),
-    0x42046de663beeef0: Schema(id: 0x42046de663beeef0, typeParams: ["T", "E"], kind: .enum(name: "Result", variants: [VariantSchema(name: "Ok", index: 0, payload: .newtype(typeRef: .var(name: "T"))), VariantSchema(name: "Err", index: 1, payload: .newtype(typeRef: .var(name: "E")))])),
-    0x4cf4b2aeb98a1939: Schema(id: 0x4cf4b2aeb98a1939, typeParams: ["E"], kind: .enum(name: "VoxError", variants: [VariantSchema(name: "User", index: 0, payload: .newtype(typeRef: .var(name: "E"))), VariantSchema(name: "UnknownMethod", index: 1, payload: .unit), VariantSchema(name: "InvalidPayload", index: 2, payload: .newtype(typeRef: .concrete(0x6d7dce914ee150e8))), VariantSchema(name: "Cancelled", index: 3, payload: .unit), VariantSchema(name: "ConnectionClosed", index: 4, payload: .unit), VariantSchema(name: "SessionShutdown", index: 5, payload: .unit), VariantSchema(name: "SendFailed", index: 6, payload: .unit), VariantSchema(name: "Indeterminate", index: 7, payload: .unit)])),
-    0x5db70a394660f3e6: Schema(id: 0x5db70a394660f3e6, typeParams: [], kind: .primitive(.never)),
-    0x6847ab90feda71c1: Schema(id: 0x6847ab90feda71c1, typeParams: ["T0"], kind: .tuple(elements: [.var(name: "T0")])),
-    0x6a734a2e970719e0: Schema(id: 0x6a734a2e970719e0, typeParams: [], kind: .struct(name: "GetAttributesResult", fields: [FieldSchema(name: "attrs", typeRef: .concrete(0xae6ac02e727cc211), required: true), FieldSchema(name: "error", typeRef: .concrete(0x361f4536eee9f991), required: true)])),
-    0x6d7dce914ee150e8: Schema(id: 0x6d7dce914ee150e8, typeParams: [], kind: .primitive(.string)),
-    0x915c6fb5b64f270b: Schema(id: 0x915c6fb5b64f270b, typeParams: ["T0", "T1", "T2", "T3"], kind: .tuple(elements: [.var(name: "T0"), .var(name: "T1"), .var(name: "T2"), .var(name: "T3")])),
-    0xaa510ab07d34f141: Schema(id: 0xaa510ab07d34f141, typeParams: ["T0", "T1", "T2"], kind: .tuple(elements: [.var(name: "T0"), .var(name: "T1"), .var(name: "T2")])),
-    0xae6ac02e727cc211: Schema(id: 0xae6ac02e727cc211, typeParams: [], kind: .struct(name: "ItemAttributes", fields: [FieldSchema(name: "item_id", typeRef: .concrete(0xd9356298b81639ac), required: true), FieldSchema(name: "item_type", typeRef: .concrete(0xd1e63100371f0715), required: true), FieldSchema(name: "size", typeRef: .concrete(0xd9356298b81639ac), required: true), FieldSchema(name: "modified_time", typeRef: .concrete(0xd9356298b81639ac), required: true), FieldSchema(name: "created_time", typeRef: .concrete(0xd9356298b81639ac), required: true), FieldSchema(name: "mode", typeRef: .concrete(0x281c5be4f2ee63b4), required: true)])),
-    0xb5d116be89549d7a: Schema(id: 0xb5d116be89549d7a, typeParams: [], kind: .struct(name: "LookupResult", fields: [FieldSchema(name: "attrs", typeRef: .concrete(0xae6ac02e727cc211), required: true), FieldSchema(name: "error", typeRef: .concrete(0x361f4536eee9f991), required: true)])),
-    0xba0496aa8cee7a4c: Schema(id: 0xba0496aa8cee7a4c, typeParams: ["T0", "T1"], kind: .tuple(elements: [.var(name: "T0"), .var(name: "T1")])),
-    0xba8125876d6388b4: Schema(id: 0xba8125876d6388b4, typeParams: [], kind: .primitive(.bytes)),
-    0xbc5c33249a2dc720: Schema(id: 0xbc5c33249a2dc720, typeParams: [], kind: .primitive(.unit)),
-    0xcef75facafe734d2: Schema(id: 0xcef75facafe734d2, typeParams: [], kind: .struct(name: "WriteResult", fields: [FieldSchema(name: "bytes_written", typeRef: .concrete(0xd9356298b81639ac), required: true), FieldSchema(name: "error", typeRef: .concrete(0x361f4536eee9f991), required: true)])),
-    0xd1e63100371f0715: Schema(id: 0xd1e63100371f0715, typeParams: [], kind: .enum(name: "ItemType", variants: [VariantSchema(name: "File", index: 0, payload: .unit), VariantSchema(name: "Directory", index: 1, payload: .unit), VariantSchema(name: "Symlink", index: 2, payload: .unit)])),
-    0xd9356298b81639ac: Schema(id: 0xd9356298b81639ac, typeParams: [], kind: .primitive(.u64)),
-    0xdcafd4de6b7969bb: Schema(id: 0xdcafd4de6b7969bb, typeParams: ["T"], kind: .option(element: .var(name: "T"))),
-    0xebf5b3e4ab445912: Schema(id: 0xebf5b3e4ab445912, typeParams: [], kind: .struct(name: "VfsResult", fields: [FieldSchema(name: "error", typeRef: .concrete(0x361f4536eee9f991), required: true)])),
-    0xf428edeadbdd9e2c: Schema(id: 0xf428edeadbdd9e2c, typeParams: [], kind: .struct(name: "DirEntry", fields: [FieldSchema(name: "name", typeRef: .concrete(0x6d7dce914ee150e8), required: true), FieldSchema(name: "item_id", typeRef: .concrete(0xd9356298b81639ac), required: true), FieldSchema(name: "item_type", typeRef: .concrete(0xd1e63100371f0715), required: true), FieldSchema(name: "size", typeRef: .concrete(0xd9356298b81639ac), required: true), FieldSchema(name: "modified_time", typeRef: .concrete(0xd9356298b81639ac), required: true), FieldSchema(name: "created_time", typeRef: .concrete(0xd9356298b81639ac), required: true), FieldSchema(name: "mode", typeRef: .concrete(0x281c5be4f2ee63b4), required: true)])),
-    0xfa5d032e4ed71409: Schema(id: 0xfa5d032e4ed71409, typeParams: [], kind: .struct(name: "SetAttributesParams", fields: [FieldSchema(name: "mode", typeRef: .generic(0xdcafd4de6b7969bb, args: [.concrete(0x281c5be4f2ee63b4)]), required: true), FieldSchema(name: "modified_time", typeRef: .generic(0xdcafd4de6b7969bb, args: [.concrete(0xd9356298b81639ac)]), required: true), FieldSchema(name: "size", typeRef: .generic(0xdcafd4de6b7969bb, args: [.concrete(0xd9356298b81639ac)]), required: true)])),
-]
-
-/// Per-method schema information for wire protocol.
-nonisolated(unsafe) public let vfs_method_schemas: [UInt64: MethodSchemaInfo] = [
-    0xab2b853c144d133b: MethodSchemaInfo(
-        argsSchemaIds: [0xd9356298b81639ac, 0x6d7dce914ee150e8, 0xba0496aa8cee7a4c],
-        argsRoot: .generic(0xba0496aa8cee7a4c, args: [.concrete(0xd9356298b81639ac), .concrete(0x6d7dce914ee150e8)]),
-        responseSchemaIds: [0x178367a87f66fb46, 0x281c5be4f2ee63b4, 0x42046de663beeef0, 0x5db70a394660f3e6, 0x6d7dce914ee150e8, 0x4cf4b2aeb98a1939, 0xd9356298b81639ac, 0xd1e63100371f0715, 0xae6ac02e727cc211, 0x361f4536eee9f991, 0xb5d116be89549d7a],
-        responseRoot: .generic(0x42046de663beeef0, args: [.concrete(0xb5d116be89549d7a), .generic(0x4cf4b2aeb98a1939, args: [.concrete(0x5db70a394660f3e6)])])
-    ),
-    0xd97f57caa097adf9: MethodSchemaInfo(
-        argsSchemaIds: [0xd9356298b81639ac, 0x6847ab90feda71c1],
-        argsRoot: .generic(0x6847ab90feda71c1, args: [.concrete(0xd9356298b81639ac)]),
-        responseSchemaIds: [0x178367a87f66fb46, 0x281c5be4f2ee63b4, 0x42046de663beeef0, 0x5db70a394660f3e6, 0x6d7dce914ee150e8, 0x4cf4b2aeb98a1939, 0xd9356298b81639ac, 0xd1e63100371f0715, 0xae6ac02e727cc211, 0x361f4536eee9f991, 0x6a734a2e970719e0],
-        responseRoot: .generic(0x42046de663beeef0, args: [.concrete(0x6a734a2e970719e0), .generic(0x4cf4b2aeb98a1939, args: [.concrete(0x5db70a394660f3e6)])])
-    ),
-    0xf2ba29feced65eb7: MethodSchemaInfo(
-        argsSchemaIds: [0xd9356298b81639ac, 0xaa510ab07d34f141],
-        argsRoot: .generic(0xaa510ab07d34f141, args: [.concrete(0xd9356298b81639ac), .concrete(0xd9356298b81639ac), .concrete(0xd9356298b81639ac)]),
-        responseSchemaIds: [0x178367a87f66fb46, 0x281c5be4f2ee63b4, 0x42046de663beeef0, 0x5db70a394660f3e6, 0x6d7dce914ee150e8, 0x4cf4b2aeb98a1939, 0xd9356298b81639ac, 0xd1e63100371f0715, 0xf428edeadbdd9e2c, 0x0a96b404b4d79d67, 0x361f4536eee9f991, 0x2c1d30ab16671dd0],
-        responseRoot: .generic(0x42046de663beeef0, args: [.concrete(0x2c1d30ab16671dd0), .generic(0x4cf4b2aeb98a1939, args: [.concrete(0x5db70a394660f3e6)])])
-    ),
-    0x719a43e94d147918: MethodSchemaInfo(
-        argsSchemaIds: [0xd9356298b81639ac, 0xaa510ab07d34f141],
-        argsRoot: .generic(0xaa510ab07d34f141, args: [.concrete(0xd9356298b81639ac), .concrete(0xd9356298b81639ac), .concrete(0xd9356298b81639ac)]),
-        responseSchemaIds: [0x178367a87f66fb46, 0x281c5be4f2ee63b4, 0x42046de663beeef0, 0x5db70a394660f3e6, 0x6d7dce914ee150e8, 0x4cf4b2aeb98a1939, 0xba8125876d6388b4, 0x361f4536eee9f991, 0x0abe5d9b06f825da],
-        responseRoot: .generic(0x42046de663beeef0, args: [.concrete(0x0abe5d9b06f825da), .generic(0x4cf4b2aeb98a1939, args: [.concrete(0x5db70a394660f3e6)])])
-    ),
-    0xc330417994d57b8a: MethodSchemaInfo(
-        argsSchemaIds: [0xd9356298b81639ac, 0xba8125876d6388b4, 0xaa510ab07d34f141],
-        argsRoot: .generic(0xaa510ab07d34f141, args: [.concrete(0xd9356298b81639ac), .concrete(0xd9356298b81639ac), .concrete(0xba8125876d6388b4)]),
-        responseSchemaIds: [0x178367a87f66fb46, 0x281c5be4f2ee63b4, 0x42046de663beeef0, 0x5db70a394660f3e6, 0x6d7dce914ee150e8, 0x4cf4b2aeb98a1939, 0xd9356298b81639ac, 0x361f4536eee9f991, 0xcef75facafe734d2],
-        responseRoot: .generic(0x42046de663beeef0, args: [.concrete(0xcef75facafe734d2), .generic(0x4cf4b2aeb98a1939, args: [.concrete(0x5db70a394660f3e6)])])
-    ),
-    0x9b060d7cd7c1a62e: MethodSchemaInfo(
-        argsSchemaIds: [0xd9356298b81639ac, 0x6d7dce914ee150e8, 0xd1e63100371f0715, 0x281c5be4f2ee63b4, 0x915c6fb5b64f270b],
-        argsRoot: .generic(0x915c6fb5b64f270b, args: [.concrete(0xd9356298b81639ac), .concrete(0x6d7dce914ee150e8), .concrete(0xd1e63100371f0715), .concrete(0x281c5be4f2ee63b4)]),
-        responseSchemaIds: [0x178367a87f66fb46, 0x281c5be4f2ee63b4, 0x42046de663beeef0, 0x5db70a394660f3e6, 0x6d7dce914ee150e8, 0x4cf4b2aeb98a1939, 0xd9356298b81639ac, 0x361f4536eee9f991, 0x2ef062292a4e82d5],
-        responseRoot: .generic(0x42046de663beeef0, args: [.concrete(0x2ef062292a4e82d5), .generic(0x4cf4b2aeb98a1939, args: [.concrete(0x5db70a394660f3e6)])])
-    ),
-    0x2a1f41955c3e63a8: MethodSchemaInfo(
-        argsSchemaIds: [0xd9356298b81639ac, 0x6847ab90feda71c1],
-        argsRoot: .generic(0x6847ab90feda71c1, args: [.concrete(0xd9356298b81639ac)]),
-        responseSchemaIds: [0x178367a87f66fb46, 0x281c5be4f2ee63b4, 0x42046de663beeef0, 0x5db70a394660f3e6, 0x6d7dce914ee150e8, 0x4cf4b2aeb98a1939, 0x361f4536eee9f991, 0xebf5b3e4ab445912],
-        responseRoot: .generic(0x42046de663beeef0, args: [.concrete(0xebf5b3e4ab445912), .generic(0x4cf4b2aeb98a1939, args: [.concrete(0x5db70a394660f3e6)])])
-    ),
-    0x5aca8524d890971d: MethodSchemaInfo(
-        argsSchemaIds: [0xd9356298b81639ac, 0x6d7dce914ee150e8, 0xaa510ab07d34f141],
-        argsRoot: .generic(0xaa510ab07d34f141, args: [.concrete(0xd9356298b81639ac), .concrete(0xd9356298b81639ac), .concrete(0x6d7dce914ee150e8)]),
-        responseSchemaIds: [0x178367a87f66fb46, 0x281c5be4f2ee63b4, 0x42046de663beeef0, 0x5db70a394660f3e6, 0x6d7dce914ee150e8, 0x4cf4b2aeb98a1939, 0x361f4536eee9f991, 0xebf5b3e4ab445912],
-        responseRoot: .generic(0x42046de663beeef0, args: [.concrete(0xebf5b3e4ab445912), .generic(0x4cf4b2aeb98a1939, args: [.concrete(0x5db70a394660f3e6)])])
-    ),
-    0x2086815889a62b33: MethodSchemaInfo(
-        argsSchemaIds: [0xd9356298b81639ac, 0x281c5be4f2ee63b4, 0xdcafd4de6b7969bb, 0xfa5d032e4ed71409, 0xba0496aa8cee7a4c],
-        argsRoot: .generic(0xba0496aa8cee7a4c, args: [.concrete(0xd9356298b81639ac), .concrete(0xfa5d032e4ed71409)]),
-        responseSchemaIds: [0x178367a87f66fb46, 0x281c5be4f2ee63b4, 0x42046de663beeef0, 0x5db70a394660f3e6, 0x6d7dce914ee150e8, 0x4cf4b2aeb98a1939, 0x361f4536eee9f991, 0xebf5b3e4ab445912],
-        responseRoot: .generic(0x42046de663beeef0, args: [.concrete(0xebf5b3e4ab445912), .generic(0x4cf4b2aeb98a1939, args: [.concrete(0x5db70a394660f3e6)])])
-    ),
-    0xda4fc1cc055a4fcb: MethodSchemaInfo(
-        argsSchemaIds: [0xbc5c33249a2dc720],
-        argsRoot: .concrete(0xbc5c33249a2dc720),
-        responseSchemaIds: [0x178367a87f66fb46, 0x281c5be4f2ee63b4, 0x42046de663beeef0, 0x5db70a394660f3e6, 0x6d7dce914ee150e8, 0x4cf4b2aeb98a1939],
-        responseRoot: .generic(0x42046de663beeef0, args: [.concrete(0x6d7dce914ee150e8), .generic(0x4cf4b2aeb98a1939, args: [.concrete(0x5db70a394660f3e6)])])
-    ),
-]
 

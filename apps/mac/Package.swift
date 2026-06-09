@@ -12,11 +12,10 @@ let package = Package(
     ],
     dependencies: [
         .package(url: "https://github.com/sparkle-project/Sparkle.git", from: "2.8.1"),
-        // Same vox the FSKit extension speaks (0.8.2); the in-app Swift VFS backend
-        // is wire-compatible. Pinned by commit (tag vox-v0.8.2 isn't semver-matchable).
-        .package(
-            url: "https://github.com/bearcove/vox.git",
-            revision: "230dcd5bb1e5aedd1309308c64de07781fad5b57"),
+        // Local ~/vox (path dep) so the Swift VoxRuntime matches the Rust vox the FSKit
+        // extension links (both ~/vox) — same wire. ~/vox phon-codec serializes via phon
+        // (from ~/phon), so use the swift/vox-runtime package. Local-only until published.
+        .package(path: "/Users/amos/vox/swift/vox-runtime"),
     ],
     targets: [
         .target(

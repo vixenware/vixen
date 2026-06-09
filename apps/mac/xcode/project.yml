@@ -22,11 +22,13 @@ packages:
     url: https://github.com/sparkle-project/Sparkle.git
     from: 2.8.1
   vox:
-    # github.com/bearcove/vox @ tag vox-v0.8.2 (pinned by commit; SwiftPM can't
-    # match the prefixed tag as semver). This is the same vox the FSKit extension
-    # speaks (vox 0.8.2), so the in-app Swift VFS backend is wire-compatible.
-    url: https://github.com/bearcove/vox.git
-    revision: 230dcd5bb1e5aedd1309308c64de07781fad5b57
+    # Local ~/vox checkout (path dep). The Rust extension links ~/vox's vox crates, so the
+    # Swift VoxRuntime must come from the same ~/vox to speak the identical wire — crates.io
+    # 0.8.2's unix framing doesn't interop with it. ~/vox is on the phon-codec branch, so
+    # VoxRuntime + the generated bindings serialize via phon (PhonSchema/IR/Engine, from
+    # ~/phon); use the swift/vox-runtime package that declares those deps, not the phon-free
+    # root. Local-only until vox is published again.
+    path: /Users/amos/vox/swift/vox-runtime
 
 targets:
   Vixen:
