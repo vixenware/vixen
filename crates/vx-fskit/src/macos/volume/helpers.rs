@@ -11,7 +11,7 @@ impl RustVolume {
         let generation = root_peer_state().generation();
         let root = RustItem::root(generation);
         let meta_dir = RustItem::meta_dir();
-        let status = RustItem::status_json(root_peer_state().status_json_bytes().len());
+        let status = RustItem::status_json(root_peer_state().status_json_bytes());
         tracing::info!("Inserting root/meta_dir/status IDs");
         let mut items = HashMap::new();
         items.insert(root.item_id(), root);
@@ -229,10 +229,10 @@ impl RustVolume {
             VirtualKind::StatusJson => {
                 let bytes = root_peer_state().status_json_bytes();
                 if let Some(status_item) = self.get_cached_item(STATUS_JSON_ID) {
-                    status_item.update_status_len(bytes.len());
+                    status_item.update_status(bytes);
                     Ok(status_item.attributes_for_request(request))
                 } else {
-                    let status_item = self.cache_item(RustItem::status_json(bytes.len()));
+                    let status_item = self.cache_item(RustItem::status_json(bytes));
                     Ok(status_item.attributes_for_request(request))
                 }
             }
@@ -312,10 +312,10 @@ impl RustVolume {
         if directory.item_id() == VIXENFS_DIR_ID && requested_name == STATUS_JSON_NAME {
             let bytes = root_peer_state().status_json_bytes();
             let item = if let Some(item) = self.get_cached_item(STATUS_JSON_ID) {
-                item.update_status_len(bytes.len());
+                item.update_status(bytes);
                 item
             } else {
-                self.cache_item(RustItem::status_json(bytes.len()))
+                self.cache_item(RustItem::status_json(bytes))
             };
             return Ok((item.clone().into_super(), item.fs_name()));
         }
@@ -393,10 +393,10 @@ impl RustVolume {
         if directory.item_id() == VIXENFS_DIR_ID {
             let bytes = root_peer_state().status_json_bytes();
             let item = if let Some(item) = self.get_cached_item(STATUS_JSON_ID) {
-                item.update_status_len(bytes.len());
+                item.update_status(bytes);
                 item
             } else {
-                self.cache_item(RustItem::status_json(bytes.len()))
+                self.cache_item(RustItem::status_json(bytes))
             };
             if cookie == unsafe { FSDirectoryCookieInitial } {
                 let attrs = item.attributes_for_request(attributes);
@@ -628,7 +628,15 @@ impl RustVolume {
             ),
         );
         if item.virtual_kind() == VirtualKind::StatusJson {
-            let data = root_peer_state().status_json_bytes();
+            // Serve the exact bytes whose length getAttributes reported (stored on the
+            // item), NOT a fresh render — re-rendering can change length between the
+            // size and the read and leave a stray byte (invalid JSON). Fall back to a
+            // fresh render only if nothing was stored yet (read without a prior stat).
+            let mut data = item.status_bytes();
+            if data.is_empty() {
+                data = root_peer_state().status_json_bytes();
+                item.update_status(data.clone());
+            }
             let start = offset.max(0) as usize;
             let start = start.min(data.len());
             let end = (start + length).min(data.len());

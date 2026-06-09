@@ -30,6 +30,11 @@ struct CachedState {
     modified_time: u64,
     created_time: u64,
     mode: u32,
+    /// For the synthetic `status.json` file: the exact rendered bytes whose length is
+    /// `size`. Serving these on read (instead of re-rendering) guarantees the read
+    /// content matches the size `getAttributes` reported — otherwise a state change
+    /// between the two calls leaves a stray byte and invalid JSON.
+    status_bytes: Vec<u8>,
 }
 
 pub(super) struct ItemIvars {
@@ -76,6 +81,7 @@ impl RustItem {
                 modified_time,
                 created_time,
                 mode,
+                status_bytes: Vec::new(),
             }),
         });
         unsafe { msg_send![super(this), init] }
@@ -113,21 +119,23 @@ impl RustItem {
         )
     }
 
-    pub(super) fn status_json(len: usize) -> Retained<Self> {
+    pub(super) fn status_json(bytes: Vec<u8>) -> Retained<Self> {
         let now = unix_time();
-        Self::new(
+        let item = Self::new(
             STATUS_JSON_ID,
             STATUS_JSON_ID,
             0,
             VIXENFS_DIR_ID,
             STATUS_JSON_NAME,
             FSItemType::File,
-            len as u64,
+            bytes.len() as u64,
             now,
             0,
             0o444,
             VirtualKind::StatusJson,
-        )
+        );
+        item.update_status(bytes);
+        item
     }
 
     pub(super) fn from_backend(
@@ -236,14 +244,27 @@ impl RustItem {
         state.parent_local_id = parent_local_id;
     }
 
-    pub(super) fn update_status_len(&self, len: usize) {
+    /// Store the rendered `status.json` bytes and sync `size` to their length, so a
+    /// subsequent read serves exactly these bytes (consistent size + content).
+    pub(super) fn update_status(&self, bytes: Vec<u8>) {
         let mut state = self
             .ivars()
             .state
             .lock()
             .expect("item state mutex poisoned");
-        state.size = len as u64;
+        state.size = bytes.len() as u64;
         state.modified_time = unix_time();
+        state.status_bytes = bytes;
+    }
+
+    /// The exact `status.json` bytes last stored (whose length equals the reported size).
+    pub(super) fn status_bytes(&self) -> Vec<u8> {
+        self.ivars()
+            .state
+            .lock()
+            .expect("item state mutex poisoned")
+            .status_bytes
+            .clone()
     }
 
     pub(super) fn debug_summary(&self) -> String {
