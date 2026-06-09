@@ -7,7 +7,7 @@ use camino::Utf8PathBuf;
 use eyre::{Result, bail};
 use facet::Facet;
 use tokio::sync::watch;
-use vox::{ConnectionAcceptor, Metadata, TransportMode};
+use vox::{ConnectionAcceptor, Metadata};
 use vx_exec_protocol::ObserveDispatcher;
 use vx_runner::RunnerService;
 use vx_services::{
@@ -369,7 +369,7 @@ async fn connect_in_process_store(service: StoreService) -> Result<vx_services::
                         connection.handle_with(StoreDispatcher::new(service.clone()));
                         Ok(())
                     }
-                    _ => Err(vec![]),
+                    _ => Err(vox::Metadata::default()),
                 }
             },
         );
@@ -388,7 +388,7 @@ async fn connect_in_process_store(service: StoreService) -> Result<vx_services::
         }
     });
 
-    Ok(vox::initiator_on(client_link, TransportMode::Bare)
+    Ok(vox::initiator_on(client_link)
         .establish::<vx_services::StoreClient>()
         .await?)
 }
@@ -417,55 +417,55 @@ impl ConnectionAcceptor for DaemonAcceptor {
             "CacheIndex" => {
                 let Some(service) = &self.cache_index_service else {
                     tracing::warn!("cache index service requested but not hosted");
-                    return Err(vec![]);
+                    return Err(vox::Metadata::default());
                 };
                 connection.handle_with(CacheIndexDispatcher::new(service.clone()));
             }
             "TestRunner" => {
                 let Some(service) = &self.test_runner_service else {
                     tracing::warn!("test runner service requested but not hosted");
-                    return Err(vec![]);
+                    return Err(vox::Metadata::default());
                 };
                 connection.handle_with(TestRunnerDispatcher::new(service.clone()));
             }
             "Store" => {
                 let Some(service) = &self.store_service else {
                     tracing::warn!("store service requested but not hosted");
-                    return Err(vec![]);
+                    return Err(vox::Metadata::default());
                 };
                 connection.handle_with(StoreDispatcher::new(service.clone()));
             }
             "Runner" => {
                 let Some(service) = &self.runner_service else {
                     tracing::warn!("runner service requested but not hosted");
-                    return Err(vec![]);
+                    return Err(vox::Metadata::default());
                 };
                 connection.handle_with(RunnerDispatcher::new(service.clone()));
             }
             "Observe" => {
                 let Some(service) = &self.runner_service else {
                     tracing::warn!("observe service requested but runner is not hosted");
-                    return Err(vec![]);
+                    return Err(vox::Metadata::default());
                 };
                 connection.handle_with(ObserveDispatcher::new(service.clone()));
             }
             "Producing" => {
                 let Some(service) = &self.runner_service else {
                     tracing::warn!("producing service requested but runner is not hosted");
-                    return Err(vec![]);
+                    return Err(vox::Metadata::default());
                 };
                 service.handle_producing_connection(connection)?;
             }
             "Vfsd" => {
                 let Some(service) = &self.vfsd_service else {
                     tracing::warn!("vfsd service requested but not hosted");
-                    return Err(vec![]);
+                    return Err(vox::Metadata::default());
                 };
                 connection.handle_with(VfsdDispatcher::new(service.clone()));
             }
             other => {
                 tracing::warn!("unknown service requested: {}", other);
-                return Err(vec![]);
+                return Err(vox::Metadata::default());
             }
         }
         Ok(())

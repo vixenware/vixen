@@ -187,7 +187,7 @@ mod tests {
                             connection.handle_with(CacheIndexDispatcher::new(service.clone()));
                             Ok(())
                         }
-                        _ => Err(vec![]),
+                        _ => Err(vox::Metadata::default()),
                     }
                 },
             );
@@ -199,7 +199,7 @@ mod tests {
                 client.caller.closed().await;
             }
         });
-        vox::initiator_on(client_link, vox::TransportMode::Bare)
+        vox::initiator_on(client_link)
             .establish::<CacheIndexClient>()
             .await
             .expect("establish cache-index client")
@@ -235,7 +235,7 @@ mod tests {
                     Ok(())
                 }
                 "Producing" => self.service.inner.handle_producing_connection(connection),
-                _ => Err(vec![]),
+                _ => Err(vox::Metadata::default()),
             }
         }
     }
@@ -258,7 +258,7 @@ mod tests {
                 client.caller.closed().await;
             }
         });
-        let client = vox::initiator_on(client_link, vox::TransportMode::Bare)
+        let client = vox::initiator_on(client_link)
             .establish::<ObserveClient>()
             .await
             .expect("establish counting runner-backed Observe client");

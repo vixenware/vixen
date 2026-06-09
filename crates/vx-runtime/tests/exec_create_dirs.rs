@@ -34,7 +34,7 @@ impl vox::ConnectionAcceptor for RecordingObserve {
                 connection.handle_with(ObserveDispatcher::new(self.clone()));
                 Ok(())
             }
-            _ => Err(vec![]),
+            _ => Err(vox::Metadata::default()),
         }
     }
 }
@@ -61,7 +61,7 @@ async fn recording_observe_client_with(
             client.caller.closed().await;
         }
     });
-    let client = vox::initiator_on(client_link, vox::TransportMode::Bare)
+    let client = vox::initiator_on(client_link)
         .establish::<ObserveClient>()
         .await
         .expect("establish recording observe client");

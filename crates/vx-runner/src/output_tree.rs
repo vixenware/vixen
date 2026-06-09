@@ -141,7 +141,7 @@ mod tests {
                             connection.handle_with(StoreDispatcher::new(store.clone()));
                             Ok(())
                         }
-                        _ => Err(vec![]),
+                        _ => Err(vox::Metadata::default()),
                     }
                 },
             );
@@ -153,7 +153,7 @@ mod tests {
                 client.caller.closed().await;
             }
         });
-        let client = vox::initiator_on(client_link, vox::TransportMode::Bare)
+        let client = vox::initiator_on(client_link)
             .establish::<StoreClient>()
             .await
             .expect("establish store client");

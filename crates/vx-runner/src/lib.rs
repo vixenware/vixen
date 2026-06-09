@@ -74,7 +74,7 @@ impl RunnerService {
             }
             None => {
                 tracing::warn!("vx-runner: Producing requested before an output tree exists");
-                Err(vec![])
+                Err(vox::Metadata::default())
             }
         }
     }
@@ -110,7 +110,7 @@ impl vox::ConnectionAcceptor for RunnerAcceptor {
             "Producing" => self.service.handle_producing_connection(connection),
             other => {
                 tracing::warn!("vx-runner: unknown service requested: {}", other);
-                Err(vec![])
+                Err(vox::Metadata::default())
             }
         }
     }
@@ -165,7 +165,7 @@ mod tests {
                 client.caller.closed().await;
             }
         });
-        vox::initiator_on(client_link, vox::TransportMode::Bare)
+        vox::initiator_on(client_link)
             .establish::<ObserveClient>()
             .await
             .expect("establish runner-backed Observe client")
@@ -182,7 +182,7 @@ mod tests {
                 client.caller.closed().await;
             }
         });
-        vox::initiator_on(client_link, vox::TransportMode::Bare)
+        vox::initiator_on(client_link)
             .establish::<ProducingClient>()
             .await
             .expect("establish runner-backed Producing client")
@@ -218,7 +218,7 @@ mod tests {
                     Ok(())
                 }
                 "Producing" => self.service.inner.handle_producing_connection(connection),
-                _ => Err(vec![]),
+                _ => Err(vox::Metadata::default()),
             }
         }
     }
@@ -241,7 +241,7 @@ mod tests {
                 client.caller.closed().await;
             }
         });
-        let client = vox::initiator_on(client_link, vox::TransportMode::Bare)
+        let client = vox::initiator_on(client_link)
             .establish::<ObserveClient>()
             .await
             .expect("establish counting runner-backed Observe client");
@@ -287,7 +287,7 @@ mod tests {
                     Ok(())
                 }
                 "Producing" => self.service.inner.handle_producing_connection(connection),
-                _ => Err(vec![]),
+                _ => Err(vox::Metadata::default()),
             }
         }
     }
@@ -315,7 +315,7 @@ mod tests {
                 client.caller.closed().await;
             }
         });
-        let client = vox::initiator_on(client_link, vox::TransportMode::Bare)
+        let client = vox::initiator_on(client_link)
             .establish::<ObserveClient>()
             .await
             .expect("establish mutating runner-backed Observe client");
@@ -336,7 +336,7 @@ mod tests {
                             connection.handle_with(StoreDispatcher::new(store.clone()));
                             Ok(())
                         }
-                        _ => Err(vec![]),
+                        _ => Err(vox::Metadata::default()),
                     }
                 },
             );
@@ -348,7 +348,7 @@ mod tests {
                 client.caller.closed().await;
             }
         });
-        let client = vox::initiator_on(client_link, vox::TransportMode::Bare)
+        let client = vox::initiator_on(client_link)
             .establish::<StoreClient>()
             .await
             .expect("establish store client");

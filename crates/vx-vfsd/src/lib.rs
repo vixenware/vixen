@@ -430,7 +430,7 @@ impl vox::ConnectionAcceptor for VfsdAcceptor {
             }
             other => {
                 tracing::warn!("vx-vfsd: unknown service requested: {}", other);
-                Err(vec![])
+                Err(vox::Metadata::default())
             }
         }
     }

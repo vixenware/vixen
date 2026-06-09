@@ -38,7 +38,7 @@ impl vox::ConnectionAcceptor for NestedTreeObserve {
                 connection.handle_with(ProducingDispatcher::new(self.producing.clone()));
                 Ok(())
             }
-            _ => Err(vec![]),
+            _ => Err(vox::Metadata::default()),
         }
     }
 }
@@ -56,7 +56,7 @@ async fn nested_tree_observe_client() -> (ObserveClient, Producer) {
             client.caller.closed().await;
         }
     });
-    let client = vox::initiator_on(client_link, vox::TransportMode::Bare)
+    let client = vox::initiator_on(client_link)
         .establish::<ObserveClient>()
         .await
         .expect("establish nested-tree observe client");

@@ -27,7 +27,7 @@ async fn executor() -> (ProducingClient, Producer) {
                         connection.handle_with(ProducingDispatcher::new(service.clone()));
                         Ok(())
                     }
-                    _ => Err(vec![]),
+                    _ => Err(vox::Metadata::default()),
                 }
             },
         );
@@ -39,7 +39,7 @@ async fn executor() -> (ProducingClient, Producer) {
             client.caller.closed().await;
         }
     });
-    let root = vox::initiator_on(client_link, vox::TransportMode::Bare)
+    let root = vox::initiator_on(client_link)
         .establish::<ProducingClient>()
         .await
         .expect("establish root Producing client");

@@ -206,7 +206,7 @@ pub async fn channel() -> (RemoteHandle, Producer) {
                         connection.handle_with(ProducingDispatcher::new(service.clone()));
                         Ok(())
                     }
-                    _ => Err(vec![]),
+                    _ => Err(vox::Metadata::default()),
                 }
             },
         );
@@ -219,7 +219,7 @@ pub async fn channel() -> (RemoteHandle, Producer) {
         }
     });
 
-    let client = vox::initiator_on(client_link, vox::TransportMode::Bare)
+    let client = vox::initiator_on(client_link)
         .establish::<ProducingClient>()
         .await
         .expect("establish in-process Producing client");
