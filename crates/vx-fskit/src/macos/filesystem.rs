@@ -62,7 +62,9 @@ define_class!(
             reply: &block2::DynBlock<dyn Fn(*mut FSVolume, *mut objc2_foundation::NSError)>,
         ) {
             tracing::info!("in loadResource");
-            root_peer_state();
+            // This is the mounting instance — start the VFS socket listener here (and
+            // only here), so probe-only instances never bind the socket.
+            root_peer_state().ensure_listening();
             tracing::info!("calling as_super()");
             let file_system = self.as_super();
             tracing::info!("calling ready()");
@@ -92,7 +94,7 @@ define_class!(
 
         #[unsafe(method(didFinishLoading))]
         fn didFinishLoading(&self) {
-            root_peer_state();
+            root_peer_state().ensure_listening();
             log_event("info", "vixen-fskit didFinishLoading");
         }
     }

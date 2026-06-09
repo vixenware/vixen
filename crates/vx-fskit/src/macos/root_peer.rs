@@ -1,4 +1,5 @@
 use std::path::PathBuf;
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex, OnceLock};
 
 use vox::{
@@ -21,6 +22,9 @@ pub(super) struct RootPeerState {
     bundle_identifier: String,
     app_group_path: PathBuf,
     inner: Arc<Mutex<RootPeerSnapshot>>,
+    /// Set once the VFS socket listener has been started. Only the mounting instance
+    /// flips this; probe-only instances never do, so they never bind the socket.
+    listener_started: Arc<AtomicBool>,
 }
 
 struct RootPeerSnapshot {
@@ -46,9 +50,24 @@ impl RootPeerState {
                 generation: 0,
                 disconnect_reason: Some("not connected".to_owned()),
             })),
+            listener_started: Arc::new(AtomicBool::new(false)),
         };
-        state.start_listener();
+        // NB: the listener is NOT started here. A single `mount` makes FSKit create the
+        // filesystem object in two processes — a probe instance and a load instance — and
+        // starting the socket listener at creation made both bind vixenfs.sock, so a
+        // backend connecting got ECONNREFUSED. Only the mounting instance starts it, via
+        // `ensure_listening()` from `loadResource`.
         state
+    }
+
+    /// Start the VFS socket listener exactly once. Called from the mount path
+    /// (`loadResource`/`didFinishLoading`); probe-only instances never call it and so
+    /// never bind the socket.
+    pub(super) fn ensure_listening(&self) {
+        if self.listener_started.swap(true, Ordering::SeqCst) {
+            return;
+        }
+        self.start_listener();
     }
 
     fn start_listener(&self) {
