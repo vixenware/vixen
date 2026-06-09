@@ -261,6 +261,7 @@ pub fn provision_device() -> Result<String> {
             "-imagekey",
             "diskimage-class=CRawDiskImage",
             "-nomount",
+            "-nobrowse",
             &image_str,
         ])
         .output()
