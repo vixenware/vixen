@@ -2,8 +2,14 @@ import Foundation
 import os
 
 #if canImport(VoxRuntime)
+    import PhonSchema
     import VoxRuntime
 #endif
+
+/// The mount prefix this app's VFS provider claims. The extension routes
+/// `/Volumes/Vixen/vfs/<prefix>/…` to whichever connection claimed `<prefix>` via its
+/// connection metadata. A build's `vx-vfsd` can later claim its own prefix without colliding.
+let vfsPrefix = "app"
 
 /// A tiny in-memory VFS served to the VixenFS extension over `vixenfs.sock`.
 ///
@@ -217,7 +223,9 @@ final class VfsBackendService: @unchecked Sendable {
                         group.addTask {
                             try await VoxRuntime.Session.initiator(
                                 UnixConnector(path: path),
-                                dispatcher: VfsDispatcher(handler: VfsBackend()))
+                                dispatcher: VfsDispatcher(handler: VfsBackend()),
+                                // Claim our mount prefix; the extension serves us under it.
+                                metadata: Metadata.null.metaSetting("prefix", .string(vfsPrefix)))
                         }
                         group.addTask {
                             try await Task.sleep(for: .seconds(10))

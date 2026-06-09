@@ -364,7 +364,9 @@ enum DoctorService {
     /// without a helper, an active probe, or a second prefix-provider — so unlike the old
     /// `vixen-management probe-vfs`, it can't displace the real prefix off the mount.
     private static func checkBackend() -> DoctorRow {
-        let path = "\(mountPoint)/README.md"
+        // The app provides its tree under its claimed prefix (`/Volumes/Vixen/vfs/app/`),
+        // not at the mount root — read the well-known file there.
+        let path = "\(mountPoint)/\(vfsPrefix)/README.md"
         guard let data = readFileWithTimeout(path, timeout: 2), !data.isEmpty else {
             logger.error("doctor backend failed: couldn't read \(path, privacy: .public)")
             return DoctorRow(

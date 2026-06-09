@@ -75,18 +75,14 @@ impl RustVolume {
     }
 
     pub(crate) fn local_item_id(&self, generation: u64, backend_item_id: u64) -> u64 {
-        if backend_item_id == ROOT_BACKEND_ID {
-            log_event(
-                "debug",
-                format!(
-                    "vixen-fskit local_item_id root backend={} generation={} -> local={}",
-                    backend_item_id, generation, ROOT_LOCAL_ID
-                ),
-            );
-            return ROOT_LOCAL_ID;
-        }
+        // NB: no ROOT_BACKEND_ID special case anymore. A provider's root (backend id 1) maps
+        // to a normal per-(generation, backend) local id — that item is the provider's
+        // *prefix directory* under the mount root, distinct per connection. ROOT_LOCAL_ID is
+        // the synthetic mount root, which is never produced by a backend lookup.
 
-        let current_generation = root_peer_state().generation();
+        // Retain routed items for every still-live provider generation (multiple prefixes
+        // can be connected at once); drop entries whose provider disconnected.
+        let live_generations = root_peer_state().live_generations();
         let live_local_ids = self
             .ivars()
             .items
@@ -102,7 +98,8 @@ impl RustVolume {
             .lock()
             .expect("routed items mutex poisoned");
         routed.by_key.retain(|key, local_id| {
-            key.connection_generation == current_generation && live_local_ids.contains(local_id)
+            live_generations.contains(&key.connection_generation)
+                && live_local_ids.contains(local_id)
         });
 
         let key = RoutedItemKey {
@@ -192,23 +189,32 @@ impl RustVolume {
         &self,
         item: &RustItem,
     ) -> Result<(vx_services::VfsClient, u64), Retained<NSError>> {
-        let (client, generation) = root_peer_state().connected_client().map_err(posix_error)?;
-        if matches!(item.virtual_kind(), VirtualKind::Root | VirtualKind::None)
-            && item.generation() != 0
-            && item.generation() != generation
-        {
-            log_event(
-                "warn",
-                format!(
-                    "vixen-fskit stale item generation item_gen={} live_gen={} {}",
-                    item.generation(),
-                    generation,
-                    item.debug_summary()
-                ),
-            );
-            return Err(posix_error(libc::ESTALE));
+        // Each routed item carries the generation of the connection (prefix provider) that
+        // owns it; route the call back to that exact provider. A generation that's no longer
+        // live means the provider disconnected — the item is stale.
+        let generation = item.generation();
+        if generation == 0 {
+            // Not tied to any provider (synthetic/root) — shouldn't reach a backend call.
+            return Err(posix_error(libc::ENOTCONN));
         }
-        Ok((client, generation))
+        match root_peer_state().client_for_generation(generation) {
+            Ok(client) => Ok((client, generation)),
+            Err(errno) => {
+                log_event(
+                    "warn",
+                    format!(
+                        "vixen-fskit no live provider for item generation={} {}",
+                        generation,
+                        item.debug_summary()
+                    ),
+                );
+                Err(posix_error(if errno == libc::ENOTCONN {
+                    libc::ESTALE
+                } else {
+                    errno
+                }))
+            }
+        }
     }
 
     pub(crate) fn directory_allows_mutation(&self, directory: &RustItem) -> bool {
@@ -216,6 +222,23 @@ impl RustVolume {
             directory.virtual_kind(),
             VirtualKind::Root | VirtualKind::None
         )
+    }
+
+    /// Build (and cache) a provider's prefix directory: a backend directory item whose
+    /// backend id is the provider's root (id 1), shown under the mount root with the prefix
+    /// name. Looking up / enumerating it flows through the generic backend path, which
+    /// routes to that provider via the item's generation.
+    fn prefix_dir_item(&self, prefix: &str, generation: u64) -> Retained<RustItem> {
+        let local_id = self.local_item_id(generation, ROOT_BACKEND_ID);
+        let attrs = vx_services::ItemAttributes {
+            item_id: ROOT_BACKEND_ID,
+            item_type: vx_services::ItemType::Directory,
+            size: 0,
+            modified_time: 0,
+            created_time: 0,
+            mode: 0o755,
+        };
+        self.cached_backend_item(local_id, ROOT_LOCAL_ID, generation, prefix, &attrs)
     }
 
     pub(crate) fn attributes_for_item(
@@ -311,6 +334,16 @@ impl RustVolume {
                 .get_cached_item(VIXENFS_DIR_ID)
                 .expect(".vixenfs dir should be cached");
             return Ok((item.clone().into_super(), item.fs_name()));
+        }
+
+        // Mount root: any other name must be a claimed prefix. Resolve it to that provider's
+        // prefix directory; anything else simply doesn't exist at the root.
+        if directory.item_id() == ROOT_LOCAL_ID {
+            if let Some((_, generation)) = root_peer_state().client_for_prefix(&requested_name) {
+                let item = self.prefix_dir_item(&requested_name, generation);
+                return Ok((item.clone().into_super(), item.fs_name()));
+            }
+            return Err(posix_error(libc::ENOENT));
         }
 
         if directory.item_id() == VIXENFS_DIR_ID && requested_name == STATUS_JSON_NAME {
@@ -432,94 +465,34 @@ impl RustVolume {
 
         if directory.item_id() == ROOT_LOCAL_ID {
             let initial = unsafe { FSDirectoryCookieInitial };
+            // Root listing: `.vixenfs`, then one directory per live prefix provider. All
+            // local — no backend RPC at the root; each prefix dir routes to its provider
+            // only when entered (via the generic backend path keyed by generation).
             let meta_dir = self
                 .get_cached_item(VIXENFS_DIR_ID)
                 .expect(".vixenfs dir should be cached");
-            let backend_cookie = if cookie == initial || cookie == 1 {
+            let mut entries: Vec<Retained<RustItem>> = vec![meta_dir];
+            for (prefix, generation) in root_peer_state().live_prefixes() {
+                entries.push(self.prefix_dir_item(&prefix, generation));
+            }
+
+            // Cookie convention: entry[i] is packed with nextCookie = i + 2 (1-based next),
+            // or 0 for the last entry. The initial call starts at entry 0; a resumed call at
+            // `cookie` (buffer was full) starts at entry `cookie - 1`.
+            let start = if cookie == initial {
                 0
             } else {
-                cookie.saturating_sub(1)
+                cookie.saturating_sub(1) as usize
             };
-
-            let mut backend_entries = Vec::<(Retained<RustItem>, FSDirectoryCookie)>::new();
-            let mut next_verifier = verifier;
-            let backend_result = root_peer_state()
-                .connected_client()
-                .map_err(posix_error)
-                .and_then(|(client, generation)| {
-                    block_on_vfs(async move {
-                        let listing = client
-                            .read_dir(ROOT_BACKEND_ID, backend_cookie, verifier)
-                            .await
-                            .map_err(|error| vox_rpc_errno("read_dir", error))?;
-                        Ok::<_, i32>((listing, generation))
-                    })
-                });
-
-            let backend_error = match backend_result {
-                Ok((
-                    ReadDirResult {
-                        entries,
-                        next_cookie,
-                        verifier,
-                        error: 0,
-                    },
-                    generation,
-                )) => {
-                    next_verifier = verifier;
-                    let total_entries = entries.len();
-                    for (index, entry) in entries.into_iter().enumerate() {
-                        let local_item_id = self.local_item_id(generation, entry.item_id);
-                        let item = self.cached_backend_item(
-                            local_item_id,
-                            ROOT_LOCAL_ID,
-                            generation,
-                            &entry.name,
-                            &entry_attributes(&entry),
-                        );
-                        let entry_cookie = if index + 1 == total_entries && next_cookie == 0 {
-                            0
-                        } else {
-                            backend_cookie + index as u64 + 2
-                        };
-                        backend_entries.push((item, entry_cookie));
-                    }
-                    None
-                }
-                Ok((ReadDirResult { error, .. }, _)) => Some(posix_error(error)),
-                Err(error) => Some(error),
-            };
-
-            if cookie == initial {
-                let attrs = meta_dir.attributes_for_request(attributes);
-                let next_cookie = if backend_entries.is_empty() { 0 } else { 1 };
-                let packed = unsafe {
-                    packer.packEntryWithName_itemType_itemID_nextCookie_attributes(
-                        &meta_dir.fs_name(),
-                        attrs.r#type(),
-                        FSItemID(meta_dir.item_id()),
-                        next_cookie,
-                        if attributes.is_some() {
-                            Some(attrs.as_ref())
-                        } else {
-                            None
-                        },
-                    )
-                };
-                if !packed {
-                    return Ok(next_verifier);
-                }
-            }
-
-            if let Some(error) = backend_error {
-                if cookie == initial || cookie == 1 {
-                    return Ok(next_verifier);
-                }
-                return Err(error);
-            }
-
-            for (item, next_cookie) in backend_entries {
+            let total = entries.len();
+            for index in start..total {
+                let item = &entries[index];
                 let attrs = item.attributes_for_request(attributes);
+                let next_cookie = if index + 1 == total {
+                    0
+                } else {
+                    index as u64 + 2
+                };
                 log_event(
                     "debug",
                     format!(
@@ -546,7 +519,7 @@ impl RustVolume {
                 }
             }
 
-            return Ok(next_verifier);
+            return Ok(verifier);
         }
 
         let directory_backend_id = directory.backend_item_id();

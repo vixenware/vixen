@@ -1,3 +1,4 @@
+use std::collections::HashMap;
 use std::path::PathBuf;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex, OnceLock};
@@ -27,10 +28,20 @@ pub(super) struct RootPeerState {
     listener_started: Arc<AtomicBool>,
 }
 
+/// One connected prefix provider: the client we call to serve that prefix's subtree, and
+/// the connection generation it was registered under (for stale-close detection).
+struct PrefixClient {
+    client: VfsClient,
+    generation: u64,
+}
+
 struct RootPeerSnapshot {
-    client: Option<VfsClient>,
-    connected: bool,
+    /// Live prefix providers, keyed by the prefix each connection claimed (its
+    /// `metadata.prefix`). Each is a virtual vox connection serving one Vfs; the volume
+    /// mounts each under `/<prefix>/`. Empty = nothing connected.
+    clients: HashMap<String, PrefixClient>,
     ever_connected: bool,
+    /// Monotonic connection counter; also the cache-invalidation key for routed items.
     generation: u64,
     disconnect_reason: Option<String>,
 }
@@ -44,8 +55,7 @@ impl RootPeerState {
             bundle_identifier: config.bundle_identifier.clone(),
             app_group_path: config.app_group_path.clone(),
             inner: Arc::new(Mutex::new(RootPeerSnapshot {
-                client: None,
-                connected: false,
+                clients: HashMap::new(),
                 ever_connected: false,
                 generation: 0,
                 disconnect_reason: Some("not connected".to_owned()),
@@ -133,51 +143,106 @@ impl RootPeerState {
         }
     }
 
-    fn record_connected(&self, client: VfsClient) -> u64 {
+    fn record_connected(&self, prefix: String, client: VfsClient) -> u64 {
         let mut snapshot = self
             .inner
             .lock()
             .expect("root peer snapshot mutex poisoned");
         snapshot.generation += 1;
-        snapshot.client = Some(client);
-        snapshot.connected = true;
+        let generation = snapshot.generation;
+        snapshot
+            .clients
+            .insert(prefix, PrefixClient { client, generation });
         snapshot.ever_connected = true;
         snapshot.disconnect_reason = None;
-        snapshot.generation
+        generation
     }
 
-    fn record_closed(&self, generation: u64, reason: &str) {
+    fn record_closed(&self, prefix: &str, generation: u64, reason: &str) {
         let mut snapshot = self
             .inner
             .lock()
             .expect("root peer snapshot mutex poisoned");
-        if snapshot.generation != generation {
-            return;
+        // Only drop the entry if it's still the one that closed — a newer connection may
+        // have re-claimed the same prefix in the meantime.
+        if snapshot
+            .clients
+            .get(prefix)
+            .is_some_and(|entry| entry.generation == generation)
+        {
+            snapshot.clients.remove(prefix);
         }
-        snapshot.client = None;
-        snapshot.connected = false;
-        snapshot.disconnect_reason = Some(reason.to_owned());
+        if snapshot.clients.is_empty() {
+            snapshot.disconnect_reason = Some(reason.to_owned());
+        }
     }
 
     fn record_disconnect(&self, reason: String) {
+        // An accept that never registered a client (e.g. handshake failure) — just note why,
+        // without disturbing any live prefixes.
         let mut snapshot = self
             .inner
             .lock()
             .expect("root peer snapshot mutex poisoned");
-        snapshot.client = None;
-        snapshot.connected = false;
-        snapshot.disconnect_reason = Some(reason);
+        if snapshot.clients.is_empty() {
+            snapshot.disconnect_reason = Some(reason);
+        }
     }
 
-    pub(super) fn connected_client(&self) -> Result<(VfsClient, u64), i32> {
+    /// The client serving the connection with this generation — used to route a routed item
+    /// back to the prefix provider that owns it.
+    pub(super) fn client_for_generation(&self, generation: u64) -> Result<VfsClient, i32> {
         let snapshot = self
             .inner
             .lock()
             .expect("root peer snapshot mutex poisoned");
-        match snapshot.client.clone() {
-            Some(client) => Ok((client, snapshot.generation)),
-            None => Err(libc::ENOTCONN),
-        }
+        snapshot
+            .clients
+            .values()
+            .find(|entry| entry.generation == generation)
+            .map(|entry| entry.client.clone())
+            .ok_or(libc::ENOTCONN)
+    }
+
+    /// The client for a named prefix, plus its generation (used to enter `/<prefix>/`).
+    pub(super) fn client_for_prefix(&self, prefix: &str) -> Option<(VfsClient, u64)> {
+        let snapshot = self
+            .inner
+            .lock()
+            .expect("root peer snapshot mutex poisoned");
+        snapshot
+            .clients
+            .get(prefix)
+            .map(|entry| (entry.client.clone(), entry.generation))
+    }
+
+    /// Live prefixes and the generation serving each, sorted by name — the directories the
+    /// mount root exposes.
+    pub(super) fn live_prefixes(&self) -> Vec<(String, u64)> {
+        let snapshot = self
+            .inner
+            .lock()
+            .expect("root peer snapshot mutex poisoned");
+        let mut prefixes: Vec<(String, u64)> = snapshot
+            .clients
+            .iter()
+            .map(|(name, entry)| (name.clone(), entry.generation))
+            .collect();
+        prefixes.sort_by(|a, b| a.0.cmp(&b.0));
+        prefixes
+    }
+
+    /// All live connection generations — the set a routed-item cache should retain.
+    pub(super) fn live_generations(&self) -> Vec<u64> {
+        let snapshot = self
+            .inner
+            .lock()
+            .expect("root peer snapshot mutex poisoned");
+        snapshot
+            .clients
+            .values()
+            .map(|entry| entry.generation)
+            .collect()
     }
 
     pub(super) fn generation(&self) -> u64 {
@@ -198,7 +263,7 @@ impl RootPeerState {
             .expect("root peer snapshot mutex poisoned");
 
         let payload = StatusPayload {
-            connected: snapshot.connected,
+            connected: !snapshot.clients.is_empty(),
             ever_connected: snapshot.ever_connected,
             bundle_version: Some(self.bundle_version.clone()),
             bundle_identifier: Some(self.bundle_identifier.clone()),
@@ -227,23 +292,43 @@ impl ConnectionAcceptor for RootPeerAcceptor {
         request: &ConnectionRequest,
         connection: PendingConnection,
     ) -> Result<(), Metadata> {
+        // A provider claims its mount prefix via connection metadata. One virtual vox
+        // connection == one prefix == one Vfs (one-service-per-connection).
+        let prefix = match request.get_str("prefix") {
+            Some(prefix) if !prefix.is_empty() => prefix.to_owned(),
+            _ => {
+                log_event(
+                    "error",
+                    format!(
+                        "rejecting VFS connection with no 'prefix' metadata (service={})",
+                        request.service()
+                    ),
+                );
+                return Err(vox::metadata()
+                    .str("error", "missing required 'prefix' connection metadata")
+                    .build());
+            }
+        };
         log_event(
             "info",
-            format!("root listener request.service={}", request.service()),
+            format!(
+                "accepting VFS provider prefix={prefix} service={}",
+                request.service()
+            ),
         );
         let client = connection.handle_with_client::<VfsClient>(());
         let client: VfsClient = client.with_middleware(ClientLogging::new(ClientLoggingOptions {
             log_metadata: true,
         }));
-        let generation = self.state.record_connected(client.clone());
+        let generation = self.state.record_connected(prefix.clone(), client.clone());
         log_event(
             "info",
-            format!("accepted VFS root peer generation={generation}"),
+            format!("accepted VFS provider prefix={prefix} generation={generation}"),
         );
         let state = self.state.clone();
         tokio::spawn(async move {
             client.caller.closed().await;
-            state.record_closed(generation, "caller closed");
+            state.record_closed(&prefix, generation, "caller closed");
         });
         Ok(())
     }
