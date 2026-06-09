@@ -21,6 +21,12 @@ packages:
   Sparkle:
     url: https://github.com/sparkle-project/Sparkle.git
     from: 2.8.1
+  vox:
+    # github.com/bearcove/vox @ tag vox-v0.8.2 (pinned by commit; SwiftPM can't
+    # match the prefixed tag as semver). This is the same vox the FSKit extension
+    # speaks (vox 0.8.2), so the in-app Swift VFS backend is wire-compatible.
+    url: https://github.com/bearcove/vox.git
+    revision: 230dcd5bb1e5aedd1309308c64de07781fad5b57
 
 targets:
   Vixen:
@@ -35,29 +41,19 @@ targets:
       - name: Embed Vixen Management
         inputFiles:
           - "$(SRCROOT)/build/RustLibs/vixen-management"
-          - "$(SRCROOT)/../installer/eu.bearcove.vixen.management.bundle.plist"
         outputFiles:
           - "$(TARGET_BUILD_DIR)/$(CONTENTS_FOLDER_PATH)/MacOS/vixen-management"
-          - "$(TARGET_BUILD_DIR)/$(CONTENTS_FOLDER_PATH)/Library/LaunchDaemons/eu.bearcove.vixen.management.plist"
         script: |
           set -euo pipefail
           helper_src="$SRCROOT/build/RustLibs/vixen-management"
-          daemon_plist_src="$SRCROOT/../installer/eu.bearcove.vixen.management.bundle.plist"
           contents="$TARGET_BUILD_DIR/$CONTENTS_FOLDER_PATH"
           helper_dst="$contents/MacOS/vixen-management"
-          daemon_plist_dst="$contents/Library/LaunchDaemons/eu.bearcove.vixen.management.plist"
           if [[ ! -f "$helper_src" ]]; then
             echo "missing staged vixen-management helper at $helper_src" >&2
             exit 1
           fi
-          if [[ ! -f "$daemon_plist_src" ]]; then
-            echo "missing bundled LaunchDaemon plist at $daemon_plist_src" >&2
-            exit 1
-          fi
           install -d "$contents/MacOS"
           install -m 755 "$helper_src" "$helper_dst"
-          install -d "$contents/Library/LaunchDaemons"
-          install -m 644 "$daemon_plist_src" "$daemon_plist_dst"
           if [[ "${CODE_SIGNING_ALLOWED:-NO}" != "NO" ]]; then
             identity="${EXPANDED_CODE_SIGN_IDENTITY:-}"
             helper_identifier="${PRODUCT_BUNDLE_IDENTIFIER:-eu.bearcove.vixen}"
@@ -102,6 +98,8 @@ targets:
         codeSign: true
       - package: Sparkle
         product: Sparkle
+      - package: vox
+        product: VoxRuntime
       - sdk: FSKit.framework
       - sdk: ServiceManagement.framework
 

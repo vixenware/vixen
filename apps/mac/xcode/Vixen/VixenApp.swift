@@ -546,6 +546,10 @@ struct ContentView: View {
         }
         .onAppear {
             cursorBob = true
+            // Serve the in-app VFS backend over vixenfs.sock so the mounted volume has a
+            // live provider (flips "Backend Connection" green and shows files). The
+            // service self-reconnects until the volume's socket is up.
+            VfsBackendService.shared.startIfNeeded()
         }
         .onReceive(
             NotificationCenter.default.publisher(for: NSApplication.didBecomeActiveNotification)
