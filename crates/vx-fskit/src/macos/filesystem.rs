@@ -29,7 +29,12 @@ define_class!(
             _resource: &FSResource,
             reply: &block2::DynBlock<dyn Fn(*mut FSProbeResult, *mut objc2_foundation::NSError)>,
         ) {
-            root_peer_state();
+            // Do NOT start the VFS root listener here. probeResource runs in throwaway
+            // probe processes (FSKit probes the module whenever something — e.g. the
+            // app's FSClient.installedExtensions poll — asks about it). Binding the
+            // socket on probe spawns a second process that competes for vixenfs.sock with
+            // the real mount instance, so a backend connecting gets ECONNREFUSED. The
+            // listener belongs only to loadResource (the actual mount), below.
             log_event("info", "vixen-fskit probeResource");
             // Block-resource FSes return a usable result carrying a name + a stable
             // container identity (name/containerID must be non-nil). Returning only a
