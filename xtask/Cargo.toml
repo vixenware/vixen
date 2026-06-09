@@ -10,6 +10,8 @@ publish = false
 rustdoc-args = ["--html-in-header", "arborium-header.html"]
 
 [dependencies]
+vox-codegen = { workspace = true }
+vx-services = { workspace = true }
 
 [lints]
 workspace = true

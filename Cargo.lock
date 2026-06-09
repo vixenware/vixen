@@ -3649,6 +3649,18 @@ dependencies = [
 ]
 
 [[package]]
+name = "vox-codegen"
+version = "0.8.2"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "3ea428dceb5a721d59340e0738b3d2e017233013cb910073a172107ae87282bd"
+dependencies = [
+ "facet-cbor",
+ "facet-core",
+ "heck 0.5.0",
+ "vox-types",
+]
+
+[[package]]
 name = "vox-core"
 version = "0.8.2"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -4675,6 +4687,10 @@ dependencies = [
 [[package]]
 name = "xtask"
 version = "0.1.0"
+dependencies = [
+ "vox-codegen",
+ "vx-services",
+]
 
 [[package]]
 name = "xterm-query"

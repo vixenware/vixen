@@ -18,6 +18,7 @@ fn main() {
             };
             install(mode)
         }
+        Some("codegen") => codegen(),
         Some(cmd) => {
             eprintln!("Unknown command: {}", cmd);
             eprintln!(
@@ -31,6 +32,23 @@ fn main() {
             std::process::exit(1);
         }
     }
+}
+
+/// Regenerate the Swift vox bindings for the macOS app's VixenFS backend.
+///
+/// The FSKit extension serves the volume by calling the `Vfs` service on whoever connects
+/// to its socket; the app implements that service in Swift (`VfsHandler`). This emits the
+/// `VfsDispatcher`/`VfsHandler`/types from the `Vfs` service descriptor via `vox-codegen`
+/// (pinned to the same vox 0.8.2 the extension speaks). Mirrors bee's `bee-services-codegen`.
+fn codegen() {
+    let workspace_root = find_workspace_root().expect("Could not find workspace root");
+    let out_dir = workspace_root.join("apps/mac/xcode/Vixen/Generated");
+    fs::create_dir_all(&out_dir).expect("creating Generated dir");
+
+    let code = vox_codegen::targets::swift::generate_service(vx_services::vfs_service_descriptor());
+    let out_path = out_dir.join("GeneratedVfsService.swift");
+    fs::write(&out_path, code).expect("writing generated Swift");
+    println!("Wrote {}", out_path.display());
 }
 
 fn install(mode: InstallMode) {
