@@ -74,15 +74,15 @@ vx-types = { path = "crates/vx-types" }
 vxd = { path = "crates/vx-daemon", package = "vx-daemon" }
 
 # facet ecosystem
-facet = { version = "0.46", features = ["jiff02", "camino"] }
-facet-error = { version = "0.46" }
-facet-json = { version = "0.46" }
-facet-postcard = { version = "0.46", features = ["jiff02", "camino"] }
-facet-styx = "4.0"
+facet = { version = "0.50.0-rc.0", features = ["jiff02", "camino"] }
+facet-error = { version = "0.50.0-rc.0" }
+facet-json = { version = "0.50.0-rc.0" }
+facet-postcard = { version = "0.50.0-rc.0", features = ["jiff02", "camino"] }
+facet-styx = "5.0.0-rc.0"
 
 
 # cmdline parsing
-figue = { version = "4" }
+figue = { version = "5.0.0-rc.0" }
 
 # vox RPC framework
 # Migrated to the local ~/vox checkout (path deps) so the Rust extension and the Swift
@@ -182,11 +182,11 @@ strip = "none"
 
 # Migrated to the local ~/vox checkout (path deps above) so the Rust extension and the
 # Swift VoxRuntime speak the exact same vox wire. ~/vox builds against the local facet
-# (~/facet 0.46.5, ahead of crates.io 0.46.0 — it has reflection APIs vox's facet-cbor
-# needs) + the format crates in ~/facet-format + figue 4.x, so the whole workspace must
-# too. This mirrors ~/vox's own [patch] set. Local-only until those are published again.
+# 0.50 RC ecosystem plus the matching format crates and figue 5.x, so the whole
+# workspace must too. This mirrors ~/vox's own [patch] set. Local-only until those are
+# published again.
 #
-# ~/facet — core reflection crates (0.46.5).
+# ~/facet — core reflection crates.
 facet = { path = "/Users/amos/facet/facet" }
 facet-core = { path = "/Users/amos/facet/facet-core" }
 facet-macros = { path = "/Users/amos/facet/facet-macros" }
@@ -197,38 +197,21 @@ facet-reflect = { path = "/Users/amos/facet/facet-reflect" }
 facet-solver = { path = "/Users/amos/facet/facet-solver" }
 facet-path = { path = "/Users/amos/facet/facet-path" }
 facet-error = { path = "/Users/amos/facet/facet-error" }
-facet-default = { path = "/Users/amos/facet/facet-default" }
 facet-pretty = { path = "/Users/amos/facet/facet-pretty" }
 facet-testhelpers = { path = "/Users/amos/facet/facet-testhelpers" }
 facet-testhelpers-macros = { path = "/Users/amos/facet/facet-testhelpers-macros" }
-facet-validate = { path = "/Users/amos/facet/facet-validate" }
-facet-urlencoded = { path = "/Users/amos/facet/facet-urlencoded" }
-facet-testattrs = { path = "/Users/amos/facet/facet-testattrs" }
-# ~/facet-format — every format crate, so any transitively-pulled one builds against the
-# same ~/facet-format event types rather than a crates.io copy.
+# ~/facet-format — keep the format crates currently in the graph on the same local facet.
 facet-value = { path = "/Users/amos/facet-format/facet-value" }
 facet-format = { path = "/Users/amos/facet-format/facet-format" }
 facet-dessert = { path = "/Users/amos/facet-format/facet-dessert" }
 facet-json = { path = "/Users/amos/facet-format/facet-json" }
-facet-json-classics = { path = "/Users/amos/facet-format/facet-json-classics" }
 facet-postcard = { path = "/Users/amos/facet-format/facet-postcard" }
-facet-msgpack = { path = "/Users/amos/facet-format/facet-msgpack" }
 facet-toml = { path = "/Users/amos/facet-format/facet-toml" }
-facet-yaml = { path = "/Users/amos/facet-format/facet-yaml" }
-facet-asn1 = { path = "/Users/amos/facet-format/facet-asn1" }
-facet-csv = { path = "/Users/amos/facet-format/facet-csv" }
-facet-xdr = { path = "/Users/amos/facet-format/facet-xdr" }
-facet-json-schema = { path = "/Users/amos/facet-format/facet-json-schema" }
-facet-typescript = { path = "/Users/amos/facet-format/facet-typescript" }
-facet-python = { path = "/Users/amos/facet-format/facet-python" }
-facet-zod = { path = "/Users/amos/facet-format/facet-zod" }
 facet-cargo-toml = { path = "/Users/amos/facet-cargo-toml" }
-# figue (used only by crates/vx) — the local 4.x builds against the sealed facet; the
-# crates.io 2.0.x predates the seal.
+# figue (used only by crates/vx) — keep it on the same facet generation as vox.
 figue = { path = "/Users/amos/figue/crates/figue" }
 figue-attrs = { path = "/Users/amos/figue/crates/figue-attrs" }
-# facet-styx — crates.io 3.0.0 matches facet enums exhaustively; facet 0.46.5 made some
-# #[non_exhaustive], so use the local 4.x which handles it.
+# facet-styx — keep it on the same facet generation as the rest of the workspace.
 facet-styx = { path = "/Users/amos/styx/crates/facet-styx" }
 
 windows-projfs = { path = "vendor/windows-projfs" }
