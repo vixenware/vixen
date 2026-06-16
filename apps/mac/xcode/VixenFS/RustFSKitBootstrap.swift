@@ -19,7 +19,6 @@ enum RustFSKitBootstrap {
     static func makeFileSystem() -> FSUnaryFileSystem & FSUnaryFileSystemOperations {
         let bundleVersion = Bundle.main.infoDictionary?["CFBundleVersion"] as? String ?? "unknown"
         let bundleIdentifier = Bundle.main.bundleIdentifier ?? "eu.bearcove.vixenfs"
-        let isDebug = ProcessInfo.processInfo.environment["VIXENFS_DEBUG"] == "1"
 
         guard
             let appGroupURL = FileManager.default.containerURL(
@@ -41,8 +40,7 @@ enum RustFSKitBootstrap {
             bundle_version: cVersion,
             bundle_identifier: cIdentifier,
             app_group_path: cAppGroup,
-            socket_path: cSocket,
-            is_debug: isDebug
+            socket_path: cSocket
         )
         let rawPtr = VixenRustCreateFileSystem(&config)
         guard let rawPtr else {

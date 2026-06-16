@@ -11,7 +11,6 @@ pub struct VixenFsConfig {
     pub bundle_identifier: *const c_char,
     pub app_group_path: *const c_char,
     pub socket_path: *const c_char,
-    pub is_debug: bool,
 }
 
 impl VixenFsConfig {
@@ -47,7 +46,6 @@ impl VixenFsConfig {
             bundle_identifier,
             app_group_path,
             socket_path,
-            is_debug: self.is_debug,
         }
     }
 }
@@ -57,7 +55,6 @@ pub struct OwnedVixenFsConfig {
     pub bundle_identifier: String,
     pub app_group_path: PathBuf,
     pub socket_path: PathBuf,
-    pub is_debug: bool,
 }
 
 use objc2::rc::Retained;
@@ -83,7 +80,7 @@ use self::logging::{init_logging, log_event};
 pub unsafe extern "C" fn VixenRustCreateFileSystem(config: *const VixenFsConfig) -> *mut c_void {
     let config = unsafe { &*config };
     let owned = config.to_owned();
-    init_logging(&owned.app_group_path, owned.is_debug);
+    init_logging(&owned.app_group_path);
     let file_system: Retained<FSUnaryFileSystem> = create_file_system(&owned);
     log_event(
         "info",

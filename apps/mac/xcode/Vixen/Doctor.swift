@@ -40,6 +40,7 @@ struct BackendStatus: Sendable {
     let uptimeSeconds: Double?
     let socketPath: String?
     let appGroupPath: String?
+    let logFilterPath: String?
     let bundleVersion: String?
     let connectedAt: String?
     let disconnectReason: String?
@@ -163,6 +164,7 @@ enum DoctorService {
             uptimeSeconds: (payload["uptime_seconds"] as? NSNumber)?.doubleValue,
             socketPath: trimmedString(payload["socket_path"]),
             appGroupPath: trimmedString(payload["app_group_path"]),
+            logFilterPath: trimmedString(payload["log_filter_path"]),
             bundleVersion: trimmedString(payload["bundle_version"]),
             connectedAt: trimmedString(payload["connected_at"]),
             disconnectReason: trimmedString(payload["disconnect_reason"])
@@ -389,15 +391,32 @@ enum DoctorService {
     /// doctor (and the UI) indefinitely.
     private static func readFileWithTimeout(_ path: String, timeout: TimeInterval) -> Data? {
         let semaphore = DispatchSemaphore(value: 0)
-        var result: Data?
+        let result = FileReadResult()
         DispatchQueue.global(qos: .userInitiated).async {
-            result = try? Data(contentsOf: URL(fileURLWithPath: path))
+            result.store(try? Data(contentsOf: URL(fileURLWithPath: path)))
             semaphore.signal()
         }
         guard semaphore.wait(timeout: .now() + timeout) == .success else {
             return nil
         }
-        return result
+        return result.load()
+    }
+
+    private final class FileReadResult: @unchecked Sendable {
+        private let lock = NSLock()
+        private var value: Data?
+
+        func store(_ value: Data?) {
+            lock.lock()
+            defer { lock.unlock() }
+            self.value = value
+        }
+
+        func load() -> Data? {
+            lock.lock()
+            defer { lock.unlock() }
+            return value
+        }
     }
 
     private struct CommandResult {

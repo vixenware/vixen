@@ -404,6 +404,7 @@ private struct DaemonHealthSurface: View {
                 if let pid = backend.extensionPid { infoRow("extension pid", "\(pid)", mono: true) }
                 if let uptime = backend.uptimeSeconds { infoRow("uptime", formatUptime(uptime), mono: false) }
                 if let socket = backend.socketPath { infoRow("socket", socket, mono: true) }
+                if let logFilter = backend.logFilterPath { infoRow("log filter", logFilter, mono: true) }
                 if let version = backend.bundleVersion { infoRow("backend build", version, mono: true) }
                 if let connectedAt = backend.connectedAt { infoRow("connected", connectedAt, mono: false) }
                 if backend.connected == false, let reason = backend.disconnectReason {

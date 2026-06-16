@@ -20,6 +20,9 @@ pub struct StatusPayload {
     pub socket_path: Option<String>,
 
     #[facet(default)]
+    pub log_filter_path: Option<String>,
+
+    #[facet(default)]
     pub extension_pid: Option<u32>,
 
     #[facet(default)]

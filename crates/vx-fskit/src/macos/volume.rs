@@ -59,11 +59,13 @@ define_class!(
     unsafe impl FSVolumeOperations for RustVolume {
         #[unsafe(method_id(supportedVolumeCapabilities))]
         unsafe fn supportedVolumeCapabilities(&self) -> Retained<FSVolumeSupportedCapabilities> {
+            log_event("trace", "vixen-fskit supportedVolumeCapabilities");
             unsafe { FSVolumeSupportedCapabilities::new() }
         }
 
         #[unsafe(method_id(volumeStatistics))]
         unsafe fn volumeStatistics(&self) -> Retained<FSStatFSResult> {
+            log_event("trace", "vixen-fskit volumeStatistics");
             let stats = unsafe {
                 FSStatFSResult::initWithFileSystemTypeName(
                     FSStatFSResult::alloc(),
@@ -167,6 +169,15 @@ define_class!(
                 ));
                 return;
             };
+            log_event(
+                "info",
+                format!(
+                    "vixen-fskit setAttributes mode_valid={} size_valid={} {}",
+                    unsafe { new_attributes.isValid(FSItemAttribute::Mode) },
+                    unsafe { new_attributes.isValid(FSItemAttribute::Size) },
+                    item.debug_summary()
+                ),
+            );
 
             if item.virtual_kind() != VirtualKind::None {
                 reply.call((
@@ -282,9 +293,16 @@ define_class!(
         #[unsafe(method(readSymbolicLink:replyHandler:))]
         unsafe fn readSymbolicLink_replyHandler(
             &self,
-            _item: &FSItem,
+            item: &FSItem,
             reply: &block2::DynBlock<dyn Fn(*mut FSFileName, *mut NSError)>,
         ) {
+            let details = as_rust_item(item)
+                .map(|item| item.debug_summary())
+                .unwrap_or_else(|| "<non-rust-item>".to_owned());
+            log_event(
+                "info",
+                format!("vixen-fskit readSymbolicLink unsupported {details}"),
+            );
             reply.call((
                 ptr::null_mut(),
                 Retained::into_raw(posix_error(libc::ENOTSUP)),
@@ -308,6 +326,16 @@ define_class!(
                 ));
                 return;
             };
+            let requested_name = fs_filename_string(name);
+            log_event(
+                "info",
+                format!(
+                    "vixen-fskit createItem name={} type={:?} dir={}",
+                    requested_name,
+                    item_type,
+                    directory.debug_summary()
+                ),
+            );
 
             if !self.directory_allows_mutation(directory) {
                 reply.call((
@@ -318,7 +346,6 @@ define_class!(
                 return;
             }
 
-            let requested_name = fs_filename_string(name);
             let mode = if unsafe { new_attributes.isValid(FSItemAttribute::Mode) } {
                 unsafe { new_attributes.mode() }
             } else if item_type == FSItemType::Directory {
@@ -423,12 +450,23 @@ define_class!(
         #[unsafe(method(createSymbolicLinkNamed:inDirectory:attributes:linkContents:replyHandler:))]
         unsafe fn createSymbolicLinkNamed_inDirectory_attributes_linkContents_replyHandler(
             &self,
-            _name: &FSFileName,
-            _directory: &FSItem,
+            name: &FSFileName,
+            directory: &FSItem,
             _new_attributes: &objc2_fs_kit::FSItemSetAttributesRequest,
-            _contents: &FSFileName,
+            contents: &FSFileName,
             reply: &block2::DynBlock<dyn Fn(*mut FSItem, *mut FSFileName, *mut NSError)>,
         ) {
+            let details = as_rust_item(directory)
+                .map(|item| item.debug_summary())
+                .unwrap_or_else(|| "<non-rust-item>".to_owned());
+            log_event(
+                "info",
+                format!(
+                    "vixen-fskit createSymbolicLink unsupported name={} contents={} dir={details}",
+                    fs_filename_string(name),
+                    fs_filename_string(contents)
+                ),
+            );
             reply.call((
                 ptr::null_mut(),
                 ptr::null_mut(),
@@ -439,11 +477,26 @@ define_class!(
         #[unsafe(method(createLinkToItem:named:inDirectory:replyHandler:))]
         unsafe fn createLinkToItem_named_inDirectory_replyHandler(
             &self,
-            _item: &FSItem,
-            _name: &FSFileName,
-            _directory: &FSItem,
+            item: &FSItem,
+            name: &FSFileName,
+            directory: &FSItem,
             reply: &block2::DynBlock<dyn Fn(*mut FSFileName, *mut NSError)>,
         ) {
+            let item_details = as_rust_item(item)
+                .map(|item| item.debug_summary())
+                .unwrap_or_else(|| "<non-rust-item>".to_owned());
+            let directory_details = as_rust_item(directory)
+                .map(|item| item.debug_summary())
+                .unwrap_or_else(|| "<non-rust-item>".to_owned());
+            log_event(
+                "info",
+                format!(
+                    "vixen-fskit createLink unsupported name={} item={} dir={}",
+                    fs_filename_string(name),
+                    item_details,
+                    directory_details
+                ),
+            );
             reply.call((
                 ptr::null_mut(),
                 Retained::into_raw(posix_error(libc::ENOTSUP)),
@@ -454,14 +507,26 @@ define_class!(
         unsafe fn removeItem_named_fromDirectory_replyHandler(
             &self,
             item: &FSItem,
-            _name: &FSFileName,
-            _directory: &FSItem,
+            name: &FSFileName,
+            directory: &FSItem,
             reply: &block2::DynBlock<dyn Fn(*mut NSError)>,
         ) {
             let Some(item) = as_rust_item(item) else {
                 reply.call((Retained::into_raw(posix_error(libc::ENOENT)),));
                 return;
             };
+            let directory_details = as_rust_item(directory)
+                .map(|item| item.debug_summary())
+                .unwrap_or_else(|| "<non-rust-item>".to_owned());
+            log_event(
+                "info",
+                format!(
+                    "vixen-fskit removeItem name={} item={} dir={}",
+                    fs_filename_string(name),
+                    item.debug_summary(),
+                    directory_details
+                ),
+            );
 
             if item.virtual_kind() != VirtualKind::None {
                 reply.call((Retained::into_raw(posix_error(libc::EACCES)),));
@@ -499,7 +564,7 @@ define_class!(
             &self,
             item: &FSItem,
             source_directory: &FSItem,
-            _source_name: &FSFileName,
+            source_name: &FSFileName,
             destination_name: &FSFileName,
             destination_directory: &FSItem,
             over_item: Option<&FSItem>,
@@ -526,6 +591,21 @@ define_class!(
                 ));
                 return;
             };
+            log_event(
+                "info",
+                format!(
+                    "vixen-fskit renameItem source_name={} destination_name={} item={} source_dir={} destination_dir={} over={}",
+                    fs_filename_string(source_name),
+                    fs_filename_string(destination_name),
+                    item.debug_summary(),
+                    source_directory.debug_summary(),
+                    destination_directory.debug_summary(),
+                    over_item
+                        .and_then(as_rust_item)
+                        .map(|item| item.debug_summary())
+                        .unwrap_or_else(|| "none".to_owned())
+                ),
+            );
 
             if item.virtual_kind() != VirtualKind::None
                 || !self.directory_allows_mutation(source_directory)
@@ -658,41 +738,49 @@ define_class!(
     unsafe impl FSVolumePathConfOperations for RustVolume {
         #[unsafe(method(maximumLinkCount))]
         unsafe fn maximumLinkCount(&self) -> isize {
+            log_event("trace", "vixen-fskit maximumLinkCount");
             1
         }
 
         #[unsafe(method(maximumNameLength))]
         unsafe fn maximumNameLength(&self) -> isize {
+            log_event("trace", "vixen-fskit maximumNameLength");
             255
         }
 
         #[unsafe(method(restrictsOwnershipChanges))]
         unsafe fn restrictsOwnershipChanges(&self) -> bool {
+            log_event("trace", "vixen-fskit restrictsOwnershipChanges");
             true
         }
 
         #[unsafe(method(truncatesLongNames))]
         unsafe fn truncatesLongNames(&self) -> bool {
+            log_event("trace", "vixen-fskit truncatesLongNames");
             false
         }
 
         #[unsafe(method(maximumXattrSize))]
         unsafe fn maximumXattrSize(&self) -> isize {
+            log_event("trace", "vixen-fskit maximumXattrSize");
             64 * 1024
         }
 
         #[unsafe(method(maximumXattrSizeInBits))]
         unsafe fn maximumXattrSizeInBits(&self) -> isize {
+            log_event("trace", "vixen-fskit maximumXattrSizeInBits");
             17
         }
 
         #[unsafe(method(maximumFileSize))]
         unsafe fn maximumFileSize(&self) -> u64 {
+            log_event("trace", "vixen-fskit maximumFileSize");
             i64::MAX as u64
         }
 
         #[unsafe(method(maximumFileSizeInBits))]
         unsafe fn maximumFileSizeInBits(&self) -> isize {
+            log_event("trace", "vixen-fskit maximumFileSizeInBits");
             64
         }
     }
@@ -739,6 +827,15 @@ define_class!(
                 reply.call((0, Retained::into_raw(posix_error(libc::ENOENT))));
                 return;
             };
+            log_event(
+                "info",
+                format!(
+                    "vixen-fskit writeContents offset={} length={} {}",
+                    offset,
+                    contents.length(),
+                    item.debug_summary()
+                ),
+            );
 
             if item.virtual_kind() != VirtualKind::None {
                 reply.call((0, Retained::into_raw(posix_error(libc::EACCES))));
@@ -779,16 +876,27 @@ define_class!(
     unsafe impl FSVolumeXattrOperations for RustVolume {
         #[unsafe(method(xattrOperationsInhibited))]
         unsafe fn xattrOperationsInhibited(&self) -> bool {
+            log_event("trace", "vixen-fskit xattrOperationsInhibited");
             false
         }
 
         #[unsafe(method(getXattrNamed:ofItem:replyHandler:))]
         unsafe fn getXattrNamed_ofItem_replyHandler(
             &self,
-            _name: &FSFileName,
-            _item: &FSItem,
+            name: &FSFileName,
+            item: &FSItem,
             reply: &block2::DynBlock<dyn Fn(*mut NSData, *mut NSError)>,
         ) {
+            let details = as_rust_item(item)
+                .map(|item| item.debug_summary())
+                .unwrap_or_else(|| "<non-rust-item>".to_owned());
+            log_event(
+                "info",
+                format!(
+                    "vixen-fskit getXattr unsupported name={} item={details}",
+                    fs_filename_string(name)
+                ),
+            );
             reply.call((
                 ptr::null_mut(),
                 Retained::into_raw(posix_error(libc::ENOATTR)),
@@ -798,21 +906,37 @@ define_class!(
         #[unsafe(method(setXattrNamed:toData:onItem:policy:replyHandler:))]
         unsafe fn setXattrNamed_toData_onItem_policy_replyHandler(
             &self,
-            _name: &FSFileName,
-            _value: Option<&NSData>,
-            _item: &FSItem,
-            _policy: FSSetXattrPolicy,
+            name: &FSFileName,
+            value: Option<&NSData>,
+            item: &FSItem,
+            policy: FSSetXattrPolicy,
             reply: &block2::DynBlock<dyn Fn(*mut NSError)>,
         ) {
+            let details = as_rust_item(item)
+                .map(|item| item.debug_summary())
+                .unwrap_or_else(|| "<non-rust-item>".to_owned());
+            log_event(
+                "info",
+                format!(
+                    "vixen-fskit setXattr unsupported name={} length={} policy={:?} item={details}",
+                    fs_filename_string(name),
+                    value.map(|value| value.length()).unwrap_or(0),
+                    policy
+                ),
+            );
             reply.call((Retained::into_raw(posix_error(libc::ENOTSUP)),));
         }
 
         #[unsafe(method(listXattrsOfItem:replyHandler:))]
         unsafe fn listXattrsOfItem_replyHandler(
             &self,
-            _item: &FSItem,
+            item: &FSItem,
             reply: &block2::DynBlock<dyn Fn(*mut NSArray<FSFileName>, *mut NSError)>,
         ) {
+            let details = as_rust_item(item)
+                .map(|item| item.debug_summary())
+                .unwrap_or_else(|| "<non-rust-item>".to_owned());
+            log_event("info", format!("vixen-fskit listXattrs item={details}"));
             let empty = NSArray::<FSFileName>::from_slice(&[]);
             reply.call((Retained::into_raw(empty), ptr::null_mut()));
         }
@@ -821,6 +945,7 @@ define_class!(
     unsafe impl FSVolumeOpenCloseOperations for RustVolume {
         #[unsafe(method(isOpenCloseInhibited))]
         unsafe fn isOpenCloseInhibited(&self) -> bool {
+            log_event("trace", "vixen-fskit isOpenCloseInhibited");
             // We want the open/close lifecycle: it's the consistency boundary used to
             // freeze a stable snapshot of the synthetic status.json across getAttributes
             // and read. For every other item open/close are harmless no-ops.
