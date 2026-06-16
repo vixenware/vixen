@@ -19,18 +19,16 @@ async fn executor() -> (ProducingClient, Producer) {
     let (service, producer) = remote::producer();
     let (client_link, server_link) = vox::memory_link_pair(64);
     tokio::spawn(async move {
-        let acceptor = vox::acceptor_fn(
-            move |request: &vox::ConnectionRequest, connection: vox::PendingConnection| {
-                match request.service() {
+        let acceptor =
+            vox::router_fn(
+                move |request: &vox::ConnectionRequest| match request.service() {
                     // Serves both the root connection and inbound virtual connections.
-                    "Producing" => {
-                        connection.handle_with(ProducingDispatcher::new(service.clone()));
-                        Ok(())
-                    }
+                    "Producing" => Ok(vox::ConnectionRoute::handle(ProducingDispatcher::new(
+                        service.clone(),
+                    ))),
                     _ => Err(vox::Metadata::default()),
-                }
-            },
-        );
+                },
+            );
         if let Ok(client) = vox::acceptor_on(server_link)
             .on_connection(acceptor)
             .establish::<vox::NoopClient>()

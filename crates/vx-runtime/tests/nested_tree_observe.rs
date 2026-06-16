@@ -23,21 +23,18 @@ impl Observe for NestedTreeObserve {
     }
 }
 
-impl vox::ConnectionAcceptor for NestedTreeObserve {
-    fn accept(
+impl vox::ConnectionRouter for NestedTreeObserve {
+    fn route(
         &self,
         request: &vox::ConnectionRequest,
-        connection: vox::PendingConnection,
-    ) -> std::result::Result<(), vox::Metadata> {
+    ) -> std::result::Result<vox::ConnectionRoute, vox::Metadata> {
         match request.service() {
-            "Observe" => {
-                connection.handle_with(ObserveDispatcher::new(self.clone()));
-                Ok(())
-            }
-            "Producing" => {
-                connection.handle_with(ProducingDispatcher::new(self.producing.clone()));
-                Ok(())
-            }
+            "Observe" => Ok(vox::ConnectionRoute::handle(ObserveDispatcher::new(
+                self.clone(),
+            ))),
+            "Producing" => Ok(vox::ConnectionRoute::handle(ProducingDispatcher::new(
+                self.producing.clone(),
+            ))),
             _ => Err(vox::Metadata::default()),
         }
     }

@@ -7,7 +7,7 @@ use camino::Utf8PathBuf;
 use eyre::{Result, bail};
 use facet::Facet;
 use tokio::sync::watch;
-use vox::{ConnectionAcceptor, Metadata};
+use vox::{ConnectionRouter, Metadata};
 use vx_exec_protocol::ObserveDispatcher;
 use vx_runner::RunnerService;
 use vx_services::{
@@ -362,17 +362,15 @@ async fn resolve_required_store_client(
 async fn connect_in_process_store(service: StoreService) -> Result<vx_services::StoreClient> {
     let (client_link, server_link) = vox::memory_link_pair(64);
     tokio::spawn(async move {
-        let acceptor = vox::acceptor_fn(
-            move |request: &vox::ConnectionRequest, connection: vox::PendingConnection| {
-                match request.service() {
-                    "Store" => {
-                        connection.handle_with(StoreDispatcher::new(service.clone()));
-                        Ok(())
-                    }
+        let acceptor =
+            vox::router_fn(
+                move |request: &vox::ConnectionRequest| match request.service() {
+                    "Store" => Ok(vox::ConnectionRoute::handle(StoreDispatcher::new(
+                        service.clone(),
+                    ))),
                     _ => Err(vox::Metadata::default()),
-                }
-            },
-        );
+                },
+            );
 
         match vox::acceptor_on(server_link)
             .on_connection(acceptor)
@@ -393,7 +391,7 @@ async fn connect_in_process_store(service: StoreService) -> Result<vx_services::
         .await?)
 }
 
-/// A connection acceptor that can serve multiple sub-services:
+/// A connection router that can serve multiple sub-services:
 /// store, runner, vfs, etc.
 #[derive(Clone)]
 struct DaemonAcceptor {
@@ -405,69 +403,81 @@ struct DaemonAcceptor {
     vfsd_service: Option<VfsdService>,
 }
 
-impl ConnectionAcceptor for DaemonAcceptor {
-    fn accept(
+impl ConnectionRouter for DaemonAcceptor {
+    fn route(
         &self,
         request: &vox::ConnectionRequest,
-        connection: vox::PendingConnection,
-    ) -> std::result::Result<(), Metadata> {
+    ) -> std::result::Result<vox::ConnectionRoute, Metadata> {
         tracing::info!("daemon got request for service: {}", request.service());
         match request.service() {
-            "Daemon" => connection.handle_with(DaemonDispatcher::new(self.service.clone())),
+            "Daemon" => Ok(vox::ConnectionRoute::handle(DaemonDispatcher::new(
+                self.service.clone(),
+            ))),
             "CacheIndex" => {
                 let Some(service) = &self.cache_index_service else {
                     tracing::warn!("cache index service requested but not hosted");
                     return Err(vox::Metadata::default());
                 };
-                connection.handle_with(CacheIndexDispatcher::new(service.clone()));
+                Ok(vox::ConnectionRoute::handle(CacheIndexDispatcher::new(
+                    service.clone(),
+                )))
             }
             "TestRunner" => {
                 let Some(service) = &self.test_runner_service else {
                     tracing::warn!("test runner service requested but not hosted");
                     return Err(vox::Metadata::default());
                 };
-                connection.handle_with(TestRunnerDispatcher::new(service.clone()));
+                Ok(vox::ConnectionRoute::handle(TestRunnerDispatcher::new(
+                    service.clone(),
+                )))
             }
             "Store" => {
                 let Some(service) = &self.store_service else {
                     tracing::warn!("store service requested but not hosted");
                     return Err(vox::Metadata::default());
                 };
-                connection.handle_with(StoreDispatcher::new(service.clone()));
+                Ok(vox::ConnectionRoute::handle(StoreDispatcher::new(
+                    service.clone(),
+                )))
             }
             "Runner" => {
                 let Some(service) = &self.runner_service else {
                     tracing::warn!("runner service requested but not hosted");
                     return Err(vox::Metadata::default());
                 };
-                connection.handle_with(RunnerDispatcher::new(service.clone()));
+                Ok(vox::ConnectionRoute::handle(RunnerDispatcher::new(
+                    service.clone(),
+                )))
             }
             "Observe" => {
                 let Some(service) = &self.runner_service else {
                     tracing::warn!("observe service requested but runner is not hosted");
                     return Err(vox::Metadata::default());
                 };
-                connection.handle_with(ObserveDispatcher::new(service.clone()));
+                Ok(vox::ConnectionRoute::handle(ObserveDispatcher::new(
+                    service.clone(),
+                )))
             }
             "Producing" => {
                 let Some(service) = &self.runner_service else {
                     tracing::warn!("producing service requested but runner is not hosted");
                     return Err(vox::Metadata::default());
                 };
-                service.handle_producing_connection(connection)?;
+                service.handle_producing_connection()
             }
             "Vfsd" => {
                 let Some(service) = &self.vfsd_service else {
                     tracing::warn!("vfsd service requested but not hosted");
                     return Err(vox::Metadata::default());
                 };
-                connection.handle_with(VfsdDispatcher::new(service.clone()));
+                Ok(vox::ConnectionRoute::handle(VfsdDispatcher::new(
+                    service.clone(),
+                )))
             }
             other => {
                 tracing::warn!("unknown service requested: {}", other);
-                return Err(vox::Metadata::default());
+                Err(vox::Metadata::default())
             }
         }
-        Ok(())
     }
 }

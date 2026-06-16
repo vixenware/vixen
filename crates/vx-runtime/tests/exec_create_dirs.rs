@@ -23,17 +23,15 @@ impl Observe for RecordingObserve {
     }
 }
 
-impl vox::ConnectionAcceptor for RecordingObserve {
-    fn accept(
+impl vox::ConnectionRouter for RecordingObserve {
+    fn route(
         &self,
         request: &vox::ConnectionRequest,
-        connection: vox::PendingConnection,
-    ) -> std::result::Result<(), vox::Metadata> {
+    ) -> std::result::Result<vox::ConnectionRoute, vox::Metadata> {
         match request.service() {
-            "Observe" => {
-                connection.handle_with(ObserveDispatcher::new(self.clone()));
-                Ok(())
-            }
+            "Observe" => Ok(vox::ConnectionRoute::handle(ObserveDispatcher::new(
+                self.clone(),
+            ))),
             _ => Err(vox::Metadata::default()),
         }
     }

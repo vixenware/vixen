@@ -180,17 +180,15 @@ mod tests {
     async fn cache_index_client_for(service: CountingCacheIndex) -> CacheIndexClient {
         let (client_link, server_link) = vox::memory_link_pair(64);
         tokio::spawn(async move {
-            let acceptor = vox::acceptor_fn(
-                move |request: &vox::ConnectionRequest, connection: vox::PendingConnection| {
-                    match request.service() {
-                        "CacheIndex" => {
-                            connection.handle_with(CacheIndexDispatcher::new(service.clone()));
-                            Ok(())
-                        }
+            let acceptor =
+                vox::router_fn(
+                    move |request: &vox::ConnectionRequest| match request.service() {
+                        "CacheIndex" => Ok(vox::ConnectionRoute::handle(
+                            CacheIndexDispatcher::new(service.clone()),
+                        )),
                         _ => Err(vox::Metadata::default()),
-                    }
-                },
-            );
+                    },
+                );
             if let Ok(client) = vox::acceptor_on(server_link)
                 .on_connection(acceptor)
                 .establish::<vox::NoopClient>()
@@ -223,18 +221,16 @@ mod tests {
         service: CountingObserveService,
     }
 
-    impl vox::ConnectionAcceptor for CountingRunnerAcceptor {
-        fn accept(
+    impl vox::ConnectionRouter for CountingRunnerAcceptor {
+        fn route(
             &self,
             request: &vox::ConnectionRequest,
-            connection: vox::PendingConnection,
-        ) -> std::result::Result<(), vox::Metadata> {
+        ) -> std::result::Result<vox::ConnectionRoute, vox::Metadata> {
             match request.service() {
-                "Observe" => {
-                    connection.handle_with(ObserveDispatcher::new(self.service.clone()));
-                    Ok(())
-                }
-                "Producing" => self.service.inner.handle_producing_connection(connection),
+                "Observe" => Ok(vox::ConnectionRoute::handle(ObserveDispatcher::new(
+                    self.service.clone(),
+                ))),
+                "Producing" => self.service.inner.handle_producing_connection(),
                 _ => Err(vox::Metadata::default()),
             }
         }

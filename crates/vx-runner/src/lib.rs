@@ -65,13 +65,11 @@ impl RunnerService {
 
     pub fn handle_producing_connection(
         &self,
-        connection: vox::PendingConnection,
-    ) -> std::result::Result<(), vox::Metadata> {
+    ) -> std::result::Result<vox::ConnectionRoute, vox::Metadata> {
         match self.produced_outputs() {
-            Some(outputs) => {
-                connection.handle_with(ProducingDispatcher::new(outputs));
-                Ok(())
-            }
+            Some(outputs) => Ok(vox::ConnectionRoute::handle(ProducingDispatcher::new(
+                outputs,
+            ))),
             None => {
                 tracing::warn!("vx-runner: Producing requested before an output tree exists");
                 Err(vox::Metadata::default())
@@ -80,7 +78,7 @@ impl RunnerService {
     }
 }
 
-/// A [`vox::ConnectionAcceptor`] that routes all connections to the [`RunnerService`].
+/// A [`vox::ConnectionRouter`] that routes all connections to the [`RunnerService`].
 #[derive(Clone)]
 pub struct RunnerAcceptor {
     service: RunnerService,
@@ -92,22 +90,19 @@ impl RunnerAcceptor {
     }
 }
 
-impl vox::ConnectionAcceptor for RunnerAcceptor {
-    fn accept(
+impl vox::ConnectionRouter for RunnerAcceptor {
+    fn route(
         &self,
         request: &vox::ConnectionRequest,
-        connection: vox::PendingConnection,
-    ) -> std::result::Result<(), vox::Metadata> {
+    ) -> std::result::Result<vox::ConnectionRoute, vox::Metadata> {
         match request.service() {
-            "Runner" => {
-                connection.handle_with(RunnerDispatcher::new(self.service.clone()));
-                Ok(())
-            }
-            "Observe" => {
-                connection.handle_with(ObserveDispatcher::new(self.service.clone()));
-                Ok(())
-            }
-            "Producing" => self.service.handle_producing_connection(connection),
+            "Runner" => Ok(vox::ConnectionRoute::handle(RunnerDispatcher::new(
+                self.service.clone(),
+            ))),
+            "Observe" => Ok(vox::ConnectionRoute::handle(ObserveDispatcher::new(
+                self.service.clone(),
+            ))),
+            "Producing" => self.service.handle_producing_connection(),
             other => {
                 tracing::warn!("vx-runner: unknown service requested: {}", other);
                 Err(vox::Metadata::default())
@@ -206,18 +201,16 @@ mod tests {
         service: CountingObserveService,
     }
 
-    impl vox::ConnectionAcceptor for CountingRunnerAcceptor {
-        fn accept(
+    impl vox::ConnectionRouter for CountingRunnerAcceptor {
+        fn route(
             &self,
             request: &vox::ConnectionRequest,
-            connection: vox::PendingConnection,
-        ) -> std::result::Result<(), vox::Metadata> {
+        ) -> std::result::Result<vox::ConnectionRoute, vox::Metadata> {
             match request.service() {
-                "Observe" => {
-                    connection.handle_with(ObserveDispatcher::new(self.service.clone()));
-                    Ok(())
-                }
-                "Producing" => self.service.inner.handle_producing_connection(connection),
+                "Observe" => Ok(vox::ConnectionRoute::handle(ObserveDispatcher::new(
+                    self.service.clone(),
+                ))),
+                "Producing" => self.service.inner.handle_producing_connection(),
                 _ => Err(vox::Metadata::default()),
             }
         }
@@ -275,18 +268,16 @@ mod tests {
         service: AfterFirstObserveService,
     }
 
-    impl vox::ConnectionAcceptor for AfterFirstRunnerAcceptor {
-        fn accept(
+    impl vox::ConnectionRouter for AfterFirstRunnerAcceptor {
+        fn route(
             &self,
             request: &vox::ConnectionRequest,
-            connection: vox::PendingConnection,
-        ) -> std::result::Result<(), vox::Metadata> {
+        ) -> std::result::Result<vox::ConnectionRoute, vox::Metadata> {
             match request.service() {
-                "Observe" => {
-                    connection.handle_with(ObserveDispatcher::new(self.service.clone()));
-                    Ok(())
-                }
-                "Producing" => self.service.inner.handle_producing_connection(connection),
+                "Observe" => Ok(vox::ConnectionRoute::handle(ObserveDispatcher::new(
+                    self.service.clone(),
+                ))),
+                "Producing" => self.service.inner.handle_producing_connection(),
                 _ => Err(vox::Metadata::default()),
             }
         }
@@ -329,17 +320,15 @@ mod tests {
             .expect("open store");
         let (client_link, server_link) = vox::memory_link_pair(64);
         tokio::spawn(async move {
-            let acceptor = vox::acceptor_fn(
-                move |request: &vox::ConnectionRequest, connection: vox::PendingConnection| {
-                    match request.service() {
-                        "Store" => {
-                            connection.handle_with(StoreDispatcher::new(store.clone()));
-                            Ok(())
-                        }
+            let acceptor =
+                vox::router_fn(
+                    move |request: &vox::ConnectionRequest| match request.service() {
+                        "Store" => Ok(vox::ConnectionRoute::handle(StoreDispatcher::new(
+                            store.clone(),
+                        ))),
                         _ => Err(vox::Metadata::default()),
-                    }
-                },
-            );
+                    },
+                );
             if let Ok(client) = vox::acceptor_on(server_link)
                 .on_connection(acceptor)
                 .establish::<vox::NoopClient>()

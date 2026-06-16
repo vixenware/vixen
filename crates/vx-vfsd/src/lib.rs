@@ -404,7 +404,7 @@ impl VfsDiskNotify for SharedVfs {
     }
 }
 
-/// A single-service [`vox::ConnectionAcceptor`] that routes all connections
+/// A single-service [`vox::ConnectionRouter`] that routes all connections
 /// to the [`VfsdService`].
 #[derive(Clone)]
 pub struct VfsdAcceptor {
@@ -417,17 +417,15 @@ impl VfsdAcceptor {
     }
 }
 
-impl vox::ConnectionAcceptor for VfsdAcceptor {
-    fn accept(
+impl vox::ConnectionRouter for VfsdAcceptor {
+    fn route(
         &self,
         request: &vox::ConnectionRequest,
-        connection: vox::PendingConnection,
-    ) -> std::result::Result<(), vox::Metadata> {
+    ) -> std::result::Result<vox::ConnectionRoute, vox::Metadata> {
         match request.service() {
-            "Vfsd" => {
-                connection.handle_with(VfsdDispatcher::new(self.service.clone()));
-                Ok(())
-            }
+            "Vfsd" => Ok(vox::ConnectionRoute::handle(VfsdDispatcher::new(
+                self.service.clone(),
+            ))),
             other => {
                 tracing::warn!("vx-vfsd: unknown service requested: {}", other);
                 Err(vox::Metadata::default())
