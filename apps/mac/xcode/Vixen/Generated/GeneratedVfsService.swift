@@ -138,11 +138,11 @@ public struct SetAttributesParams: Sendable {
 
 // MARK: - wire error type
 
-public enum Infallible: Sendable {}
+public enum VfsInfallible: Sendable {}
 
-/// The wire error of `Result<T, VoxError<E>>`. Variant order matches the
-/// Rust `VoxError<E>` (User=0 … Indeterminate=7) so wire indices align.
-public enum VoxError<E: Sendable>: Error, Sendable {
+/// The wire error of `Result<T, VfsVoxError<E>>`. Variant order matches the
+/// Rust `VfsVoxError<E>` (User=0 … Indeterminate=7) so wire indices align.
+public enum VfsVoxError<E: Sendable>: Error, Sendable {
     case user(E)
     case unknownMethod
     case invalidPayload(String)
@@ -157,13 +157,13 @@ public enum VoxError<E: Sendable>: Error, Sendable {
 
 nonisolated(unsafe) let vfs_lookup_ArgsDescriptor: Descriptor = Descriptor(schema: .concrete(SchemaId(0xbd977dd7da39259f)), layout: Layout(size: MemoryLayout<(UInt64, String)>.size, align: MemoryLayout<(UInt64, String)>.alignment), access: .record(RecordAccess(fields: [FieldAccess(offset: MemoryLayout<(UInt64, String)>.offset(of: \.0)!, descriptor: Descriptor(schema: .concrete(SchemaId(0xd9356298b81639ac)), layout: Layout(size: MemoryLayout<UInt64>.size, align: MemoryLayout<UInt64>.alignment), access: .scalar)), FieldAccess(offset: MemoryLayout<(UInt64, String)>.offset(of: \.1)!, descriptor: Descriptor(schema: .concrete(SchemaId(0x6d7dce914ee150e8)), layout: Layout(size: MemoryLayout<String>.size, align: MemoryLayout<String>.alignment), access: .bytes(BytesAccess(stride: 1, elemAlign: 1, witness: .string))))], construct: .inPlace)))
 nonisolated(unsafe) let vfs_lookup_ArgsDescriptorBlocks: [SchemaId: Descriptor] = [:]
-nonisolated(unsafe) let vfs_lookup_ResponseDescriptor: Descriptor = Descriptor(schema: .concrete(SchemaId(0x3a81d2ae3be3c008)), layout: Layout(size: MemoryLayout<Result<LookupResult, VoxError<Infallible>>>.size, align: MemoryLayout<Result<LookupResult, VoxError<Infallible>>>.alignment), access: .enumeration(EnumAccess(
-            tag: { ptr in switch ptr.assumingMemoryBound(to: Result<LookupResult, VoxError<Infallible>>.self).pointee { case .success: return 0; case .failure: return 1 } },
-            projectPayload: { value, _, scratch in switch value.assumingMemoryBound(to: Result<LookupResult, VoxError<Infallible>>.self).pointee { case .success(let f0): scratch.assumingMemoryBound(to: LookupResult.self).initialize(to: f0); case .failure(let f0): scratch.assumingMemoryBound(to: VoxError<Infallible>.self).initialize(to: f0) } },
-            destroyPayload: { scratch, localIndex in if localIndex == 0 { scratch.assumingMemoryBound(to: LookupResult.self).deinitialize(count: 1) } else { scratch.assumingMemoryBound(to: VoxError<Infallible>.self).deinitialize(count: 1) } },
+nonisolated(unsafe) let vfs_lookup_ResponseDescriptor: Descriptor = Descriptor(schema: .concrete(SchemaId(0x3a81d2ae3be3c008)), layout: Layout(size: MemoryLayout<Result<LookupResult, VfsVoxError<VfsInfallible>>>.size, align: MemoryLayout<Result<LookupResult, VfsVoxError<VfsInfallible>>>.alignment), access: .enumeration(EnumAccess(
+            tag: { ptr in switch ptr.assumingMemoryBound(to: Result<LookupResult, VfsVoxError<VfsInfallible>>.self).pointee { case .success: return 0; case .failure: return 1 } },
+            projectPayload: { value, _, scratch in switch value.assumingMemoryBound(to: Result<LookupResult, VfsVoxError<VfsInfallible>>.self).pointee { case .success(let f0): scratch.assumingMemoryBound(to: LookupResult.self).initialize(to: f0); case .failure(let f0): scratch.assumingMemoryBound(to: VfsVoxError<VfsInfallible>.self).initialize(to: f0) } },
+            destroyPayload: { scratch, localIndex in if localIndex == 0 { scratch.assumingMemoryBound(to: LookupResult.self).deinitialize(count: 1) } else { scratch.assumingMemoryBound(to: VfsVoxError<VfsInfallible>.self).deinitialize(count: 1) } },
             inject: { slot, localIndex, scratch in
-            let v: Result<LookupResult, VoxError<Infallible>> = localIndex == 0 ? .success(scratch.assumingMemoryBound(to: LookupResult.self).move()) : .failure(scratch.assumingMemoryBound(to: VoxError<Infallible>.self).move())
-            slot.assumingMemoryBound(to: Result<LookupResult, VoxError<Infallible>>.self).initialize(to: v) },
+            let v: Result<LookupResult, VfsVoxError<VfsInfallible>> = localIndex == 0 ? .success(scratch.assumingMemoryBound(to: LookupResult.self).move()) : .failure(scratch.assumingMemoryBound(to: VfsVoxError<VfsInfallible>.self).move())
+            slot.assumingMemoryBound(to: Result<LookupResult, VfsVoxError<VfsInfallible>>.self).initialize(to: v) },
             variants: [VariantAccess(wireIndex: 0, payloadFields: [FieldAccess(offset: 0, descriptor: Descriptor(schema: .concrete(SchemaId(0xd009b6f4011f3606)), layout: Layout(size: MemoryLayout<LookupResult>.size, align: MemoryLayout<LookupResult>.alignment), access: .record(RecordAccess(fields: [FieldAccess(offset: MemoryLayout<LookupResult>.offset(of: \LookupResult.attrs)!, descriptor: Descriptor(schema: .concrete(SchemaId(0x6cfe043b88869048)), layout: Layout(size: MemoryLayout<ItemAttributes>.size, align: MemoryLayout<ItemAttributes>.alignment), access: .record(RecordAccess(fields: [FieldAccess(offset: MemoryLayout<ItemAttributes>.offset(of: \ItemAttributes.itemId)!, descriptor: Descriptor(schema: .concrete(SchemaId(0xd9356298b81639ac)), layout: Layout(size: MemoryLayout<UInt64>.size, align: MemoryLayout<UInt64>.alignment), access: .scalar)), FieldAccess(offset: MemoryLayout<ItemAttributes>.offset(of: \ItemAttributes.itemType)!, descriptor: Descriptor(schema: .concrete(SchemaId(0x0ad78e1b712b0663)), layout: Layout(size: MemoryLayout<ItemType>.size, align: MemoryLayout<ItemType>.alignment), access: .enumeration(EnumAccess(
             tag: { ptr in switch ptr.assumingMemoryBound(to: ItemType.self).pointee {
             case .file: return 0
@@ -187,8 +187,8 @@ nonisolated(unsafe) let vfs_lookup_ResponseDescriptor: Descriptor = Descriptor(s
             default: fatalError("bad variant index")
             }
             slot.assumingMemoryBound(to: ItemType.self).initialize(to: v) },
-            variants: [VariantAccess(wireIndex: 0, payloadFields: [], payloadLayout: Layout(size: 0, align: 1)), VariantAccess(wireIndex: 1, payloadFields: [], payloadLayout: Layout(size: 0, align: 1)), VariantAccess(wireIndex: 2, payloadFields: [], payloadLayout: Layout(size: 0, align: 1))])))), FieldAccess(offset: MemoryLayout<ItemAttributes>.offset(of: \ItemAttributes.size)!, descriptor: Descriptor(schema: .concrete(SchemaId(0xd9356298b81639ac)), layout: Layout(size: MemoryLayout<UInt64>.size, align: MemoryLayout<UInt64>.alignment), access: .scalar)), FieldAccess(offset: MemoryLayout<ItemAttributes>.offset(of: \ItemAttributes.modifiedTime)!, descriptor: Descriptor(schema: .concrete(SchemaId(0xd9356298b81639ac)), layout: Layout(size: MemoryLayout<UInt64>.size, align: MemoryLayout<UInt64>.alignment), access: .scalar)), FieldAccess(offset: MemoryLayout<ItemAttributes>.offset(of: \ItemAttributes.createdTime)!, descriptor: Descriptor(schema: .concrete(SchemaId(0xd9356298b81639ac)), layout: Layout(size: MemoryLayout<UInt64>.size, align: MemoryLayout<UInt64>.alignment), access: .scalar)), FieldAccess(offset: MemoryLayout<ItemAttributes>.offset(of: \ItemAttributes.mode)!, descriptor: Descriptor(schema: .concrete(SchemaId(0x281c5be4f2ee63b4)), layout: Layout(size: MemoryLayout<UInt32>.size, align: MemoryLayout<UInt32>.alignment), access: .scalar))], construct: .inPlace)))), FieldAccess(offset: MemoryLayout<LookupResult>.offset(of: \LookupResult.error)!, descriptor: Descriptor(schema: .concrete(SchemaId(0x361f4536eee9f991)), layout: Layout(size: MemoryLayout<Int32>.size, align: MemoryLayout<Int32>.alignment), access: .scalar))], construct: .inPlace))))], payloadLayout: MemoryLayout<LookupResult>.phonLayout), VariantAccess(wireIndex: 1, payloadFields: [FieldAccess(offset: 0, descriptor: Descriptor(schema: .concrete(SchemaId(0x3032e6270c5d2644)), layout: Layout(size: MemoryLayout<VoxError<Infallible>>.size, align: MemoryLayout<VoxError<Infallible>>.alignment), access: .enumeration(EnumAccess(
-            tag: { ptr in switch ptr.assumingMemoryBound(to: VoxError<Infallible>.self).pointee {
+            variants: [VariantAccess(wireIndex: 0, payloadFields: [], payloadLayout: Layout(size: 0, align: 1)), VariantAccess(wireIndex: 1, payloadFields: [], payloadLayout: Layout(size: 0, align: 1)), VariantAccess(wireIndex: 2, payloadFields: [], payloadLayout: Layout(size: 0, align: 1))])))), FieldAccess(offset: MemoryLayout<ItemAttributes>.offset(of: \ItemAttributes.size)!, descriptor: Descriptor(schema: .concrete(SchemaId(0xd9356298b81639ac)), layout: Layout(size: MemoryLayout<UInt64>.size, align: MemoryLayout<UInt64>.alignment), access: .scalar)), FieldAccess(offset: MemoryLayout<ItemAttributes>.offset(of: \ItemAttributes.modifiedTime)!, descriptor: Descriptor(schema: .concrete(SchemaId(0xd9356298b81639ac)), layout: Layout(size: MemoryLayout<UInt64>.size, align: MemoryLayout<UInt64>.alignment), access: .scalar)), FieldAccess(offset: MemoryLayout<ItemAttributes>.offset(of: \ItemAttributes.createdTime)!, descriptor: Descriptor(schema: .concrete(SchemaId(0xd9356298b81639ac)), layout: Layout(size: MemoryLayout<UInt64>.size, align: MemoryLayout<UInt64>.alignment), access: .scalar)), FieldAccess(offset: MemoryLayout<ItemAttributes>.offset(of: \ItemAttributes.mode)!, descriptor: Descriptor(schema: .concrete(SchemaId(0x281c5be4f2ee63b4)), layout: Layout(size: MemoryLayout<UInt32>.size, align: MemoryLayout<UInt32>.alignment), access: .scalar))], construct: .inPlace)))), FieldAccess(offset: MemoryLayout<LookupResult>.offset(of: \LookupResult.error)!, descriptor: Descriptor(schema: .concrete(SchemaId(0x361f4536eee9f991)), layout: Layout(size: MemoryLayout<Int32>.size, align: MemoryLayout<Int32>.alignment), access: .scalar))], construct: .inPlace))))], payloadLayout: MemoryLayout<LookupResult>.phonLayout), VariantAccess(wireIndex: 1, payloadFields: [FieldAccess(offset: 0, descriptor: Descriptor(schema: .concrete(SchemaId(0x3032e6270c5d2644)), layout: Layout(size: MemoryLayout<VfsVoxError<VfsInfallible>>.size, align: MemoryLayout<VfsVoxError<VfsInfallible>>.alignment), access: .enumeration(EnumAccess(
+            tag: { ptr in switch ptr.assumingMemoryBound(to: VfsVoxError<VfsInfallible>.self).pointee {
             case .user: return 0
             case .unknownMethod: return 1
             case .invalidPayload: return 2
@@ -198,10 +198,10 @@ nonisolated(unsafe) let vfs_lookup_ResponseDescriptor: Descriptor = Descriptor(s
             case .sendFailed: return 6
             case .indeterminate: return 7
             } },
-            projectPayload: { value, _, scratch in switch value.assumingMemoryBound(to: VoxError<Infallible>.self).pointee {
+            projectPayload: { value, _, scratch in switch value.assumingMemoryBound(to: VfsVoxError<VfsInfallible>.self).pointee {
             case .user: fatalError("uninhabited variant payload")
             case .unknownMethod: break
-            case .invalidPayload(let f0): scratch.advanced(by: 0).assumingMemoryBound(to: String.self).initialize(to: f0); 
+            case .invalidPayload(let f0): scratch.advanced(by: 0).assumingMemoryBound(to: String.self).initialize(to: f0);
             case .cancelled: break
             case .connectionClosed: break
             case .sessionShutdown: break
@@ -210,15 +210,15 @@ nonisolated(unsafe) let vfs_lookup_ResponseDescriptor: Descriptor = Descriptor(s
             } },
             destroyPayload: { scratch, localIndex in switch localIndex {
             case 0: break
-            case 2: scratch.advanced(by: 0).assumingMemoryBound(to: String.self).deinitialize(count: 1); 
+            case 2: scratch.advanced(by: 0).assumingMemoryBound(to: String.self).deinitialize(count: 1);
             default: break
             } },
             inject: { slot, localIndex, scratch in
-            let v: VoxError<Infallible>
+            let v: VfsVoxError<VfsInfallible>
             switch localIndex {
             case 0: fatalError("uninhabited variant payload")
             case 1: v = .unknownMethod
-            case 2: let f0 = scratch.advanced(by: 0).assumingMemoryBound(to: String.self).move(); v = .invalidPayload(f0)
+            case 2: let f0 = scratch.advanced(by: 0).assumingMemoryBound(to: String.self).move();v = .invalidPayload(f0)
             case 3: v = .cancelled
             case 4: v = .connectionClosed
             case 5: v = .sessionShutdown
@@ -226,18 +226,18 @@ nonisolated(unsafe) let vfs_lookup_ResponseDescriptor: Descriptor = Descriptor(s
             case 7: v = .indeterminate
             default: fatalError("bad variant index")
             }
-            slot.assumingMemoryBound(to: VoxError<Infallible>.self).initialize(to: v) },
-            variants: [VariantAccess(wireIndex: 0, payloadFields: [FieldAccess(offset: 0, descriptor: Descriptor(schema: .concrete(SchemaId(0x8bfe7856188d64f1)), layout: Layout(size: MemoryLayout<Infallible>.size, align: MemoryLayout<Infallible>.alignment), access: .record(RecordAccess(fields: [], construct: .inPlace))))], payloadLayout: MemoryLayout<Infallible>.phonLayout), VariantAccess(wireIndex: 1, payloadFields: [], payloadLayout: Layout(size: 0, align: 1)), VariantAccess(wireIndex: 2, payloadFields: [FieldAccess(offset: 0, descriptor: Descriptor(schema: .concrete(SchemaId(0x6d7dce914ee150e8)), layout: Layout(size: MemoryLayout<String>.size, align: MemoryLayout<String>.alignment), access: .bytes(BytesAccess(stride: 1, elemAlign: 1, witness: .string))))], payloadLayout: MemoryLayout<String>.phonLayout), VariantAccess(wireIndex: 3, payloadFields: [], payloadLayout: Layout(size: 0, align: 1)), VariantAccess(wireIndex: 4, payloadFields: [], payloadLayout: Layout(size: 0, align: 1)), VariantAccess(wireIndex: 5, payloadFields: [], payloadLayout: Layout(size: 0, align: 1)), VariantAccess(wireIndex: 6, payloadFields: [], payloadLayout: Layout(size: 0, align: 1)), VariantAccess(wireIndex: 7, payloadFields: [], payloadLayout: Layout(size: 0, align: 1))]))))], payloadLayout: MemoryLayout<VoxError<Infallible>>.phonLayout)])))
+            slot.assumingMemoryBound(to: VfsVoxError<VfsInfallible>.self).initialize(to: v) },
+            variants: [VariantAccess(wireIndex: 0, payloadFields: [FieldAccess(offset: 0, descriptor: Descriptor(schema: .concrete(SchemaId(0x8bfe7856188d64f1)), layout: Layout(size: MemoryLayout<VfsInfallible>.size, align: MemoryLayout<VfsInfallible>.alignment), access: .record(RecordAccess(fields: [], construct: .inPlace))))], payloadLayout: MemoryLayout<VfsInfallible>.phonLayout), VariantAccess(wireIndex: 1, payloadFields: [], payloadLayout: Layout(size: 0, align: 1)), VariantAccess(wireIndex: 2, payloadFields: [FieldAccess(offset: 0, descriptor: Descriptor(schema: .concrete(SchemaId(0x6d7dce914ee150e8)), layout: Layout(size: MemoryLayout<String>.size, align: MemoryLayout<String>.alignment), access: .bytes(BytesAccess(stride: 1, elemAlign: 1, witness: .string))))], payloadLayout: MemoryLayout<String>.phonLayout), VariantAccess(wireIndex: 3, payloadFields: [], payloadLayout: Layout(size: 0, align: 1)), VariantAccess(wireIndex: 4, payloadFields: [], payloadLayout: Layout(size: 0, align: 1)), VariantAccess(wireIndex: 5, payloadFields: [], payloadLayout: Layout(size: 0, align: 1)), VariantAccess(wireIndex: 6, payloadFields: [], payloadLayout: Layout(size: 0, align: 1)), VariantAccess(wireIndex: 7, payloadFields: [], payloadLayout: Layout(size: 0, align: 1))]))))], payloadLayout: MemoryLayout<VfsVoxError<VfsInfallible>>.phonLayout)])))
 nonisolated(unsafe) let vfs_lookup_ResponseDescriptorBlocks: [SchemaId: Descriptor] = [:]
 nonisolated(unsafe) let vfs_getAttributes_ArgsDescriptor: Descriptor = Descriptor(schema: .concrete(SchemaId(0xdb73db3b46e1a03f)), layout: Layout(size: MemoryLayout<(UInt64)>.size, align: MemoryLayout<(UInt64)>.alignment), access: .record(RecordAccess(fields: [FieldAccess(offset: 0, descriptor: Descriptor(schema: .concrete(SchemaId(0xd9356298b81639ac)), layout: Layout(size: MemoryLayout<UInt64>.size, align: MemoryLayout<UInt64>.alignment), access: .scalar))], construct: .inPlace)))
 nonisolated(unsafe) let vfs_getAttributes_ArgsDescriptorBlocks: [SchemaId: Descriptor] = [:]
-nonisolated(unsafe) let vfs_getAttributes_ResponseDescriptor: Descriptor = Descriptor(schema: .concrete(SchemaId(0x54458c442cc0f21a)), layout: Layout(size: MemoryLayout<Result<GetAttributesResult, VoxError<Infallible>>>.size, align: MemoryLayout<Result<GetAttributesResult, VoxError<Infallible>>>.alignment), access: .enumeration(EnumAccess(
-            tag: { ptr in switch ptr.assumingMemoryBound(to: Result<GetAttributesResult, VoxError<Infallible>>.self).pointee { case .success: return 0; case .failure: return 1 } },
-            projectPayload: { value, _, scratch in switch value.assumingMemoryBound(to: Result<GetAttributesResult, VoxError<Infallible>>.self).pointee { case .success(let f0): scratch.assumingMemoryBound(to: GetAttributesResult.self).initialize(to: f0); case .failure(let f0): scratch.assumingMemoryBound(to: VoxError<Infallible>.self).initialize(to: f0) } },
-            destroyPayload: { scratch, localIndex in if localIndex == 0 { scratch.assumingMemoryBound(to: GetAttributesResult.self).deinitialize(count: 1) } else { scratch.assumingMemoryBound(to: VoxError<Infallible>.self).deinitialize(count: 1) } },
+nonisolated(unsafe) let vfs_getAttributes_ResponseDescriptor: Descriptor = Descriptor(schema: .concrete(SchemaId(0x54458c442cc0f21a)), layout: Layout(size: MemoryLayout<Result<GetAttributesResult, VfsVoxError<VfsInfallible>>>.size, align: MemoryLayout<Result<GetAttributesResult, VfsVoxError<VfsInfallible>>>.alignment), access: .enumeration(EnumAccess(
+            tag: { ptr in switch ptr.assumingMemoryBound(to: Result<GetAttributesResult, VfsVoxError<VfsInfallible>>.self).pointee { case .success: return 0; case .failure: return 1 } },
+            projectPayload: { value, _, scratch in switch value.assumingMemoryBound(to: Result<GetAttributesResult, VfsVoxError<VfsInfallible>>.self).pointee { case .success(let f0): scratch.assumingMemoryBound(to: GetAttributesResult.self).initialize(to: f0); case .failure(let f0): scratch.assumingMemoryBound(to: VfsVoxError<VfsInfallible>.self).initialize(to: f0) } },
+            destroyPayload: { scratch, localIndex in if localIndex == 0 { scratch.assumingMemoryBound(to: GetAttributesResult.self).deinitialize(count: 1) } else { scratch.assumingMemoryBound(to: VfsVoxError<VfsInfallible>.self).deinitialize(count: 1) } },
             inject: { slot, localIndex, scratch in
-            let v: Result<GetAttributesResult, VoxError<Infallible>> = localIndex == 0 ? .success(scratch.assumingMemoryBound(to: GetAttributesResult.self).move()) : .failure(scratch.assumingMemoryBound(to: VoxError<Infallible>.self).move())
-            slot.assumingMemoryBound(to: Result<GetAttributesResult, VoxError<Infallible>>.self).initialize(to: v) },
+            let v: Result<GetAttributesResult, VfsVoxError<VfsInfallible>> = localIndex == 0 ? .success(scratch.assumingMemoryBound(to: GetAttributesResult.self).move()) : .failure(scratch.assumingMemoryBound(to: VfsVoxError<VfsInfallible>.self).move())
+            slot.assumingMemoryBound(to: Result<GetAttributesResult, VfsVoxError<VfsInfallible>>.self).initialize(to: v) },
             variants: [VariantAccess(wireIndex: 0, payloadFields: [FieldAccess(offset: 0, descriptor: Descriptor(schema: .concrete(SchemaId(0x209fcbf9bd43042d)), layout: Layout(size: MemoryLayout<GetAttributesResult>.size, align: MemoryLayout<GetAttributesResult>.alignment), access: .record(RecordAccess(fields: [FieldAccess(offset: MemoryLayout<GetAttributesResult>.offset(of: \GetAttributesResult.attrs)!, descriptor: Descriptor(schema: .concrete(SchemaId(0x6cfe043b88869048)), layout: Layout(size: MemoryLayout<ItemAttributes>.size, align: MemoryLayout<ItemAttributes>.alignment), access: .record(RecordAccess(fields: [FieldAccess(offset: MemoryLayout<ItemAttributes>.offset(of: \ItemAttributes.itemId)!, descriptor: Descriptor(schema: .concrete(SchemaId(0xd9356298b81639ac)), layout: Layout(size: MemoryLayout<UInt64>.size, align: MemoryLayout<UInt64>.alignment), access: .scalar)), FieldAccess(offset: MemoryLayout<ItemAttributes>.offset(of: \ItemAttributes.itemType)!, descriptor: Descriptor(schema: .concrete(SchemaId(0x0ad78e1b712b0663)), layout: Layout(size: MemoryLayout<ItemType>.size, align: MemoryLayout<ItemType>.alignment), access: .enumeration(EnumAccess(
             tag: { ptr in switch ptr.assumingMemoryBound(to: ItemType.self).pointee {
             case .file: return 0
@@ -261,8 +261,8 @@ nonisolated(unsafe) let vfs_getAttributes_ResponseDescriptor: Descriptor = Descr
             default: fatalError("bad variant index")
             }
             slot.assumingMemoryBound(to: ItemType.self).initialize(to: v) },
-            variants: [VariantAccess(wireIndex: 0, payloadFields: [], payloadLayout: Layout(size: 0, align: 1)), VariantAccess(wireIndex: 1, payloadFields: [], payloadLayout: Layout(size: 0, align: 1)), VariantAccess(wireIndex: 2, payloadFields: [], payloadLayout: Layout(size: 0, align: 1))])))), FieldAccess(offset: MemoryLayout<ItemAttributes>.offset(of: \ItemAttributes.size)!, descriptor: Descriptor(schema: .concrete(SchemaId(0xd9356298b81639ac)), layout: Layout(size: MemoryLayout<UInt64>.size, align: MemoryLayout<UInt64>.alignment), access: .scalar)), FieldAccess(offset: MemoryLayout<ItemAttributes>.offset(of: \ItemAttributes.modifiedTime)!, descriptor: Descriptor(schema: .concrete(SchemaId(0xd9356298b81639ac)), layout: Layout(size: MemoryLayout<UInt64>.size, align: MemoryLayout<UInt64>.alignment), access: .scalar)), FieldAccess(offset: MemoryLayout<ItemAttributes>.offset(of: \ItemAttributes.createdTime)!, descriptor: Descriptor(schema: .concrete(SchemaId(0xd9356298b81639ac)), layout: Layout(size: MemoryLayout<UInt64>.size, align: MemoryLayout<UInt64>.alignment), access: .scalar)), FieldAccess(offset: MemoryLayout<ItemAttributes>.offset(of: \ItemAttributes.mode)!, descriptor: Descriptor(schema: .concrete(SchemaId(0x281c5be4f2ee63b4)), layout: Layout(size: MemoryLayout<UInt32>.size, align: MemoryLayout<UInt32>.alignment), access: .scalar))], construct: .inPlace)))), FieldAccess(offset: MemoryLayout<GetAttributesResult>.offset(of: \GetAttributesResult.error)!, descriptor: Descriptor(schema: .concrete(SchemaId(0x361f4536eee9f991)), layout: Layout(size: MemoryLayout<Int32>.size, align: MemoryLayout<Int32>.alignment), access: .scalar))], construct: .inPlace))))], payloadLayout: MemoryLayout<GetAttributesResult>.phonLayout), VariantAccess(wireIndex: 1, payloadFields: [FieldAccess(offset: 0, descriptor: Descriptor(schema: .concrete(SchemaId(0x3032e6270c5d2644)), layout: Layout(size: MemoryLayout<VoxError<Infallible>>.size, align: MemoryLayout<VoxError<Infallible>>.alignment), access: .enumeration(EnumAccess(
-            tag: { ptr in switch ptr.assumingMemoryBound(to: VoxError<Infallible>.self).pointee {
+            variants: [VariantAccess(wireIndex: 0, payloadFields: [], payloadLayout: Layout(size: 0, align: 1)), VariantAccess(wireIndex: 1, payloadFields: [], payloadLayout: Layout(size: 0, align: 1)), VariantAccess(wireIndex: 2, payloadFields: [], payloadLayout: Layout(size: 0, align: 1))])))), FieldAccess(offset: MemoryLayout<ItemAttributes>.offset(of: \ItemAttributes.size)!, descriptor: Descriptor(schema: .concrete(SchemaId(0xd9356298b81639ac)), layout: Layout(size: MemoryLayout<UInt64>.size, align: MemoryLayout<UInt64>.alignment), access: .scalar)), FieldAccess(offset: MemoryLayout<ItemAttributes>.offset(of: \ItemAttributes.modifiedTime)!, descriptor: Descriptor(schema: .concrete(SchemaId(0xd9356298b81639ac)), layout: Layout(size: MemoryLayout<UInt64>.size, align: MemoryLayout<UInt64>.alignment), access: .scalar)), FieldAccess(offset: MemoryLayout<ItemAttributes>.offset(of: \ItemAttributes.createdTime)!, descriptor: Descriptor(schema: .concrete(SchemaId(0xd9356298b81639ac)), layout: Layout(size: MemoryLayout<UInt64>.size, align: MemoryLayout<UInt64>.alignment), access: .scalar)), FieldAccess(offset: MemoryLayout<ItemAttributes>.offset(of: \ItemAttributes.mode)!, descriptor: Descriptor(schema: .concrete(SchemaId(0x281c5be4f2ee63b4)), layout: Layout(size: MemoryLayout<UInt32>.size, align: MemoryLayout<UInt32>.alignment), access: .scalar))], construct: .inPlace)))), FieldAccess(offset: MemoryLayout<GetAttributesResult>.offset(of: \GetAttributesResult.error)!, descriptor: Descriptor(schema: .concrete(SchemaId(0x361f4536eee9f991)), layout: Layout(size: MemoryLayout<Int32>.size, align: MemoryLayout<Int32>.alignment), access: .scalar))], construct: .inPlace))))], payloadLayout: MemoryLayout<GetAttributesResult>.phonLayout), VariantAccess(wireIndex: 1, payloadFields: [FieldAccess(offset: 0, descriptor: Descriptor(schema: .concrete(SchemaId(0x3032e6270c5d2644)), layout: Layout(size: MemoryLayout<VfsVoxError<VfsInfallible>>.size, align: MemoryLayout<VfsVoxError<VfsInfallible>>.alignment), access: .enumeration(EnumAccess(
+            tag: { ptr in switch ptr.assumingMemoryBound(to: VfsVoxError<VfsInfallible>.self).pointee {
             case .user: return 0
             case .unknownMethod: return 1
             case .invalidPayload: return 2
@@ -272,10 +272,10 @@ nonisolated(unsafe) let vfs_getAttributes_ResponseDescriptor: Descriptor = Descr
             case .sendFailed: return 6
             case .indeterminate: return 7
             } },
-            projectPayload: { value, _, scratch in switch value.assumingMemoryBound(to: VoxError<Infallible>.self).pointee {
+            projectPayload: { value, _, scratch in switch value.assumingMemoryBound(to: VfsVoxError<VfsInfallible>.self).pointee {
             case .user: fatalError("uninhabited variant payload")
             case .unknownMethod: break
-            case .invalidPayload(let f0): scratch.advanced(by: 0).assumingMemoryBound(to: String.self).initialize(to: f0); 
+            case .invalidPayload(let f0): scratch.advanced(by: 0).assumingMemoryBound(to: String.self).initialize(to: f0);
             case .cancelled: break
             case .connectionClosed: break
             case .sessionShutdown: break
@@ -284,15 +284,15 @@ nonisolated(unsafe) let vfs_getAttributes_ResponseDescriptor: Descriptor = Descr
             } },
             destroyPayload: { scratch, localIndex in switch localIndex {
             case 0: break
-            case 2: scratch.advanced(by: 0).assumingMemoryBound(to: String.self).deinitialize(count: 1); 
+            case 2: scratch.advanced(by: 0).assumingMemoryBound(to: String.self).deinitialize(count: 1);
             default: break
             } },
             inject: { slot, localIndex, scratch in
-            let v: VoxError<Infallible>
+            let v: VfsVoxError<VfsInfallible>
             switch localIndex {
             case 0: fatalError("uninhabited variant payload")
             case 1: v = .unknownMethod
-            case 2: let f0 = scratch.advanced(by: 0).assumingMemoryBound(to: String.self).move(); v = .invalidPayload(f0)
+            case 2: let f0 = scratch.advanced(by: 0).assumingMemoryBound(to: String.self).move();v = .invalidPayload(f0)
             case 3: v = .cancelled
             case 4: v = .connectionClosed
             case 5: v = .sessionShutdown
@@ -300,18 +300,18 @@ nonisolated(unsafe) let vfs_getAttributes_ResponseDescriptor: Descriptor = Descr
             case 7: v = .indeterminate
             default: fatalError("bad variant index")
             }
-            slot.assumingMemoryBound(to: VoxError<Infallible>.self).initialize(to: v) },
-            variants: [VariantAccess(wireIndex: 0, payloadFields: [FieldAccess(offset: 0, descriptor: Descriptor(schema: .concrete(SchemaId(0x8bfe7856188d64f1)), layout: Layout(size: MemoryLayout<Infallible>.size, align: MemoryLayout<Infallible>.alignment), access: .record(RecordAccess(fields: [], construct: .inPlace))))], payloadLayout: MemoryLayout<Infallible>.phonLayout), VariantAccess(wireIndex: 1, payloadFields: [], payloadLayout: Layout(size: 0, align: 1)), VariantAccess(wireIndex: 2, payloadFields: [FieldAccess(offset: 0, descriptor: Descriptor(schema: .concrete(SchemaId(0x6d7dce914ee150e8)), layout: Layout(size: MemoryLayout<String>.size, align: MemoryLayout<String>.alignment), access: .bytes(BytesAccess(stride: 1, elemAlign: 1, witness: .string))))], payloadLayout: MemoryLayout<String>.phonLayout), VariantAccess(wireIndex: 3, payloadFields: [], payloadLayout: Layout(size: 0, align: 1)), VariantAccess(wireIndex: 4, payloadFields: [], payloadLayout: Layout(size: 0, align: 1)), VariantAccess(wireIndex: 5, payloadFields: [], payloadLayout: Layout(size: 0, align: 1)), VariantAccess(wireIndex: 6, payloadFields: [], payloadLayout: Layout(size: 0, align: 1)), VariantAccess(wireIndex: 7, payloadFields: [], payloadLayout: Layout(size: 0, align: 1))]))))], payloadLayout: MemoryLayout<VoxError<Infallible>>.phonLayout)])))
+            slot.assumingMemoryBound(to: VfsVoxError<VfsInfallible>.self).initialize(to: v) },
+            variants: [VariantAccess(wireIndex: 0, payloadFields: [FieldAccess(offset: 0, descriptor: Descriptor(schema: .concrete(SchemaId(0x8bfe7856188d64f1)), layout: Layout(size: MemoryLayout<VfsInfallible>.size, align: MemoryLayout<VfsInfallible>.alignment), access: .record(RecordAccess(fields: [], construct: .inPlace))))], payloadLayout: MemoryLayout<VfsInfallible>.phonLayout), VariantAccess(wireIndex: 1, payloadFields: [], payloadLayout: Layout(size: 0, align: 1)), VariantAccess(wireIndex: 2, payloadFields: [FieldAccess(offset: 0, descriptor: Descriptor(schema: .concrete(SchemaId(0x6d7dce914ee150e8)), layout: Layout(size: MemoryLayout<String>.size, align: MemoryLayout<String>.alignment), access: .bytes(BytesAccess(stride: 1, elemAlign: 1, witness: .string))))], payloadLayout: MemoryLayout<String>.phonLayout), VariantAccess(wireIndex: 3, payloadFields: [], payloadLayout: Layout(size: 0, align: 1)), VariantAccess(wireIndex: 4, payloadFields: [], payloadLayout: Layout(size: 0, align: 1)), VariantAccess(wireIndex: 5, payloadFields: [], payloadLayout: Layout(size: 0, align: 1)), VariantAccess(wireIndex: 6, payloadFields: [], payloadLayout: Layout(size: 0, align: 1)), VariantAccess(wireIndex: 7, payloadFields: [], payloadLayout: Layout(size: 0, align: 1))]))))], payloadLayout: MemoryLayout<VfsVoxError<VfsInfallible>>.phonLayout)])))
 nonisolated(unsafe) let vfs_getAttributes_ResponseDescriptorBlocks: [SchemaId: Descriptor] = [:]
 nonisolated(unsafe) let vfs_readDir_ArgsDescriptor: Descriptor = Descriptor(schema: .concrete(SchemaId(0x373bd01794b28844)), layout: Layout(size: MemoryLayout<(UInt64, UInt64, UInt64)>.size, align: MemoryLayout<(UInt64, UInt64, UInt64)>.alignment), access: .record(RecordAccess(fields: [FieldAccess(offset: MemoryLayout<(UInt64, UInt64, UInt64)>.offset(of: \.0)!, descriptor: Descriptor(schema: .concrete(SchemaId(0xd9356298b81639ac)), layout: Layout(size: MemoryLayout<UInt64>.size, align: MemoryLayout<UInt64>.alignment), access: .scalar)), FieldAccess(offset: MemoryLayout<(UInt64, UInt64, UInt64)>.offset(of: \.1)!, descriptor: Descriptor(schema: .concrete(SchemaId(0xd9356298b81639ac)), layout: Layout(size: MemoryLayout<UInt64>.size, align: MemoryLayout<UInt64>.alignment), access: .scalar)), FieldAccess(offset: MemoryLayout<(UInt64, UInt64, UInt64)>.offset(of: \.2)!, descriptor: Descriptor(schema: .concrete(SchemaId(0xd9356298b81639ac)), layout: Layout(size: MemoryLayout<UInt64>.size, align: MemoryLayout<UInt64>.alignment), access: .scalar))], construct: .inPlace)))
 nonisolated(unsafe) let vfs_readDir_ArgsDescriptorBlocks: [SchemaId: Descriptor] = [:]
-nonisolated(unsafe) let vfs_readDir_ResponseDescriptor: Descriptor = Descriptor(schema: .concrete(SchemaId(0x8933c409f6853841)), layout: Layout(size: MemoryLayout<Result<ReadDirResult, VoxError<Infallible>>>.size, align: MemoryLayout<Result<ReadDirResult, VoxError<Infallible>>>.alignment), access: .enumeration(EnumAccess(
-            tag: { ptr in switch ptr.assumingMemoryBound(to: Result<ReadDirResult, VoxError<Infallible>>.self).pointee { case .success: return 0; case .failure: return 1 } },
-            projectPayload: { value, _, scratch in switch value.assumingMemoryBound(to: Result<ReadDirResult, VoxError<Infallible>>.self).pointee { case .success(let f0): scratch.assumingMemoryBound(to: ReadDirResult.self).initialize(to: f0); case .failure(let f0): scratch.assumingMemoryBound(to: VoxError<Infallible>.self).initialize(to: f0) } },
-            destroyPayload: { scratch, localIndex in if localIndex == 0 { scratch.assumingMemoryBound(to: ReadDirResult.self).deinitialize(count: 1) } else { scratch.assumingMemoryBound(to: VoxError<Infallible>.self).deinitialize(count: 1) } },
+nonisolated(unsafe) let vfs_readDir_ResponseDescriptor: Descriptor = Descriptor(schema: .concrete(SchemaId(0x8933c409f6853841)), layout: Layout(size: MemoryLayout<Result<ReadDirResult, VfsVoxError<VfsInfallible>>>.size, align: MemoryLayout<Result<ReadDirResult, VfsVoxError<VfsInfallible>>>.alignment), access: .enumeration(EnumAccess(
+            tag: { ptr in switch ptr.assumingMemoryBound(to: Result<ReadDirResult, VfsVoxError<VfsInfallible>>.self).pointee { case .success: return 0; case .failure: return 1 } },
+            projectPayload: { value, _, scratch in switch value.assumingMemoryBound(to: Result<ReadDirResult, VfsVoxError<VfsInfallible>>.self).pointee { case .success(let f0): scratch.assumingMemoryBound(to: ReadDirResult.self).initialize(to: f0); case .failure(let f0): scratch.assumingMemoryBound(to: VfsVoxError<VfsInfallible>.self).initialize(to: f0) } },
+            destroyPayload: { scratch, localIndex in if localIndex == 0 { scratch.assumingMemoryBound(to: ReadDirResult.self).deinitialize(count: 1) } else { scratch.assumingMemoryBound(to: VfsVoxError<VfsInfallible>.self).deinitialize(count: 1) } },
             inject: { slot, localIndex, scratch in
-            let v: Result<ReadDirResult, VoxError<Infallible>> = localIndex == 0 ? .success(scratch.assumingMemoryBound(to: ReadDirResult.self).move()) : .failure(scratch.assumingMemoryBound(to: VoxError<Infallible>.self).move())
-            slot.assumingMemoryBound(to: Result<ReadDirResult, VoxError<Infallible>>.self).initialize(to: v) },
+            let v: Result<ReadDirResult, VfsVoxError<VfsInfallible>> = localIndex == 0 ? .success(scratch.assumingMemoryBound(to: ReadDirResult.self).move()) : .failure(scratch.assumingMemoryBound(to: VfsVoxError<VfsInfallible>.self).move())
+            slot.assumingMemoryBound(to: Result<ReadDirResult, VfsVoxError<VfsInfallible>>.self).initialize(to: v) },
             variants: [VariantAccess(wireIndex: 0, payloadFields: [FieldAccess(offset: 0, descriptor: Descriptor(schema: .concrete(SchemaId(0xafda26786604d3fb)), layout: Layout(size: MemoryLayout<ReadDirResult>.size, align: MemoryLayout<ReadDirResult>.alignment), access: .record(RecordAccess(fields: [FieldAccess(offset: MemoryLayout<ReadDirResult>.offset(of: \ReadDirResult.entries)!, descriptor: Descriptor(schema: .concrete(SchemaId(0x24dda76ec8b4c522)), layout: Layout(size: MemoryLayout<[DirEntry]>.size, align: MemoryLayout<[DirEntry]>.alignment), access: .sequence(SequenceAccess(element: Descriptor(schema: .concrete(SchemaId(0x51a85bceb07b2b9e)), layout: Layout(size: MemoryLayout<DirEntry>.size, align: MemoryLayout<DirEntry>.alignment), access: .record(RecordAccess(fields: [FieldAccess(offset: MemoryLayout<DirEntry>.offset(of: \DirEntry.name)!, descriptor: Descriptor(schema: .concrete(SchemaId(0x6d7dce914ee150e8)), layout: Layout(size: MemoryLayout<String>.size, align: MemoryLayout<String>.alignment), access: .bytes(BytesAccess(stride: 1, elemAlign: 1, witness: .string)))), FieldAccess(offset: MemoryLayout<DirEntry>.offset(of: \DirEntry.itemId)!, descriptor: Descriptor(schema: .concrete(SchemaId(0xd9356298b81639ac)), layout: Layout(size: MemoryLayout<UInt64>.size, align: MemoryLayout<UInt64>.alignment), access: .scalar)), FieldAccess(offset: MemoryLayout<DirEntry>.offset(of: \DirEntry.itemType)!, descriptor: Descriptor(schema: .concrete(SchemaId(0x0ad78e1b712b0663)), layout: Layout(size: MemoryLayout<ItemType>.size, align: MemoryLayout<ItemType>.alignment), access: .enumeration(EnumAccess(
             tag: { ptr in switch ptr.assumingMemoryBound(to: ItemType.self).pointee {
             case .file: return 0
@@ -335,8 +335,8 @@ nonisolated(unsafe) let vfs_readDir_ResponseDescriptor: Descriptor = Descriptor(
             default: fatalError("bad variant index")
             }
             slot.assumingMemoryBound(to: ItemType.self).initialize(to: v) },
-            variants: [VariantAccess(wireIndex: 0, payloadFields: [], payloadLayout: Layout(size: 0, align: 1)), VariantAccess(wireIndex: 1, payloadFields: [], payloadLayout: Layout(size: 0, align: 1)), VariantAccess(wireIndex: 2, payloadFields: [], payloadLayout: Layout(size: 0, align: 1))])))), FieldAccess(offset: MemoryLayout<DirEntry>.offset(of: \DirEntry.size)!, descriptor: Descriptor(schema: .concrete(SchemaId(0xd9356298b81639ac)), layout: Layout(size: MemoryLayout<UInt64>.size, align: MemoryLayout<UInt64>.alignment), access: .scalar)), FieldAccess(offset: MemoryLayout<DirEntry>.offset(of: \DirEntry.modifiedTime)!, descriptor: Descriptor(schema: .concrete(SchemaId(0xd9356298b81639ac)), layout: Layout(size: MemoryLayout<UInt64>.size, align: MemoryLayout<UInt64>.alignment), access: .scalar)), FieldAccess(offset: MemoryLayout<DirEntry>.offset(of: \DirEntry.createdTime)!, descriptor: Descriptor(schema: .concrete(SchemaId(0xd9356298b81639ac)), layout: Layout(size: MemoryLayout<UInt64>.size, align: MemoryLayout<UInt64>.alignment), access: .scalar)), FieldAccess(offset: MemoryLayout<DirEntry>.offset(of: \DirEntry.mode)!, descriptor: Descriptor(schema: .concrete(SchemaId(0x281c5be4f2ee63b4)), layout: Layout(size: MemoryLayout<UInt32>.size, align: MemoryLayout<UInt32>.alignment), access: .scalar))], construct: .inPlace))), stride: MemoryLayout<DirEntry>.stride, elemAlign: MemoryLayout<DirEntry>.alignment, witness: .of(DirEntry.self))))), FieldAccess(offset: MemoryLayout<ReadDirResult>.offset(of: \ReadDirResult.nextCookie)!, descriptor: Descriptor(schema: .concrete(SchemaId(0xd9356298b81639ac)), layout: Layout(size: MemoryLayout<UInt64>.size, align: MemoryLayout<UInt64>.alignment), access: .scalar)), FieldAccess(offset: MemoryLayout<ReadDirResult>.offset(of: \ReadDirResult.verifier)!, descriptor: Descriptor(schema: .concrete(SchemaId(0xd9356298b81639ac)), layout: Layout(size: MemoryLayout<UInt64>.size, align: MemoryLayout<UInt64>.alignment), access: .scalar)), FieldAccess(offset: MemoryLayout<ReadDirResult>.offset(of: \ReadDirResult.error)!, descriptor: Descriptor(schema: .concrete(SchemaId(0x361f4536eee9f991)), layout: Layout(size: MemoryLayout<Int32>.size, align: MemoryLayout<Int32>.alignment), access: .scalar))], construct: .inPlace))))], payloadLayout: MemoryLayout<ReadDirResult>.phonLayout), VariantAccess(wireIndex: 1, payloadFields: [FieldAccess(offset: 0, descriptor: Descriptor(schema: .concrete(SchemaId(0x3032e6270c5d2644)), layout: Layout(size: MemoryLayout<VoxError<Infallible>>.size, align: MemoryLayout<VoxError<Infallible>>.alignment), access: .enumeration(EnumAccess(
-            tag: { ptr in switch ptr.assumingMemoryBound(to: VoxError<Infallible>.self).pointee {
+            variants: [VariantAccess(wireIndex: 0, payloadFields: [], payloadLayout: Layout(size: 0, align: 1)), VariantAccess(wireIndex: 1, payloadFields: [], payloadLayout: Layout(size: 0, align: 1)), VariantAccess(wireIndex: 2, payloadFields: [], payloadLayout: Layout(size: 0, align: 1))])))), FieldAccess(offset: MemoryLayout<DirEntry>.offset(of: \DirEntry.size)!, descriptor: Descriptor(schema: .concrete(SchemaId(0xd9356298b81639ac)), layout: Layout(size: MemoryLayout<UInt64>.size, align: MemoryLayout<UInt64>.alignment), access: .scalar)), FieldAccess(offset: MemoryLayout<DirEntry>.offset(of: \DirEntry.modifiedTime)!, descriptor: Descriptor(schema: .concrete(SchemaId(0xd9356298b81639ac)), layout: Layout(size: MemoryLayout<UInt64>.size, align: MemoryLayout<UInt64>.alignment), access: .scalar)), FieldAccess(offset: MemoryLayout<DirEntry>.offset(of: \DirEntry.createdTime)!, descriptor: Descriptor(schema: .concrete(SchemaId(0xd9356298b81639ac)), layout: Layout(size: MemoryLayout<UInt64>.size, align: MemoryLayout<UInt64>.alignment), access: .scalar)), FieldAccess(offset: MemoryLayout<DirEntry>.offset(of: \DirEntry.mode)!, descriptor: Descriptor(schema: .concrete(SchemaId(0x281c5be4f2ee63b4)), layout: Layout(size: MemoryLayout<UInt32>.size, align: MemoryLayout<UInt32>.alignment), access: .scalar))], construct: .inPlace))), stride: MemoryLayout<DirEntry>.stride, elemAlign: MemoryLayout<DirEntry>.alignment, witness: .of(DirEntry.self))))), FieldAccess(offset: MemoryLayout<ReadDirResult>.offset(of: \ReadDirResult.nextCookie)!, descriptor: Descriptor(schema: .concrete(SchemaId(0xd9356298b81639ac)), layout: Layout(size: MemoryLayout<UInt64>.size, align: MemoryLayout<UInt64>.alignment), access: .scalar)), FieldAccess(offset: MemoryLayout<ReadDirResult>.offset(of: \ReadDirResult.verifier)!, descriptor: Descriptor(schema: .concrete(SchemaId(0xd9356298b81639ac)), layout: Layout(size: MemoryLayout<UInt64>.size, align: MemoryLayout<UInt64>.alignment), access: .scalar)), FieldAccess(offset: MemoryLayout<ReadDirResult>.offset(of: \ReadDirResult.error)!, descriptor: Descriptor(schema: .concrete(SchemaId(0x361f4536eee9f991)), layout: Layout(size: MemoryLayout<Int32>.size, align: MemoryLayout<Int32>.alignment), access: .scalar))], construct: .inPlace))))], payloadLayout: MemoryLayout<ReadDirResult>.phonLayout), VariantAccess(wireIndex: 1, payloadFields: [FieldAccess(offset: 0, descriptor: Descriptor(schema: .concrete(SchemaId(0x3032e6270c5d2644)), layout: Layout(size: MemoryLayout<VfsVoxError<VfsInfallible>>.size, align: MemoryLayout<VfsVoxError<VfsInfallible>>.alignment), access: .enumeration(EnumAccess(
+            tag: { ptr in switch ptr.assumingMemoryBound(to: VfsVoxError<VfsInfallible>.self).pointee {
             case .user: return 0
             case .unknownMethod: return 1
             case .invalidPayload: return 2
@@ -346,10 +346,10 @@ nonisolated(unsafe) let vfs_readDir_ResponseDescriptor: Descriptor = Descriptor(
             case .sendFailed: return 6
             case .indeterminate: return 7
             } },
-            projectPayload: { value, _, scratch in switch value.assumingMemoryBound(to: VoxError<Infallible>.self).pointee {
+            projectPayload: { value, _, scratch in switch value.assumingMemoryBound(to: VfsVoxError<VfsInfallible>.self).pointee {
             case .user: fatalError("uninhabited variant payload")
             case .unknownMethod: break
-            case .invalidPayload(let f0): scratch.advanced(by: 0).assumingMemoryBound(to: String.self).initialize(to: f0); 
+            case .invalidPayload(let f0): scratch.advanced(by: 0).assumingMemoryBound(to: String.self).initialize(to: f0);
             case .cancelled: break
             case .connectionClosed: break
             case .sessionShutdown: break
@@ -358,15 +358,15 @@ nonisolated(unsafe) let vfs_readDir_ResponseDescriptor: Descriptor = Descriptor(
             } },
             destroyPayload: { scratch, localIndex in switch localIndex {
             case 0: break
-            case 2: scratch.advanced(by: 0).assumingMemoryBound(to: String.self).deinitialize(count: 1); 
+            case 2: scratch.advanced(by: 0).assumingMemoryBound(to: String.self).deinitialize(count: 1);
             default: break
             } },
             inject: { slot, localIndex, scratch in
-            let v: VoxError<Infallible>
+            let v: VfsVoxError<VfsInfallible>
             switch localIndex {
             case 0: fatalError("uninhabited variant payload")
             case 1: v = .unknownMethod
-            case 2: let f0 = scratch.advanced(by: 0).assumingMemoryBound(to: String.self).move(); v = .invalidPayload(f0)
+            case 2: let f0 = scratch.advanced(by: 0).assumingMemoryBound(to: String.self).move();v = .invalidPayload(f0)
             case 3: v = .cancelled
             case 4: v = .connectionClosed
             case 5: v = .sessionShutdown
@@ -374,20 +374,20 @@ nonisolated(unsafe) let vfs_readDir_ResponseDescriptor: Descriptor = Descriptor(
             case 7: v = .indeterminate
             default: fatalError("bad variant index")
             }
-            slot.assumingMemoryBound(to: VoxError<Infallible>.self).initialize(to: v) },
-            variants: [VariantAccess(wireIndex: 0, payloadFields: [FieldAccess(offset: 0, descriptor: Descriptor(schema: .concrete(SchemaId(0x8bfe7856188d64f1)), layout: Layout(size: MemoryLayout<Infallible>.size, align: MemoryLayout<Infallible>.alignment), access: .record(RecordAccess(fields: [], construct: .inPlace))))], payloadLayout: MemoryLayout<Infallible>.phonLayout), VariantAccess(wireIndex: 1, payloadFields: [], payloadLayout: Layout(size: 0, align: 1)), VariantAccess(wireIndex: 2, payloadFields: [FieldAccess(offset: 0, descriptor: Descriptor(schema: .concrete(SchemaId(0x6d7dce914ee150e8)), layout: Layout(size: MemoryLayout<String>.size, align: MemoryLayout<String>.alignment), access: .bytes(BytesAccess(stride: 1, elemAlign: 1, witness: .string))))], payloadLayout: MemoryLayout<String>.phonLayout), VariantAccess(wireIndex: 3, payloadFields: [], payloadLayout: Layout(size: 0, align: 1)), VariantAccess(wireIndex: 4, payloadFields: [], payloadLayout: Layout(size: 0, align: 1)), VariantAccess(wireIndex: 5, payloadFields: [], payloadLayout: Layout(size: 0, align: 1)), VariantAccess(wireIndex: 6, payloadFields: [], payloadLayout: Layout(size: 0, align: 1)), VariantAccess(wireIndex: 7, payloadFields: [], payloadLayout: Layout(size: 0, align: 1))]))))], payloadLayout: MemoryLayout<VoxError<Infallible>>.phonLayout)])))
+            slot.assumingMemoryBound(to: VfsVoxError<VfsInfallible>.self).initialize(to: v) },
+            variants: [VariantAccess(wireIndex: 0, payloadFields: [FieldAccess(offset: 0, descriptor: Descriptor(schema: .concrete(SchemaId(0x8bfe7856188d64f1)), layout: Layout(size: MemoryLayout<VfsInfallible>.size, align: MemoryLayout<VfsInfallible>.alignment), access: .record(RecordAccess(fields: [], construct: .inPlace))))], payloadLayout: MemoryLayout<VfsInfallible>.phonLayout), VariantAccess(wireIndex: 1, payloadFields: [], payloadLayout: Layout(size: 0, align: 1)), VariantAccess(wireIndex: 2, payloadFields: [FieldAccess(offset: 0, descriptor: Descriptor(schema: .concrete(SchemaId(0x6d7dce914ee150e8)), layout: Layout(size: MemoryLayout<String>.size, align: MemoryLayout<String>.alignment), access: .bytes(BytesAccess(stride: 1, elemAlign: 1, witness: .string))))], payloadLayout: MemoryLayout<String>.phonLayout), VariantAccess(wireIndex: 3, payloadFields: [], payloadLayout: Layout(size: 0, align: 1)), VariantAccess(wireIndex: 4, payloadFields: [], payloadLayout: Layout(size: 0, align: 1)), VariantAccess(wireIndex: 5, payloadFields: [], payloadLayout: Layout(size: 0, align: 1)), VariantAccess(wireIndex: 6, payloadFields: [], payloadLayout: Layout(size: 0, align: 1)), VariantAccess(wireIndex: 7, payloadFields: [], payloadLayout: Layout(size: 0, align: 1))]))))], payloadLayout: MemoryLayout<VfsVoxError<VfsInfallible>>.phonLayout)])))
 nonisolated(unsafe) let vfs_readDir_ResponseDescriptorBlocks: [SchemaId: Descriptor] = [:]
 nonisolated(unsafe) let vfs_read_ArgsDescriptor: Descriptor = Descriptor(schema: .concrete(SchemaId(0x373bd01794b28844)), layout: Layout(size: MemoryLayout<(UInt64, UInt64, UInt64)>.size, align: MemoryLayout<(UInt64, UInt64, UInt64)>.alignment), access: .record(RecordAccess(fields: [FieldAccess(offset: MemoryLayout<(UInt64, UInt64, UInt64)>.offset(of: \.0)!, descriptor: Descriptor(schema: .concrete(SchemaId(0xd9356298b81639ac)), layout: Layout(size: MemoryLayout<UInt64>.size, align: MemoryLayout<UInt64>.alignment), access: .scalar)), FieldAccess(offset: MemoryLayout<(UInt64, UInt64, UInt64)>.offset(of: \.1)!, descriptor: Descriptor(schema: .concrete(SchemaId(0xd9356298b81639ac)), layout: Layout(size: MemoryLayout<UInt64>.size, align: MemoryLayout<UInt64>.alignment), access: .scalar)), FieldAccess(offset: MemoryLayout<(UInt64, UInt64, UInt64)>.offset(of: \.2)!, descriptor: Descriptor(schema: .concrete(SchemaId(0xd9356298b81639ac)), layout: Layout(size: MemoryLayout<UInt64>.size, align: MemoryLayout<UInt64>.alignment), access: .scalar))], construct: .inPlace)))
 nonisolated(unsafe) let vfs_read_ArgsDescriptorBlocks: [SchemaId: Descriptor] = [:]
-nonisolated(unsafe) let vfs_read_ResponseDescriptor: Descriptor = Descriptor(schema: .concrete(SchemaId(0x0c569e8a025f2bf7)), layout: Layout(size: MemoryLayout<Result<ReadResult, VoxError<Infallible>>>.size, align: MemoryLayout<Result<ReadResult, VoxError<Infallible>>>.alignment), access: .enumeration(EnumAccess(
-            tag: { ptr in switch ptr.assumingMemoryBound(to: Result<ReadResult, VoxError<Infallible>>.self).pointee { case .success: return 0; case .failure: return 1 } },
-            projectPayload: { value, _, scratch in switch value.assumingMemoryBound(to: Result<ReadResult, VoxError<Infallible>>.self).pointee { case .success(let f0): scratch.assumingMemoryBound(to: ReadResult.self).initialize(to: f0); case .failure(let f0): scratch.assumingMemoryBound(to: VoxError<Infallible>.self).initialize(to: f0) } },
-            destroyPayload: { scratch, localIndex in if localIndex == 0 { scratch.assumingMemoryBound(to: ReadResult.self).deinitialize(count: 1) } else { scratch.assumingMemoryBound(to: VoxError<Infallible>.self).deinitialize(count: 1) } },
+nonisolated(unsafe) let vfs_read_ResponseDescriptor: Descriptor = Descriptor(schema: .concrete(SchemaId(0x0c569e8a025f2bf7)), layout: Layout(size: MemoryLayout<Result<ReadResult, VfsVoxError<VfsInfallible>>>.size, align: MemoryLayout<Result<ReadResult, VfsVoxError<VfsInfallible>>>.alignment), access: .enumeration(EnumAccess(
+            tag: { ptr in switch ptr.assumingMemoryBound(to: Result<ReadResult, VfsVoxError<VfsInfallible>>.self).pointee { case .success: return 0; case .failure: return 1 } },
+            projectPayload: { value, _, scratch in switch value.assumingMemoryBound(to: Result<ReadResult, VfsVoxError<VfsInfallible>>.self).pointee { case .success(let f0): scratch.assumingMemoryBound(to: ReadResult.self).initialize(to: f0); case .failure(let f0): scratch.assumingMemoryBound(to: VfsVoxError<VfsInfallible>.self).initialize(to: f0) } },
+            destroyPayload: { scratch, localIndex in if localIndex == 0 { scratch.assumingMemoryBound(to: ReadResult.self).deinitialize(count: 1) } else { scratch.assumingMemoryBound(to: VfsVoxError<VfsInfallible>.self).deinitialize(count: 1) } },
             inject: { slot, localIndex, scratch in
-            let v: Result<ReadResult, VoxError<Infallible>> = localIndex == 0 ? .success(scratch.assumingMemoryBound(to: ReadResult.self).move()) : .failure(scratch.assumingMemoryBound(to: VoxError<Infallible>.self).move())
-            slot.assumingMemoryBound(to: Result<ReadResult, VoxError<Infallible>>.self).initialize(to: v) },
-            variants: [VariantAccess(wireIndex: 0, payloadFields: [FieldAccess(offset: 0, descriptor: Descriptor(schema: .concrete(SchemaId(0x18f20b532d4ba7c4)), layout: Layout(size: MemoryLayout<ReadResult>.size, align: MemoryLayout<ReadResult>.alignment), access: .record(RecordAccess(fields: [FieldAccess(offset: MemoryLayout<ReadResult>.offset(of: \ReadResult.data)!, descriptor: Descriptor(schema: .concrete(SchemaId(0xaa0667df4299d151)), layout: Layout(size: MemoryLayout<Data>.size, align: MemoryLayout<Data>.alignment), access: .bytes(BytesAccess(stride: 1, elemAlign: 1, witness: .data)))), FieldAccess(offset: MemoryLayout<ReadResult>.offset(of: \ReadResult.error)!, descriptor: Descriptor(schema: .concrete(SchemaId(0x361f4536eee9f991)), layout: Layout(size: MemoryLayout<Int32>.size, align: MemoryLayout<Int32>.alignment), access: .scalar))], construct: .inPlace))))], payloadLayout: MemoryLayout<ReadResult>.phonLayout), VariantAccess(wireIndex: 1, payloadFields: [FieldAccess(offset: 0, descriptor: Descriptor(schema: .concrete(SchemaId(0x3032e6270c5d2644)), layout: Layout(size: MemoryLayout<VoxError<Infallible>>.size, align: MemoryLayout<VoxError<Infallible>>.alignment), access: .enumeration(EnumAccess(
-            tag: { ptr in switch ptr.assumingMemoryBound(to: VoxError<Infallible>.self).pointee {
+            let v: Result<ReadResult, VfsVoxError<VfsInfallible>> = localIndex == 0 ? .success(scratch.assumingMemoryBound(to: ReadResult.self).move()) : .failure(scratch.assumingMemoryBound(to: VfsVoxError<VfsInfallible>.self).move())
+            slot.assumingMemoryBound(to: Result<ReadResult, VfsVoxError<VfsInfallible>>.self).initialize(to: v) },
+            variants: [VariantAccess(wireIndex: 0, payloadFields: [FieldAccess(offset: 0, descriptor: Descriptor(schema: .concrete(SchemaId(0x18f20b532d4ba7c4)), layout: Layout(size: MemoryLayout<ReadResult>.size, align: MemoryLayout<ReadResult>.alignment), access: .record(RecordAccess(fields: [FieldAccess(offset: MemoryLayout<ReadResult>.offset(of: \ReadResult.data)!, descriptor: Descriptor(schema: .concrete(SchemaId(0xaa0667df4299d151)), layout: Layout(size: MemoryLayout<Data>.size, align: MemoryLayout<Data>.alignment), access: .bytes(BytesAccess(stride: 1, elemAlign: 1, witness: .data)))), FieldAccess(offset: MemoryLayout<ReadResult>.offset(of: \ReadResult.error)!, descriptor: Descriptor(schema: .concrete(SchemaId(0x361f4536eee9f991)), layout: Layout(size: MemoryLayout<Int32>.size, align: MemoryLayout<Int32>.alignment), access: .scalar))], construct: .inPlace))))], payloadLayout: MemoryLayout<ReadResult>.phonLayout), VariantAccess(wireIndex: 1, payloadFields: [FieldAccess(offset: 0, descriptor: Descriptor(schema: .concrete(SchemaId(0x3032e6270c5d2644)), layout: Layout(size: MemoryLayout<VfsVoxError<VfsInfallible>>.size, align: MemoryLayout<VfsVoxError<VfsInfallible>>.alignment), access: .enumeration(EnumAccess(
+            tag: { ptr in switch ptr.assumingMemoryBound(to: VfsVoxError<VfsInfallible>.self).pointee {
             case .user: return 0
             case .unknownMethod: return 1
             case .invalidPayload: return 2
@@ -397,10 +397,10 @@ nonisolated(unsafe) let vfs_read_ResponseDescriptor: Descriptor = Descriptor(sch
             case .sendFailed: return 6
             case .indeterminate: return 7
             } },
-            projectPayload: { value, _, scratch in switch value.assumingMemoryBound(to: VoxError<Infallible>.self).pointee {
+            projectPayload: { value, _, scratch in switch value.assumingMemoryBound(to: VfsVoxError<VfsInfallible>.self).pointee {
             case .user: fatalError("uninhabited variant payload")
             case .unknownMethod: break
-            case .invalidPayload(let f0): scratch.advanced(by: 0).assumingMemoryBound(to: String.self).initialize(to: f0); 
+            case .invalidPayload(let f0): scratch.advanced(by: 0).assumingMemoryBound(to: String.self).initialize(to: f0);
             case .cancelled: break
             case .connectionClosed: break
             case .sessionShutdown: break
@@ -409,15 +409,15 @@ nonisolated(unsafe) let vfs_read_ResponseDescriptor: Descriptor = Descriptor(sch
             } },
             destroyPayload: { scratch, localIndex in switch localIndex {
             case 0: break
-            case 2: scratch.advanced(by: 0).assumingMemoryBound(to: String.self).deinitialize(count: 1); 
+            case 2: scratch.advanced(by: 0).assumingMemoryBound(to: String.self).deinitialize(count: 1);
             default: break
             } },
             inject: { slot, localIndex, scratch in
-            let v: VoxError<Infallible>
+            let v: VfsVoxError<VfsInfallible>
             switch localIndex {
             case 0: fatalError("uninhabited variant payload")
             case 1: v = .unknownMethod
-            case 2: let f0 = scratch.advanced(by: 0).assumingMemoryBound(to: String.self).move(); v = .invalidPayload(f0)
+            case 2: let f0 = scratch.advanced(by: 0).assumingMemoryBound(to: String.self).move();v = .invalidPayload(f0)
             case 3: v = .cancelled
             case 4: v = .connectionClosed
             case 5: v = .sessionShutdown
@@ -425,20 +425,20 @@ nonisolated(unsafe) let vfs_read_ResponseDescriptor: Descriptor = Descriptor(sch
             case 7: v = .indeterminate
             default: fatalError("bad variant index")
             }
-            slot.assumingMemoryBound(to: VoxError<Infallible>.self).initialize(to: v) },
-            variants: [VariantAccess(wireIndex: 0, payloadFields: [FieldAccess(offset: 0, descriptor: Descriptor(schema: .concrete(SchemaId(0x8bfe7856188d64f1)), layout: Layout(size: MemoryLayout<Infallible>.size, align: MemoryLayout<Infallible>.alignment), access: .record(RecordAccess(fields: [], construct: .inPlace))))], payloadLayout: MemoryLayout<Infallible>.phonLayout), VariantAccess(wireIndex: 1, payloadFields: [], payloadLayout: Layout(size: 0, align: 1)), VariantAccess(wireIndex: 2, payloadFields: [FieldAccess(offset: 0, descriptor: Descriptor(schema: .concrete(SchemaId(0x6d7dce914ee150e8)), layout: Layout(size: MemoryLayout<String>.size, align: MemoryLayout<String>.alignment), access: .bytes(BytesAccess(stride: 1, elemAlign: 1, witness: .string))))], payloadLayout: MemoryLayout<String>.phonLayout), VariantAccess(wireIndex: 3, payloadFields: [], payloadLayout: Layout(size: 0, align: 1)), VariantAccess(wireIndex: 4, payloadFields: [], payloadLayout: Layout(size: 0, align: 1)), VariantAccess(wireIndex: 5, payloadFields: [], payloadLayout: Layout(size: 0, align: 1)), VariantAccess(wireIndex: 6, payloadFields: [], payloadLayout: Layout(size: 0, align: 1)), VariantAccess(wireIndex: 7, payloadFields: [], payloadLayout: Layout(size: 0, align: 1))]))))], payloadLayout: MemoryLayout<VoxError<Infallible>>.phonLayout)])))
+            slot.assumingMemoryBound(to: VfsVoxError<VfsInfallible>.self).initialize(to: v) },
+            variants: [VariantAccess(wireIndex: 0, payloadFields: [FieldAccess(offset: 0, descriptor: Descriptor(schema: .concrete(SchemaId(0x8bfe7856188d64f1)), layout: Layout(size: MemoryLayout<VfsInfallible>.size, align: MemoryLayout<VfsInfallible>.alignment), access: .record(RecordAccess(fields: [], construct: .inPlace))))], payloadLayout: MemoryLayout<VfsInfallible>.phonLayout), VariantAccess(wireIndex: 1, payloadFields: [], payloadLayout: Layout(size: 0, align: 1)), VariantAccess(wireIndex: 2, payloadFields: [FieldAccess(offset: 0, descriptor: Descriptor(schema: .concrete(SchemaId(0x6d7dce914ee150e8)), layout: Layout(size: MemoryLayout<String>.size, align: MemoryLayout<String>.alignment), access: .bytes(BytesAccess(stride: 1, elemAlign: 1, witness: .string))))], payloadLayout: MemoryLayout<String>.phonLayout), VariantAccess(wireIndex: 3, payloadFields: [], payloadLayout: Layout(size: 0, align: 1)), VariantAccess(wireIndex: 4, payloadFields: [], payloadLayout: Layout(size: 0, align: 1)), VariantAccess(wireIndex: 5, payloadFields: [], payloadLayout: Layout(size: 0, align: 1)), VariantAccess(wireIndex: 6, payloadFields: [], payloadLayout: Layout(size: 0, align: 1)), VariantAccess(wireIndex: 7, payloadFields: [], payloadLayout: Layout(size: 0, align: 1))]))))], payloadLayout: MemoryLayout<VfsVoxError<VfsInfallible>>.phonLayout)])))
 nonisolated(unsafe) let vfs_read_ResponseDescriptorBlocks: [SchemaId: Descriptor] = [:]
 nonisolated(unsafe) let vfs_write_ArgsDescriptor: Descriptor = Descriptor(schema: .concrete(SchemaId(0x96046ae85aacc237)), layout: Layout(size: MemoryLayout<(UInt64, UInt64, Data)>.size, align: MemoryLayout<(UInt64, UInt64, Data)>.alignment), access: .record(RecordAccess(fields: [FieldAccess(offset: MemoryLayout<(UInt64, UInt64, Data)>.offset(of: \.0)!, descriptor: Descriptor(schema: .concrete(SchemaId(0xd9356298b81639ac)), layout: Layout(size: MemoryLayout<UInt64>.size, align: MemoryLayout<UInt64>.alignment), access: .scalar)), FieldAccess(offset: MemoryLayout<(UInt64, UInt64, Data)>.offset(of: \.1)!, descriptor: Descriptor(schema: .concrete(SchemaId(0xd9356298b81639ac)), layout: Layout(size: MemoryLayout<UInt64>.size, align: MemoryLayout<UInt64>.alignment), access: .scalar)), FieldAccess(offset: MemoryLayout<(UInt64, UInt64, Data)>.offset(of: \.2)!, descriptor: Descriptor(schema: .concrete(SchemaId(0xaa0667df4299d151)), layout: Layout(size: MemoryLayout<Data>.size, align: MemoryLayout<Data>.alignment), access: .bytes(BytesAccess(stride: 1, elemAlign: 1, witness: .data))))], construct: .inPlace)))
 nonisolated(unsafe) let vfs_write_ArgsDescriptorBlocks: [SchemaId: Descriptor] = [:]
-nonisolated(unsafe) let vfs_write_ResponseDescriptor: Descriptor = Descriptor(schema: .concrete(SchemaId(0x76e97bc65f90930e)), layout: Layout(size: MemoryLayout<Result<WriteResult, VoxError<Infallible>>>.size, align: MemoryLayout<Result<WriteResult, VoxError<Infallible>>>.alignment), access: .enumeration(EnumAccess(
-            tag: { ptr in switch ptr.assumingMemoryBound(to: Result<WriteResult, VoxError<Infallible>>.self).pointee { case .success: return 0; case .failure: return 1 } },
-            projectPayload: { value, _, scratch in switch value.assumingMemoryBound(to: Result<WriteResult, VoxError<Infallible>>.self).pointee { case .success(let f0): scratch.assumingMemoryBound(to: WriteResult.self).initialize(to: f0); case .failure(let f0): scratch.assumingMemoryBound(to: VoxError<Infallible>.self).initialize(to: f0) } },
-            destroyPayload: { scratch, localIndex in if localIndex == 0 { scratch.assumingMemoryBound(to: WriteResult.self).deinitialize(count: 1) } else { scratch.assumingMemoryBound(to: VoxError<Infallible>.self).deinitialize(count: 1) } },
+nonisolated(unsafe) let vfs_write_ResponseDescriptor: Descriptor = Descriptor(schema: .concrete(SchemaId(0x76e97bc65f90930e)), layout: Layout(size: MemoryLayout<Result<WriteResult, VfsVoxError<VfsInfallible>>>.size, align: MemoryLayout<Result<WriteResult, VfsVoxError<VfsInfallible>>>.alignment), access: .enumeration(EnumAccess(
+            tag: { ptr in switch ptr.assumingMemoryBound(to: Result<WriteResult, VfsVoxError<VfsInfallible>>.self).pointee { case .success: return 0; case .failure: return 1 } },
+            projectPayload: { value, _, scratch in switch value.assumingMemoryBound(to: Result<WriteResult, VfsVoxError<VfsInfallible>>.self).pointee { case .success(let f0): scratch.assumingMemoryBound(to: WriteResult.self).initialize(to: f0); case .failure(let f0): scratch.assumingMemoryBound(to: VfsVoxError<VfsInfallible>.self).initialize(to: f0) } },
+            destroyPayload: { scratch, localIndex in if localIndex == 0 { scratch.assumingMemoryBound(to: WriteResult.self).deinitialize(count: 1) } else { scratch.assumingMemoryBound(to: VfsVoxError<VfsInfallible>.self).deinitialize(count: 1) } },
             inject: { slot, localIndex, scratch in
-            let v: Result<WriteResult, VoxError<Infallible>> = localIndex == 0 ? .success(scratch.assumingMemoryBound(to: WriteResult.self).move()) : .failure(scratch.assumingMemoryBound(to: VoxError<Infallible>.self).move())
-            slot.assumingMemoryBound(to: Result<WriteResult, VoxError<Infallible>>.self).initialize(to: v) },
-            variants: [VariantAccess(wireIndex: 0, payloadFields: [FieldAccess(offset: 0, descriptor: Descriptor(schema: .concrete(SchemaId(0xbb84612fe7996d64)), layout: Layout(size: MemoryLayout<WriteResult>.size, align: MemoryLayout<WriteResult>.alignment), access: .record(RecordAccess(fields: [FieldAccess(offset: MemoryLayout<WriteResult>.offset(of: \WriteResult.bytesWritten)!, descriptor: Descriptor(schema: .concrete(SchemaId(0xd9356298b81639ac)), layout: Layout(size: MemoryLayout<UInt64>.size, align: MemoryLayout<UInt64>.alignment), access: .scalar)), FieldAccess(offset: MemoryLayout<WriteResult>.offset(of: \WriteResult.error)!, descriptor: Descriptor(schema: .concrete(SchemaId(0x361f4536eee9f991)), layout: Layout(size: MemoryLayout<Int32>.size, align: MemoryLayout<Int32>.alignment), access: .scalar))], construct: .inPlace))))], payloadLayout: MemoryLayout<WriteResult>.phonLayout), VariantAccess(wireIndex: 1, payloadFields: [FieldAccess(offset: 0, descriptor: Descriptor(schema: .concrete(SchemaId(0x3032e6270c5d2644)), layout: Layout(size: MemoryLayout<VoxError<Infallible>>.size, align: MemoryLayout<VoxError<Infallible>>.alignment), access: .enumeration(EnumAccess(
-            tag: { ptr in switch ptr.assumingMemoryBound(to: VoxError<Infallible>.self).pointee {
+            let v: Result<WriteResult, VfsVoxError<VfsInfallible>> = localIndex == 0 ? .success(scratch.assumingMemoryBound(to: WriteResult.self).move()) : .failure(scratch.assumingMemoryBound(to: VfsVoxError<VfsInfallible>.self).move())
+            slot.assumingMemoryBound(to: Result<WriteResult, VfsVoxError<VfsInfallible>>.self).initialize(to: v) },
+            variants: [VariantAccess(wireIndex: 0, payloadFields: [FieldAccess(offset: 0, descriptor: Descriptor(schema: .concrete(SchemaId(0xbb84612fe7996d64)), layout: Layout(size: MemoryLayout<WriteResult>.size, align: MemoryLayout<WriteResult>.alignment), access: .record(RecordAccess(fields: [FieldAccess(offset: MemoryLayout<WriteResult>.offset(of: \WriteResult.bytesWritten)!, descriptor: Descriptor(schema: .concrete(SchemaId(0xd9356298b81639ac)), layout: Layout(size: MemoryLayout<UInt64>.size, align: MemoryLayout<UInt64>.alignment), access: .scalar)), FieldAccess(offset: MemoryLayout<WriteResult>.offset(of: \WriteResult.error)!, descriptor: Descriptor(schema: .concrete(SchemaId(0x361f4536eee9f991)), layout: Layout(size: MemoryLayout<Int32>.size, align: MemoryLayout<Int32>.alignment), access: .scalar))], construct: .inPlace))))], payloadLayout: MemoryLayout<WriteResult>.phonLayout), VariantAccess(wireIndex: 1, payloadFields: [FieldAccess(offset: 0, descriptor: Descriptor(schema: .concrete(SchemaId(0x3032e6270c5d2644)), layout: Layout(size: MemoryLayout<VfsVoxError<VfsInfallible>>.size, align: MemoryLayout<VfsVoxError<VfsInfallible>>.alignment), access: .enumeration(EnumAccess(
+            tag: { ptr in switch ptr.assumingMemoryBound(to: VfsVoxError<VfsInfallible>.self).pointee {
             case .user: return 0
             case .unknownMethod: return 1
             case .invalidPayload: return 2
@@ -448,10 +448,10 @@ nonisolated(unsafe) let vfs_write_ResponseDescriptor: Descriptor = Descriptor(sc
             case .sendFailed: return 6
             case .indeterminate: return 7
             } },
-            projectPayload: { value, _, scratch in switch value.assumingMemoryBound(to: VoxError<Infallible>.self).pointee {
+            projectPayload: { value, _, scratch in switch value.assumingMemoryBound(to: VfsVoxError<VfsInfallible>.self).pointee {
             case .user: fatalError("uninhabited variant payload")
             case .unknownMethod: break
-            case .invalidPayload(let f0): scratch.advanced(by: 0).assumingMemoryBound(to: String.self).initialize(to: f0); 
+            case .invalidPayload(let f0): scratch.advanced(by: 0).assumingMemoryBound(to: String.self).initialize(to: f0);
             case .cancelled: break
             case .connectionClosed: break
             case .sessionShutdown: break
@@ -460,15 +460,15 @@ nonisolated(unsafe) let vfs_write_ResponseDescriptor: Descriptor = Descriptor(sc
             } },
             destroyPayload: { scratch, localIndex in switch localIndex {
             case 0: break
-            case 2: scratch.advanced(by: 0).assumingMemoryBound(to: String.self).deinitialize(count: 1); 
+            case 2: scratch.advanced(by: 0).assumingMemoryBound(to: String.self).deinitialize(count: 1);
             default: break
             } },
             inject: { slot, localIndex, scratch in
-            let v: VoxError<Infallible>
+            let v: VfsVoxError<VfsInfallible>
             switch localIndex {
             case 0: fatalError("uninhabited variant payload")
             case 1: v = .unknownMethod
-            case 2: let f0 = scratch.advanced(by: 0).assumingMemoryBound(to: String.self).move(); v = .invalidPayload(f0)
+            case 2: let f0 = scratch.advanced(by: 0).assumingMemoryBound(to: String.self).move();v = .invalidPayload(f0)
             case 3: v = .cancelled
             case 4: v = .connectionClosed
             case 5: v = .sessionShutdown
@@ -476,8 +476,8 @@ nonisolated(unsafe) let vfs_write_ResponseDescriptor: Descriptor = Descriptor(sc
             case 7: v = .indeterminate
             default: fatalError("bad variant index")
             }
-            slot.assumingMemoryBound(to: VoxError<Infallible>.self).initialize(to: v) },
-            variants: [VariantAccess(wireIndex: 0, payloadFields: [FieldAccess(offset: 0, descriptor: Descriptor(schema: .concrete(SchemaId(0x8bfe7856188d64f1)), layout: Layout(size: MemoryLayout<Infallible>.size, align: MemoryLayout<Infallible>.alignment), access: .record(RecordAccess(fields: [], construct: .inPlace))))], payloadLayout: MemoryLayout<Infallible>.phonLayout), VariantAccess(wireIndex: 1, payloadFields: [], payloadLayout: Layout(size: 0, align: 1)), VariantAccess(wireIndex: 2, payloadFields: [FieldAccess(offset: 0, descriptor: Descriptor(schema: .concrete(SchemaId(0x6d7dce914ee150e8)), layout: Layout(size: MemoryLayout<String>.size, align: MemoryLayout<String>.alignment), access: .bytes(BytesAccess(stride: 1, elemAlign: 1, witness: .string))))], payloadLayout: MemoryLayout<String>.phonLayout), VariantAccess(wireIndex: 3, payloadFields: [], payloadLayout: Layout(size: 0, align: 1)), VariantAccess(wireIndex: 4, payloadFields: [], payloadLayout: Layout(size: 0, align: 1)), VariantAccess(wireIndex: 5, payloadFields: [], payloadLayout: Layout(size: 0, align: 1)), VariantAccess(wireIndex: 6, payloadFields: [], payloadLayout: Layout(size: 0, align: 1)), VariantAccess(wireIndex: 7, payloadFields: [], payloadLayout: Layout(size: 0, align: 1))]))))], payloadLayout: MemoryLayout<VoxError<Infallible>>.phonLayout)])))
+            slot.assumingMemoryBound(to: VfsVoxError<VfsInfallible>.self).initialize(to: v) },
+            variants: [VariantAccess(wireIndex: 0, payloadFields: [FieldAccess(offset: 0, descriptor: Descriptor(schema: .concrete(SchemaId(0x8bfe7856188d64f1)), layout: Layout(size: MemoryLayout<VfsInfallible>.size, align: MemoryLayout<VfsInfallible>.alignment), access: .record(RecordAccess(fields: [], construct: .inPlace))))], payloadLayout: MemoryLayout<VfsInfallible>.phonLayout), VariantAccess(wireIndex: 1, payloadFields: [], payloadLayout: Layout(size: 0, align: 1)), VariantAccess(wireIndex: 2, payloadFields: [FieldAccess(offset: 0, descriptor: Descriptor(schema: .concrete(SchemaId(0x6d7dce914ee150e8)), layout: Layout(size: MemoryLayout<String>.size, align: MemoryLayout<String>.alignment), access: .bytes(BytesAccess(stride: 1, elemAlign: 1, witness: .string))))], payloadLayout: MemoryLayout<String>.phonLayout), VariantAccess(wireIndex: 3, payloadFields: [], payloadLayout: Layout(size: 0, align: 1)), VariantAccess(wireIndex: 4, payloadFields: [], payloadLayout: Layout(size: 0, align: 1)), VariantAccess(wireIndex: 5, payloadFields: [], payloadLayout: Layout(size: 0, align: 1)), VariantAccess(wireIndex: 6, payloadFields: [], payloadLayout: Layout(size: 0, align: 1)), VariantAccess(wireIndex: 7, payloadFields: [], payloadLayout: Layout(size: 0, align: 1))]))))], payloadLayout: MemoryLayout<VfsVoxError<VfsInfallible>>.phonLayout)])))
 nonisolated(unsafe) let vfs_write_ResponseDescriptorBlocks: [SchemaId: Descriptor] = [:]
 nonisolated(unsafe) let vfs_create_ArgsDescriptor: Descriptor = Descriptor(schema: .concrete(SchemaId(0xde5b6d03173d96c0)), layout: Layout(size: MemoryLayout<(UInt64, String, ItemType, UInt32)>.size, align: MemoryLayout<(UInt64, String, ItemType, UInt32)>.alignment), access: .record(RecordAccess(fields: [FieldAccess(offset: MemoryLayout<(UInt64, String, ItemType, UInt32)>.offset(of: \.0)!, descriptor: Descriptor(schema: .concrete(SchemaId(0xd9356298b81639ac)), layout: Layout(size: MemoryLayout<UInt64>.size, align: MemoryLayout<UInt64>.alignment), access: .scalar)), FieldAccess(offset: MemoryLayout<(UInt64, String, ItemType, UInt32)>.offset(of: \.1)!, descriptor: Descriptor(schema: .concrete(SchemaId(0x6d7dce914ee150e8)), layout: Layout(size: MemoryLayout<String>.size, align: MemoryLayout<String>.alignment), access: .bytes(BytesAccess(stride: 1, elemAlign: 1, witness: .string)))), FieldAccess(offset: MemoryLayout<(UInt64, String, ItemType, UInt32)>.offset(of: \.2)!, descriptor: Descriptor(schema: .concrete(SchemaId(0x0ad78e1b712b0663)), layout: Layout(size: MemoryLayout<ItemType>.size, align: MemoryLayout<ItemType>.alignment), access: .enumeration(EnumAccess(
             tag: { ptr in switch ptr.assumingMemoryBound(to: ItemType.self).pointee {
@@ -504,15 +504,15 @@ nonisolated(unsafe) let vfs_create_ArgsDescriptor: Descriptor = Descriptor(schem
             slot.assumingMemoryBound(to: ItemType.self).initialize(to: v) },
             variants: [VariantAccess(wireIndex: 0, payloadFields: [], payloadLayout: Layout(size: 0, align: 1)), VariantAccess(wireIndex: 1, payloadFields: [], payloadLayout: Layout(size: 0, align: 1)), VariantAccess(wireIndex: 2, payloadFields: [], payloadLayout: Layout(size: 0, align: 1))])))), FieldAccess(offset: MemoryLayout<(UInt64, String, ItemType, UInt32)>.offset(of: \.3)!, descriptor: Descriptor(schema: .concrete(SchemaId(0x281c5be4f2ee63b4)), layout: Layout(size: MemoryLayout<UInt32>.size, align: MemoryLayout<UInt32>.alignment), access: .scalar))], construct: .inPlace)))
 nonisolated(unsafe) let vfs_create_ArgsDescriptorBlocks: [SchemaId: Descriptor] = [:]
-nonisolated(unsafe) let vfs_create_ResponseDescriptor: Descriptor = Descriptor(schema: .concrete(SchemaId(0xd3fa4ad375051b9b)), layout: Layout(size: MemoryLayout<Result<CreateResult, VoxError<Infallible>>>.size, align: MemoryLayout<Result<CreateResult, VoxError<Infallible>>>.alignment), access: .enumeration(EnumAccess(
-            tag: { ptr in switch ptr.assumingMemoryBound(to: Result<CreateResult, VoxError<Infallible>>.self).pointee { case .success: return 0; case .failure: return 1 } },
-            projectPayload: { value, _, scratch in switch value.assumingMemoryBound(to: Result<CreateResult, VoxError<Infallible>>.self).pointee { case .success(let f0): scratch.assumingMemoryBound(to: CreateResult.self).initialize(to: f0); case .failure(let f0): scratch.assumingMemoryBound(to: VoxError<Infallible>.self).initialize(to: f0) } },
-            destroyPayload: { scratch, localIndex in if localIndex == 0 { scratch.assumingMemoryBound(to: CreateResult.self).deinitialize(count: 1) } else { scratch.assumingMemoryBound(to: VoxError<Infallible>.self).deinitialize(count: 1) } },
+nonisolated(unsafe) let vfs_create_ResponseDescriptor: Descriptor = Descriptor(schema: .concrete(SchemaId(0xd3fa4ad375051b9b)), layout: Layout(size: MemoryLayout<Result<CreateResult, VfsVoxError<VfsInfallible>>>.size, align: MemoryLayout<Result<CreateResult, VfsVoxError<VfsInfallible>>>.alignment), access: .enumeration(EnumAccess(
+            tag: { ptr in switch ptr.assumingMemoryBound(to: Result<CreateResult, VfsVoxError<VfsInfallible>>.self).pointee { case .success: return 0; case .failure: return 1 } },
+            projectPayload: { value, _, scratch in switch value.assumingMemoryBound(to: Result<CreateResult, VfsVoxError<VfsInfallible>>.self).pointee { case .success(let f0): scratch.assumingMemoryBound(to: CreateResult.self).initialize(to: f0); case .failure(let f0): scratch.assumingMemoryBound(to: VfsVoxError<VfsInfallible>.self).initialize(to: f0) } },
+            destroyPayload: { scratch, localIndex in if localIndex == 0 { scratch.assumingMemoryBound(to: CreateResult.self).deinitialize(count: 1) } else { scratch.assumingMemoryBound(to: VfsVoxError<VfsInfallible>.self).deinitialize(count: 1) } },
             inject: { slot, localIndex, scratch in
-            let v: Result<CreateResult, VoxError<Infallible>> = localIndex == 0 ? .success(scratch.assumingMemoryBound(to: CreateResult.self).move()) : .failure(scratch.assumingMemoryBound(to: VoxError<Infallible>.self).move())
-            slot.assumingMemoryBound(to: Result<CreateResult, VoxError<Infallible>>.self).initialize(to: v) },
-            variants: [VariantAccess(wireIndex: 0, payloadFields: [FieldAccess(offset: 0, descriptor: Descriptor(schema: .concrete(SchemaId(0xad488235c6eee3cd)), layout: Layout(size: MemoryLayout<CreateResult>.size, align: MemoryLayout<CreateResult>.alignment), access: .record(RecordAccess(fields: [FieldAccess(offset: MemoryLayout<CreateResult>.offset(of: \CreateResult.itemId)!, descriptor: Descriptor(schema: .concrete(SchemaId(0xd9356298b81639ac)), layout: Layout(size: MemoryLayout<UInt64>.size, align: MemoryLayout<UInt64>.alignment), access: .scalar)), FieldAccess(offset: MemoryLayout<CreateResult>.offset(of: \CreateResult.error)!, descriptor: Descriptor(schema: .concrete(SchemaId(0x361f4536eee9f991)), layout: Layout(size: MemoryLayout<Int32>.size, align: MemoryLayout<Int32>.alignment), access: .scalar))], construct: .inPlace))))], payloadLayout: MemoryLayout<CreateResult>.phonLayout), VariantAccess(wireIndex: 1, payloadFields: [FieldAccess(offset: 0, descriptor: Descriptor(schema: .concrete(SchemaId(0x3032e6270c5d2644)), layout: Layout(size: MemoryLayout<VoxError<Infallible>>.size, align: MemoryLayout<VoxError<Infallible>>.alignment), access: .enumeration(EnumAccess(
-            tag: { ptr in switch ptr.assumingMemoryBound(to: VoxError<Infallible>.self).pointee {
+            let v: Result<CreateResult, VfsVoxError<VfsInfallible>> = localIndex == 0 ? .success(scratch.assumingMemoryBound(to: CreateResult.self).move()) : .failure(scratch.assumingMemoryBound(to: VfsVoxError<VfsInfallible>.self).move())
+            slot.assumingMemoryBound(to: Result<CreateResult, VfsVoxError<VfsInfallible>>.self).initialize(to: v) },
+            variants: [VariantAccess(wireIndex: 0, payloadFields: [FieldAccess(offset: 0, descriptor: Descriptor(schema: .concrete(SchemaId(0xad488235c6eee3cd)), layout: Layout(size: MemoryLayout<CreateResult>.size, align: MemoryLayout<CreateResult>.alignment), access: .record(RecordAccess(fields: [FieldAccess(offset: MemoryLayout<CreateResult>.offset(of: \CreateResult.itemId)!, descriptor: Descriptor(schema: .concrete(SchemaId(0xd9356298b81639ac)), layout: Layout(size: MemoryLayout<UInt64>.size, align: MemoryLayout<UInt64>.alignment), access: .scalar)), FieldAccess(offset: MemoryLayout<CreateResult>.offset(of: \CreateResult.error)!, descriptor: Descriptor(schema: .concrete(SchemaId(0x361f4536eee9f991)), layout: Layout(size: MemoryLayout<Int32>.size, align: MemoryLayout<Int32>.alignment), access: .scalar))], construct: .inPlace))))], payloadLayout: MemoryLayout<CreateResult>.phonLayout), VariantAccess(wireIndex: 1, payloadFields: [FieldAccess(offset: 0, descriptor: Descriptor(schema: .concrete(SchemaId(0x3032e6270c5d2644)), layout: Layout(size: MemoryLayout<VfsVoxError<VfsInfallible>>.size, align: MemoryLayout<VfsVoxError<VfsInfallible>>.alignment), access: .enumeration(EnumAccess(
+            tag: { ptr in switch ptr.assumingMemoryBound(to: VfsVoxError<VfsInfallible>.self).pointee {
             case .user: return 0
             case .unknownMethod: return 1
             case .invalidPayload: return 2
@@ -522,10 +522,10 @@ nonisolated(unsafe) let vfs_create_ResponseDescriptor: Descriptor = Descriptor(s
             case .sendFailed: return 6
             case .indeterminate: return 7
             } },
-            projectPayload: { value, _, scratch in switch value.assumingMemoryBound(to: VoxError<Infallible>.self).pointee {
+            projectPayload: { value, _, scratch in switch value.assumingMemoryBound(to: VfsVoxError<VfsInfallible>.self).pointee {
             case .user: fatalError("uninhabited variant payload")
             case .unknownMethod: break
-            case .invalidPayload(let f0): scratch.advanced(by: 0).assumingMemoryBound(to: String.self).initialize(to: f0); 
+            case .invalidPayload(let f0): scratch.advanced(by: 0).assumingMemoryBound(to: String.self).initialize(to: f0);
             case .cancelled: break
             case .connectionClosed: break
             case .sessionShutdown: break
@@ -534,15 +534,15 @@ nonisolated(unsafe) let vfs_create_ResponseDescriptor: Descriptor = Descriptor(s
             } },
             destroyPayload: { scratch, localIndex in switch localIndex {
             case 0: break
-            case 2: scratch.advanced(by: 0).assumingMemoryBound(to: String.self).deinitialize(count: 1); 
+            case 2: scratch.advanced(by: 0).assumingMemoryBound(to: String.self).deinitialize(count: 1);
             default: break
             } },
             inject: { slot, localIndex, scratch in
-            let v: VoxError<Infallible>
+            let v: VfsVoxError<VfsInfallible>
             switch localIndex {
             case 0: fatalError("uninhabited variant payload")
             case 1: v = .unknownMethod
-            case 2: let f0 = scratch.advanced(by: 0).assumingMemoryBound(to: String.self).move(); v = .invalidPayload(f0)
+            case 2: let f0 = scratch.advanced(by: 0).assumingMemoryBound(to: String.self).move();v = .invalidPayload(f0)
             case 3: v = .cancelled
             case 4: v = .connectionClosed
             case 5: v = .sessionShutdown
@@ -550,20 +550,20 @@ nonisolated(unsafe) let vfs_create_ResponseDescriptor: Descriptor = Descriptor(s
             case 7: v = .indeterminate
             default: fatalError("bad variant index")
             }
-            slot.assumingMemoryBound(to: VoxError<Infallible>.self).initialize(to: v) },
-            variants: [VariantAccess(wireIndex: 0, payloadFields: [FieldAccess(offset: 0, descriptor: Descriptor(schema: .concrete(SchemaId(0x8bfe7856188d64f1)), layout: Layout(size: MemoryLayout<Infallible>.size, align: MemoryLayout<Infallible>.alignment), access: .record(RecordAccess(fields: [], construct: .inPlace))))], payloadLayout: MemoryLayout<Infallible>.phonLayout), VariantAccess(wireIndex: 1, payloadFields: [], payloadLayout: Layout(size: 0, align: 1)), VariantAccess(wireIndex: 2, payloadFields: [FieldAccess(offset: 0, descriptor: Descriptor(schema: .concrete(SchemaId(0x6d7dce914ee150e8)), layout: Layout(size: MemoryLayout<String>.size, align: MemoryLayout<String>.alignment), access: .bytes(BytesAccess(stride: 1, elemAlign: 1, witness: .string))))], payloadLayout: MemoryLayout<String>.phonLayout), VariantAccess(wireIndex: 3, payloadFields: [], payloadLayout: Layout(size: 0, align: 1)), VariantAccess(wireIndex: 4, payloadFields: [], payloadLayout: Layout(size: 0, align: 1)), VariantAccess(wireIndex: 5, payloadFields: [], payloadLayout: Layout(size: 0, align: 1)), VariantAccess(wireIndex: 6, payloadFields: [], payloadLayout: Layout(size: 0, align: 1)), VariantAccess(wireIndex: 7, payloadFields: [], payloadLayout: Layout(size: 0, align: 1))]))))], payloadLayout: MemoryLayout<VoxError<Infallible>>.phonLayout)])))
+            slot.assumingMemoryBound(to: VfsVoxError<VfsInfallible>.self).initialize(to: v) },
+            variants: [VariantAccess(wireIndex: 0, payloadFields: [FieldAccess(offset: 0, descriptor: Descriptor(schema: .concrete(SchemaId(0x8bfe7856188d64f1)), layout: Layout(size: MemoryLayout<VfsInfallible>.size, align: MemoryLayout<VfsInfallible>.alignment), access: .record(RecordAccess(fields: [], construct: .inPlace))))], payloadLayout: MemoryLayout<VfsInfallible>.phonLayout), VariantAccess(wireIndex: 1, payloadFields: [], payloadLayout: Layout(size: 0, align: 1)), VariantAccess(wireIndex: 2, payloadFields: [FieldAccess(offset: 0, descriptor: Descriptor(schema: .concrete(SchemaId(0x6d7dce914ee150e8)), layout: Layout(size: MemoryLayout<String>.size, align: MemoryLayout<String>.alignment), access: .bytes(BytesAccess(stride: 1, elemAlign: 1, witness: .string))))], payloadLayout: MemoryLayout<String>.phonLayout), VariantAccess(wireIndex: 3, payloadFields: [], payloadLayout: Layout(size: 0, align: 1)), VariantAccess(wireIndex: 4, payloadFields: [], payloadLayout: Layout(size: 0, align: 1)), VariantAccess(wireIndex: 5, payloadFields: [], payloadLayout: Layout(size: 0, align: 1)), VariantAccess(wireIndex: 6, payloadFields: [], payloadLayout: Layout(size: 0, align: 1)), VariantAccess(wireIndex: 7, payloadFields: [], payloadLayout: Layout(size: 0, align: 1))]))))], payloadLayout: MemoryLayout<VfsVoxError<VfsInfallible>>.phonLayout)])))
 nonisolated(unsafe) let vfs_create_ResponseDescriptorBlocks: [SchemaId: Descriptor] = [:]
 nonisolated(unsafe) let vfs_delete_ArgsDescriptor: Descriptor = Descriptor(schema: .concrete(SchemaId(0xdb73db3b46e1a03f)), layout: Layout(size: MemoryLayout<(UInt64)>.size, align: MemoryLayout<(UInt64)>.alignment), access: .record(RecordAccess(fields: [FieldAccess(offset: 0, descriptor: Descriptor(schema: .concrete(SchemaId(0xd9356298b81639ac)), layout: Layout(size: MemoryLayout<UInt64>.size, align: MemoryLayout<UInt64>.alignment), access: .scalar))], construct: .inPlace)))
 nonisolated(unsafe) let vfs_delete_ArgsDescriptorBlocks: [SchemaId: Descriptor] = [:]
-nonisolated(unsafe) let vfs_delete_ResponseDescriptor: Descriptor = Descriptor(schema: .concrete(SchemaId(0xe20f9d0564afad42)), layout: Layout(size: MemoryLayout<Result<VfsResult, VoxError<Infallible>>>.size, align: MemoryLayout<Result<VfsResult, VoxError<Infallible>>>.alignment), access: .enumeration(EnumAccess(
-            tag: { ptr in switch ptr.assumingMemoryBound(to: Result<VfsResult, VoxError<Infallible>>.self).pointee { case .success: return 0; case .failure: return 1 } },
-            projectPayload: { value, _, scratch in switch value.assumingMemoryBound(to: Result<VfsResult, VoxError<Infallible>>.self).pointee { case .success(let f0): scratch.assumingMemoryBound(to: VfsResult.self).initialize(to: f0); case .failure(let f0): scratch.assumingMemoryBound(to: VoxError<Infallible>.self).initialize(to: f0) } },
-            destroyPayload: { scratch, localIndex in if localIndex == 0 { scratch.assumingMemoryBound(to: VfsResult.self).deinitialize(count: 1) } else { scratch.assumingMemoryBound(to: VoxError<Infallible>.self).deinitialize(count: 1) } },
+nonisolated(unsafe) let vfs_delete_ResponseDescriptor: Descriptor = Descriptor(schema: .concrete(SchemaId(0xe20f9d0564afad42)), layout: Layout(size: MemoryLayout<Result<VfsResult, VfsVoxError<VfsInfallible>>>.size, align: MemoryLayout<Result<VfsResult, VfsVoxError<VfsInfallible>>>.alignment), access: .enumeration(EnumAccess(
+            tag: { ptr in switch ptr.assumingMemoryBound(to: Result<VfsResult, VfsVoxError<VfsInfallible>>.self).pointee { case .success: return 0; case .failure: return 1 } },
+            projectPayload: { value, _, scratch in switch value.assumingMemoryBound(to: Result<VfsResult, VfsVoxError<VfsInfallible>>.self).pointee { case .success(let f0): scratch.assumingMemoryBound(to: VfsResult.self).initialize(to: f0); case .failure(let f0): scratch.assumingMemoryBound(to: VfsVoxError<VfsInfallible>.self).initialize(to: f0) } },
+            destroyPayload: { scratch, localIndex in if localIndex == 0 { scratch.assumingMemoryBound(to: VfsResult.self).deinitialize(count: 1) } else { scratch.assumingMemoryBound(to: VfsVoxError<VfsInfallible>.self).deinitialize(count: 1) } },
             inject: { slot, localIndex, scratch in
-            let v: Result<VfsResult, VoxError<Infallible>> = localIndex == 0 ? .success(scratch.assumingMemoryBound(to: VfsResult.self).move()) : .failure(scratch.assumingMemoryBound(to: VoxError<Infallible>.self).move())
-            slot.assumingMemoryBound(to: Result<VfsResult, VoxError<Infallible>>.self).initialize(to: v) },
-            variants: [VariantAccess(wireIndex: 0, payloadFields: [FieldAccess(offset: 0, descriptor: Descriptor(schema: .concrete(SchemaId(0x913891b444d17a61)), layout: Layout(size: MemoryLayout<VfsResult>.size, align: MemoryLayout<VfsResult>.alignment), access: .record(RecordAccess(fields: [FieldAccess(offset: MemoryLayout<VfsResult>.offset(of: \VfsResult.error)!, descriptor: Descriptor(schema: .concrete(SchemaId(0x361f4536eee9f991)), layout: Layout(size: MemoryLayout<Int32>.size, align: MemoryLayout<Int32>.alignment), access: .scalar))], construct: .inPlace))))], payloadLayout: MemoryLayout<VfsResult>.phonLayout), VariantAccess(wireIndex: 1, payloadFields: [FieldAccess(offset: 0, descriptor: Descriptor(schema: .concrete(SchemaId(0x3032e6270c5d2644)), layout: Layout(size: MemoryLayout<VoxError<Infallible>>.size, align: MemoryLayout<VoxError<Infallible>>.alignment), access: .enumeration(EnumAccess(
-            tag: { ptr in switch ptr.assumingMemoryBound(to: VoxError<Infallible>.self).pointee {
+            let v: Result<VfsResult, VfsVoxError<VfsInfallible>> = localIndex == 0 ? .success(scratch.assumingMemoryBound(to: VfsResult.self).move()) : .failure(scratch.assumingMemoryBound(to: VfsVoxError<VfsInfallible>.self).move())
+            slot.assumingMemoryBound(to: Result<VfsResult, VfsVoxError<VfsInfallible>>.self).initialize(to: v) },
+            variants: [VariantAccess(wireIndex: 0, payloadFields: [FieldAccess(offset: 0, descriptor: Descriptor(schema: .concrete(SchemaId(0x913891b444d17a61)), layout: Layout(size: MemoryLayout<VfsResult>.size, align: MemoryLayout<VfsResult>.alignment), access: .record(RecordAccess(fields: [FieldAccess(offset: MemoryLayout<VfsResult>.offset(of: \VfsResult.error)!, descriptor: Descriptor(schema: .concrete(SchemaId(0x361f4536eee9f991)), layout: Layout(size: MemoryLayout<Int32>.size, align: MemoryLayout<Int32>.alignment), access: .scalar))], construct: .inPlace))))], payloadLayout: MemoryLayout<VfsResult>.phonLayout), VariantAccess(wireIndex: 1, payloadFields: [FieldAccess(offset: 0, descriptor: Descriptor(schema: .concrete(SchemaId(0x3032e6270c5d2644)), layout: Layout(size: MemoryLayout<VfsVoxError<VfsInfallible>>.size, align: MemoryLayout<VfsVoxError<VfsInfallible>>.alignment), access: .enumeration(EnumAccess(
+            tag: { ptr in switch ptr.assumingMemoryBound(to: VfsVoxError<VfsInfallible>.self).pointee {
             case .user: return 0
             case .unknownMethod: return 1
             case .invalidPayload: return 2
@@ -573,10 +573,10 @@ nonisolated(unsafe) let vfs_delete_ResponseDescriptor: Descriptor = Descriptor(s
             case .sendFailed: return 6
             case .indeterminate: return 7
             } },
-            projectPayload: { value, _, scratch in switch value.assumingMemoryBound(to: VoxError<Infallible>.self).pointee {
+            projectPayload: { value, _, scratch in switch value.assumingMemoryBound(to: VfsVoxError<VfsInfallible>.self).pointee {
             case .user: fatalError("uninhabited variant payload")
             case .unknownMethod: break
-            case .invalidPayload(let f0): scratch.advanced(by: 0).assumingMemoryBound(to: String.self).initialize(to: f0); 
+            case .invalidPayload(let f0): scratch.advanced(by: 0).assumingMemoryBound(to: String.self).initialize(to: f0);
             case .cancelled: break
             case .connectionClosed: break
             case .sessionShutdown: break
@@ -585,15 +585,15 @@ nonisolated(unsafe) let vfs_delete_ResponseDescriptor: Descriptor = Descriptor(s
             } },
             destroyPayload: { scratch, localIndex in switch localIndex {
             case 0: break
-            case 2: scratch.advanced(by: 0).assumingMemoryBound(to: String.self).deinitialize(count: 1); 
+            case 2: scratch.advanced(by: 0).assumingMemoryBound(to: String.self).deinitialize(count: 1);
             default: break
             } },
             inject: { slot, localIndex, scratch in
-            let v: VoxError<Infallible>
+            let v: VfsVoxError<VfsInfallible>
             switch localIndex {
             case 0: fatalError("uninhabited variant payload")
             case 1: v = .unknownMethod
-            case 2: let f0 = scratch.advanced(by: 0).assumingMemoryBound(to: String.self).move(); v = .invalidPayload(f0)
+            case 2: let f0 = scratch.advanced(by: 0).assumingMemoryBound(to: String.self).move();v = .invalidPayload(f0)
             case 3: v = .cancelled
             case 4: v = .connectionClosed
             case 5: v = .sessionShutdown
@@ -601,20 +601,20 @@ nonisolated(unsafe) let vfs_delete_ResponseDescriptor: Descriptor = Descriptor(s
             case 7: v = .indeterminate
             default: fatalError("bad variant index")
             }
-            slot.assumingMemoryBound(to: VoxError<Infallible>.self).initialize(to: v) },
-            variants: [VariantAccess(wireIndex: 0, payloadFields: [FieldAccess(offset: 0, descriptor: Descriptor(schema: .concrete(SchemaId(0x8bfe7856188d64f1)), layout: Layout(size: MemoryLayout<Infallible>.size, align: MemoryLayout<Infallible>.alignment), access: .record(RecordAccess(fields: [], construct: .inPlace))))], payloadLayout: MemoryLayout<Infallible>.phonLayout), VariantAccess(wireIndex: 1, payloadFields: [], payloadLayout: Layout(size: 0, align: 1)), VariantAccess(wireIndex: 2, payloadFields: [FieldAccess(offset: 0, descriptor: Descriptor(schema: .concrete(SchemaId(0x6d7dce914ee150e8)), layout: Layout(size: MemoryLayout<String>.size, align: MemoryLayout<String>.alignment), access: .bytes(BytesAccess(stride: 1, elemAlign: 1, witness: .string))))], payloadLayout: MemoryLayout<String>.phonLayout), VariantAccess(wireIndex: 3, payloadFields: [], payloadLayout: Layout(size: 0, align: 1)), VariantAccess(wireIndex: 4, payloadFields: [], payloadLayout: Layout(size: 0, align: 1)), VariantAccess(wireIndex: 5, payloadFields: [], payloadLayout: Layout(size: 0, align: 1)), VariantAccess(wireIndex: 6, payloadFields: [], payloadLayout: Layout(size: 0, align: 1)), VariantAccess(wireIndex: 7, payloadFields: [], payloadLayout: Layout(size: 0, align: 1))]))))], payloadLayout: MemoryLayout<VoxError<Infallible>>.phonLayout)])))
+            slot.assumingMemoryBound(to: VfsVoxError<VfsInfallible>.self).initialize(to: v) },
+            variants: [VariantAccess(wireIndex: 0, payloadFields: [FieldAccess(offset: 0, descriptor: Descriptor(schema: .concrete(SchemaId(0x8bfe7856188d64f1)), layout: Layout(size: MemoryLayout<VfsInfallible>.size, align: MemoryLayout<VfsInfallible>.alignment), access: .record(RecordAccess(fields: [], construct: .inPlace))))], payloadLayout: MemoryLayout<VfsInfallible>.phonLayout), VariantAccess(wireIndex: 1, payloadFields: [], payloadLayout: Layout(size: 0, align: 1)), VariantAccess(wireIndex: 2, payloadFields: [FieldAccess(offset: 0, descriptor: Descriptor(schema: .concrete(SchemaId(0x6d7dce914ee150e8)), layout: Layout(size: MemoryLayout<String>.size, align: MemoryLayout<String>.alignment), access: .bytes(BytesAccess(stride: 1, elemAlign: 1, witness: .string))))], payloadLayout: MemoryLayout<String>.phonLayout), VariantAccess(wireIndex: 3, payloadFields: [], payloadLayout: Layout(size: 0, align: 1)), VariantAccess(wireIndex: 4, payloadFields: [], payloadLayout: Layout(size: 0, align: 1)), VariantAccess(wireIndex: 5, payloadFields: [], payloadLayout: Layout(size: 0, align: 1)), VariantAccess(wireIndex: 6, payloadFields: [], payloadLayout: Layout(size: 0, align: 1)), VariantAccess(wireIndex: 7, payloadFields: [], payloadLayout: Layout(size: 0, align: 1))]))))], payloadLayout: MemoryLayout<VfsVoxError<VfsInfallible>>.phonLayout)])))
 nonisolated(unsafe) let vfs_delete_ResponseDescriptorBlocks: [SchemaId: Descriptor] = [:]
 nonisolated(unsafe) let vfs_rename_ArgsDescriptor: Descriptor = Descriptor(schema: .concrete(SchemaId(0xbd27f8160767ea93)), layout: Layout(size: MemoryLayout<(UInt64, UInt64, String)>.size, align: MemoryLayout<(UInt64, UInt64, String)>.alignment), access: .record(RecordAccess(fields: [FieldAccess(offset: MemoryLayout<(UInt64, UInt64, String)>.offset(of: \.0)!, descriptor: Descriptor(schema: .concrete(SchemaId(0xd9356298b81639ac)), layout: Layout(size: MemoryLayout<UInt64>.size, align: MemoryLayout<UInt64>.alignment), access: .scalar)), FieldAccess(offset: MemoryLayout<(UInt64, UInt64, String)>.offset(of: \.1)!, descriptor: Descriptor(schema: .concrete(SchemaId(0xd9356298b81639ac)), layout: Layout(size: MemoryLayout<UInt64>.size, align: MemoryLayout<UInt64>.alignment), access: .scalar)), FieldAccess(offset: MemoryLayout<(UInt64, UInt64, String)>.offset(of: \.2)!, descriptor: Descriptor(schema: .concrete(SchemaId(0x6d7dce914ee150e8)), layout: Layout(size: MemoryLayout<String>.size, align: MemoryLayout<String>.alignment), access: .bytes(BytesAccess(stride: 1, elemAlign: 1, witness: .string))))], construct: .inPlace)))
 nonisolated(unsafe) let vfs_rename_ArgsDescriptorBlocks: [SchemaId: Descriptor] = [:]
-nonisolated(unsafe) let vfs_rename_ResponseDescriptor: Descriptor = Descriptor(schema: .concrete(SchemaId(0xe20f9d0564afad42)), layout: Layout(size: MemoryLayout<Result<VfsResult, VoxError<Infallible>>>.size, align: MemoryLayout<Result<VfsResult, VoxError<Infallible>>>.alignment), access: .enumeration(EnumAccess(
-            tag: { ptr in switch ptr.assumingMemoryBound(to: Result<VfsResult, VoxError<Infallible>>.self).pointee { case .success: return 0; case .failure: return 1 } },
-            projectPayload: { value, _, scratch in switch value.assumingMemoryBound(to: Result<VfsResult, VoxError<Infallible>>.self).pointee { case .success(let f0): scratch.assumingMemoryBound(to: VfsResult.self).initialize(to: f0); case .failure(let f0): scratch.assumingMemoryBound(to: VoxError<Infallible>.self).initialize(to: f0) } },
-            destroyPayload: { scratch, localIndex in if localIndex == 0 { scratch.assumingMemoryBound(to: VfsResult.self).deinitialize(count: 1) } else { scratch.assumingMemoryBound(to: VoxError<Infallible>.self).deinitialize(count: 1) } },
+nonisolated(unsafe) let vfs_rename_ResponseDescriptor: Descriptor = Descriptor(schema: .concrete(SchemaId(0xe20f9d0564afad42)), layout: Layout(size: MemoryLayout<Result<VfsResult, VfsVoxError<VfsInfallible>>>.size, align: MemoryLayout<Result<VfsResult, VfsVoxError<VfsInfallible>>>.alignment), access: .enumeration(EnumAccess(
+            tag: { ptr in switch ptr.assumingMemoryBound(to: Result<VfsResult, VfsVoxError<VfsInfallible>>.self).pointee { case .success: return 0; case .failure: return 1 } },
+            projectPayload: { value, _, scratch in switch value.assumingMemoryBound(to: Result<VfsResult, VfsVoxError<VfsInfallible>>.self).pointee { case .success(let f0): scratch.assumingMemoryBound(to: VfsResult.self).initialize(to: f0); case .failure(let f0): scratch.assumingMemoryBound(to: VfsVoxError<VfsInfallible>.self).initialize(to: f0) } },
+            destroyPayload: { scratch, localIndex in if localIndex == 0 { scratch.assumingMemoryBound(to: VfsResult.self).deinitialize(count: 1) } else { scratch.assumingMemoryBound(to: VfsVoxError<VfsInfallible>.self).deinitialize(count: 1) } },
             inject: { slot, localIndex, scratch in
-            let v: Result<VfsResult, VoxError<Infallible>> = localIndex == 0 ? .success(scratch.assumingMemoryBound(to: VfsResult.self).move()) : .failure(scratch.assumingMemoryBound(to: VoxError<Infallible>.self).move())
-            slot.assumingMemoryBound(to: Result<VfsResult, VoxError<Infallible>>.self).initialize(to: v) },
-            variants: [VariantAccess(wireIndex: 0, payloadFields: [FieldAccess(offset: 0, descriptor: Descriptor(schema: .concrete(SchemaId(0x913891b444d17a61)), layout: Layout(size: MemoryLayout<VfsResult>.size, align: MemoryLayout<VfsResult>.alignment), access: .record(RecordAccess(fields: [FieldAccess(offset: MemoryLayout<VfsResult>.offset(of: \VfsResult.error)!, descriptor: Descriptor(schema: .concrete(SchemaId(0x361f4536eee9f991)), layout: Layout(size: MemoryLayout<Int32>.size, align: MemoryLayout<Int32>.alignment), access: .scalar))], construct: .inPlace))))], payloadLayout: MemoryLayout<VfsResult>.phonLayout), VariantAccess(wireIndex: 1, payloadFields: [FieldAccess(offset: 0, descriptor: Descriptor(schema: .concrete(SchemaId(0x3032e6270c5d2644)), layout: Layout(size: MemoryLayout<VoxError<Infallible>>.size, align: MemoryLayout<VoxError<Infallible>>.alignment), access: .enumeration(EnumAccess(
-            tag: { ptr in switch ptr.assumingMemoryBound(to: VoxError<Infallible>.self).pointee {
+            let v: Result<VfsResult, VfsVoxError<VfsInfallible>> = localIndex == 0 ? .success(scratch.assumingMemoryBound(to: VfsResult.self).move()) : .failure(scratch.assumingMemoryBound(to: VfsVoxError<VfsInfallible>.self).move())
+            slot.assumingMemoryBound(to: Result<VfsResult, VfsVoxError<VfsInfallible>>.self).initialize(to: v) },
+            variants: [VariantAccess(wireIndex: 0, payloadFields: [FieldAccess(offset: 0, descriptor: Descriptor(schema: .concrete(SchemaId(0x913891b444d17a61)), layout: Layout(size: MemoryLayout<VfsResult>.size, align: MemoryLayout<VfsResult>.alignment), access: .record(RecordAccess(fields: [FieldAccess(offset: MemoryLayout<VfsResult>.offset(of: \VfsResult.error)!, descriptor: Descriptor(schema: .concrete(SchemaId(0x361f4536eee9f991)), layout: Layout(size: MemoryLayout<Int32>.size, align: MemoryLayout<Int32>.alignment), access: .scalar))], construct: .inPlace))))], payloadLayout: MemoryLayout<VfsResult>.phonLayout), VariantAccess(wireIndex: 1, payloadFields: [FieldAccess(offset: 0, descriptor: Descriptor(schema: .concrete(SchemaId(0x3032e6270c5d2644)), layout: Layout(size: MemoryLayout<VfsVoxError<VfsInfallible>>.size, align: MemoryLayout<VfsVoxError<VfsInfallible>>.alignment), access: .enumeration(EnumAccess(
+            tag: { ptr in switch ptr.assumingMemoryBound(to: VfsVoxError<VfsInfallible>.self).pointee {
             case .user: return 0
             case .unknownMethod: return 1
             case .invalidPayload: return 2
@@ -624,10 +624,10 @@ nonisolated(unsafe) let vfs_rename_ResponseDescriptor: Descriptor = Descriptor(s
             case .sendFailed: return 6
             case .indeterminate: return 7
             } },
-            projectPayload: { value, _, scratch in switch value.assumingMemoryBound(to: VoxError<Infallible>.self).pointee {
+            projectPayload: { value, _, scratch in switch value.assumingMemoryBound(to: VfsVoxError<VfsInfallible>.self).pointee {
             case .user: fatalError("uninhabited variant payload")
             case .unknownMethod: break
-            case .invalidPayload(let f0): scratch.advanced(by: 0).assumingMemoryBound(to: String.self).initialize(to: f0); 
+            case .invalidPayload(let f0): scratch.advanced(by: 0).assumingMemoryBound(to: String.self).initialize(to: f0);
             case .cancelled: break
             case .connectionClosed: break
             case .sessionShutdown: break
@@ -636,15 +636,15 @@ nonisolated(unsafe) let vfs_rename_ResponseDescriptor: Descriptor = Descriptor(s
             } },
             destroyPayload: { scratch, localIndex in switch localIndex {
             case 0: break
-            case 2: scratch.advanced(by: 0).assumingMemoryBound(to: String.self).deinitialize(count: 1); 
+            case 2: scratch.advanced(by: 0).assumingMemoryBound(to: String.self).deinitialize(count: 1);
             default: break
             } },
             inject: { slot, localIndex, scratch in
-            let v: VoxError<Infallible>
+            let v: VfsVoxError<VfsInfallible>
             switch localIndex {
             case 0: fatalError("uninhabited variant payload")
             case 1: v = .unknownMethod
-            case 2: let f0 = scratch.advanced(by: 0).assumingMemoryBound(to: String.self).move(); v = .invalidPayload(f0)
+            case 2: let f0 = scratch.advanced(by: 0).assumingMemoryBound(to: String.self).move();v = .invalidPayload(f0)
             case 3: v = .cancelled
             case 4: v = .connectionClosed
             case 5: v = .sessionShutdown
@@ -652,20 +652,20 @@ nonisolated(unsafe) let vfs_rename_ResponseDescriptor: Descriptor = Descriptor(s
             case 7: v = .indeterminate
             default: fatalError("bad variant index")
             }
-            slot.assumingMemoryBound(to: VoxError<Infallible>.self).initialize(to: v) },
-            variants: [VariantAccess(wireIndex: 0, payloadFields: [FieldAccess(offset: 0, descriptor: Descriptor(schema: .concrete(SchemaId(0x8bfe7856188d64f1)), layout: Layout(size: MemoryLayout<Infallible>.size, align: MemoryLayout<Infallible>.alignment), access: .record(RecordAccess(fields: [], construct: .inPlace))))], payloadLayout: MemoryLayout<Infallible>.phonLayout), VariantAccess(wireIndex: 1, payloadFields: [], payloadLayout: Layout(size: 0, align: 1)), VariantAccess(wireIndex: 2, payloadFields: [FieldAccess(offset: 0, descriptor: Descriptor(schema: .concrete(SchemaId(0x6d7dce914ee150e8)), layout: Layout(size: MemoryLayout<String>.size, align: MemoryLayout<String>.alignment), access: .bytes(BytesAccess(stride: 1, elemAlign: 1, witness: .string))))], payloadLayout: MemoryLayout<String>.phonLayout), VariantAccess(wireIndex: 3, payloadFields: [], payloadLayout: Layout(size: 0, align: 1)), VariantAccess(wireIndex: 4, payloadFields: [], payloadLayout: Layout(size: 0, align: 1)), VariantAccess(wireIndex: 5, payloadFields: [], payloadLayout: Layout(size: 0, align: 1)), VariantAccess(wireIndex: 6, payloadFields: [], payloadLayout: Layout(size: 0, align: 1)), VariantAccess(wireIndex: 7, payloadFields: [], payloadLayout: Layout(size: 0, align: 1))]))))], payloadLayout: MemoryLayout<VoxError<Infallible>>.phonLayout)])))
+            slot.assumingMemoryBound(to: VfsVoxError<VfsInfallible>.self).initialize(to: v) },
+            variants: [VariantAccess(wireIndex: 0, payloadFields: [FieldAccess(offset: 0, descriptor: Descriptor(schema: .concrete(SchemaId(0x8bfe7856188d64f1)), layout: Layout(size: MemoryLayout<VfsInfallible>.size, align: MemoryLayout<VfsInfallible>.alignment), access: .record(RecordAccess(fields: [], construct: .inPlace))))], payloadLayout: MemoryLayout<VfsInfallible>.phonLayout), VariantAccess(wireIndex: 1, payloadFields: [], payloadLayout: Layout(size: 0, align: 1)), VariantAccess(wireIndex: 2, payloadFields: [FieldAccess(offset: 0, descriptor: Descriptor(schema: .concrete(SchemaId(0x6d7dce914ee150e8)), layout: Layout(size: MemoryLayout<String>.size, align: MemoryLayout<String>.alignment), access: .bytes(BytesAccess(stride: 1, elemAlign: 1, witness: .string))))], payloadLayout: MemoryLayout<String>.phonLayout), VariantAccess(wireIndex: 3, payloadFields: [], payloadLayout: Layout(size: 0, align: 1)), VariantAccess(wireIndex: 4, payloadFields: [], payloadLayout: Layout(size: 0, align: 1)), VariantAccess(wireIndex: 5, payloadFields: [], payloadLayout: Layout(size: 0, align: 1)), VariantAccess(wireIndex: 6, payloadFields: [], payloadLayout: Layout(size: 0, align: 1)), VariantAccess(wireIndex: 7, payloadFields: [], payloadLayout: Layout(size: 0, align: 1))]))))], payloadLayout: MemoryLayout<VfsVoxError<VfsInfallible>>.phonLayout)])))
 nonisolated(unsafe) let vfs_rename_ResponseDescriptorBlocks: [SchemaId: Descriptor] = [:]
 nonisolated(unsafe) let vfs_setAttributes_ArgsDescriptor: Descriptor = Descriptor(schema: .concrete(SchemaId(0x520b7af70f1bcc79)), layout: Layout(size: MemoryLayout<(UInt64, SetAttributesParams)>.size, align: MemoryLayout<(UInt64, SetAttributesParams)>.alignment), access: .record(RecordAccess(fields: [FieldAccess(offset: MemoryLayout<(UInt64, SetAttributesParams)>.offset(of: \.0)!, descriptor: Descriptor(schema: .concrete(SchemaId(0xd9356298b81639ac)), layout: Layout(size: MemoryLayout<UInt64>.size, align: MemoryLayout<UInt64>.alignment), access: .scalar)), FieldAccess(offset: MemoryLayout<(UInt64, SetAttributesParams)>.offset(of: \.1)!, descriptor: Descriptor(schema: .concrete(SchemaId(0x588f0e34e94c74db)), layout: Layout(size: MemoryLayout<SetAttributesParams>.size, align: MemoryLayout<SetAttributesParams>.alignment), access: .record(RecordAccess(fields: [FieldAccess(offset: MemoryLayout<SetAttributesParams>.offset(of: \SetAttributesParams.mode)!, descriptor: Descriptor(schema: .concrete(SchemaId(0x204c22815e2e921d)), layout: Layout(size: MemoryLayout<UInt32?>.size, align: MemoryLayout<UInt32?>.alignment), access: .option(OptionAccess(witness: .of(UInt32.self), some: Descriptor(schema: .concrete(SchemaId(0x281c5be4f2ee63b4)), layout: Layout(size: MemoryLayout<UInt32>.size, align: MemoryLayout<UInt32>.alignment), access: .scalar))))), FieldAccess(offset: MemoryLayout<SetAttributesParams>.offset(of: \SetAttributesParams.modifiedTime)!, descriptor: Descriptor(schema: .concrete(SchemaId(0x1558460a4da2721d)), layout: Layout(size: MemoryLayout<UInt64?>.size, align: MemoryLayout<UInt64?>.alignment), access: .option(OptionAccess(witness: .of(UInt64.self), some: Descriptor(schema: .concrete(SchemaId(0xd9356298b81639ac)), layout: Layout(size: MemoryLayout<UInt64>.size, align: MemoryLayout<UInt64>.alignment), access: .scalar))))), FieldAccess(offset: MemoryLayout<SetAttributesParams>.offset(of: \SetAttributesParams.size)!, descriptor: Descriptor(schema: .concrete(SchemaId(0x1558460a4da2721d)), layout: Layout(size: MemoryLayout<UInt64?>.size, align: MemoryLayout<UInt64?>.alignment), access: .option(OptionAccess(witness: .of(UInt64.self), some: Descriptor(schema: .concrete(SchemaId(0xd9356298b81639ac)), layout: Layout(size: MemoryLayout<UInt64>.size, align: MemoryLayout<UInt64>.alignment), access: .scalar)))))], construct: .inPlace))))], construct: .inPlace)))
 nonisolated(unsafe) let vfs_setAttributes_ArgsDescriptorBlocks: [SchemaId: Descriptor] = [:]
-nonisolated(unsafe) let vfs_setAttributes_ResponseDescriptor: Descriptor = Descriptor(schema: .concrete(SchemaId(0xe20f9d0564afad42)), layout: Layout(size: MemoryLayout<Result<VfsResult, VoxError<Infallible>>>.size, align: MemoryLayout<Result<VfsResult, VoxError<Infallible>>>.alignment), access: .enumeration(EnumAccess(
-            tag: { ptr in switch ptr.assumingMemoryBound(to: Result<VfsResult, VoxError<Infallible>>.self).pointee { case .success: return 0; case .failure: return 1 } },
-            projectPayload: { value, _, scratch in switch value.assumingMemoryBound(to: Result<VfsResult, VoxError<Infallible>>.self).pointee { case .success(let f0): scratch.assumingMemoryBound(to: VfsResult.self).initialize(to: f0); case .failure(let f0): scratch.assumingMemoryBound(to: VoxError<Infallible>.self).initialize(to: f0) } },
-            destroyPayload: { scratch, localIndex in if localIndex == 0 { scratch.assumingMemoryBound(to: VfsResult.self).deinitialize(count: 1) } else { scratch.assumingMemoryBound(to: VoxError<Infallible>.self).deinitialize(count: 1) } },
+nonisolated(unsafe) let vfs_setAttributes_ResponseDescriptor: Descriptor = Descriptor(schema: .concrete(SchemaId(0xe20f9d0564afad42)), layout: Layout(size: MemoryLayout<Result<VfsResult, VfsVoxError<VfsInfallible>>>.size, align: MemoryLayout<Result<VfsResult, VfsVoxError<VfsInfallible>>>.alignment), access: .enumeration(EnumAccess(
+            tag: { ptr in switch ptr.assumingMemoryBound(to: Result<VfsResult, VfsVoxError<VfsInfallible>>.self).pointee { case .success: return 0; case .failure: return 1 } },
+            projectPayload: { value, _, scratch in switch value.assumingMemoryBound(to: Result<VfsResult, VfsVoxError<VfsInfallible>>.self).pointee { case .success(let f0): scratch.assumingMemoryBound(to: VfsResult.self).initialize(to: f0); case .failure(let f0): scratch.assumingMemoryBound(to: VfsVoxError<VfsInfallible>.self).initialize(to: f0) } },
+            destroyPayload: { scratch, localIndex in if localIndex == 0 { scratch.assumingMemoryBound(to: VfsResult.self).deinitialize(count: 1) } else { scratch.assumingMemoryBound(to: VfsVoxError<VfsInfallible>.self).deinitialize(count: 1) } },
             inject: { slot, localIndex, scratch in
-            let v: Result<VfsResult, VoxError<Infallible>> = localIndex == 0 ? .success(scratch.assumingMemoryBound(to: VfsResult.self).move()) : .failure(scratch.assumingMemoryBound(to: VoxError<Infallible>.self).move())
-            slot.assumingMemoryBound(to: Result<VfsResult, VoxError<Infallible>>.self).initialize(to: v) },
-            variants: [VariantAccess(wireIndex: 0, payloadFields: [FieldAccess(offset: 0, descriptor: Descriptor(schema: .concrete(SchemaId(0x913891b444d17a61)), layout: Layout(size: MemoryLayout<VfsResult>.size, align: MemoryLayout<VfsResult>.alignment), access: .record(RecordAccess(fields: [FieldAccess(offset: MemoryLayout<VfsResult>.offset(of: \VfsResult.error)!, descriptor: Descriptor(schema: .concrete(SchemaId(0x361f4536eee9f991)), layout: Layout(size: MemoryLayout<Int32>.size, align: MemoryLayout<Int32>.alignment), access: .scalar))], construct: .inPlace))))], payloadLayout: MemoryLayout<VfsResult>.phonLayout), VariantAccess(wireIndex: 1, payloadFields: [FieldAccess(offset: 0, descriptor: Descriptor(schema: .concrete(SchemaId(0x3032e6270c5d2644)), layout: Layout(size: MemoryLayout<VoxError<Infallible>>.size, align: MemoryLayout<VoxError<Infallible>>.alignment), access: .enumeration(EnumAccess(
-            tag: { ptr in switch ptr.assumingMemoryBound(to: VoxError<Infallible>.self).pointee {
+            let v: Result<VfsResult, VfsVoxError<VfsInfallible>> = localIndex == 0 ? .success(scratch.assumingMemoryBound(to: VfsResult.self).move()) : .failure(scratch.assumingMemoryBound(to: VfsVoxError<VfsInfallible>.self).move())
+            slot.assumingMemoryBound(to: Result<VfsResult, VfsVoxError<VfsInfallible>>.self).initialize(to: v) },
+            variants: [VariantAccess(wireIndex: 0, payloadFields: [FieldAccess(offset: 0, descriptor: Descriptor(schema: .concrete(SchemaId(0x913891b444d17a61)), layout: Layout(size: MemoryLayout<VfsResult>.size, align: MemoryLayout<VfsResult>.alignment), access: .record(RecordAccess(fields: [FieldAccess(offset: MemoryLayout<VfsResult>.offset(of: \VfsResult.error)!, descriptor: Descriptor(schema: .concrete(SchemaId(0x361f4536eee9f991)), layout: Layout(size: MemoryLayout<Int32>.size, align: MemoryLayout<Int32>.alignment), access: .scalar))], construct: .inPlace))))], payloadLayout: MemoryLayout<VfsResult>.phonLayout), VariantAccess(wireIndex: 1, payloadFields: [FieldAccess(offset: 0, descriptor: Descriptor(schema: .concrete(SchemaId(0x3032e6270c5d2644)), layout: Layout(size: MemoryLayout<VfsVoxError<VfsInfallible>>.size, align: MemoryLayout<VfsVoxError<VfsInfallible>>.alignment), access: .enumeration(EnumAccess(
+            tag: { ptr in switch ptr.assumingMemoryBound(to: VfsVoxError<VfsInfallible>.self).pointee {
             case .user: return 0
             case .unknownMethod: return 1
             case .invalidPayload: return 2
@@ -675,10 +675,10 @@ nonisolated(unsafe) let vfs_setAttributes_ResponseDescriptor: Descriptor = Descr
             case .sendFailed: return 6
             case .indeterminate: return 7
             } },
-            projectPayload: { value, _, scratch in switch value.assumingMemoryBound(to: VoxError<Infallible>.self).pointee {
+            projectPayload: { value, _, scratch in switch value.assumingMemoryBound(to: VfsVoxError<VfsInfallible>.self).pointee {
             case .user: fatalError("uninhabited variant payload")
             case .unknownMethod: break
-            case .invalidPayload(let f0): scratch.advanced(by: 0).assumingMemoryBound(to: String.self).initialize(to: f0); 
+            case .invalidPayload(let f0): scratch.advanced(by: 0).assumingMemoryBound(to: String.self).initialize(to: f0);
             case .cancelled: break
             case .connectionClosed: break
             case .sessionShutdown: break
@@ -687,15 +687,15 @@ nonisolated(unsafe) let vfs_setAttributes_ResponseDescriptor: Descriptor = Descr
             } },
             destroyPayload: { scratch, localIndex in switch localIndex {
             case 0: break
-            case 2: scratch.advanced(by: 0).assumingMemoryBound(to: String.self).deinitialize(count: 1); 
+            case 2: scratch.advanced(by: 0).assumingMemoryBound(to: String.self).deinitialize(count: 1);
             default: break
             } },
             inject: { slot, localIndex, scratch in
-            let v: VoxError<Infallible>
+            let v: VfsVoxError<VfsInfallible>
             switch localIndex {
             case 0: fatalError("uninhabited variant payload")
             case 1: v = .unknownMethod
-            case 2: let f0 = scratch.advanced(by: 0).assumingMemoryBound(to: String.self).move(); v = .invalidPayload(f0)
+            case 2: let f0 = scratch.advanced(by: 0).assumingMemoryBound(to: String.self).move();v = .invalidPayload(f0)
             case 3: v = .cancelled
             case 4: v = .connectionClosed
             case 5: v = .sessionShutdown
@@ -703,20 +703,20 @@ nonisolated(unsafe) let vfs_setAttributes_ResponseDescriptor: Descriptor = Descr
             case 7: v = .indeterminate
             default: fatalError("bad variant index")
             }
-            slot.assumingMemoryBound(to: VoxError<Infallible>.self).initialize(to: v) },
-            variants: [VariantAccess(wireIndex: 0, payloadFields: [FieldAccess(offset: 0, descriptor: Descriptor(schema: .concrete(SchemaId(0x8bfe7856188d64f1)), layout: Layout(size: MemoryLayout<Infallible>.size, align: MemoryLayout<Infallible>.alignment), access: .record(RecordAccess(fields: [], construct: .inPlace))))], payloadLayout: MemoryLayout<Infallible>.phonLayout), VariantAccess(wireIndex: 1, payloadFields: [], payloadLayout: Layout(size: 0, align: 1)), VariantAccess(wireIndex: 2, payloadFields: [FieldAccess(offset: 0, descriptor: Descriptor(schema: .concrete(SchemaId(0x6d7dce914ee150e8)), layout: Layout(size: MemoryLayout<String>.size, align: MemoryLayout<String>.alignment), access: .bytes(BytesAccess(stride: 1, elemAlign: 1, witness: .string))))], payloadLayout: MemoryLayout<String>.phonLayout), VariantAccess(wireIndex: 3, payloadFields: [], payloadLayout: Layout(size: 0, align: 1)), VariantAccess(wireIndex: 4, payloadFields: [], payloadLayout: Layout(size: 0, align: 1)), VariantAccess(wireIndex: 5, payloadFields: [], payloadLayout: Layout(size: 0, align: 1)), VariantAccess(wireIndex: 6, payloadFields: [], payloadLayout: Layout(size: 0, align: 1)), VariantAccess(wireIndex: 7, payloadFields: [], payloadLayout: Layout(size: 0, align: 1))]))))], payloadLayout: MemoryLayout<VoxError<Infallible>>.phonLayout)])))
+            slot.assumingMemoryBound(to: VfsVoxError<VfsInfallible>.self).initialize(to: v) },
+            variants: [VariantAccess(wireIndex: 0, payloadFields: [FieldAccess(offset: 0, descriptor: Descriptor(schema: .concrete(SchemaId(0x8bfe7856188d64f1)), layout: Layout(size: MemoryLayout<VfsInfallible>.size, align: MemoryLayout<VfsInfallible>.alignment), access: .record(RecordAccess(fields: [], construct: .inPlace))))], payloadLayout: MemoryLayout<VfsInfallible>.phonLayout), VariantAccess(wireIndex: 1, payloadFields: [], payloadLayout: Layout(size: 0, align: 1)), VariantAccess(wireIndex: 2, payloadFields: [FieldAccess(offset: 0, descriptor: Descriptor(schema: .concrete(SchemaId(0x6d7dce914ee150e8)), layout: Layout(size: MemoryLayout<String>.size, align: MemoryLayout<String>.alignment), access: .bytes(BytesAccess(stride: 1, elemAlign: 1, witness: .string))))], payloadLayout: MemoryLayout<String>.phonLayout), VariantAccess(wireIndex: 3, payloadFields: [], payloadLayout: Layout(size: 0, align: 1)), VariantAccess(wireIndex: 4, payloadFields: [], payloadLayout: Layout(size: 0, align: 1)), VariantAccess(wireIndex: 5, payloadFields: [], payloadLayout: Layout(size: 0, align: 1)), VariantAccess(wireIndex: 6, payloadFields: [], payloadLayout: Layout(size: 0, align: 1)), VariantAccess(wireIndex: 7, payloadFields: [], payloadLayout: Layout(size: 0, align: 1))]))))], payloadLayout: MemoryLayout<VfsVoxError<VfsInfallible>>.phonLayout)])))
 nonisolated(unsafe) let vfs_setAttributes_ResponseDescriptorBlocks: [SchemaId: Descriptor] = [:]
 nonisolated(unsafe) let vfs_ping_ArgsDescriptor: Descriptor = Descriptor(schema: .concrete(SchemaId(0xbc5c33249a2dc720)), layout: Layout(size: MemoryLayout<Void>.size, align: MemoryLayout<Void>.alignment), access: .scalar)
 nonisolated(unsafe) let vfs_ping_ArgsDescriptorBlocks: [SchemaId: Descriptor] = [:]
-nonisolated(unsafe) let vfs_ping_ResponseDescriptor: Descriptor = Descriptor(schema: .concrete(SchemaId(0xa40be1c5eb244dd8)), layout: Layout(size: MemoryLayout<Result<String, VoxError<Infallible>>>.size, align: MemoryLayout<Result<String, VoxError<Infallible>>>.alignment), access: .enumeration(EnumAccess(
-            tag: { ptr in switch ptr.assumingMemoryBound(to: Result<String, VoxError<Infallible>>.self).pointee { case .success: return 0; case .failure: return 1 } },
-            projectPayload: { value, _, scratch in switch value.assumingMemoryBound(to: Result<String, VoxError<Infallible>>.self).pointee { case .success(let f0): scratch.assumingMemoryBound(to: String.self).initialize(to: f0); case .failure(let f0): scratch.assumingMemoryBound(to: VoxError<Infallible>.self).initialize(to: f0) } },
-            destroyPayload: { scratch, localIndex in if localIndex == 0 { scratch.assumingMemoryBound(to: String.self).deinitialize(count: 1) } else { scratch.assumingMemoryBound(to: VoxError<Infallible>.self).deinitialize(count: 1) } },
+nonisolated(unsafe) let vfs_ping_ResponseDescriptor: Descriptor = Descriptor(schema: .concrete(SchemaId(0xa40be1c5eb244dd8)), layout: Layout(size: MemoryLayout<Result<String, VfsVoxError<VfsInfallible>>>.size, align: MemoryLayout<Result<String, VfsVoxError<VfsInfallible>>>.alignment), access: .enumeration(EnumAccess(
+            tag: { ptr in switch ptr.assumingMemoryBound(to: Result<String, VfsVoxError<VfsInfallible>>.self).pointee { case .success: return 0; case .failure: return 1 } },
+            projectPayload: { value, _, scratch in switch value.assumingMemoryBound(to: Result<String, VfsVoxError<VfsInfallible>>.self).pointee { case .success(let f0): scratch.assumingMemoryBound(to: String.self).initialize(to: f0); case .failure(let f0): scratch.assumingMemoryBound(to: VfsVoxError<VfsInfallible>.self).initialize(to: f0) } },
+            destroyPayload: { scratch, localIndex in if localIndex == 0 { scratch.assumingMemoryBound(to: String.self).deinitialize(count: 1) } else { scratch.assumingMemoryBound(to: VfsVoxError<VfsInfallible>.self).deinitialize(count: 1) } },
             inject: { slot, localIndex, scratch in
-            let v: Result<String, VoxError<Infallible>> = localIndex == 0 ? .success(scratch.assumingMemoryBound(to: String.self).move()) : .failure(scratch.assumingMemoryBound(to: VoxError<Infallible>.self).move())
-            slot.assumingMemoryBound(to: Result<String, VoxError<Infallible>>.self).initialize(to: v) },
-            variants: [VariantAccess(wireIndex: 0, payloadFields: [FieldAccess(offset: 0, descriptor: Descriptor(schema: .concrete(SchemaId(0x6d7dce914ee150e8)), layout: Layout(size: MemoryLayout<String>.size, align: MemoryLayout<String>.alignment), access: .bytes(BytesAccess(stride: 1, elemAlign: 1, witness: .string))))], payloadLayout: MemoryLayout<String>.phonLayout), VariantAccess(wireIndex: 1, payloadFields: [FieldAccess(offset: 0, descriptor: Descriptor(schema: .concrete(SchemaId(0x3032e6270c5d2644)), layout: Layout(size: MemoryLayout<VoxError<Infallible>>.size, align: MemoryLayout<VoxError<Infallible>>.alignment), access: .enumeration(EnumAccess(
-            tag: { ptr in switch ptr.assumingMemoryBound(to: VoxError<Infallible>.self).pointee {
+            let v: Result<String, VfsVoxError<VfsInfallible>> = localIndex == 0 ? .success(scratch.assumingMemoryBound(to: String.self).move()) : .failure(scratch.assumingMemoryBound(to: VfsVoxError<VfsInfallible>.self).move())
+            slot.assumingMemoryBound(to: Result<String, VfsVoxError<VfsInfallible>>.self).initialize(to: v) },
+            variants: [VariantAccess(wireIndex: 0, payloadFields: [FieldAccess(offset: 0, descriptor: Descriptor(schema: .concrete(SchemaId(0x6d7dce914ee150e8)), layout: Layout(size: MemoryLayout<String>.size, align: MemoryLayout<String>.alignment), access: .bytes(BytesAccess(stride: 1, elemAlign: 1, witness: .string))))], payloadLayout: MemoryLayout<String>.phonLayout), VariantAccess(wireIndex: 1, payloadFields: [FieldAccess(offset: 0, descriptor: Descriptor(schema: .concrete(SchemaId(0x3032e6270c5d2644)), layout: Layout(size: MemoryLayout<VfsVoxError<VfsInfallible>>.size, align: MemoryLayout<VfsVoxError<VfsInfallible>>.alignment), access: .enumeration(EnumAccess(
+            tag: { ptr in switch ptr.assumingMemoryBound(to: VfsVoxError<VfsInfallible>.self).pointee {
             case .user: return 0
             case .unknownMethod: return 1
             case .invalidPayload: return 2
@@ -726,10 +726,10 @@ nonisolated(unsafe) let vfs_ping_ResponseDescriptor: Descriptor = Descriptor(sch
             case .sendFailed: return 6
             case .indeterminate: return 7
             } },
-            projectPayload: { value, _, scratch in switch value.assumingMemoryBound(to: VoxError<Infallible>.self).pointee {
+            projectPayload: { value, _, scratch in switch value.assumingMemoryBound(to: VfsVoxError<VfsInfallible>.self).pointee {
             case .user: fatalError("uninhabited variant payload")
             case .unknownMethod: break
-            case .invalidPayload(let f0): scratch.advanced(by: 0).assumingMemoryBound(to: String.self).initialize(to: f0); 
+            case .invalidPayload(let f0): scratch.advanced(by: 0).assumingMemoryBound(to: String.self).initialize(to: f0);
             case .cancelled: break
             case .connectionClosed: break
             case .sessionShutdown: break
@@ -738,15 +738,15 @@ nonisolated(unsafe) let vfs_ping_ResponseDescriptor: Descriptor = Descriptor(sch
             } },
             destroyPayload: { scratch, localIndex in switch localIndex {
             case 0: break
-            case 2: scratch.advanced(by: 0).assumingMemoryBound(to: String.self).deinitialize(count: 1); 
+            case 2: scratch.advanced(by: 0).assumingMemoryBound(to: String.self).deinitialize(count: 1);
             default: break
             } },
             inject: { slot, localIndex, scratch in
-            let v: VoxError<Infallible>
+            let v: VfsVoxError<VfsInfallible>
             switch localIndex {
             case 0: fatalError("uninhabited variant payload")
             case 1: v = .unknownMethod
-            case 2: let f0 = scratch.advanced(by: 0).assumingMemoryBound(to: String.self).move(); v = .invalidPayload(f0)
+            case 2: let f0 = scratch.advanced(by: 0).assumingMemoryBound(to: String.self).move();v = .invalidPayload(f0)
             case 3: v = .cancelled
             case 4: v = .connectionClosed
             case 5: v = .sessionShutdown
@@ -754,11 +754,11 @@ nonisolated(unsafe) let vfs_ping_ResponseDescriptor: Descriptor = Descriptor(sch
             case 7: v = .indeterminate
             default: fatalError("bad variant index")
             }
-            slot.assumingMemoryBound(to: VoxError<Infallible>.self).initialize(to: v) },
-            variants: [VariantAccess(wireIndex: 0, payloadFields: [FieldAccess(offset: 0, descriptor: Descriptor(schema: .concrete(SchemaId(0x8bfe7856188d64f1)), layout: Layout(size: MemoryLayout<Infallible>.size, align: MemoryLayout<Infallible>.alignment), access: .record(RecordAccess(fields: [], construct: .inPlace))))], payloadLayout: MemoryLayout<Infallible>.phonLayout), VariantAccess(wireIndex: 1, payloadFields: [], payloadLayout: Layout(size: 0, align: 1)), VariantAccess(wireIndex: 2, payloadFields: [FieldAccess(offset: 0, descriptor: Descriptor(schema: .concrete(SchemaId(0x6d7dce914ee150e8)), layout: Layout(size: MemoryLayout<String>.size, align: MemoryLayout<String>.alignment), access: .bytes(BytesAccess(stride: 1, elemAlign: 1, witness: .string))))], payloadLayout: MemoryLayout<String>.phonLayout), VariantAccess(wireIndex: 3, payloadFields: [], payloadLayout: Layout(size: 0, align: 1)), VariantAccess(wireIndex: 4, payloadFields: [], payloadLayout: Layout(size: 0, align: 1)), VariantAccess(wireIndex: 5, payloadFields: [], payloadLayout: Layout(size: 0, align: 1)), VariantAccess(wireIndex: 6, payloadFields: [], payloadLayout: Layout(size: 0, align: 1)), VariantAccess(wireIndex: 7, payloadFields: [], payloadLayout: Layout(size: 0, align: 1))]))))], payloadLayout: MemoryLayout<VoxError<Infallible>>.phonLayout)])))
+            slot.assumingMemoryBound(to: VfsVoxError<VfsInfallible>.self).initialize(to: v) },
+            variants: [VariantAccess(wireIndex: 0, payloadFields: [FieldAccess(offset: 0, descriptor: Descriptor(schema: .concrete(SchemaId(0x8bfe7856188d64f1)), layout: Layout(size: MemoryLayout<VfsInfallible>.size, align: MemoryLayout<VfsInfallible>.alignment), access: .record(RecordAccess(fields: [], construct: .inPlace))))], payloadLayout: MemoryLayout<VfsInfallible>.phonLayout), VariantAccess(wireIndex: 1, payloadFields: [], payloadLayout: Layout(size: 0, align: 1)), VariantAccess(wireIndex: 2, payloadFields: [FieldAccess(offset: 0, descriptor: Descriptor(schema: .concrete(SchemaId(0x6d7dce914ee150e8)), layout: Layout(size: MemoryLayout<String>.size, align: MemoryLayout<String>.alignment), access: .bytes(BytesAccess(stride: 1, elemAlign: 1, witness: .string))))], payloadLayout: MemoryLayout<String>.phonLayout), VariantAccess(wireIndex: 3, payloadFields: [], payloadLayout: Layout(size: 0, align: 1)), VariantAccess(wireIndex: 4, payloadFields: [], payloadLayout: Layout(size: 0, align: 1)), VariantAccess(wireIndex: 5, payloadFields: [], payloadLayout: Layout(size: 0, align: 1)), VariantAccess(wireIndex: 6, payloadFields: [], payloadLayout: Layout(size: 0, align: 1)), VariantAccess(wireIndex: 7, payloadFields: [], payloadLayout: Layout(size: 0, align: 1))]))))], payloadLayout: MemoryLayout<VfsVoxError<VfsInfallible>>.phonLayout)])))
 nonisolated(unsafe) let vfs_ping_ResponseDescriptorBlocks: [SchemaId: Descriptor] = [:]
 
-public let vfsMethods: [UInt64: PhonMethodSchemas] = [
+nonisolated public let vfsMethods: [UInt64: PhonMethodSchemas] = [
     0xab2b853c144d133b: PhonMethodSchemas(
         argsRoot: SchemaId(0xbd977dd7da39259f),
         argsSchemaClosure: [159, 37, 57, 218, 215, 125, 151, 189, 1, 0, 0, 0, 215, 0, 0, 0, 22, 6, 0, 0, 0, 83, 99, 104, 101, 109, 97, 3, 0, 0, 0, 2, 0, 0, 0, 105, 100, 5, 159, 37, 57, 218, 215, 125, 151, 189, 11, 0, 0, 0, 116, 121, 112, 101, 95, 112, 97, 114, 97, 109, 115, 17, 0, 0, 0, 0, 4, 0, 0, 0, 107, 105, 110, 100, 23, 5, 0, 0, 0, 84, 117, 112, 108, 101, 22, 5, 0, 0, 0, 84, 117, 112, 108, 101, 1, 0, 0, 0, 8, 0, 0, 0, 101, 108, 101, 109, 101, 110, 116, 115, 17, 2, 0, 0, 0, 23, 8, 0, 0, 0, 67, 111, 110, 99, 114, 101, 116, 101, 22, 8, 0, 0, 0, 67, 111, 110, 99, 114, 101, 116, 101, 2, 0, 0, 0, 2, 0, 0, 0, 105, 100, 5, 172, 57, 22, 184, 152, 98, 53, 217, 4, 0, 0, 0, 97, 114, 103, 115, 17, 0, 0, 0, 0, 23, 8, 0, 0, 0, 67, 111, 110, 99, 114, 101, 116, 101, 22, 8, 0, 0, 0, 67, 111, 110, 99, 114, 101, 116, 101, 2, 0, 0, 0, 2, 0, 0, 0, 105, 100, 5, 232, 80, 225, 78, 145, 206, 125, 109, 4, 0, 0, 0, 97, 114, 103, 115, 17, 0, 0, 0, 0],
@@ -877,44 +877,44 @@ nonisolated(unsafe) public let vfsRegistry: Registry = buildServiceRegistry(vfsM
 
 nonisolated(unsafe) let vfs_lookup_ArgsEncodeProgram: Lowered = try! lowerTyped(vfs_lookup_ArgsDescriptor, vfsRegistry, vfs_lookup_ArgsDescriptorBlocks)
 nonisolated(unsafe) let vfs_lookup_ResponseEncodeProgram: Lowered = try! lowerTyped(vfs_lookup_ResponseDescriptor, vfsRegistry, vfs_lookup_ResponseDescriptorBlocks)
-let vfs_lookup_ArgsEncoder = VoxTypedEncoder(vfs_lookup_ArgsEncodeProgram)
-let vfs_lookup_ResponseEncoder = VoxTypedEncoder(vfs_lookup_ResponseEncodeProgram)
+nonisolated let vfs_lookup_ArgsEncoder = VoxTypedEncoder(vfs_lookup_ArgsEncodeProgram)
+nonisolated let vfs_lookup_ResponseEncoder = VoxTypedEncoder(vfs_lookup_ResponseEncodeProgram)
 nonisolated(unsafe) let vfs_getAttributes_ArgsEncodeProgram: Lowered = try! lowerTyped(vfs_getAttributes_ArgsDescriptor, vfsRegistry, vfs_getAttributes_ArgsDescriptorBlocks)
 nonisolated(unsafe) let vfs_getAttributes_ResponseEncodeProgram: Lowered = try! lowerTyped(vfs_getAttributes_ResponseDescriptor, vfsRegistry, vfs_getAttributes_ResponseDescriptorBlocks)
-let vfs_getAttributes_ArgsEncoder = VoxTypedEncoder(vfs_getAttributes_ArgsEncodeProgram)
-let vfs_getAttributes_ResponseEncoder = VoxTypedEncoder(vfs_getAttributes_ResponseEncodeProgram)
+nonisolated let vfs_getAttributes_ArgsEncoder = VoxTypedEncoder(vfs_getAttributes_ArgsEncodeProgram)
+nonisolated let vfs_getAttributes_ResponseEncoder = VoxTypedEncoder(vfs_getAttributes_ResponseEncodeProgram)
 nonisolated(unsafe) let vfs_readDir_ArgsEncodeProgram: Lowered = try! lowerTyped(vfs_readDir_ArgsDescriptor, vfsRegistry, vfs_readDir_ArgsDescriptorBlocks)
 nonisolated(unsafe) let vfs_readDir_ResponseEncodeProgram: Lowered = try! lowerTyped(vfs_readDir_ResponseDescriptor, vfsRegistry, vfs_readDir_ResponseDescriptorBlocks)
-let vfs_readDir_ArgsEncoder = VoxTypedEncoder(vfs_readDir_ArgsEncodeProgram)
-let vfs_readDir_ResponseEncoder = VoxTypedEncoder(vfs_readDir_ResponseEncodeProgram)
+nonisolated let vfs_readDir_ArgsEncoder = VoxTypedEncoder(vfs_readDir_ArgsEncodeProgram)
+nonisolated let vfs_readDir_ResponseEncoder = VoxTypedEncoder(vfs_readDir_ResponseEncodeProgram)
 nonisolated(unsafe) let vfs_read_ArgsEncodeProgram: Lowered = try! lowerTyped(vfs_read_ArgsDescriptor, vfsRegistry, vfs_read_ArgsDescriptorBlocks)
 nonisolated(unsafe) let vfs_read_ResponseEncodeProgram: Lowered = try! lowerTyped(vfs_read_ResponseDescriptor, vfsRegistry, vfs_read_ResponseDescriptorBlocks)
-let vfs_read_ArgsEncoder = VoxTypedEncoder(vfs_read_ArgsEncodeProgram)
-let vfs_read_ResponseEncoder = VoxTypedEncoder(vfs_read_ResponseEncodeProgram)
+nonisolated let vfs_read_ArgsEncoder = VoxTypedEncoder(vfs_read_ArgsEncodeProgram)
+nonisolated let vfs_read_ResponseEncoder = VoxTypedEncoder(vfs_read_ResponseEncodeProgram)
 nonisolated(unsafe) let vfs_write_ArgsEncodeProgram: Lowered = try! lowerTyped(vfs_write_ArgsDescriptor, vfsRegistry, vfs_write_ArgsDescriptorBlocks)
 nonisolated(unsafe) let vfs_write_ResponseEncodeProgram: Lowered = try! lowerTyped(vfs_write_ResponseDescriptor, vfsRegistry, vfs_write_ResponseDescriptorBlocks)
-let vfs_write_ArgsEncoder = VoxTypedEncoder(vfs_write_ArgsEncodeProgram)
-let vfs_write_ResponseEncoder = VoxTypedEncoder(vfs_write_ResponseEncodeProgram)
+nonisolated let vfs_write_ArgsEncoder = VoxTypedEncoder(vfs_write_ArgsEncodeProgram)
+nonisolated let vfs_write_ResponseEncoder = VoxTypedEncoder(vfs_write_ResponseEncodeProgram)
 nonisolated(unsafe) let vfs_create_ArgsEncodeProgram: Lowered = try! lowerTyped(vfs_create_ArgsDescriptor, vfsRegistry, vfs_create_ArgsDescriptorBlocks)
 nonisolated(unsafe) let vfs_create_ResponseEncodeProgram: Lowered = try! lowerTyped(vfs_create_ResponseDescriptor, vfsRegistry, vfs_create_ResponseDescriptorBlocks)
-let vfs_create_ArgsEncoder = VoxTypedEncoder(vfs_create_ArgsEncodeProgram)
-let vfs_create_ResponseEncoder = VoxTypedEncoder(vfs_create_ResponseEncodeProgram)
+nonisolated let vfs_create_ArgsEncoder = VoxTypedEncoder(vfs_create_ArgsEncodeProgram)
+nonisolated let vfs_create_ResponseEncoder = VoxTypedEncoder(vfs_create_ResponseEncodeProgram)
 nonisolated(unsafe) let vfs_delete_ArgsEncodeProgram: Lowered = try! lowerTyped(vfs_delete_ArgsDescriptor, vfsRegistry, vfs_delete_ArgsDescriptorBlocks)
 nonisolated(unsafe) let vfs_delete_ResponseEncodeProgram: Lowered = try! lowerTyped(vfs_delete_ResponseDescriptor, vfsRegistry, vfs_delete_ResponseDescriptorBlocks)
-let vfs_delete_ArgsEncoder = VoxTypedEncoder(vfs_delete_ArgsEncodeProgram)
-let vfs_delete_ResponseEncoder = VoxTypedEncoder(vfs_delete_ResponseEncodeProgram)
+nonisolated let vfs_delete_ArgsEncoder = VoxTypedEncoder(vfs_delete_ArgsEncodeProgram)
+nonisolated let vfs_delete_ResponseEncoder = VoxTypedEncoder(vfs_delete_ResponseEncodeProgram)
 nonisolated(unsafe) let vfs_rename_ArgsEncodeProgram: Lowered = try! lowerTyped(vfs_rename_ArgsDescriptor, vfsRegistry, vfs_rename_ArgsDescriptorBlocks)
 nonisolated(unsafe) let vfs_rename_ResponseEncodeProgram: Lowered = try! lowerTyped(vfs_rename_ResponseDescriptor, vfsRegistry, vfs_rename_ResponseDescriptorBlocks)
-let vfs_rename_ArgsEncoder = VoxTypedEncoder(vfs_rename_ArgsEncodeProgram)
-let vfs_rename_ResponseEncoder = VoxTypedEncoder(vfs_rename_ResponseEncodeProgram)
+nonisolated let vfs_rename_ArgsEncoder = VoxTypedEncoder(vfs_rename_ArgsEncodeProgram)
+nonisolated let vfs_rename_ResponseEncoder = VoxTypedEncoder(vfs_rename_ResponseEncodeProgram)
 nonisolated(unsafe) let vfs_setAttributes_ArgsEncodeProgram: Lowered = try! lowerTyped(vfs_setAttributes_ArgsDescriptor, vfsRegistry, vfs_setAttributes_ArgsDescriptorBlocks)
 nonisolated(unsafe) let vfs_setAttributes_ResponseEncodeProgram: Lowered = try! lowerTyped(vfs_setAttributes_ResponseDescriptor, vfsRegistry, vfs_setAttributes_ResponseDescriptorBlocks)
-let vfs_setAttributes_ArgsEncoder = VoxTypedEncoder(vfs_setAttributes_ArgsEncodeProgram)
-let vfs_setAttributes_ResponseEncoder = VoxTypedEncoder(vfs_setAttributes_ResponseEncodeProgram)
+nonisolated let vfs_setAttributes_ArgsEncoder = VoxTypedEncoder(vfs_setAttributes_ArgsEncodeProgram)
+nonisolated let vfs_setAttributes_ResponseEncoder = VoxTypedEncoder(vfs_setAttributes_ResponseEncodeProgram)
 nonisolated(unsafe) let vfs_ping_ArgsEncodeProgram: Lowered = try! lowerTyped(vfs_ping_ArgsDescriptor, vfsRegistry, vfs_ping_ArgsDescriptorBlocks)
 nonisolated(unsafe) let vfs_ping_ResponseEncodeProgram: Lowered = try! lowerTyped(vfs_ping_ResponseDescriptor, vfsRegistry, vfs_ping_ResponseDescriptorBlocks)
-let vfs_ping_ArgsEncoder = VoxTypedEncoder(vfs_ping_ArgsEncodeProgram)
-let vfs_ping_ResponseEncoder = VoxTypedEncoder(vfs_ping_ResponseEncodeProgram)
+nonisolated let vfs_ping_ArgsEncoder = VoxTypedEncoder(vfs_ping_ArgsEncodeProgram)
+nonisolated let vfs_ping_ResponseEncoder = VoxTypedEncoder(vfs_ping_ResponseEncodeProgram)
 
 ///  The VFS service trait - defines the RPC interface between client and server.
 public protocol VfsCaller: Sendable {
@@ -942,7 +942,9 @@ public protocol VfsCaller: Sendable {
     func ping() async throws -> String
 }
 
-public final class VfsClient: VfsCaller, Sendable {
+public final class VfsClient: VfsCaller, ExpectedRootClient, Sendable {
+    nonisolated public static let voxServiceName = "Vfs"
+
     private let connection: VoxConnection
     private let timeout: TimeInterval?
 
@@ -958,9 +960,9 @@ public final class VfsClient: VfsCaller, Sendable {
             finalizeChannels: nil,
             schemaInfo: ClientSchemaInfo(methodSchemas: vfsMethods[0xab2b853c144d133b]!, registry: vfsRegistry))
         guard let respDecoder = connection.schemaReceiveTracker.buildDecodeFn(0xab2b853c144d133b, .response, readerDescriptor: vfs_lookup_ResponseDescriptor, readerBlocks: vfs_lookup_ResponseDescriptorBlocks, local: vfsRegistry) else {
-            throw VoxError<Infallible>.invalidPayload("no response schema advertised")
+            throw VfsVoxError<VfsInfallible>.invalidPayload("no response schema advertised")
         }
-        let result: Result<LookupResult, VoxError<Infallible>> = try decodeVoxTyped(respDecoder, response)
+        let result: Result<LookupResult, VfsVoxError<VfsInfallible>> = try decodeVoxTyped(respDecoder, response)
         switch result {
         case .success(let value): return value
         case .failure(let error): throw error
@@ -974,9 +976,9 @@ public final class VfsClient: VfsCaller, Sendable {
             finalizeChannels: nil,
             schemaInfo: ClientSchemaInfo(methodSchemas: vfsMethods[0xd97f57caa097adf9]!, registry: vfsRegistry))
         guard let respDecoder = connection.schemaReceiveTracker.buildDecodeFn(0xd97f57caa097adf9, .response, readerDescriptor: vfs_getAttributes_ResponseDescriptor, readerBlocks: vfs_getAttributes_ResponseDescriptorBlocks, local: vfsRegistry) else {
-            throw VoxError<Infallible>.invalidPayload("no response schema advertised")
+            throw VfsVoxError<VfsInfallible>.invalidPayload("no response schema advertised")
         }
-        let result: Result<GetAttributesResult, VoxError<Infallible>> = try decodeVoxTyped(respDecoder, response)
+        let result: Result<GetAttributesResult, VfsVoxError<VfsInfallible>> = try decodeVoxTyped(respDecoder, response)
         switch result {
         case .success(let value): return value
         case .failure(let error): throw error
@@ -990,9 +992,9 @@ public final class VfsClient: VfsCaller, Sendable {
             finalizeChannels: nil,
             schemaInfo: ClientSchemaInfo(methodSchemas: vfsMethods[0xf2ba29feced65eb7]!, registry: vfsRegistry))
         guard let respDecoder = connection.schemaReceiveTracker.buildDecodeFn(0xf2ba29feced65eb7, .response, readerDescriptor: vfs_readDir_ResponseDescriptor, readerBlocks: vfs_readDir_ResponseDescriptorBlocks, local: vfsRegistry) else {
-            throw VoxError<Infallible>.invalidPayload("no response schema advertised")
+            throw VfsVoxError<VfsInfallible>.invalidPayload("no response schema advertised")
         }
-        let result: Result<ReadDirResult, VoxError<Infallible>> = try decodeVoxTyped(respDecoder, response)
+        let result: Result<ReadDirResult, VfsVoxError<VfsInfallible>> = try decodeVoxTyped(respDecoder, response)
         switch result {
         case .success(let value): return value
         case .failure(let error): throw error
@@ -1006,9 +1008,9 @@ public final class VfsClient: VfsCaller, Sendable {
             finalizeChannels: nil,
             schemaInfo: ClientSchemaInfo(methodSchemas: vfsMethods[0x719a43e94d147918]!, registry: vfsRegistry))
         guard let respDecoder = connection.schemaReceiveTracker.buildDecodeFn(0x719a43e94d147918, .response, readerDescriptor: vfs_read_ResponseDescriptor, readerBlocks: vfs_read_ResponseDescriptorBlocks, local: vfsRegistry) else {
-            throw VoxError<Infallible>.invalidPayload("no response schema advertised")
+            throw VfsVoxError<VfsInfallible>.invalidPayload("no response schema advertised")
         }
-        let result: Result<ReadResult, VoxError<Infallible>> = try decodeVoxTyped(respDecoder, response)
+        let result: Result<ReadResult, VfsVoxError<VfsInfallible>> = try decodeVoxTyped(respDecoder, response)
         switch result {
         case .success(let value): return value
         case .failure(let error): throw error
@@ -1022,9 +1024,9 @@ public final class VfsClient: VfsCaller, Sendable {
             finalizeChannels: nil,
             schemaInfo: ClientSchemaInfo(methodSchemas: vfsMethods[0xc330417994d57b8a]!, registry: vfsRegistry))
         guard let respDecoder = connection.schemaReceiveTracker.buildDecodeFn(0xc330417994d57b8a, .response, readerDescriptor: vfs_write_ResponseDescriptor, readerBlocks: vfs_write_ResponseDescriptorBlocks, local: vfsRegistry) else {
-            throw VoxError<Infallible>.invalidPayload("no response schema advertised")
+            throw VfsVoxError<VfsInfallible>.invalidPayload("no response schema advertised")
         }
-        let result: Result<WriteResult, VoxError<Infallible>> = try decodeVoxTyped(respDecoder, response)
+        let result: Result<WriteResult, VfsVoxError<VfsInfallible>> = try decodeVoxTyped(respDecoder, response)
         switch result {
         case .success(let value): return value
         case .failure(let error): throw error
@@ -1038,9 +1040,9 @@ public final class VfsClient: VfsCaller, Sendable {
             finalizeChannels: nil,
             schemaInfo: ClientSchemaInfo(methodSchemas: vfsMethods[0x9b060d7cd7c1a62e]!, registry: vfsRegistry))
         guard let respDecoder = connection.schemaReceiveTracker.buildDecodeFn(0x9b060d7cd7c1a62e, .response, readerDescriptor: vfs_create_ResponseDescriptor, readerBlocks: vfs_create_ResponseDescriptorBlocks, local: vfsRegistry) else {
-            throw VoxError<Infallible>.invalidPayload("no response schema advertised")
+            throw VfsVoxError<VfsInfallible>.invalidPayload("no response schema advertised")
         }
-        let result: Result<CreateResult, VoxError<Infallible>> = try decodeVoxTyped(respDecoder, response)
+        let result: Result<CreateResult, VfsVoxError<VfsInfallible>> = try decodeVoxTyped(respDecoder, response)
         switch result {
         case .success(let value): return value
         case .failure(let error): throw error
@@ -1054,9 +1056,9 @@ public final class VfsClient: VfsCaller, Sendable {
             finalizeChannels: nil,
             schemaInfo: ClientSchemaInfo(methodSchemas: vfsMethods[0x2a1f41955c3e63a8]!, registry: vfsRegistry))
         guard let respDecoder = connection.schemaReceiveTracker.buildDecodeFn(0x2a1f41955c3e63a8, .response, readerDescriptor: vfs_delete_ResponseDescriptor, readerBlocks: vfs_delete_ResponseDescriptorBlocks, local: vfsRegistry) else {
-            throw VoxError<Infallible>.invalidPayload("no response schema advertised")
+            throw VfsVoxError<VfsInfallible>.invalidPayload("no response schema advertised")
         }
-        let result: Result<VfsResult, VoxError<Infallible>> = try decodeVoxTyped(respDecoder, response)
+        let result: Result<VfsResult, VfsVoxError<VfsInfallible>> = try decodeVoxTyped(respDecoder, response)
         switch result {
         case .success(let value): return value
         case .failure(let error): throw error
@@ -1070,9 +1072,9 @@ public final class VfsClient: VfsCaller, Sendable {
             finalizeChannels: nil,
             schemaInfo: ClientSchemaInfo(methodSchemas: vfsMethods[0x5aca8524d890971d]!, registry: vfsRegistry))
         guard let respDecoder = connection.schemaReceiveTracker.buildDecodeFn(0x5aca8524d890971d, .response, readerDescriptor: vfs_rename_ResponseDescriptor, readerBlocks: vfs_rename_ResponseDescriptorBlocks, local: vfsRegistry) else {
-            throw VoxError<Infallible>.invalidPayload("no response schema advertised")
+            throw VfsVoxError<VfsInfallible>.invalidPayload("no response schema advertised")
         }
-        let result: Result<VfsResult, VoxError<Infallible>> = try decodeVoxTyped(respDecoder, response)
+        let result: Result<VfsResult, VfsVoxError<VfsInfallible>> = try decodeVoxTyped(respDecoder, response)
         switch result {
         case .success(let value): return value
         case .failure(let error): throw error
@@ -1086,9 +1088,9 @@ public final class VfsClient: VfsCaller, Sendable {
             finalizeChannels: nil,
             schemaInfo: ClientSchemaInfo(methodSchemas: vfsMethods[0x2086815889a62b33]!, registry: vfsRegistry))
         guard let respDecoder = connection.schemaReceiveTracker.buildDecodeFn(0x2086815889a62b33, .response, readerDescriptor: vfs_setAttributes_ResponseDescriptor, readerBlocks: vfs_setAttributes_ResponseDescriptorBlocks, local: vfsRegistry) else {
-            throw VoxError<Infallible>.invalidPayload("no response schema advertised")
+            throw VfsVoxError<VfsInfallible>.invalidPayload("no response schema advertised")
         }
-        let result: Result<VfsResult, VoxError<Infallible>> = try decodeVoxTyped(respDecoder, response)
+        let result: Result<VfsResult, VfsVoxError<VfsInfallible>> = try decodeVoxTyped(respDecoder, response)
         switch result {
         case .success(let value): return value
         case .failure(let error): throw error
@@ -1102,9 +1104,9 @@ public final class VfsClient: VfsCaller, Sendable {
             finalizeChannels: nil,
             schemaInfo: ClientSchemaInfo(methodSchemas: vfsMethods[0xda4fc1cc055a4fcb]!, registry: vfsRegistry))
         guard let respDecoder = connection.schemaReceiveTracker.buildDecodeFn(0xda4fc1cc055a4fcb, .response, readerDescriptor: vfs_ping_ResponseDescriptor, readerBlocks: vfs_ping_ResponseDescriptorBlocks, local: vfsRegistry) else {
-            throw VoxError<Infallible>.invalidPayload("no response schema advertised")
+            throw VfsVoxError<VfsInfallible>.invalidPayload("no response schema advertised")
         }
-        let result: Result<String, VoxError<Infallible>> = try decodeVoxTyped(respDecoder, response)
+        let result: Result<String, VfsVoxError<VfsInfallible>> = try decodeVoxTyped(respDecoder, response)
         switch result {
         case .success(let value): return value
         case .failure(let error): throw error
@@ -1144,7 +1146,7 @@ public final class VfsDispatcher: ServiceDispatcher {
     public init(handler: VfsHandler) { self.handler = handler }
 
     public func encodeVoxError(_ error: VoxRuntimeError) -> [UInt8] {
-        let wire: VoxError<Infallible>
+        let wire: VfsVoxError<VfsInfallible>
         switch error {
         case .unknownMethod, .notImplemented: wire = .unknownMethod
         case .invalidPayload(let s), .decodeError(let s), .encodeError(let s): wire = .invalidPayload(s)
@@ -1152,7 +1154,7 @@ public final class VfsDispatcher: ServiceDispatcher {
         case .connectionClosed: wire = .connectionClosed
         case .timeout, .indeterminate: wire = .indeterminate
         }
-        let r: Result<LookupResult, VoxError<Infallible>> = .failure(wire)
+        let r: Result<LookupResult, VfsVoxError<VfsInfallible>> = .failure(wire)
         return encodeVoxTyped(r, vfs_lookup_ResponseEncoder)
     }
 
@@ -1186,7 +1188,7 @@ public final class VfsDispatcher: ServiceDispatcher {
             taskTx(.response(requestId: requestId, payload: encodeVoxError(.invalidPayload("decode args")), methodId: 0xab2b853c144d133b, responseSchemaClosure: vfsMethods[0xab2b853c144d133b]!.responseSchemaClosure))
             return
         }
-        let voxResult: Result<LookupResult, VoxError<Infallible>>
+        let voxResult: Result<LookupResult, VfsVoxError<VfsInfallible>>
         do {
             let voxValue = try await handler.lookup(parentId: args.0, name: args.1)
             voxResult = .success(voxValue)
@@ -1207,7 +1209,7 @@ public final class VfsDispatcher: ServiceDispatcher {
             taskTx(.response(requestId: requestId, payload: encodeVoxError(.invalidPayload("decode args")), methodId: 0xd97f57caa097adf9, responseSchemaClosure: vfsMethods[0xd97f57caa097adf9]!.responseSchemaClosure))
             return
         }
-        let voxResult: Result<GetAttributesResult, VoxError<Infallible>>
+        let voxResult: Result<GetAttributesResult, VfsVoxError<VfsInfallible>>
         do {
             let voxValue = try await handler.getAttributes(itemId: args)
             voxResult = .success(voxValue)
@@ -1228,7 +1230,7 @@ public final class VfsDispatcher: ServiceDispatcher {
             taskTx(.response(requestId: requestId, payload: encodeVoxError(.invalidPayload("decode args")), methodId: 0xf2ba29feced65eb7, responseSchemaClosure: vfsMethods[0xf2ba29feced65eb7]!.responseSchemaClosure))
             return
         }
-        let voxResult: Result<ReadDirResult, VoxError<Infallible>>
+        let voxResult: Result<ReadDirResult, VfsVoxError<VfsInfallible>>
         do {
             let voxValue = try await handler.readDir(itemId: args.0, cookie: args.1, verifier: args.2)
             voxResult = .success(voxValue)
@@ -1249,7 +1251,7 @@ public final class VfsDispatcher: ServiceDispatcher {
             taskTx(.response(requestId: requestId, payload: encodeVoxError(.invalidPayload("decode args")), methodId: 0x719a43e94d147918, responseSchemaClosure: vfsMethods[0x719a43e94d147918]!.responseSchemaClosure))
             return
         }
-        let voxResult: Result<ReadResult, VoxError<Infallible>>
+        let voxResult: Result<ReadResult, VfsVoxError<VfsInfallible>>
         do {
             let voxValue = try await handler.read(itemId: args.0, offset: args.1, len: args.2)
             voxResult = .success(voxValue)
@@ -1270,7 +1272,7 @@ public final class VfsDispatcher: ServiceDispatcher {
             taskTx(.response(requestId: requestId, payload: encodeVoxError(.invalidPayload("decode args")), methodId: 0xc330417994d57b8a, responseSchemaClosure: vfsMethods[0xc330417994d57b8a]!.responseSchemaClosure))
             return
         }
-        let voxResult: Result<WriteResult, VoxError<Infallible>>
+        let voxResult: Result<WriteResult, VfsVoxError<VfsInfallible>>
         do {
             let voxValue = try await handler.write(itemId: args.0, offset: args.1, data: args.2)
             voxResult = .success(voxValue)
@@ -1291,7 +1293,7 @@ public final class VfsDispatcher: ServiceDispatcher {
             taskTx(.response(requestId: requestId, payload: encodeVoxError(.invalidPayload("decode args")), methodId: 0x9b060d7cd7c1a62e, responseSchemaClosure: vfsMethods[0x9b060d7cd7c1a62e]!.responseSchemaClosure))
             return
         }
-        let voxResult: Result<CreateResult, VoxError<Infallible>>
+        let voxResult: Result<CreateResult, VfsVoxError<VfsInfallible>>
         do {
             let voxValue = try await handler.create(parentId: args.0, name: args.1, itemType: args.2, mode: args.3)
             voxResult = .success(voxValue)
@@ -1312,7 +1314,7 @@ public final class VfsDispatcher: ServiceDispatcher {
             taskTx(.response(requestId: requestId, payload: encodeVoxError(.invalidPayload("decode args")), methodId: 0x2a1f41955c3e63a8, responseSchemaClosure: vfsMethods[0x2a1f41955c3e63a8]!.responseSchemaClosure))
             return
         }
-        let voxResult: Result<VfsResult, VoxError<Infallible>>
+        let voxResult: Result<VfsResult, VfsVoxError<VfsInfallible>>
         do {
             let voxValue = try await handler.delete(itemId: args)
             voxResult = .success(voxValue)
@@ -1333,7 +1335,7 @@ public final class VfsDispatcher: ServiceDispatcher {
             taskTx(.response(requestId: requestId, payload: encodeVoxError(.invalidPayload("decode args")), methodId: 0x5aca8524d890971d, responseSchemaClosure: vfsMethods[0x5aca8524d890971d]!.responseSchemaClosure))
             return
         }
-        let voxResult: Result<VfsResult, VoxError<Infallible>>
+        let voxResult: Result<VfsResult, VfsVoxError<VfsInfallible>>
         do {
             let voxValue = try await handler.rename(itemId: args.0, newParentId: args.1, newName: args.2)
             voxResult = .success(voxValue)
@@ -1354,7 +1356,7 @@ public final class VfsDispatcher: ServiceDispatcher {
             taskTx(.response(requestId: requestId, payload: encodeVoxError(.invalidPayload("decode args")), methodId: 0x2086815889a62b33, responseSchemaClosure: vfsMethods[0x2086815889a62b33]!.responseSchemaClosure))
             return
         }
-        let voxResult: Result<VfsResult, VoxError<Infallible>>
+        let voxResult: Result<VfsResult, VfsVoxError<VfsInfallible>>
         do {
             let voxValue = try await handler.setAttributes(itemId: args.0, params: args.1)
             voxResult = .success(voxValue)
@@ -1366,7 +1368,7 @@ public final class VfsDispatcher: ServiceDispatcher {
     }
 
     private func dispatch_ping(payload: [UInt8], requestId: UInt64, schemaSendTracker: SchemaSendTracker, schemaReceiveTracker: SchemaTracker, taskTx: @escaping @Sendable (TaskMessage) -> Void) async {
-        let voxResult: Result<String, VoxError<Infallible>>
+        let voxResult: Result<String, VfsVoxError<VfsInfallible>>
         do {
             let voxValue = try await handler.ping()
             voxResult = .success(voxValue)

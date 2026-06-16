@@ -225,6 +225,7 @@ final class VfsBackendService: @unchecked Sendable {
                         group.addTask {
                             try await VoxRuntime.Session.initiator(
                                 UnixConnector(path: path),
+                                expecting: NoopClient.self,
                                 dispatcher: NoopDispatcher())
                         }
                         group.addTask {
@@ -237,10 +238,10 @@ final class VfsBackendService: @unchecked Sendable {
                     }
                     // Serve our Vfs on a *virtual* connection that claims the prefix. One
                     // virtual connection == one prefix == one Vfs; the extension mounts us at
-                    // /Volumes/Vixen/vfs/<prefix>/. Parity is .initiator (we opened it).
+                    // /Volumes/Vixen/vfs/<prefix>/. Odd parity is the initiator side.
                     backendLog("connected; opening prefix '\(vfsPrefix)'")
                     let settings = ConnectionSettings(
-                        parity: .initiator, maxConcurrentRequests: 64, initialChannelCredit: 16)
+                        parity: .odd, maxConcurrentRequests: 64, initialChannelCredit: 16)
                     let metadata = Metadata.null
                         .metaSetting("vox-service", .string("Vfs"))
                         .metaSetting("prefix", .string(vfsPrefix))
