@@ -36,4 +36,7 @@ pub struct StatusPayload {
 
     #[facet(default)]
     pub disconnect_reason: Option<String>,
+
+    #[facet(default)]
+    pub live_prefixes: Vec<String>,
 }

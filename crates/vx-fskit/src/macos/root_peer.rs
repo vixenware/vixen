@@ -262,6 +262,8 @@ impl RootPeerState {
             .inner
             .lock()
             .expect("root peer snapshot mutex poisoned");
+        let mut live_prefixes: Vec<String> = snapshot.clients.keys().cloned().collect();
+        live_prefixes.sort();
 
         let payload = StatusPayload {
             connected: !snapshot.clients.is_empty(),
@@ -276,6 +278,7 @@ impl RootPeerState {
             disconnected_at: None,
             uptime_seconds: None,
             disconnect_reason: snapshot.disconnect_reason.clone(),
+            live_prefixes,
         };
         let mut bytes = facet_json::to_string(&payload)
             .expect("StatusPayload serialization should not fail")

@@ -22,7 +22,16 @@ private let vfsBackendLog = Logger(subsystem: "eu.bearcove.vixen", category: "Vf
 
 enum VfsBackendError: Error, CustomStringConvertible {
     case connectTimeout
-    var description: String { "connect/handshake timed out" }
+    case openLaneTimeout
+
+    var description: String {
+        switch self {
+        case .connectTimeout:
+            "connect/handshake timed out"
+        case .openLaneTimeout:
+            "Vfs lane open timed out"
+        }
+    }
 }
 
 /// Log to both os_log and a plain file (`~/Library/Logs/Vixen/vixen-backend.log`).
@@ -71,7 +80,7 @@ final class VfsBackend: VfsHandler {
         let readme = Data("""
         # VixenFS
 
-        This volume is served by the Vixen app's in-app VFS backend (pure Swift, vox 0.8.2).
+        This volume is served by the Vixen app's in-app VFS backend.
         If you can read this, the FSKit extension ↔ backend connection is live.
         """.utf8)
         let hello = Data("Hello from the Vixen Swift VFS backend!\n".utf8)
@@ -235,18 +244,41 @@ final class VfsBackendService: @unchecked Sendable {
                     // virtual connection == one prefix == one Vfs; the extension mounts us at
                     // /Volumes/Vixen/vfs/<prefix>/. Odd parity is the initiator side.
                     backendLog("connected; opening prefix '\(vfsPrefix)'")
+                    let runTask = Task {
+                        try await connection.run()
+                    }
                     let settings = ConnectionSettings(
                         parity: .odd, maxConcurrentRequests: 64, initialChannelCredit: 16)
                     let metadata = Metadata.null
                         .metaSetting("vox-service", .string("Vfs"))
                         .metaSetting("prefix", .string(vfsPrefix))
-                    _ = try await connection.openLane(
-                        settings: settings,
-                        metadata: metadata,
-                        dispatcher: VfsDispatcher(handler: VfsBackend()))
-                    backendLog("serving prefix '\(vfsPrefix)'")
-                    try await connection.run()
-                    backendLog("connection ended; will reconnect")
+                    do {
+                        let serviceLane = try await withThrowingTaskGroup(
+                            of: Lane.self
+                        ) { group in
+                            group.addTask {
+                                try await connection.openLane(
+                                    settings: settings,
+                                    metadata: metadata,
+                                    dispatcher: VfsDispatcher(handler: VfsBackend()))
+                            }
+                            group.addTask {
+                                try await Task.sleep(for: .seconds(10))
+                                throw VfsBackendError.openLaneTimeout
+                            }
+                            let lane = try await group.next()!
+                            group.cancelAll()
+                            return lane
+                        }
+                        backendLog(
+                            "serving prefix '\(vfsPrefix)' on lane \(serviceLane.laneId)")
+                        defer { _ = serviceLane }
+                        try await runTask.value
+                        backendLog("connection ended; will reconnect")
+                    } catch {
+                        runTask.cancel()
+                        throw error
+                    }
                 } catch {
                     backendLog("connect failed: \(error)")
                 }

@@ -44,6 +44,7 @@ struct BackendStatus: Sendable {
     let bundleVersion: String?
     let connectedAt: String?
     let disconnectReason: String?
+    let livePrefixes: [String]
 }
 
 struct DoctorSnapshot: Sendable {
@@ -150,7 +151,7 @@ enum DoctorService {
         }
         rows.append(status.row)
         rows.append(timed("backend probe") {
-            checkBackend()
+            checkBackend(statusPayload: status.payload)
         })
 
         return DoctorSnapshot(rows: rows, backend: backendStatus(from: status.payload))
@@ -167,7 +168,8 @@ enum DoctorService {
             logFilterPath: trimmedString(payload["log_filter_path"]),
             bundleVersion: trimmedString(payload["bundle_version"]),
             connectedAt: trimmedString(payload["connected_at"]),
-            disconnectReason: trimmedString(payload["disconnect_reason"])
+            disconnectReason: trimmedString(payload["disconnect_reason"]),
+            livePrefixes: trimmedStringArray(payload["live_prefixes"])
         )
     }
 
@@ -175,6 +177,14 @@ enum DoctorService {
         guard let string = value as? String else { return nil }
         let trimmed = string.trimmingCharacters(in: .whitespacesAndNewlines)
         return trimmed.isEmpty ? nil : trimmed
+    }
+
+    private static func trimmedStringArray(_ value: Any?) -> [String] {
+        guard let strings = value as? [String] else { return [] }
+        return strings.compactMap { value in
+            let trimmed = value.trimmingCharacters(in: .whitespacesAndNewlines)
+            return trimmed.isEmpty ? nil : trimmed
+        }
     }
 
     private static func timed<T>(_ name: String, _ body: () -> T) -> T {
@@ -365,11 +375,36 @@ enum DoctorService {
     /// (kernel → FSKit → vox socket → the app's prefix, looping back into this process)
     /// without a helper, an active probe, or a second prefix-provider — so unlike the old
     /// `vixen-management probe-vfs`, it can't displace the real prefix off the mount.
-    private static func checkBackend() -> DoctorRow {
+    private static func checkBackend(statusPayload: [String: Any]?) -> DoctorRow {
+        guard let statusPayload else {
+            return DoctorRow(
+                id: "backend",
+                title: "Backend Connection",
+                state: .failed,
+                detail: "Status unavailable"
+            )
+        }
+        guard statusPayload["connected"] as? Bool == true else {
+            return DoctorRow(
+                id: "backend",
+                title: "Backend Connection",
+                state: .failed,
+                detail: "Backend provider not connected"
+            )
+        }
+        let livePrefixes = trimmedStringArray(statusPayload["live_prefixes"])
+        guard livePrefixes.contains(vfsPrefix) else {
+            return DoctorRow(
+                id: "backend",
+                title: "Backend Connection",
+                state: .failed,
+                detail: "Backend provider has not claimed /\(vfsPrefix)"
+            )
+        }
         // The app provides its tree under its claimed prefix (`/Volumes/Vixen/vfs/app/`),
         // not at the mount root — read the well-known file there.
         let path = "\(mountPoint)/\(vfsPrefix)/README.md"
-        guard let data = readFileWithTimeout(path, timeout: 2), !data.isEmpty else {
+        guard let data = readFileEventually(path, timeout: 2), !data.isEmpty else {
             logger.error("doctor backend failed: couldn't read \(path, privacy: .public)")
             return DoctorRow(
                 id: "backend",
@@ -385,6 +420,18 @@ enum DoctorService {
             state: .ok,
             detail: "Read README.md (\(data.count) bytes) from the Vixen prefix"
         )
+    }
+
+    private static func readFileEventually(_ path: String, timeout: TimeInterval) -> Data? {
+        let deadline = Date().addingTimeInterval(timeout)
+        while true {
+            let remaining = deadline.timeIntervalSinceNow
+            guard remaining > 0 else { return nil }
+            if let data = readFileWithTimeout(path, timeout: min(remaining, 0.25)), !data.isEmpty {
+                return data
+            }
+            Thread.sleep(forTimeInterval: min(0.1, max(0, deadline.timeIntervalSinceNow)))
+        }
     }
 
     /// Read a file on a background queue with a bound, so a wedged mount can't hang the
