@@ -3,10 +3,7 @@ use std::path::PathBuf;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex, OnceLock};
 
-use vox::{
-    ClientLogging, ClientLoggingOptions, ConnectionRequest, ConnectionRoute, ConnectionRouter,
-    Metadata, ReplySink, acceptor_on,
-};
+use vox::{ClientLogging, ClientLoggingOptions, LaneRequest, PendingLane, ReplySink, acceptor_on};
 use vx_fskit_types::StatusPayload;
 use vx_services::VfsClient;
 
@@ -130,15 +127,15 @@ impl RootPeerState {
 
     async fn accept_link(self, link: vox::transport::local::LocalLink) {
         match acceptor_on(link)
-            .on_connection(RootPeerAcceptor {
+            .on_lane(RootPeerAcceptor {
                 state: self.clone(),
             })
-            .establish::<vox::NoopClient>()
+            .establish_connection()
             .await
         {
-            Ok(client) => {
+            Ok(connection) => {
                 log_event("info", "VFS root peer session established");
-                client.caller.closed().await;
+                connection.closed().await;
             }
             Err(error) => {
                 self.record_disconnect(format!("accept_error:{error}"));
@@ -312,8 +309,8 @@ impl vox::Handler<vox::DriverReplySink> for PrefixProviderHandler {
     }
 }
 
-impl ConnectionRouter for RootPeerAcceptor {
-    fn route(&self, request: &ConnectionRequest) -> Result<ConnectionRoute, Metadata> {
+impl vox::LaneAcceptor for RootPeerAcceptor {
+    fn accept(&self, request: &LaneRequest, lane: PendingLane) -> Result<(), vox::LaneRejection> {
         let prefix = request
             .get_str("prefix")
             .filter(|prefix| !prefix.is_empty())
@@ -325,42 +322,37 @@ impl ConnectionRouter for RootPeerAcceptor {
         // connection == one prefix == one Vfs (one-service-per-connection). Connections
         // without a prefix (e.g. the peer's root/session anchor) are accepted but register
         // no provider, so they don't tear the session down.
-        Ok(ConnectionRoute::handle_with_client::<VfsClient>(
-            PrefixProviderHandler,
-            move |client| {
-                let client: VfsClient =
-                    client.with_middleware(ClientLogging::new(ClientLoggingOptions {
-                        log_metadata: true,
-                    }));
-                match prefix {
-                    Some(prefix) => {
-                        log_event(
-                            "info",
-                            format!("accepting VFS provider prefix={prefix} service={service}"),
-                        );
-                        let generation = state.record_connected(prefix.clone(), client.clone());
-                        log_event(
-                            "info",
-                            format!(
-                                "accepted VFS provider prefix={prefix} generation={generation}"
-                            ),
-                        );
-                        tokio::spawn(async move {
-                            client.caller.closed().await;
-                            state.record_closed(&prefix, generation, "caller closed");
-                        });
-                    }
-                    None => {
-                        log_event(
-                            "info",
-                            format!(
-                                "accepted connection with no prefix (not a provider) service={service}"
-                            ),
-                        );
-                    }
-                }
-            },
-        ))
+        let client: VfsClient = lane
+            .handle_with_client::<VfsClient>(PrefixProviderHandler)
+            .with_middleware(ClientLogging::new(ClientLoggingOptions {
+                log_metadata: true,
+            }));
+        match prefix {
+            Some(prefix) => {
+                log_event(
+                    "info",
+                    format!("accepting VFS provider prefix={prefix} service={service}"),
+                );
+                let generation = state.record_connected(prefix.clone(), client.clone());
+                log_event(
+                    "info",
+                    format!("accepted VFS provider prefix={prefix} generation={generation}"),
+                );
+                tokio::spawn(async move {
+                    client.caller.closed().await;
+                    state.record_closed(&prefix, generation, "caller closed");
+                });
+            }
+            None => {
+                log_event(
+                    "info",
+                    format!(
+                        "accepted connection with no prefix (not a provider) service={service}"
+                    ),
+                );
+            }
+        }
+        Ok(())
     }
 }
 

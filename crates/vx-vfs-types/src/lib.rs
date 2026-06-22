@@ -11,6 +11,7 @@ pub const DEFAULT_CONFIGURED_VFS_MOUNT_PATH: &str = "/tmp/vx/vfs";
 /// enumerating `/Volumes` does not have to touch a wedged FSKit root.
 pub const MACOS_VFS_MOUNT_PARENT: &str = "/Volumes/Vixen";
 pub const MACOS_VFS_MOUNT_POINT: &str = "/Volumes/Vixen/vfs";
+pub const MACOS_VFS_DAEMON_PROVIDER_PREFIX: &str = "vx";
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Facet)]
 #[repr(u8)]

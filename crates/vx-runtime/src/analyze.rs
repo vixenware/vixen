@@ -59,6 +59,7 @@ pub(crate) struct GraphRuntimeMeta {
 pub(crate) struct ExecInvocationMeta {
     pub(crate) args: Vec<CliArgTemplate>,
     pub(crate) observer: Option<vx_ir::Bundle>,
+    pub(crate) observer_identity: Option<String>,
     pub(crate) env: Vec<ExecEnvMeta>,
     pub(crate) mounts: Vec<ExecMountMeta>,
     pub(crate) writable_roots: Vec<NodeId>,
@@ -430,11 +431,15 @@ impl Builder<'_> {
         let observer = meta
             .observer
             .map(|body| vx_ir::reachable(&self.program.arena, self.env, body));
+        let observer_identity = meta
+            .observer
+            .map(|body| closure_code_identity(self.program, body));
         self.runtime_meta.execs.insert(
             node,
             ExecInvocationMeta {
                 args,
                 observer,
+                observer_identity,
                 env: meta.env,
                 mounts: meta.mounts,
                 writable_roots: meta.writable_roots,

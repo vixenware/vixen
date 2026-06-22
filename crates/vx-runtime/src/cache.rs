@@ -97,7 +97,7 @@ impl FunctionOutputCacheKey {
 #[repr(u8)]
 pub(crate) enum ObserverCacheIdentity {
     Default,
-    Bundle(String),
+    Code(String),
 }
 
 #[derive(Debug, Clone)]

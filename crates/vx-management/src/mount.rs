@@ -414,9 +414,13 @@ fn run_mount_command(devnode: &str) -> Result<Output> {
         "running VixenFS mount as the logged-in user"
     );
     Command::new("/sbin/mount")
-        .args(["-F", "-t", FS_TYPE, devnode, MOUNT_POINT])
+        .args(mount_command_args(devnode))
         .output()
         .wrap_err("running mount")
+}
+
+fn mount_command_args(devnode: &str) -> [&str; 7] {
+    ["-F", "-t", FS_TYPE, "-o", "nobrowse", devnode, MOUNT_POINT]
 }
 
 /// Detach any raw disk-image devices currently attached for [`IMAGE_PATH`].
@@ -644,6 +648,14 @@ map auto_home on /System/Volumes/Data/home (autofs, ...)";
         assert!(!mount_table_has_volume(
             "disk9 on /Volumes/Other (vixenfs, fskit)"
         ));
+    }
+
+    #[test]
+    fn mount_command_marks_the_fskit_volume_nobrowse() {
+        assert_eq!(
+            mount_command_args("disk18"),
+            ["-F", "-t", FS_TYPE, "-o", "nobrowse", "disk18", MOUNT_POINT]
+        );
     }
 
     #[test]

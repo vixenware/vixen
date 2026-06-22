@@ -23,19 +23,24 @@ impl Observe for NestedTreeObserve {
     }
 }
 
-impl vox::ConnectionRouter for NestedTreeObserve {
-    fn route(
+impl vox::LaneAcceptor for NestedTreeObserve {
+    fn accept(
         &self,
-        request: &vox::ConnectionRequest,
-    ) -> std::result::Result<vox::ConnectionRoute, vox::Metadata> {
+        request: &vox::LaneRequest,
+        conn: vox::PendingLane,
+    ) -> std::result::Result<(), vox::LaneRejection> {
         match request.service() {
-            "Observe" => Ok(vox::ConnectionRoute::handle(ObserveDispatcher::new(
-                self.clone(),
-            ))),
-            "Producing" => Ok(vox::ConnectionRoute::handle(ProducingDispatcher::new(
-                self.producing.clone(),
-            ))),
-            _ => Err(vox::Metadata::default()),
+            "Observe" => {
+                conn.handle_with(ObserveDispatcher::new(self.clone()));
+                Ok(())
+            }
+            "Producing" => {
+                conn.handle_with(ProducingDispatcher::new(self.producing.clone()));
+                Ok(())
+            }
+            _ => Err(vox::LaneRejection::new(
+                vox::LaneRejectReason::UnknownService,
+            )),
         }
     }
 }
@@ -45,12 +50,12 @@ async fn nested_tree_observe_client() -> (ObserveClient, Producer) {
     let service = NestedTreeObserve { producing };
     let (client_link, server_link) = vox::memory_link_pair(64);
     tokio::spawn(async move {
-        if let Ok(client) = vox::acceptor_on(server_link)
-            .on_connection(service)
-            .establish::<vox::NoopClient>()
+        if let Ok(connection) = vox::acceptor_on(server_link)
+            .on_lane(service)
+            .establish_connection()
             .await
         {
-            client.caller.closed().await;
+            connection.closed().await;
         }
     });
     let client = vox::initiator_on(client_link)

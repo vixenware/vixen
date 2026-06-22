@@ -85,17 +85,13 @@ facet-styx = "5.0.0-rc.0"
 figue = { version = "5.0.0-rc.0" }
 
 # vox RPC framework
-# Migrated to the local ~/vox checkout (path deps) so the Rust extension and the Swift
-# VoxRuntime speak the exact same vox wire. crates.io is still 0.8.2; the only newer code
-# is ~/vox. Local-only until vox is published again.
-vox = { path = "/Users/amos/vox/rust/vox", features = ["transport-tcp", "transport-local"] }
-vox-types = { path = "/Users/amos/vox/rust/vox-types" }
-vox-codegen = { path = "/Users/amos/vox/rust/vox-codegen" }
+vox = { version = "0.10.0-rc.1", features = ["transport-tcp", "transport-local"] }
+vox-types = "0.10.0-rc.1"
+vox-codegen = "0.10.0-rc.2"
 
-# copy-and-patch JIT substrate (from ~/phon): executable memory + AArch64
+# copy-and-patch JIT substrate: executable memory + AArch64
 # relocation patching + build-time stencil extraction. Backend-agnostic — no IR.
-# Path dep for now; Vixen will reach phon through Vox eventually.
-copypatch = { path = "../../phon/rust/copypatch" }
+copypatch = "0.2.0-rc.0"
 
 # stackful coroutines (the strand substrate): each strand is a real stack we can
 # dump, step through, and off-CPU-profile — which async futures (a shredded state
@@ -179,41 +175,6 @@ split-debuginfo = "unpacked"
 strip = "none"
 
 [patch.crates-io]
-
-# Migrated to the local ~/vox checkout (path deps above) so the Rust extension and the
-# Swift VoxRuntime speak the exact same vox wire. ~/vox builds against the local facet
-# 0.50 RC ecosystem plus the matching format crates and figue 5.x, so the whole
-# workspace must too. This mirrors ~/vox's own [patch] set. Local-only until those are
-# published again.
-#
-# ~/facet — core reflection crates.
-facet = { path = "/Users/amos/facet/facet" }
-facet-core = { path = "/Users/amos/facet/facet-core" }
-facet-macros = { path = "/Users/amos/facet/facet-macros" }
-facet-macros-impl = { path = "/Users/amos/facet/facet-macros-impl" }
-facet-macro-parse = { path = "/Users/amos/facet/facet-macro-parse" }
-facet-macro-types = { path = "/Users/amos/facet/facet-macro-types" }
-facet-reflect = { path = "/Users/amos/facet/facet-reflect" }
-facet-solver = { path = "/Users/amos/facet/facet-solver" }
-facet-path = { path = "/Users/amos/facet/facet-path" }
-facet-error = { path = "/Users/amos/facet/facet-error" }
-facet-pretty = { path = "/Users/amos/facet/facet-pretty" }
-facet-testhelpers = { path = "/Users/amos/facet/facet-testhelpers" }
-facet-testhelpers-macros = { path = "/Users/amos/facet/facet-testhelpers-macros" }
-# ~/facet-format — keep the format crates currently in the graph on the same local facet.
-facet-value = { path = "/Users/amos/facet-format/facet-value" }
-facet-format = { path = "/Users/amos/facet-format/facet-format" }
-facet-dessert = { path = "/Users/amos/facet-format/facet-dessert" }
-facet-json = { path = "/Users/amos/facet-format/facet-json" }
-facet-postcard = { path = "/Users/amos/facet-format/facet-postcard" }
-facet-toml = { path = "/Users/amos/facet-format/facet-toml" }
-facet-cargo-toml = { path = "/Users/amos/facet-cargo-toml" }
-# figue (used only by crates/vx) — keep it on the same facet generation as vox.
-figue = { path = "/Users/amos/figue/crates/figue" }
-figue-attrs = { path = "/Users/amos/figue/crates/figue-attrs" }
-# facet-styx — keep it on the same facet generation as the rest of the workspace.
-facet-styx = { path = "/Users/amos/styx/crates/facet-styx" }
-
 windows-projfs = { path = "vendor/windows-projfs" }
 
 [profile.samply]

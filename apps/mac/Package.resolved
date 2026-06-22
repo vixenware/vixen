@@ -1,6 +1,14 @@
 {
-  "originHash" : "f2883dbbea43a180f7d88675bd0c96be2c4fbc740bbefa0577f62306de81eeca",
+  "originHash" : "c264a231ff5365535c7164941ede60525e55f115cfdacb2d36c42ea0a8df4690",
   "pins" : [
+    {
+      "identity" : "facet",
+      "kind" : "remoteSourceControl",
+      "location" : "https://github.com/facet-rs/facet.git",
+      "state" : {
+        "revision" : "f4f0f90de9cb46172d03bcdb02fb8bdeb56c491b"
+      }
+    },
     {
       "identity" : "sparkle",
       "kind" : "remoteSourceControl",
@@ -42,16 +50,8 @@
       "kind" : "remoteSourceControl",
       "location" : "https://github.com/apple/swift-system.git",
       "state" : {
-        "revision" : "669763cfd5806a67e21972d7e5e2d6b80b1ea985",
-        "version" : "1.6.5"
-      }
-    },
-    {
-      "identity" : "vox",
-      "kind" : "remoteSourceControl",
-      "location" : "https://github.com/bearcove/vox.git",
-      "state" : {
-        "revision" : "230dcd5bb1e5aedd1309308c64de07781fad5b57"
+        "revision" : "7502b711c92a17741fa625d722b0ccbd595d8ed1",
+        "version" : "1.7.2"
       }
     }
   ],

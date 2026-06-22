@@ -216,17 +216,12 @@ final class VfsBackendService: @unchecked Sendable {
                 do {
                     backendLog("connecting to \(path)")
                     // Bound the connect/handshake so a stall is observable + retried rather
-                    // than dead-hanging. The root connection is just the session anchor — it
-                    // serves nothing (NoopDispatcher); the extension establishes NoopClient
-                    // and never calls it.
-                    let session = try await withThrowingTaskGroup(
-                        of: VoxRuntime.Session.self
+                    // than dead-hanging. The root connection is just the anchor for service lanes.
+                    let connection = try await withThrowingTaskGroup(
+                        of: Connection.self
                     ) { group in
                         group.addTask {
-                            try await VoxRuntime.Session.initiator(
-                                UnixConnector(path: path),
-                                expecting: NoopClient.self,
-                                dispatcher: NoopDispatcher())
+                            try await Connection.connect(UnixConnector(path: path))
                         }
                         group.addTask {
                             try await Task.sleep(for: .seconds(10))
@@ -245,13 +240,13 @@ final class VfsBackendService: @unchecked Sendable {
                     let metadata = Metadata.null
                         .metaSetting("vox-service", .string("Vfs"))
                         .metaSetting("prefix", .string(vfsPrefix))
-                    _ = try await session.handle.openConnection(
+                    _ = try await connection.openLane(
                         settings: settings,
                         metadata: metadata,
                         dispatcher: VfsDispatcher(handler: VfsBackend()))
                     backendLog("serving prefix '\(vfsPrefix)'")
-                    try await session.run()
-                    backendLog("session ended; will reconnect")
+                    try await connection.run()
+                    backendLog("connection ended; will reconnect")
                 } catch {
                     backendLog("connect failed: \(error)")
                 }

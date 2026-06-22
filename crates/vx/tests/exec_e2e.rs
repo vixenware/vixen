@@ -72,7 +72,7 @@ async fn exec_runs_against_the_vfs_and_flushes_the_write_set() {
     // Wait for the daemon (and its VFS) to come up — retry the first connect.
     let mut connected: Option<RunnerClient> = None;
     for _ in 0..100 {
-        if let Ok(client) = vox::connect(&addr).await {
+        if let Ok(client) = vox::connect_lane::<RunnerClient>(&addr).await {
             connected = Some(client);
             break;
         }
@@ -107,7 +107,7 @@ async fn exec_runs_against_the_vfs_and_flushes_the_write_set() {
     let out_tree = result.outputs[0].tree;
 
     // Mount the flushed write-set and read `y.txt` back — the round-trip proof.
-    let vfsd: VfsdClient = vox::connect(&addr).await.expect("connect vfsd");
+    let vfsd: VfsdClient = vox::connect_lane(&addr).await.expect("connect vfsd");
     let _ = vfsd.rm_rf("/verify".to_string()).await;
     vfsd.mount("/verify".to_string(), out_tree)
         .await

@@ -4,15 +4,15 @@
 //!
 //! `VixenFS` owns a stable Vox `local://` listener inside the app group container.
 //! `vx-vfs` mounts the extension, resolves the socket path from status.json,
-//! then connects to that listener and serves `Vfs` on one root connection.
+//! then connects to that listener and serves `Vfs` on a prefixed provider lane.
 
 use std::time::Duration;
 
 use camino::Utf8Path;
 use moire::process::Command;
 use moire::sync::watch;
-use vox::{NoopClient, ServerLogging, ServerLoggingOptions};
-use vx_services::{Vfs, VfsDiskNotify, VfsDispatcher};
+use vox::{ConnectionSettings, Driver, Parity, ServerLogging, ServerLoggingOptions};
+use vx_services::{Vfs, VfsClient, VfsDiskNotify, VfsDispatcher};
 
 use crate::types::{VfsConfig, VfsError, VfsStart};
 
@@ -60,14 +60,8 @@ where
 
     let addr = format!("local://{socket_path}");
 
-    // 3. Connect to the extension's Vox listener
-    let client = vox::connect::<NoopClient>(&addr)
-        .on_connection(VfsDispatcher::new(vfs).with_middleware(ServerLogging::new(
-            ServerLoggingOptions {
-                log_metadata: true,
-                ..Default::default()
-            },
-        )))
+    // 3. Connect to the extension's Vox listener, then claim the daemon provider prefix.
+    let connection = vox::connect(&addr)
         .connect_timeout(CONNECT_TIMEOUT)
         .wait_for_service(WAIT_FOR_SERVICE)
         .establish()
@@ -77,15 +71,47 @@ where
             _diagnostics: vec![],
         })?;
 
+    let provider_prefix = vx_vfs_types::MACOS_VFS_DAEMON_PROVIDER_PREFIX;
+    let provider_metadata = vox::metadata()
+        .str("vox-service", <VfsClient as vox::FromVoxLane>::SERVICE_NAME)
+        .str("prefix", provider_prefix)
+        .build();
+    let provider_lane = connection
+        .open_lane_handle(
+            ConnectionSettings {
+                parity: Parity::Odd,
+                max_concurrent_requests: 64,
+                initial_channel_credit: 16,
+            },
+            provider_metadata,
+        )
+        .await
+        .map_err(|e| VfsError::MountFailed {
+            message: format!(
+                "failed to claim VixenFS provider prefix {provider_prefix:?} at {addr}: {e}"
+            ),
+            _diagnostics: vec![],
+        })?;
+    let mut driver = Driver::new(
+        provider_lane,
+        VfsDispatcher::new(vfs).with_middleware(ServerLogging::new(ServerLoggingOptions {
+            log_metadata: true,
+            ..Default::default()
+        })),
+    );
+    tokio::spawn(async move {
+        driver.run().await;
+    });
+
     // 4. Spawn a task that watches for the session closing
     let (vfs_dead_tx, vfs_dead_rx) = watch::channel("vfs_dead", false);
     tokio::spawn(async move {
-        client.caller.closed().await;
+        connection.closed().await;
         tracing::warn!("VixenFS Vox session closed");
         let _ = vfs_dead_tx.send(true);
     });
 
-    let access_path = config.mount_path.clone();
+    let access_path = config.mount_path.join(provider_prefix);
     Ok(VfsStart::Mounted {
         mount_path: config.mount_path,
         access_path,

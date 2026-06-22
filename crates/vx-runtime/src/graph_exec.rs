@@ -686,8 +686,8 @@ fn exec_invocation_key(
     create_dirs: Vec<String>,
     invocation: &ExecInvocationMeta,
 ) -> ExecInvocationCacheKey {
-    let observer = match &invocation.observer {
-        Some(bundle) => ObserverCacheIdentity::Bundle(bundle.content_identity()),
+    let observer = match &invocation.observer_identity {
+        Some(identity) => ObserverCacheIdentity::Code(identity.clone()),
         None => ObserverCacheIdentity::Default,
     };
     ExecInvocationCacheKey {

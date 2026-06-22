@@ -18,7 +18,7 @@ fn main() {
             };
             install(mode)
         }
-        Some("codegen") => codegen(),
+        Some("codegen" | "vixenfs-codegen") => codegen(),
         Some(cmd) => {
             eprintln!("Unknown command: {}", cmd);
             eprintln!(
@@ -38,8 +38,8 @@ fn main() {
 ///
 /// The FSKit extension serves the volume by calling the `Vfs` service on whoever connects
 /// to its socket; the app implements that service in Swift (`VfsHandler`). This emits the
-/// `VfsDispatcher`/`VfsHandler`/types from the `Vfs` service descriptor via `vox-codegen`
-/// (pinned to the same vox 0.8.2 the extension speaks). Mirrors bee's `bee-services-codegen`.
+/// `VfsDispatcher`/`VfsHandler`/types from the `Vfs` service descriptor via `vox-codegen`,
+/// matching the Vox runtime used by the app and extension. Mirrors bee's `bee-services-codegen`.
 fn codegen() {
     let workspace_root = find_workspace_root().expect("Could not find workspace root");
     let out_dir = workspace_root.join("apps/mac/xcode/Vixen/Generated");

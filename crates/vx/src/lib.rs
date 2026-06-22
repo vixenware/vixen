@@ -138,7 +138,7 @@ async fn kill(args: KillArgs) -> eyre::Result<()> {
 }
 
 async fn shutdown_daemon(address: &str) -> eyre::Result<()> {
-    let client: DaemonClient = vox::connect(address).await?;
+    let client: DaemonClient = vox::connect_lane(address).await?;
     match client.shutdown().await {
         Ok(()) => {}
         Err(vox::VoxError::UnknownMethod) if address.starts_with("local://") => {
@@ -378,7 +378,7 @@ async fn eval_invocation(args: EvalInvocation) -> eyre::Result<()> {
     let daemon = ensure_daemon_available(&args.target, args.fresh_daemon).await?;
     emit_eval_daemon_note(&daemon.address, &daemon.status)?;
     let address = daemon.address;
-    let client: OrchestratorClient = vox::connect(&address).await?;
+    let client: OrchestratorClient = vox::connect_lane(&address).await?;
     let (progress_tx, mut progress_rx) = vox::channel::<EvalProgressEvent>();
     let progress_task = tokio::spawn(async move {
         while let Ok(Some(event)) = progress_rx.recv().await {
@@ -442,7 +442,7 @@ async fn test(args: TestArgs) -> eyre::Result<()> {
 
     let daemon = ensure_daemon_available(&args.target, args.fresh_daemon).await?;
     let address = daemon.address;
-    let client: TestRunnerClient = vox::connect(&address).await?;
+    let client: TestRunnerClient = vox::connect_lane(&address).await?;
 
     let (events_tx, mut events_rx) = vox::channel::<Event>();
     let reporter = tokio::spawn(async move {
@@ -588,7 +588,7 @@ async fn mount(args: MountArgs) -> eyre::Result<()> {
     let mount_name = args.name.unwrap_or_else(|| hash.to_hex());
     validate_mount_name(&mount_name)?;
 
-    let client: VfsdClient = vox::connect(&address).await?;
+    let client: VfsdClient = vox::connect_lane(&address).await?;
     let path = format!("/{mount_name}");
 
     let _ = client.rm_rf(path.clone()).await;
@@ -792,7 +792,7 @@ async fn ensure_daemon_available(
     };
 
     spawn_daemon(launch)?;
-    let client: DaemonClient = vox::connect(&resolved.address)
+    let client: DaemonClient = vox::connect_lane(&resolved.address)
         .connect_timeout(DAEMON_CONNECT_TIMEOUT)
         .wait_for_service(DAEMON_WAIT_FOR_SERVICE_TIMEOUT)
         .await?;
@@ -804,7 +804,7 @@ async fn ensure_daemon_available(
 }
 
 async fn daemon_connect(address: &str) -> eyre::Result<DaemonClient> {
-    Ok(vox::connect(address).await?)
+    Ok(vox::connect_lane(address).await?)
 }
 
 async fn daemon_status(address: &str) -> eyre::Result<vx_services::DaemonStatus> {

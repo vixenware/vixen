@@ -39,7 +39,7 @@ use std::sync::mpsc;
 use std::sync::{Arc, Mutex};
 use std::thread::JoinHandle;
 
-use corosensei::{Coroutine, CoroutineResult, Yielder};
+use corosensei::{Coroutine, CoroutineResult, Yielder, stack::DefaultStack};
 use futures_util::stream::{FuturesUnordered, StreamExt};
 use tokio::sync::mpsc::{UnboundedReceiver, UnboundedSender};
 use vx_exec_protocol::{ObserveClient, ObserveRequest, Observed, WireValue};
@@ -56,6 +56,8 @@ type Yielded = (ParkReason, Backtrace);
 /// its [`Outcome`] when done. `!Send` (it may hold eval's `Rc` state) — so it lives
 /// and dies on one worker and is never put in a message.
 type Coro = Coroutine<(), Yielded, Outcome>;
+
+const STRAND_STACK_BYTES: usize = 8 * 1024 * 1024;
 
 /// A strand body: the synchronous work. It parks via [`park_on`] (which reaches the
 /// coroutine's yielder through a thread-local), so it takes no yielder argument and
@@ -875,9 +877,9 @@ async fn drive_observe(
         Err(e) => Observed::Poisoned(format!("observe RPC failed: {e:?}")),
     };
     let producing = if matches!(observed, Observed::Tree | Observed::ValueWithTree(_)) {
-        match client.session.as_ref() {
-            Some(session) => session
-                .open::<ProducingClient>(vox::ConnectionSettings {
+        match client.connection.as_ref() {
+            Some(connection) => connection
+                .open_lane_with_settings::<ProducingClient>(vox::ConnectionSettings {
                     parity: vox::Parity::Odd,
                     max_concurrent_requests: 64,
                     initial_channel_credit: 16,
@@ -935,10 +937,12 @@ fn worker_loop(
         match cmd {
             Command::Shutdown => return,
             Command::Start { id, body } => {
-                let mut coro = Coroutine::new(move |yielder: &Yielder<(), Yielded>, _: ()| {
-                    put_current(id, yielder as *const _);
-                    body()
-                });
+                let stack = DefaultStack::new(STRAND_STACK_BYTES).expect("allocate strand stack");
+                let mut coro =
+                    Coroutine::with_stack(stack, move |yielder: &Yielder<(), Yielded>, _: ()| {
+                        put_current(id, yielder as *const _);
+                        body()
+                    });
                 drive(idx, id, &mut coro, result_tx);
                 if !coro.done() {
                     coros.insert(id, coro);

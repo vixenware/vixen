@@ -23,16 +23,20 @@ impl Observe for RecordingObserve {
     }
 }
 
-impl vox::ConnectionRouter for RecordingObserve {
-    fn route(
+impl vox::LaneAcceptor for RecordingObserve {
+    fn accept(
         &self,
-        request: &vox::ConnectionRequest,
-    ) -> std::result::Result<vox::ConnectionRoute, vox::Metadata> {
+        request: &vox::LaneRequest,
+        conn: vox::PendingLane,
+    ) -> std::result::Result<(), vox::LaneRejection> {
         match request.service() {
-            "Observe" => Ok(vox::ConnectionRoute::handle(ObserveDispatcher::new(
-                self.clone(),
-            ))),
-            _ => Err(vox::Metadata::default()),
+            "Observe" => {
+                conn.handle_with(ObserveDispatcher::new(self.clone()));
+                Ok(())
+            }
+            _ => Err(vox::LaneRejection::new(
+                vox::LaneRejectReason::UnknownService,
+            )),
         }
     }
 }
@@ -51,12 +55,12 @@ async fn recording_observe_client_with(
     };
     let (client_link, server_link) = vox::memory_link_pair(64);
     tokio::spawn(async move {
-        if let Ok(client) = vox::acceptor_on(server_link)
-            .on_connection(service)
-            .establish::<vox::NoopClient>()
+        if let Ok(connection) = vox::acceptor_on(server_link)
+            .on_lane(service)
+            .establish_connection()
             .await
         {
-            client.caller.closed().await;
+            connection.closed().await;
         }
     });
     let client = vox::initiator_on(client_link)

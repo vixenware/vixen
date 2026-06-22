@@ -65,20 +65,22 @@ impl RunnerService {
 
     pub fn handle_producing_connection(
         &self,
-    ) -> std::result::Result<vox::ConnectionRoute, vox::Metadata> {
+        conn: vox::PendingLane,
+    ) -> std::result::Result<(), vox::LaneRejection> {
         match self.produced_outputs() {
-            Some(outputs) => Ok(vox::ConnectionRoute::handle(ProducingDispatcher::new(
-                outputs,
-            ))),
+            Some(outputs) => {
+                conn.handle_with(ProducingDispatcher::new(outputs));
+                Ok(())
+            }
             None => {
                 tracing::warn!("vx-runner: Producing requested before an output tree exists");
-                Err(vox::Metadata::default())
+                Err(vox::LaneRejection::new(vox::LaneRejectReason::NotReady))
             }
         }
     }
 }
 
-/// A [`vox::ConnectionRouter`] that routes all connections to the [`RunnerService`].
+/// A [`vox::LaneAcceptor`] that routes all connections to the [`RunnerService`].
 #[derive(Clone)]
 pub struct RunnerAcceptor {
     service: RunnerService,
@@ -90,22 +92,27 @@ impl RunnerAcceptor {
     }
 }
 
-impl vox::ConnectionRouter for RunnerAcceptor {
-    fn route(
+impl vox::LaneAcceptor for RunnerAcceptor {
+    fn accept(
         &self,
-        request: &vox::ConnectionRequest,
-    ) -> std::result::Result<vox::ConnectionRoute, vox::Metadata> {
+        request: &vox::LaneRequest,
+        conn: vox::PendingLane,
+    ) -> std::result::Result<(), vox::LaneRejection> {
         match request.service() {
-            "Runner" => Ok(vox::ConnectionRoute::handle(RunnerDispatcher::new(
-                self.service.clone(),
-            ))),
-            "Observe" => Ok(vox::ConnectionRoute::handle(ObserveDispatcher::new(
-                self.service.clone(),
-            ))),
-            "Producing" => self.service.handle_producing_connection(),
+            "Runner" => {
+                conn.handle_with(RunnerDispatcher::new(self.service.clone()));
+                Ok(())
+            }
+            "Observe" => {
+                conn.handle_with(ObserveDispatcher::new(self.service.clone()));
+                Ok(())
+            }
+            "Producing" => self.service.handle_producing_connection(conn),
             other => {
                 tracing::warn!("vx-runner: unknown service requested: {}", other);
-                Err(vox::Metadata::default())
+                Err(vox::LaneRejection::new(
+                    vox::LaneRejectReason::UnknownService,
+                ))
             }
         }
     }
@@ -152,12 +159,12 @@ mod tests {
     async fn observe_client_for(service: RunnerService) -> ObserveClient {
         let (client_link, server_link) = vox::memory_link_pair(64);
         tokio::spawn(async move {
-            if let Ok(client) = vox::acceptor_on(server_link)
-                .on_connection(RunnerAcceptor::new(service))
-                .establish::<vox::NoopClient>()
+            if let Ok(connection) = vox::acceptor_on(server_link)
+                .on_lane(RunnerAcceptor::new(service))
+                .establish_connection()
                 .await
             {
-                client.caller.closed().await;
+                connection.closed().await;
             }
         });
         vox::initiator_on(client_link)
@@ -169,12 +176,12 @@ mod tests {
     async fn producing_client_for(service: RunnerService) -> ProducingClient {
         let (client_link, server_link) = vox::memory_link_pair(64);
         tokio::spawn(async move {
-            if let Ok(client) = vox::acceptor_on(server_link)
-                .on_connection(RunnerAcceptor::new(service))
-                .establish::<vox::NoopClient>()
+            if let Ok(connection) = vox::acceptor_on(server_link)
+                .on_lane(RunnerAcceptor::new(service))
+                .establish_connection()
                 .await
             {
-                client.caller.closed().await;
+                connection.closed().await;
             }
         });
         vox::initiator_on(client_link)
@@ -201,17 +208,21 @@ mod tests {
         service: CountingObserveService,
     }
 
-    impl vox::ConnectionRouter for CountingRunnerAcceptor {
-        fn route(
+    impl vox::LaneAcceptor for CountingRunnerAcceptor {
+        fn accept(
             &self,
-            request: &vox::ConnectionRequest,
-        ) -> std::result::Result<vox::ConnectionRoute, vox::Metadata> {
+            request: &vox::LaneRequest,
+            conn: vox::PendingLane,
+        ) -> std::result::Result<(), vox::LaneRejection> {
             match request.service() {
-                "Observe" => Ok(vox::ConnectionRoute::handle(ObserveDispatcher::new(
-                    self.service.clone(),
-                ))),
-                "Producing" => self.service.inner.handle_producing_connection(),
-                _ => Err(vox::Metadata::default()),
+                "Observe" => {
+                    conn.handle_with(ObserveDispatcher::new(self.service.clone()));
+                    Ok(())
+                }
+                "Producing" => self.service.inner.handle_producing_connection(conn),
+                _ => Err(vox::LaneRejection::new(
+                    vox::LaneRejectReason::UnknownService,
+                )),
             }
         }
     }
@@ -226,12 +237,12 @@ mod tests {
         };
         let (client_link, server_link) = vox::memory_link_pair(64);
         tokio::spawn(async move {
-            if let Ok(client) = vox::acceptor_on(server_link)
-                .on_connection(CountingRunnerAcceptor { service: counting })
-                .establish::<vox::NoopClient>()
+            if let Ok(connection) = vox::acceptor_on(server_link)
+                .on_lane(CountingRunnerAcceptor { service: counting })
+                .establish_connection()
                 .await
             {
-                client.caller.closed().await;
+                connection.closed().await;
             }
         });
         let client = vox::initiator_on(client_link)
@@ -268,17 +279,21 @@ mod tests {
         service: AfterFirstObserveService,
     }
 
-    impl vox::ConnectionRouter for AfterFirstRunnerAcceptor {
-        fn route(
+    impl vox::LaneAcceptor for AfterFirstRunnerAcceptor {
+        fn accept(
             &self,
-            request: &vox::ConnectionRequest,
-        ) -> std::result::Result<vox::ConnectionRoute, vox::Metadata> {
+            request: &vox::LaneRequest,
+            conn: vox::PendingLane,
+        ) -> std::result::Result<(), vox::LaneRejection> {
             match request.service() {
-                "Observe" => Ok(vox::ConnectionRoute::handle(ObserveDispatcher::new(
-                    self.service.clone(),
-                ))),
-                "Producing" => self.service.inner.handle_producing_connection(),
-                _ => Err(vox::Metadata::default()),
+                "Observe" => {
+                    conn.handle_with(ObserveDispatcher::new(self.service.clone()));
+                    Ok(())
+                }
+                "Producing" => self.service.inner.handle_producing_connection(conn),
+                _ => Err(vox::LaneRejection::new(
+                    vox::LaneRejectReason::UnknownService,
+                )),
             }
         }
     }
@@ -298,12 +313,12 @@ mod tests {
         };
         let (client_link, server_link) = vox::memory_link_pair(64);
         tokio::spawn(async move {
-            if let Ok(client) = vox::acceptor_on(server_link)
-                .on_connection(AfterFirstRunnerAcceptor { service })
-                .establish::<vox::NoopClient>()
+            if let Ok(connection) = vox::acceptor_on(server_link)
+                .on_lane(AfterFirstRunnerAcceptor { service })
+                .establish_connection()
                 .await
             {
-                client.caller.closed().await;
+                connection.closed().await;
             }
         });
         let client = vox::initiator_on(client_link)
@@ -321,20 +336,23 @@ mod tests {
         let (client_link, server_link) = vox::memory_link_pair(64);
         tokio::spawn(async move {
             let acceptor =
-                vox::router_fn(
-                    move |request: &vox::ConnectionRequest| match request.service() {
-                        "Store" => Ok(vox::ConnectionRoute::handle(StoreDispatcher::new(
-                            store.clone(),
-                        ))),
-                        _ => Err(vox::Metadata::default()),
-                    },
-                );
-            if let Ok(client) = vox::acceptor_on(server_link)
-                .on_connection(acceptor)
-                .establish::<vox::NoopClient>()
+                vox::lane_acceptor_fn(move |request: &vox::LaneRequest, conn: vox::PendingLane| {
+                    match request.service() {
+                        "Store" => {
+                            conn.handle_with(StoreDispatcher::new(store.clone()));
+                            Ok(())
+                        }
+                        _ => Err(vox::LaneRejection::new(
+                            vox::LaneRejectReason::UnknownService,
+                        )),
+                    }
+                });
+            if let Ok(connection) = vox::acceptor_on(server_link)
+                .on_lane(acceptor)
+                .establish_connection()
                 .await
             {
-                client.caller.closed().await;
+                connection.closed().await;
             }
         });
         let client = vox::initiator_on(client_link)

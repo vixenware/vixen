@@ -4,25 +4,25 @@ import PackageDescription
 let package = Package(
     name: "VixenMac",
     platforms: [
-        .macOS(.v15)
+        .macOS("15.4")
     ],
     products: [
         .library(name: "VixenApp", targets: ["VixenApp"]),
         .library(name: "VixenFS", targets: ["VixenFS"]),
     ],
     dependencies: [
-        .package(url: "https://github.com/sparkle-project/Sparkle.git", from: "2.8.1"),
-        // Local ~/vox (path dep) so the Swift VoxRuntime matches the Rust vox the FSKit
-        // extension links (both ~/vox) — same wire. ~/vox phon-codec serializes via phon
-        // (from ~/phon), so use the swift/vox-runtime package. Local-only until published.
-        .package(path: "/Users/amos/vox/swift/vox-runtime"),
+        .package(url: "https://github.com/sparkle-project/Sparkle.git", exact: "2.8.1"),
+        .package(
+            url: "https://github.com/facet-rs/facet.git",
+            revision: "f4f0f90de9cb46172d03bcdb02fb8bdeb56c491b"
+        ),
     ],
     targets: [
         .target(
             name: "VixenApp",
             dependencies: [
                 .product(name: "Sparkle", package: "Sparkle"),
-                .product(name: "VoxRuntime", package: "vox"),
+                .product(name: "VoxRuntime", package: "facet"),
             ],
             path: "xcode/Vixen",
             linkerSettings: [

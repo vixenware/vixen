@@ -37,11 +37,19 @@ pub fn effective_mount_path(configured_mount: &Utf8PathBuf) -> Utf8PathBuf {
     }
 }
 
+pub fn effective_access_path(mount: &Utf8PathBuf) -> Utf8PathBuf {
+    if cfg!(target_os = "macos") {
+        mount.join(vx_vfs_types::MACOS_VFS_DAEMON_PROVIDER_PREFIX)
+    } else {
+        mount.clone()
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use camino::Utf8PathBuf;
 
-    use super::{DEFAULT_CONFIGURED_VFS_MOUNT_PATH, effective_mount_path};
+    use super::{DEFAULT_CONFIGURED_VFS_MOUNT_PATH, effective_access_path, effective_mount_path};
 
     #[test]
     fn macos_effective_mount_uses_the_shared_nested_mountpoint() {
@@ -57,6 +65,22 @@ mod tests {
             assert!(effective.starts_with(vx_vfs_types::MACOS_VFS_MOUNT_PARENT));
         } else {
             assert_eq!(effective, configured);
+        }
+    }
+
+    #[test]
+    fn macos_effective_access_path_uses_the_daemon_provider_prefix() {
+        let mount = effective_mount_path(&Utf8PathBuf::from(DEFAULT_CONFIGURED_VFS_MOUNT_PATH));
+        let access = effective_access_path(&mount);
+
+        if cfg!(target_os = "macos") {
+            assert_eq!(
+                access,
+                Utf8PathBuf::from(vx_vfs_types::MACOS_VFS_MOUNT_POINT)
+                    .join(vx_vfs_types::MACOS_VFS_DAEMON_PROVIDER_PREFIX)
+            );
+        } else {
+            assert_eq!(access, mount);
         }
     }
 }
@@ -404,7 +428,7 @@ impl VfsDiskNotify for SharedVfs {
     }
 }
 
-/// A single-service [`vox::ConnectionRouter`] that routes all connections
+/// A single-service [`vox::LaneAcceptor`] that routes all connections
 /// to the [`VfsdService`].
 #[derive(Clone)]
 pub struct VfsdAcceptor {
@@ -417,18 +441,22 @@ impl VfsdAcceptor {
     }
 }
 
-impl vox::ConnectionRouter for VfsdAcceptor {
-    fn route(
+impl vox::LaneAcceptor for VfsdAcceptor {
+    fn accept(
         &self,
-        request: &vox::ConnectionRequest,
-    ) -> std::result::Result<vox::ConnectionRoute, vox::Metadata> {
+        request: &vox::LaneRequest,
+        conn: vox::PendingLane,
+    ) -> std::result::Result<(), vox::LaneRejection> {
         match request.service() {
-            "Vfsd" => Ok(vox::ConnectionRoute::handle(VfsdDispatcher::new(
-                self.service.clone(),
-            ))),
+            "Vfsd" => {
+                conn.handle_with(VfsdDispatcher::new(self.service.clone()));
+                Ok(())
+            }
             other => {
                 tracing::warn!("vx-vfsd: unknown service requested: {}", other);
-                Err(vox::Metadata::default())
+                Err(vox::LaneRejection::new(
+                    vox::LaneRejectReason::UnknownService,
+                ))
             }
         }
     }
@@ -447,7 +475,11 @@ pub async fn boot_with_store(
     if let Some(ref dir) = disk_cache_dir {
         tracing::debug!(%dir, "L2 disk blob cache enabled");
     }
-    let vfs = Arc::new(CasVfs::new(cas.clone(), disk_cache_dir, mount.clone()));
+    let vfs = Arc::new(CasVfs::new(
+        cas.clone(),
+        disk_cache_dir,
+        effective_access_path(mount),
+    ));
     seed_demo_prefix(cas.clone(), vfs.clone()).await?;
 
     // 3. Clean up, create mount dir, mount VFS, smoke test.
@@ -603,7 +635,7 @@ pub async fn boot(store_addr: &str, mount: &Utf8PathBuf) -> Result<VfsdService> 
     use vx_services::StoreClient;
 
     tracing::debug!(%store_addr, "connecting to store");
-    let cas: StoreClient = vox::connect(store_addr)
+    let cas: StoreClient = vox::connect_lane::<StoreClient>(store_addr)
         .await
         .map_err(|e| eyre::eyre!("failed to connect to store at {store_addr}: {e}"))?;
     tracing::debug!("connected to store");

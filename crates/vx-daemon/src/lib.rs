@@ -7,7 +7,6 @@ use camino::Utf8PathBuf;
 use eyre::{Result, bail};
 use facet::Facet;
 use tokio::sync::watch;
-use vox::{ConnectionRouter, Metadata};
 use vx_exec_protocol::ObserveDispatcher;
 use vx_runner::RunnerService;
 use vx_services::{
@@ -222,7 +221,9 @@ pub async fn serve(config: DaemonConfig) -> Result<()> {
                 ServiceRef::InProcess => {
                     bail!("store.upstream cannot be @in_process; a store cannot upstream to itself")
                 }
-                ServiceRef::Rpc { address } => std::sync::Arc::new(vox::connect(address).await?),
+                ServiceRef::Rpc { address } => {
+                    std::sync::Arc::new(vox::connect_lane(address).await?)
+                }
             };
             store_service.set_upstream(upstream);
         }
@@ -346,7 +347,7 @@ async fn resolve_required_store_client(
             };
             connect_in_process_store(local_store.clone()).await
         }
-        Some(ServiceRef::Rpc { address }) => Ok(vox::connect(address).await?),
+        Some(ServiceRef::Rpc { address }) => Ok(vox::connect_lane(address).await?),
         None => {
             if let Some(local_store) = local_store {
                 connect_in_process_store(local_store.clone()).await
@@ -363,22 +364,25 @@ async fn connect_in_process_store(service: StoreService) -> Result<vx_services::
     let (client_link, server_link) = vox::memory_link_pair(64);
     tokio::spawn(async move {
         let acceptor =
-            vox::router_fn(
-                move |request: &vox::ConnectionRequest| match request.service() {
-                    "Store" => Ok(vox::ConnectionRoute::handle(StoreDispatcher::new(
-                        service.clone(),
-                    ))),
-                    _ => Err(vox::Metadata::default()),
-                },
-            );
+            vox::lane_acceptor_fn(move |request: &vox::LaneRequest, lane: vox::PendingLane| {
+                match request.service() {
+                    "Store" => {
+                        lane.handle_with(StoreDispatcher::new(service.clone()));
+                        Ok(())
+                    }
+                    _ => Err(vox::LaneRejection::new(
+                        vox::LaneRejectReason::UnknownService,
+                    )),
+                }
+            });
 
         match vox::acceptor_on(server_link)
-            .on_connection(acceptor)
-            .establish::<vox::NoopClient>()
+            .on_lane(acceptor)
+            .establish_connection()
             .await
         {
-            Ok(client) => {
-                client.caller.closed().await;
+            Ok(connection) => {
+                connection.closed().await;
             }
             Err(error) => {
                 tracing::warn!(?error, "in-process store acceptor exited");
@@ -391,7 +395,7 @@ async fn connect_in_process_store(service: StoreService) -> Result<vx_services::
         .await?)
 }
 
-/// A connection router that can serve multiple sub-services:
+/// A lane acceptor that can serve multiple sub-services:
 /// store, runner, vfs, etc.
 #[derive(Clone)]
 struct DaemonAcceptor {
@@ -403,80 +407,78 @@ struct DaemonAcceptor {
     vfsd_service: Option<VfsdService>,
 }
 
-impl ConnectionRouter for DaemonAcceptor {
-    fn route(
+impl vox::LaneAcceptor for DaemonAcceptor {
+    fn accept(
         &self,
-        request: &vox::ConnectionRequest,
-    ) -> std::result::Result<vox::ConnectionRoute, Metadata> {
+        request: &vox::LaneRequest,
+        lane: vox::PendingLane,
+    ) -> std::result::Result<(), vox::LaneRejection> {
         tracing::info!("daemon got request for service: {}", request.service());
         match request.service() {
-            "Daemon" => Ok(vox::ConnectionRoute::handle(DaemonDispatcher::new(
-                self.service.clone(),
-            ))),
+            "Daemon" => {
+                lane.handle_with(DaemonDispatcher::new(self.service.clone()));
+                Ok(())
+            }
             "CacheIndex" => {
                 let Some(service) = &self.cache_index_service else {
                     tracing::warn!("cache index service requested but not hosted");
-                    return Err(vox::Metadata::default());
+                    return Err(vox::LaneRejection::new(vox::LaneRejectReason::NotReady));
                 };
-                Ok(vox::ConnectionRoute::handle(CacheIndexDispatcher::new(
-                    service.clone(),
-                )))
+                lane.handle_with(CacheIndexDispatcher::new(service.clone()));
+                Ok(())
             }
             "TestRunner" => {
                 let Some(service) = &self.test_runner_service else {
                     tracing::warn!("test runner service requested but not hosted");
-                    return Err(vox::Metadata::default());
+                    return Err(vox::LaneRejection::new(vox::LaneRejectReason::NotReady));
                 };
-                Ok(vox::ConnectionRoute::handle(TestRunnerDispatcher::new(
-                    service.clone(),
-                )))
+                lane.handle_with(TestRunnerDispatcher::new(service.clone()));
+                Ok(())
             }
             "Store" => {
                 let Some(service) = &self.store_service else {
                     tracing::warn!("store service requested but not hosted");
-                    return Err(vox::Metadata::default());
+                    return Err(vox::LaneRejection::new(vox::LaneRejectReason::NotReady));
                 };
-                Ok(vox::ConnectionRoute::handle(StoreDispatcher::new(
-                    service.clone(),
-                )))
+                lane.handle_with(StoreDispatcher::new(service.clone()));
+                Ok(())
             }
             "Runner" => {
                 let Some(service) = &self.runner_service else {
                     tracing::warn!("runner service requested but not hosted");
-                    return Err(vox::Metadata::default());
+                    return Err(vox::LaneRejection::new(vox::LaneRejectReason::NotReady));
                 };
-                Ok(vox::ConnectionRoute::handle(RunnerDispatcher::new(
-                    service.clone(),
-                )))
+                lane.handle_with(RunnerDispatcher::new(service.clone()));
+                Ok(())
             }
             "Observe" => {
                 let Some(service) = &self.runner_service else {
                     tracing::warn!("observe service requested but runner is not hosted");
-                    return Err(vox::Metadata::default());
+                    return Err(vox::LaneRejection::new(vox::LaneRejectReason::NotReady));
                 };
-                Ok(vox::ConnectionRoute::handle(ObserveDispatcher::new(
-                    service.clone(),
-                )))
+                lane.handle_with(ObserveDispatcher::new(service.clone()));
+                Ok(())
             }
             "Producing" => {
                 let Some(service) = &self.runner_service else {
                     tracing::warn!("producing service requested but runner is not hosted");
-                    return Err(vox::Metadata::default());
+                    return Err(vox::LaneRejection::new(vox::LaneRejectReason::NotReady));
                 };
-                service.handle_producing_connection()
+                service.handle_producing_connection(lane)
             }
             "Vfsd" => {
                 let Some(service) = &self.vfsd_service else {
                     tracing::warn!("vfsd service requested but not hosted");
-                    return Err(vox::Metadata::default());
+                    return Err(vox::LaneRejection::new(vox::LaneRejectReason::NotReady));
                 };
-                Ok(vox::ConnectionRoute::handle(VfsdDispatcher::new(
-                    service.clone(),
-                )))
+                lane.handle_with(VfsdDispatcher::new(service.clone()));
+                Ok(())
             }
             other => {
                 tracing::warn!("unknown service requested: {}", other);
-                Err(vox::Metadata::default())
+                Err(vox::LaneRejection::new(
+                    vox::LaneRejectReason::UnknownService,
+                ))
             }
         }
     }

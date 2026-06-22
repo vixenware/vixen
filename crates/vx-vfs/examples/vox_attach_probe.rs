@@ -1,6 +1,5 @@
 use std::time::Duration;
 
-use vox::{MetadataEntry, NoopClient};
 use vx_services::{
     CreateResult, DirEntry, GetAttributesResult, ItemAttributes, ItemId, ItemType, LookupResult,
     ReadDirResult, ReadResult, SetAttributesParams, Vfs, VfsDiskNotify, VfsDispatcher, VfsResult,
@@ -113,15 +112,15 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     )?;
     let addr = format!("local://{socket_path}");
 
-    let builder = vox::connect::<NoopClient>(&addr)
-        .metadata(vec![MetadataEntry::str("probe", "rust")])
+    let builder = vox::connect(&addr)
+        .metadata(vox::metadata().str("probe", "rust").build())
         .connect_timeout(Duration::from_secs(5));
 
-    let client = match mode.as_str() {
+    let connection = match mode.as_str() {
         "noop" => builder.establish().await?,
         "vfs" => {
             builder
-                .on_connection(VfsDispatcher::new(DummyVfs))
+                .on_lane(VfsDispatcher::new(DummyVfs))
                 .establish()
                 .await?
         }
@@ -129,7 +128,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     };
 
     println!("connected {addr}");
-    client.caller.closed().await;
+    connection.closed().await;
     println!("closed");
     Ok(())
 }
