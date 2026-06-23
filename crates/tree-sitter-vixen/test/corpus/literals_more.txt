@@ -1,0 +1,394 @@
+================================================================================
+Integer literal
+================================================================================
+
+fn value() -> U64 {
+  42
+}
+
+--------------------------------------------------------------------------------
+
+(document
+  (function_declaration
+    (lower_identifier)
+    (parameter_clause)
+    (return_type
+      (type_primary
+        (type_path
+          (upper_identifier))))
+    (block
+      (statement_list
+        (primary_expression
+          (integer_literal))))))
+
+================================================================================
+Integer literal with underscores
+================================================================================
+
+fn value() -> U64 {
+  1_000_000
+}
+
+--------------------------------------------------------------------------------
+
+(document
+  (function_declaration
+    (lower_identifier)
+    (parameter_clause)
+    (return_type
+      (type_primary
+        (type_path
+          (upper_identifier))))
+    (block
+      (statement_list
+        (primary_expression
+          (integer_literal))))))
+
+================================================================================
+Float literal
+================================================================================
+
+fn value() -> F64 {
+  3.14
+}
+
+--------------------------------------------------------------------------------
+
+(document
+  (function_declaration
+    (lower_identifier)
+    (parameter_clause)
+    (return_type
+      (type_primary
+        (type_path
+          (upper_identifier))))
+    (block
+      (statement_list
+        (primary_expression
+          (float_literal))))))
+
+================================================================================
+Float literal with underscores
+================================================================================
+
+fn value() -> F64 {
+  1_000.000_1
+}
+
+--------------------------------------------------------------------------------
+
+(document
+  (function_declaration
+    (lower_identifier)
+    (parameter_clause)
+    (return_type
+      (type_primary
+        (type_path
+          (upper_identifier))))
+    (block
+      (statement_list
+        (primary_expression
+          (float_literal))))))
+
+================================================================================
+Boolean true
+================================================================================
+
+fn value() -> Bool {
+  true
+}
+
+--------------------------------------------------------------------------------
+
+(document
+  (function_declaration
+    (lower_identifier)
+    (parameter_clause)
+    (return_type
+      (type_primary
+        (type_path
+          (upper_identifier))))
+    (block
+      (statement_list
+        (primary_expression
+          (boolean_literal))))))
+
+================================================================================
+Boolean false
+================================================================================
+
+fn value() -> Bool {
+  false
+}
+
+--------------------------------------------------------------------------------
+
+(document
+  (function_declaration
+    (lower_identifier)
+    (parameter_clause)
+    (return_type
+      (type_primary
+        (type_path
+          (upper_identifier))))
+    (block
+      (statement_list
+        (primary_expression
+          (boolean_literal))))))
+
+================================================================================
+String literal
+================================================================================
+
+fn value() -> String {
+  "hello"
+}
+
+--------------------------------------------------------------------------------
+
+(document
+  (function_declaration
+    (lower_identifier)
+    (parameter_clause)
+    (return_type
+      (type_primary
+        (type_path
+          (upper_identifier))))
+    (block
+      (statement_list
+        (primary_expression
+          (string_literal
+            (string_content)))))))
+
+================================================================================
+Escaped string literal
+================================================================================
+
+fn value() -> String {
+  "line\\nnext"
+}
+
+--------------------------------------------------------------------------------
+
+(document
+  (function_declaration
+    (lower_identifier)
+    (parameter_clause)
+    (return_type
+      (type_primary
+        (type_path
+          (upper_identifier))))
+    (block
+      (statement_list
+        (primary_expression
+          (string_literal
+            (string_content)
+            (escape_sequence)
+            (string_content)))))))
+
+================================================================================
+Interpolated string
+================================================================================
+
+fn value(name: String) -> String {
+  `hello ${name}`
+}
+
+--------------------------------------------------------------------------------
+
+(document
+  (function_declaration
+    (lower_identifier)
+    (parameter_clause
+      (parameter_list
+        (parameter
+          (binding_pattern
+            (lower_identifier))
+          (slot_type
+            (type_primary
+              (type_path
+                (upper_identifier)))))))
+    (return_type
+      (type_primary
+        (type_path
+          (upper_identifier))))
+    (block
+      (statement_list
+        (primary_expression
+          (interpolated_string
+            (string_content)
+            (string_interpolation
+              (primary_expression
+                (identifier_expression
+                  (lower_identifier))))))))))
+
+================================================================================
+Unit expression
+================================================================================
+
+fn value() -> () {
+  ()
+}
+
+--------------------------------------------------------------------------------
+
+(document
+  (function_declaration
+    (lower_identifier)
+    (parameter_clause)
+    (return_type
+      (type_primary
+        (unit_type)))
+    (block
+      (statement_list
+        (primary_expression
+          (unit_expression))))))
+
+================================================================================
+Tuple expression
+================================================================================
+
+fn value() -> (U64, U64) {
+  (1, 2)
+}
+
+--------------------------------------------------------------------------------
+
+(document
+  (function_declaration
+    (lower_identifier)
+    (parameter_clause)
+    (return_type
+      (type_primary
+        (tuple_type
+          (type_primary
+            (type_path
+              (upper_identifier)))
+          (type_primary
+            (type_path
+              (upper_identifier))))))
+    (block
+      (statement_list
+        (primary_expression
+          (tuple_expression
+            (primary_expression
+              (integer_literal))
+            (primary_expression
+              (integer_literal))))))))
+
+================================================================================
+Parenthesized expression
+================================================================================
+
+fn value() -> U64 {
+  (1 + 2)
+}
+
+--------------------------------------------------------------------------------
+
+(document
+  (function_declaration
+    (lower_identifier)
+    (parameter_clause)
+    (return_type
+      (type_primary
+        (type_path
+          (upper_identifier))))
+    (block
+      (statement_list
+        (primary_expression
+          (tuple_expression
+            (additive_expression
+              (primary_expression
+                (integer_literal))
+              (primary_expression
+                (integer_literal)))))))))
+
+================================================================================
+Array expression with spread
+================================================================================
+
+fn value(tail: Array[U64]) -> Array[U64] {
+  [1, ..tail, 4]
+}
+
+--------------------------------------------------------------------------------
+
+(document
+  (function_declaration
+    (lower_identifier)
+    (parameter_clause
+      (parameter_list
+        (parameter
+          (binding_pattern
+            (lower_identifier))
+          (slot_type
+            (type_primary
+              (type_path
+                (upper_identifier)
+                (type_arguments
+                  (type_primary
+                    (type_path
+                      (upper_identifier))))))))))
+    (return_type
+      (type_primary
+        (type_path
+          (upper_identifier)
+          (type_arguments
+            (type_primary
+              (type_path
+                (upper_identifier)))))))
+    (block
+      (statement_list
+        (primary_expression
+          (array_expression
+            (primary_expression
+              (integer_literal))
+            (spread_expression
+              (primary_expression
+                (identifier_expression
+                  (lower_identifier))))
+            (primary_expression
+              (integer_literal))))))))
+
+================================================================================
+Map expression
+================================================================================
+
+fn value() -> Map[String, U64] {
+  { "a": 1, "b": 2 }
+}
+
+--------------------------------------------------------------------------------
+
+(document
+  (function_declaration
+    (lower_identifier)
+    (parameter_clause)
+    (return_type
+      (type_primary
+        (type_path
+          (upper_identifier)
+          (type_arguments
+            (type_primary
+              (type_path
+                (upper_identifier)))
+            (type_primary
+              (type_path
+                (upper_identifier)))))))
+    (block
+      (statement_list
+        (primary_expression
+          (map_expression
+            (map_entry
+              (map_key_expression
+                (string_literal
+                  (string_content)))
+              (primary_expression
+                (integer_literal)))
+            (map_entry
+              (map_key_expression
+                (string_literal
+                  (string_content)))
+              (primary_expression
+                (integer_literal)))))))))

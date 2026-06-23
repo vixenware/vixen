@@ -1,0 +1,159 @@
+================================================================================
+Let bindings and local functions
+================================================================================
+
+fn run(point: Pair, config: Config, state: State) -> U64 {
+  let { x, y }: Pair = point;
+  fn add_one(value: U64) -> U64 {
+    value + 1
+  };
+  config with= {
+    build.jobs: 4,
+  };
+  state.count = add_one x;
+  return y
+}
+
+--------------------------------------------------------------------------------
+
+(document
+  (function_declaration
+    (lower_identifier)
+    (parameter_clause
+      (parameter_list
+        (parameter
+          (binding_pattern
+            (lower_identifier))
+          (slot_type
+            (type_primary
+              (type_path
+                (upper_identifier)))))
+        (parameter
+          (binding_pattern
+            (lower_identifier))
+          (slot_type
+            (type_primary
+              (type_path
+                (upper_identifier)))))
+        (parameter
+          (binding_pattern
+            (lower_identifier))
+          (slot_type
+            (type_primary
+              (type_path
+                (upper_identifier)))))))
+    (return_type
+      (type_primary
+        (type_path
+          (upper_identifier))))
+    (block
+      (statement_list
+        (binding_statement
+          (binding_pattern
+            (struct_pattern
+              (struct_pattern_field
+                (lower_identifier))
+              (struct_pattern_field
+                (lower_identifier))))
+          (slot_type
+            (type_primary
+              (type_path
+                (upper_identifier))))
+          (primary_expression
+            (identifier_expression
+              (lower_identifier))))
+        (function_declaration
+          (lower_identifier)
+          (parameter_clause
+            (parameter_list
+              (parameter
+                (binding_pattern
+                  (lower_identifier))
+                (slot_type
+                  (type_primary
+                    (type_path
+                      (upper_identifier)))))))
+          (return_type
+            (type_primary
+              (type_path
+                (upper_identifier))))
+          (block
+            (statement_list
+              (additive_expression
+                (primary_expression
+                  (identifier_expression
+                    (lower_identifier)))
+                (primary_expression
+                  (integer_literal))))))
+        (compound_update_statement
+          (lower_identifier)
+          (update_body
+            (update_field
+              (field_path
+                (lower_identifier)
+                (lower_identifier))
+              (primary_expression
+                (integer_literal)))))
+        (field_assignment_statement
+          (field_assignment_target
+            (field_expression
+              (primary_expression
+                (identifier_expression
+                  (lower_identifier)))
+              (lower_identifier)))
+          (application_expression
+            (primary_expression
+              (identifier_expression
+                (lower_identifier)))
+            (primary_expression
+              (identifier_expression
+                (lower_identifier)))))
+        (return_statement
+          (primary_expression
+            (identifier_expression
+              (lower_identifier))))))))
+
+================================================================================
+Comments inside blocks
+================================================================================
+
+fn comments() -> U64 {
+  let value = 1;
+  // comment
+  let next = value + 1;
+  /* outer /* inner */ still outer */
+  next
+}
+
+--------------------------------------------------------------------------------
+
+(document
+  (function_declaration
+    (lower_identifier)
+    (parameter_clause)
+    (return_type
+      (type_primary
+        (type_path
+          (upper_identifier))))
+    (block
+      (statement_list
+        (binding_statement
+          (binding_pattern
+            (lower_identifier))
+          (primary_expression
+            (integer_literal)))
+        (line_comment)
+        (binding_statement
+          (binding_pattern
+            (lower_identifier))
+          (additive_expression
+            (primary_expression
+              (identifier_expression
+                (lower_identifier)))
+            (primary_expression
+              (integer_literal))))
+        (block_comment
+          (block_comment))
+        (primary_expression
+          (identifier_expression
+            (lower_identifier)))))))

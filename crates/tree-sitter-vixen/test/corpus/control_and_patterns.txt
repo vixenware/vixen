@@ -1,0 +1,157 @@
+================================================================================
+If else and match
+================================================================================
+
+fn classify(flag: Bool, value: Value) -> String {
+  if flag {
+    "yes"
+  } else if value.count > 0 {
+    "maybe"
+  } else {
+    match value {
+      Message.Hello { body } => body,
+      _ => "no",
+    }
+  }
+}
+
+--------------------------------------------------------------------------------
+
+(document
+  (function_declaration
+    (lower_identifier)
+    (parameter_clause
+      (parameter_list
+        (parameter
+          (binding_pattern
+            (lower_identifier))
+          (slot_type
+            (type_primary
+              (type_path
+                (upper_identifier)))))
+        (parameter
+          (binding_pattern
+            (lower_identifier))
+          (slot_type
+            (type_primary
+              (type_path
+                (upper_identifier)))))))
+    (return_type
+      (type_primary
+        (type_path
+          (upper_identifier))))
+    (block
+      (statement_list
+        (if_expression
+          (primary_expression
+            (identifier_expression
+              (lower_identifier)))
+          (block
+            (statement_list
+              (primary_expression
+                (string_literal
+                  (string_content)))))
+          (else_clause
+            (if_expression
+              (comparison_expression
+                (field_expression
+                  (primary_expression
+                    (identifier_expression
+                      (lower_identifier)))
+                  (lower_identifier))
+                (primary_expression
+                  (integer_literal)))
+              (block
+                (statement_list
+                  (primary_expression
+                    (string_literal
+                      (string_content)))))
+              (else_clause
+                (block
+                  (statement_list
+                    (match_expression
+                      (primary_expression
+                        (identifier_expression
+                          (lower_identifier)))
+                      (match_arm
+                        (variant_pattern
+                          (type_path
+                            (upper_identifier)
+                            (upper_identifier))
+                          (struct_pattern
+                            (struct_pattern_field
+                              (lower_identifier))))
+                        (primary_expression
+                          (identifier_expression
+                            (lower_identifier))))
+                      (match_arm
+                        (wildcard_pattern)
+                        (primary_expression
+                          (string_literal
+                            (string_content)))))))))))))))
+
+================================================================================
+Array and struct patterns
+================================================================================
+
+fn unpack(items: Array[String], point: Point) -> String {
+  let [first, ..rest] = items;
+  let { x, y } = point;
+  first
+}
+
+--------------------------------------------------------------------------------
+
+(document
+  (function_declaration
+    (lower_identifier)
+    (parameter_clause
+      (parameter_list
+        (parameter
+          (binding_pattern
+            (lower_identifier))
+          (slot_type
+            (type_primary
+              (type_path
+                (upper_identifier)
+                (type_arguments
+                  (type_primary
+                    (type_path
+                      (upper_identifier))))))))
+        (parameter
+          (binding_pattern
+            (lower_identifier))
+          (slot_type
+            (type_primary
+              (type_path
+                (upper_identifier)))))))
+    (return_type
+      (type_primary
+        (type_path
+          (upper_identifier))))
+    (block
+      (statement_list
+        (binding_statement
+          (binding_pattern
+            (array_pattern
+              (array_pattern_item
+                (lower_identifier))
+              (array_pattern_item
+                (array_rest_pattern
+                  (lower_identifier)))))
+          (primary_expression
+            (identifier_expression
+              (lower_identifier))))
+        (binding_statement
+          (binding_pattern
+            (struct_pattern
+              (struct_pattern_field
+                (lower_identifier))
+              (struct_pattern_field
+                (lower_identifier))))
+          (primary_expression
+            (identifier_expression
+              (lower_identifier))))
+        (primary_expression
+          (identifier_expression
+            (lower_identifier)))))))

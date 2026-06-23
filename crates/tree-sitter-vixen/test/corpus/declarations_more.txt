@@ -1,0 +1,433 @@
+================================================================================
+Struct declaration
+================================================================================
+
+struct Point {
+  x: F64,
+  y: F64,
+}
+
+--------------------------------------------------------------------------------
+
+(document
+  (struct_declaration
+    (upper_identifier)
+    (struct_declaration_body
+      (struct_field_declaration
+        (lower_identifier)
+        (slot_type
+          (type_primary
+            (type_path
+              (upper_identifier)))))
+      (struct_field_declaration
+        (lower_identifier)
+        (slot_type
+          (type_primary
+            (type_path
+              (upper_identifier))))))))
+
+================================================================================
+Attributed struct declaration
+================================================================================
+
+#[rename = "point"]
+struct Point {
+  x: F64,
+}
+
+--------------------------------------------------------------------------------
+
+(document
+  (struct_declaration
+    (attribute_list
+      (attribute
+        (attribute_entry
+          (lower_identifier)
+          (primary_expression
+            (string_literal
+              (string_content))))))
+    (upper_identifier)
+    (struct_declaration_body
+      (struct_field_declaration
+        (lower_identifier)
+        (slot_type
+          (type_primary
+            (type_path
+              (upper_identifier))))))))
+
+================================================================================
+Generic struct declaration
+================================================================================
+
+struct Pair[A, B] {
+  first: A,
+  second: B,
+}
+
+--------------------------------------------------------------------------------
+
+(document
+  (struct_declaration
+    (upper_identifier)
+    (type_parameter_list
+      (type_parameter
+        (upper_identifier))
+      (type_parameter
+        (upper_identifier)))
+    (struct_declaration_body
+      (struct_field_declaration
+        (lower_identifier)
+        (slot_type
+          (type_primary
+            (type_path
+              (upper_identifier)))))
+      (struct_field_declaration
+        (lower_identifier)
+        (slot_type
+          (type_primary
+            (type_path
+              (upper_identifier))))))))
+
+================================================================================
+Struct with defaults
+================================================================================
+
+struct Config {
+  optimize: Bool = false,
+  jobs: U64 = 8,
+  target: String,
+}
+
+--------------------------------------------------------------------------------
+
+(document
+  (struct_declaration
+    (upper_identifier)
+    (struct_declaration_body
+      (struct_field_declaration
+        (lower_identifier)
+        (slot_type
+          (type_primary
+            (type_path
+              (upper_identifier))))
+        (primary_expression
+          (boolean_literal)))
+      (struct_field_declaration
+        (lower_identifier)
+        (slot_type
+          (type_primary
+            (type_path
+              (upper_identifier))))
+        (primary_expression
+          (integer_literal)))
+      (struct_field_declaration
+        (lower_identifier)
+        (slot_type
+          (type_primary
+            (type_path
+              (upper_identifier))))))))
+
+================================================================================
+Enum declaration
+================================================================================
+
+enum Shape {
+  struct Circle {
+    radius: F64,
+  },
+  struct Rect {
+    width: F64,
+    height: F64,
+  },
+  struct Empty,
+}
+
+--------------------------------------------------------------------------------
+
+(document
+  (enum_declaration
+    (upper_identifier)
+    (enum_declaration_body
+      (enum_variant_declaration
+        (upper_identifier)
+        (struct_declaration_body
+          (struct_field_declaration
+            (lower_identifier)
+            (slot_type
+              (type_primary
+                (type_path
+                  (upper_identifier)))))))
+      (enum_variant_declaration
+        (upper_identifier)
+        (struct_declaration_body
+          (struct_field_declaration
+            (lower_identifier)
+            (slot_type
+              (type_primary
+                (type_path
+                  (upper_identifier)))))
+          (struct_field_declaration
+            (lower_identifier)
+            (slot_type
+              (type_primary
+                (type_path
+                  (upper_identifier)))))))
+      (enum_variant_declaration
+        (upper_identifier)))))
+
+================================================================================
+Attributed enum variant
+================================================================================
+
+enum Event {
+  #[rename = "click"]
+  struct Click {
+    x: F64,
+  },
+  struct KeyPress,
+}
+
+--------------------------------------------------------------------------------
+
+(document
+  (enum_declaration
+    (upper_identifier)
+    (enum_declaration_body
+      (enum_variant_declaration
+        (attribute_list
+          (attribute
+            (attribute_entry
+              (lower_identifier)
+              (primary_expression
+                (string_literal
+                  (string_content))))))
+        (upper_identifier)
+        (struct_declaration_body
+          (struct_field_declaration
+            (lower_identifier)
+            (slot_type
+              (type_primary
+                (type_path
+                  (upper_identifier)))))))
+      (enum_variant_declaration
+        (upper_identifier)))))
+
+================================================================================
+Generic enum declaration
+================================================================================
+
+enum Result[T, E] {
+  struct Ok {
+    value: T,
+  },
+  struct Err {
+    error: E,
+  },
+}
+
+--------------------------------------------------------------------------------
+
+(document
+  (enum_declaration
+    (upper_identifier)
+    (type_parameter_list
+      (type_parameter
+        (upper_identifier))
+      (type_parameter
+        (upper_identifier)))
+    (enum_declaration_body
+      (enum_variant_declaration
+        (upper_identifier)
+        (struct_declaration_body
+          (struct_field_declaration
+            (lower_identifier)
+            (slot_type
+              (type_primary
+                (type_path
+                  (upper_identifier)))))))
+      (enum_variant_declaration
+        (upper_identifier)
+        (struct_declaration_body
+          (struct_field_declaration
+            (lower_identifier)
+            (slot_type
+              (type_primary
+                (type_path
+                  (upper_identifier))))))))))
+
+================================================================================
+Type alias declaration with generics
+================================================================================
+
+type PairTree[T] = Map[String, T]
+
+--------------------------------------------------------------------------------
+
+(document
+  (type_alias_declaration
+    (upper_identifier)
+    (type_parameter_list
+      (type_parameter
+        (upper_identifier)))
+    (type_alias_value
+      (type_primary
+        (type_path
+          (upper_identifier)
+          (type_arguments
+            (type_primary
+              (type_path
+                (upper_identifier)))
+            (type_primary
+              (type_path
+                (upper_identifier)))))))))
+
+================================================================================
+Function declaration with destructuring parameter
+================================================================================
+
+fn value({ first, last }: Name) -> String {
+  first
+}
+
+--------------------------------------------------------------------------------
+
+(document
+  (function_declaration
+    (lower_identifier)
+    (parameter_clause
+      (parameter_list
+        (parameter
+          (binding_pattern
+            (struct_pattern
+              (struct_pattern_field
+                (lower_identifier))
+              (struct_pattern_field
+                (lower_identifier))))
+          (slot_type
+            (type_primary
+              (type_path
+                (upper_identifier)))))))
+    (return_type
+      (type_primary
+        (type_path
+          (upper_identifier))))
+    (block
+      (statement_list
+        (primary_expression
+          (identifier_expression
+            (lower_identifier)))))))
+
+================================================================================
+Function declaration with keyword only parameters
+================================================================================
+
+fn connect(; host: String, port: U64 = 80) -> String {
+  host
+}
+
+--------------------------------------------------------------------------------
+
+(document
+  (function_declaration
+    (lower_identifier)
+    (parameter_clause
+      (keyword_parameter_section
+        (keyword_parameter
+          (lower_identifier)
+          (slot_type
+            (type_primary
+              (type_path
+                (upper_identifier)))))
+        (keyword_parameter
+          (lower_identifier)
+          (slot_type
+            (type_primary
+              (type_path
+                (upper_identifier))))
+          (primary_expression
+            (integer_literal)))))
+    (return_type
+      (type_primary
+        (type_path
+          (upper_identifier))))
+    (block
+      (statement_list
+        (primary_expression
+          (identifier_expression
+            (lower_identifier)))))))
+
+================================================================================
+Constructor function declaration
+================================================================================
+
+fn Blob(s: String) -> Blob {
+  Blob { content: s }
+}
+
+--------------------------------------------------------------------------------
+
+(document
+  (function_declaration
+    (upper_identifier)
+    (parameter_clause
+      (parameter_list
+        (parameter
+          (binding_pattern
+            (lower_identifier))
+          (slot_type
+            (type_primary
+              (type_path
+                (upper_identifier)))))))
+    (return_type
+      (type_primary
+        (type_path
+          (upper_identifier))))
+    (block
+      (statement_list
+        (application_expression
+          (primary_expression
+            (identifier_expression
+              (upper_identifier)))
+          (record_expression
+            (record_field
+              (lower_identifier)
+              (primary_expression
+                (identifier_expression
+                  (lower_identifier))))))))))
+
+================================================================================
+Capability tagged function declaration
+================================================================================
+
+fn discover(path: Path) #fs #discover -> Blob {
+  blob
+}
+
+--------------------------------------------------------------------------------
+
+(document
+  (function_declaration
+    (lower_identifier)
+    (parameter_clause
+      (parameter_list
+        (parameter
+          (binding_pattern
+            (lower_identifier))
+          (slot_type
+            (type_primary
+              (type_path
+                (upper_identifier)))))))
+    (capability_list
+      (capability_tag
+        (lower_identifier))
+      (capability_tag
+        (lower_identifier)))
+    (return_type
+      (type_primary
+        (type_path
+          (upper_identifier))))
+    (block
+      (statement_list
+        (primary_expression
+          (identifier_expression
+            (lower_identifier)))))))

@@ -1,0 +1,7 @@
+.claude
+target
+node_modules
+*.dylib
+*.so
+*.dll
+*.wasm

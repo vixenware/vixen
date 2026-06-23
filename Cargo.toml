@@ -44,6 +44,7 @@ members = [
 
   "xtask",
 ]
+exclude = ["crates/tree-sitter-vixen"]
 resolver = "2"
 
 [workspace.package]

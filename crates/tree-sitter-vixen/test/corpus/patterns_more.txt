@@ -1,0 +1,501 @@
+================================================================================
+Wildcard pattern in match
+================================================================================
+
+fn value(input: String) -> String {
+  match input {
+    _ => "anything",
+  }
+}
+
+--------------------------------------------------------------------------------
+
+(document
+  (function_declaration
+    (lower_identifier)
+    (parameter_clause
+      (parameter_list
+        (parameter
+          (binding_pattern
+            (lower_identifier))
+          (slot_type
+            (type_primary
+              (type_path
+                (upper_identifier)))))))
+    (return_type
+      (type_primary
+        (type_path
+          (upper_identifier))))
+    (block
+      (statement_list
+        (match_expression
+          (primary_expression
+            (identifier_expression
+              (lower_identifier)))
+          (match_arm
+            (wildcard_pattern)
+            (primary_expression
+              (string_literal
+                (string_content)))))))))
+
+================================================================================
+Integer literal pattern
+================================================================================
+
+fn value(code: U64) -> String {
+  match code {
+    0 => "ok",
+    _ => "error",
+  }
+}
+
+--------------------------------------------------------------------------------
+
+(document
+  (function_declaration
+    (lower_identifier)
+    (parameter_clause
+      (parameter_list
+        (parameter
+          (binding_pattern
+            (lower_identifier))
+          (slot_type
+            (type_primary
+              (type_path
+                (upper_identifier)))))))
+    (return_type
+      (type_primary
+        (type_path
+          (upper_identifier))))
+    (block
+      (statement_list
+        (match_expression
+          (primary_expression
+            (identifier_expression
+              (lower_identifier)))
+          (match_arm
+            (literal_pattern
+              (integer_literal))
+            (primary_expression
+              (string_literal
+                (string_content))))
+          (match_arm
+            (wildcard_pattern)
+            (primary_expression
+              (string_literal
+                (string_content)))))))))
+
+================================================================================
+String literal pattern
+================================================================================
+
+fn value(name: String) -> String {
+  match name {
+    "Alice" => "hello alice",
+    "Bob" => "hello bob",
+    _ => "hello stranger",
+  }
+}
+
+--------------------------------------------------------------------------------
+
+(document
+  (function_declaration
+    (lower_identifier)
+    (parameter_clause
+      (parameter_list
+        (parameter
+          (binding_pattern
+            (lower_identifier))
+          (slot_type
+            (type_primary
+              (type_path
+                (upper_identifier)))))))
+    (return_type
+      (type_primary
+        (type_path
+          (upper_identifier))))
+    (block
+      (statement_list
+        (match_expression
+          (primary_expression
+            (identifier_expression
+              (lower_identifier)))
+          (match_arm
+            (literal_pattern
+              (string_literal
+                (string_content)))
+            (primary_expression
+              (string_literal
+                (string_content))))
+          (match_arm
+            (literal_pattern
+              (string_literal
+                (string_content)))
+            (primary_expression
+              (string_literal
+                (string_content))))
+          (match_arm
+            (wildcard_pattern)
+            (primary_expression
+              (string_literal
+                (string_content)))))))))
+
+================================================================================
+Tuple pattern
+================================================================================
+
+fn value(pair: (U64, U64)) -> U64 {
+  match pair {
+    (x, y) => x,
+  }
+}
+
+--------------------------------------------------------------------------------
+
+(document
+  (function_declaration
+    (lower_identifier)
+    (parameter_clause
+      (parameter_list
+        (parameter
+          (binding_pattern
+            (lower_identifier))
+          (slot_type
+            (type_primary
+              (tuple_type
+                (type_primary
+                  (type_path
+                    (upper_identifier)))
+                (type_primary
+                  (type_path
+                    (upper_identifier)))))))))
+    (return_type
+      (type_primary
+        (type_path
+          (upper_identifier))))
+    (block
+      (statement_list
+        (match_expression
+          (primary_expression
+            (identifier_expression
+              (lower_identifier)))
+          (match_arm
+            (tuple_pattern
+              (lower_identifier)
+              (lower_identifier))
+            (primary_expression
+              (identifier_expression
+                (lower_identifier)))))))))
+
+================================================================================
+Struct pattern
+================================================================================
+
+fn value(point: Point) -> U64 {
+  match point {
+    { x, y } => x,
+  }
+}
+
+--------------------------------------------------------------------------------
+
+(document
+  (function_declaration
+    (lower_identifier)
+    (parameter_clause
+      (parameter_list
+        (parameter
+          (binding_pattern
+            (lower_identifier))
+          (slot_type
+            (type_primary
+              (type_path
+                (upper_identifier)))))))
+    (return_type
+      (type_primary
+        (type_path
+          (upper_identifier))))
+    (block
+      (statement_list
+        (match_expression
+          (primary_expression
+            (identifier_expression
+              (lower_identifier)))
+          (match_arm
+            (struct_pattern
+              (struct_pattern_field
+                (lower_identifier))
+              (struct_pattern_field
+                (lower_identifier)))
+            (primary_expression
+              (identifier_expression
+                (lower_identifier)))))))))
+
+================================================================================
+Variant pattern
+================================================================================
+
+fn value(message: Message) -> String {
+  match message {
+    Message.Hello { body } => body,
+    Message.Goodbye => "bye",
+  }
+}
+
+--------------------------------------------------------------------------------
+
+(document
+  (function_declaration
+    (lower_identifier)
+    (parameter_clause
+      (parameter_list
+        (parameter
+          (binding_pattern
+            (lower_identifier))
+          (slot_type
+            (type_primary
+              (type_path
+                (upper_identifier)))))))
+    (return_type
+      (type_primary
+        (type_path
+          (upper_identifier))))
+    (block
+      (statement_list
+        (match_expression
+          (primary_expression
+            (identifier_expression
+              (lower_identifier)))
+          (match_arm
+            (variant_pattern
+              (type_path
+                (upper_identifier)
+                (upper_identifier))
+              (struct_pattern
+                (struct_pattern_field
+                  (lower_identifier))))
+            (primary_expression
+              (identifier_expression
+                (lower_identifier))))
+          (match_arm
+            (variant_pattern
+              (type_path
+                (upper_identifier)
+                (upper_identifier)))
+            (primary_expression
+              (string_literal
+                (string_content)))))))))
+
+================================================================================
+Array rest pattern
+================================================================================
+
+fn value(items: Array[String]) -> String {
+  match items {
+    [first, ..rest] => first,
+    [] => "empty",
+  }
+}
+
+--------------------------------------------------------------------------------
+
+(document
+  (function_declaration
+    (lower_identifier)
+    (parameter_clause
+      (parameter_list
+        (parameter
+          (binding_pattern
+            (lower_identifier))
+          (slot_type
+            (type_primary
+              (type_path
+                (upper_identifier)
+                (type_arguments
+                  (type_primary
+                    (type_path
+                      (upper_identifier))))))))))
+    (return_type
+      (type_primary
+        (type_path
+          (upper_identifier))))
+    (block
+      (statement_list
+        (match_expression
+          (primary_expression
+            (identifier_expression
+              (lower_identifier)))
+          (match_arm
+            (array_pattern
+              (array_pattern_item
+                (lower_identifier))
+              (array_pattern_item
+                (array_rest_pattern
+                  (lower_identifier))))
+            (primary_expression
+              (identifier_expression
+                (lower_identifier))))
+          (match_arm
+            (array_pattern)
+            (primary_expression
+              (string_literal
+                (string_content)))))))))
+
+================================================================================
+At pattern
+================================================================================
+
+fn value(message: Message) -> Message {
+  match message {
+    whole @ Message.Hello { body } => whole,
+    other => other,
+  }
+}
+
+--------------------------------------------------------------------------------
+
+(document
+  (function_declaration
+    (lower_identifier)
+    (parameter_clause
+      (parameter_list
+        (parameter
+          (binding_pattern
+            (lower_identifier))
+          (slot_type
+            (type_primary
+              (type_path
+                (upper_identifier)))))))
+    (return_type
+      (type_primary
+        (type_path
+          (upper_identifier))))
+    (block
+      (statement_list
+        (match_expression
+          (primary_expression
+            (identifier_expression
+              (lower_identifier)))
+          (match_arm
+            (at_pattern
+              (lower_identifier)
+              (variant_pattern
+                (type_path
+                  (upper_identifier)
+                  (upper_identifier))
+                (struct_pattern
+                  (struct_pattern_field
+                    (lower_identifier)))))
+            (primary_expression
+              (identifier_expression
+                (lower_identifier))))
+          (match_arm
+            (lower_identifier)
+            (primary_expression
+              (identifier_expression
+                (lower_identifier)))))))))
+
+================================================================================
+Or pattern
+================================================================================
+
+fn value(direction: Direction) -> Bool {
+  match direction {
+    Direction.North | Direction.South => true,
+    _ => false,
+  }
+}
+
+--------------------------------------------------------------------------------
+
+(document
+  (function_declaration
+    (lower_identifier)
+    (parameter_clause
+      (parameter_list
+        (parameter
+          (binding_pattern
+            (lower_identifier))
+          (slot_type
+            (type_primary
+              (type_path
+                (upper_identifier)))))))
+    (return_type
+      (type_primary
+        (type_path
+          (upper_identifier))))
+    (block
+      (statement_list
+        (match_expression
+          (primary_expression
+            (identifier_expression
+              (lower_identifier)))
+          (match_arm
+            (or_pattern
+              (variant_pattern
+                (type_path
+                  (upper_identifier)
+                  (upper_identifier)))
+              (variant_pattern
+                (type_path
+                  (upper_identifier)
+                  (upper_identifier))))
+            (primary_expression
+              (boolean_literal)))
+          (match_arm
+            (wildcard_pattern)
+            (primary_expression
+              (boolean_literal))))))))
+
+================================================================================
+Match guard
+================================================================================
+
+fn value(code: U64) -> String {
+  match code {
+    n if n < 1024 => "small",
+    _ => "large",
+  }
+}
+
+--------------------------------------------------------------------------------
+
+(document
+  (function_declaration
+    (lower_identifier)
+    (parameter_clause
+      (parameter_list
+        (parameter
+          (binding_pattern
+            (lower_identifier))
+          (slot_type
+            (type_primary
+              (type_path
+                (upper_identifier)))))))
+    (return_type
+      (type_primary
+        (type_path
+          (upper_identifier))))
+    (block
+      (statement_list
+        (match_expression
+          (primary_expression
+            (identifier_expression
+              (lower_identifier)))
+          (match_arm
+            (lower_identifier)
+            (comparison_expression
+              (primary_expression
+                (identifier_expression
+                  (lower_identifier)))
+              (primary_expression
+                (integer_literal)))
+            (primary_expression
+              (string_literal
+                (string_content))))
+          (match_arm
+            (wildcard_pattern)
+            (primary_expression
+              (string_literal
+                (string_content)))))))))

@@ -1,0 +1,223 @@
+================================================================================
+Optional types and capability function types
+================================================================================
+
+fn parse(
+  handler: Fn(String) #discover -> String?,
+  input: String?,
+) -> String? {
+  let result: String? = handler "hello";
+  result
+}
+
+--------------------------------------------------------------------------------
+
+(document
+  (function_declaration
+    (lower_identifier)
+    (parameter_clause
+      (parameter_list
+        (parameter
+          (binding_pattern
+            (lower_identifier))
+          (slot_type
+            (optional_type
+              (type_primary
+                (function_type
+                  (type_primary
+                    (type_path
+                      (upper_identifier)))
+                  (capability_list
+                    (capability_tag
+                      (lower_identifier)))
+                  (type_primary
+                    (type_path
+                      (upper_identifier))))))))
+        (parameter
+          (binding_pattern
+            (lower_identifier))
+          (slot_type
+            (optional_type
+              (type_primary
+                (type_path
+                  (upper_identifier))))))))
+    (return_type
+      (optional_type
+        (type_primary
+          (type_path
+            (upper_identifier)))))
+    (block
+      (statement_list
+        (binding_statement
+          (binding_pattern
+            (lower_identifier))
+          (slot_type
+            (optional_type
+              (type_primary
+                (type_path
+                  (upper_identifier)))))
+          (application_expression
+            (primary_expression
+              (identifier_expression
+                (lower_identifier)))
+            (primary_expression
+              (string_literal
+                (string_content)))))
+        (primary_expression
+          (identifier_expression
+            (lower_identifier)))))))
+
+================================================================================
+Inline declarations in slot positions
+================================================================================
+
+struct Dashboard {
+  layout: enum Layout {
+    struct Grid,
+    struct List,
+  },
+  theme: enum {
+    struct Light,
+    struct Dark,
+  },
+  content: type Content = Blob | Tree,
+  empty: newtype Empty of (),
+  metadata: struct Metadata {
+    title: String,
+  },
+}
+
+fn render(
+  input: struct RenderInput {
+    path: String,
+  },
+  ; theme: enum Theme {
+    struct Light,
+    struct Dark,
+  } = Theme.Light,
+) -> () {
+  let state: enum {
+    struct Ready,
+    struct Busy,
+  } = current;
+  ()
+}
+
+--------------------------------------------------------------------------------
+
+(document
+  (struct_declaration
+    (upper_identifier)
+    (struct_declaration_body
+      (struct_field_declaration
+        (lower_identifier)
+        (slot_type
+          (inline_type_declaration
+            (inline_enum_declaration
+              (upper_identifier)
+              (enum_declaration_body
+                (enum_variant_declaration
+                  (upper_identifier))
+                (enum_variant_declaration
+                  (upper_identifier)))))))
+      (struct_field_declaration
+        (lower_identifier)
+        (slot_type
+          (inline_type_declaration
+            (inline_enum_declaration
+              (enum_declaration_body
+                (enum_variant_declaration
+                  (upper_identifier))
+                (enum_variant_declaration
+                  (upper_identifier)))))))
+      (struct_field_declaration
+        (lower_identifier)
+        (slot_type
+          (inline_type_declaration
+            (inline_type_alias_declaration
+              (upper_identifier)
+              (type_alias_value
+                (sum_type_definition
+                  (type_primary
+                    (type_path
+                      (upper_identifier)))
+                  (type_primary
+                    (type_path
+                      (upper_identifier)))))))))
+      (struct_field_declaration
+        (lower_identifier)
+        (slot_type
+          (inline_type_declaration
+            (inline_newtype_declaration
+              (upper_identifier)
+              (type_primary
+                (unit_type))))))
+      (struct_field_declaration
+        (lower_identifier)
+        (slot_type
+          (inline_type_declaration
+            (inline_struct_declaration
+              (upper_identifier)
+              (struct_declaration_body
+                (struct_field_declaration
+                  (lower_identifier)
+                  (slot_type
+                    (type_primary
+                      (type_path
+                        (upper_identifier))))))))))))
+  (function_declaration
+    (lower_identifier)
+    (parameter_clause
+      (parameter_list
+        (parameter
+          (binding_pattern
+            (lower_identifier))
+          (slot_type
+            (inline_type_declaration
+              (inline_struct_declaration
+                (upper_identifier)
+                (struct_declaration_body
+                  (struct_field_declaration
+                    (lower_identifier)
+                    (slot_type
+                      (type_primary
+                        (type_path
+                          (upper_identifier)))))))))))
+      (keyword_parameter_section
+        (keyword_parameter
+          (lower_identifier)
+          (slot_type
+            (inline_type_declaration
+              (inline_enum_declaration
+                (upper_identifier)
+                (enum_declaration_body
+                  (enum_variant_declaration
+                    (upper_identifier))
+                  (enum_variant_declaration
+                    (upper_identifier))))))
+          (field_expression
+            (primary_expression
+              (identifier_expression
+                (upper_identifier)))
+            (upper_identifier)))))
+    (return_type
+      (type_primary
+        (unit_type)))
+    (block
+      (statement_list
+        (binding_statement
+          (binding_pattern
+            (lower_identifier))
+          (slot_type
+            (inline_type_declaration
+              (inline_enum_declaration
+                (enum_declaration_body
+                  (enum_variant_declaration
+                    (upper_identifier))
+                  (enum_variant_declaration
+                    (upper_identifier))))))
+          (primary_expression
+            (identifier_expression
+              (lower_identifier))))
+        (primary_expression
+          (unit_expression))))))

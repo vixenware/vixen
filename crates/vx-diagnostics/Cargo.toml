@@ -19,7 +19,7 @@ arborium = { workspace = true }
 arborium-highlight = { workspace = true }
 arborium-theme = { workspace = true }
 terminal-light = { workspace = true }
-tree-sitter-vixen = { git = "ssh://git@code.vixen.rs/vixen/tree-sitter-vixen.git", rev = "3e2cc63b460685ff595429afe435e8178c4f14a8" }
+tree-sitter-vixen = { path = "../tree-sitter-vixen", version = "0.1.0" }
 vx-ir = { workspace = true }
 vx-parser = { workspace = true }
 vx-stdlib = { workspace = true }
