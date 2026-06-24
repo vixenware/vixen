@@ -6,8 +6,8 @@ specs (
     {
         name language
         include (
-            docs/content/spec/language/*.md
-            docs/content/spec/language/**/*.md
+            docs/spec/language/*.md
+            docs/spec/language/**/*.md
         )
         impls (
             {
@@ -20,8 +20,8 @@ specs (
     {
         name stdlib
         include (
-            docs/content/spec/stdlib/*.md
-            docs/content/spec/stdlib/**/*.md
+            docs/spec/stdlib/*.md
+            docs/spec/stdlib/**/*.md
         )
         impls (
             {
@@ -33,7 +33,7 @@ specs (
     }
     {
         name internals
-        include (docs/content/spec/internals.md)
+        include (docs/spec/internals.md)
         impls (
             {
                 name rust
@@ -44,7 +44,7 @@ specs (
     }
     {
         name diagnostics
-        include (docs/content/spec/diagnostics.md)
+        include (docs/spec/diagnostics.md)
         impls (
             {
                 name rust
