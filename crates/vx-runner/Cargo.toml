@@ -1,5 +1,6 @@
 [package]
 name = "vx-runner"
+publish = false
 version.workspace = true
 edition.workspace = true
 

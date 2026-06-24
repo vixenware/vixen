@@ -1,5 +1,6 @@
 [package]
 name = "vx-daemon"
+publish = false
 version.workspace = true
 edition.workspace = true
 

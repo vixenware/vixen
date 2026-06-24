@@ -1,5 +1,6 @@
 [package]
 name = "vx"
+publish = false
 version.workspace = true
 edition.workspace = true
 autobins = false

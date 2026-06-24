@@ -1,5 +1,6 @@
 [package]
 name = "vx-types"
+publish = false
 version.workspace = true
 edition.workspace = true
 license.workspace = true
