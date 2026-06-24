@@ -22,6 +22,7 @@ We ship two distinct products. They are not tiers of one product. Conflating the
 ## Vixen Build subsystem docs
 
 - [Vixen language](/vixen-language/)
+- [Open language kernel strategy](/open-language-kernel-strategy/)
 - [Build and resolution](/build-and-resolution/)
 - [Packages and publishing](/packages-and-publishing/)
 - [Executor abilities](/executor-abilities/)
