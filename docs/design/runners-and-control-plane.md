@@ -11,13 +11,13 @@ job queue) and *not* CI runners. The existing app.vixen.rs code conflates the
 three; see [`product-boundaries.md`](product-boundaries.md) before forming a model
 from that code.
 
-Cross-refs: [`spec/language/core.md`](../content/spec/language/core.md)
+Cross-refs: [`spec/language/core.md`](../spec/language/core.md)
 (`capability { advertises T }`, `r[constraint.requirement]`),
-[`spec/stdlib/build.md`](../content/spec/stdlib/build.md) (`r[exec.signature]`,
+[`spec/stdlib/build.md`](../spec/stdlib/build.md) (`r[exec.signature]`,
 `r[exec.exemptions]`, `r[exec.verifier.host.coarse]`),
-[`spec/language/build.md`](../content/spec/language/build.md)
+[`spec/language/build.md`](../spec/language/build.md)
 (`r[eval.memoization]` — type-driven routing),
-[`runtime-semantics.md`](runtime-semantics.md) (demand model, exemptions,
+[`runtime-semantics.md`](../../wiki/content/runtime-semantics.md) (demand model, exemptions,
 fingerprints, two-level cache).
 
 ---
@@ -55,7 +55,7 @@ deliberately kept separate:
 
 - **Your local daemon — always present.** There is *always* a daemon on your own
   machine: it **watches your filesystem** (read-set invalidation —
-  [`runtime-semantics.md`](runtime-semantics.md) §6–7), holds your local cache, and
+  [`runtime-semantics.md`](../../wiki/content/runtime-semantics.md) §6–7), holds your local cache, and
   can act as a local **executor**. There is **no daemon-less / "embedded" mode.**
 - **The orchestrator** — drives a build: walks the demand graph, **places** each
   `exec`, makes the decisions. It *usually* runs **on your local daemon**
@@ -154,7 +154,7 @@ the daemon's continuous capability detection, not as a build-graph operation.
 
 (The other original motivation for `discover` — cargo manifest vs lock — is
 handled separately, as a build-output-overlaid-as-input plus overrides; see
-[`runtime-semantics.md`](runtime-semantics.md).)
+[`runtime-semantics.md`](../../wiki/content/runtime-semantics.md).)
 
 ## 7. Deployment: two independent axes
 

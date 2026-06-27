@@ -77,7 +77,7 @@ fn main() {
     let files: Vec<String> = if args.is_empty() {
         ["demand_basis", "which_field_which_graph", "poisons"]
             .iter()
-            .map(|f| format!("crates/vx-rt/tests/lang/{f}.vx"))
+            .map(|f| format!("crates/vx-runtime/tests/lang/{f}.vx"))
             .collect()
     } else {
         args

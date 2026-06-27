@@ -5,13 +5,15 @@
 //! by **both** the orchestrator and the executor, so a shipped closure evaluates
 //! the same on either side.
 //!
-//! It **replaces** the eager evaluator. The standalone `vx-rt` crate is now
-//! removed; `vx-daemon`'s `runtime_eval` core and the `vx-ir` back-end
-//! (`KernelOp`/`lower`/`demand`) remain until the daemon cuts over.
+//! It **replaces** the eager evaluator. The standalone `vx-rt` crate and
+//! `vx-daemon`'s `runtime_eval` core are gone; keep them gone. The remaining
+//! transition is collapsing public compatibility surfaces onto graph execution.
 //!
 //! The pieces, demand-in to value-out:
 //! - [`analyze`] — VIR → the [`graph`] demand graph.
-//! - [`graph`] — the demand graph: lazy nodes, spans, bombs.
+//! - [`graph`] — compatibility re-export of `vx-runtime-graph`.
+//! - `vx-runtime-core` — source-blind graph stepping.
+//! - `vx-runtime-driver` — legal demand origins, memo state, and work loop.
 //! - `graph_exec` — source entry → graph driver. This is the new public source
 //!   execution path while the rest of the runtime is being cut over.
 //! - [`lower`] — a scalar region of the graph → [`kernel`] IR (`NotLowerable` when

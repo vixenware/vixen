@@ -1,6 +1,6 @@
 # Vixen.app (macOS FSKit host)
 
-![Vixen fox logo](../../art/fox.svg)
+![Vixen fox logo](../../docs/static/img/fox.svg)
 
 `apps/mac` contains the macOS app and FSKit extension used by `vx-vfs`.
 

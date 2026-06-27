@@ -5,8 +5,10 @@ Durable home for multi-thread architectural work on Vixen. Substrate is dodeca; 
 ## Serve
 
 ```
-ddc serve vixen/wiki
+ddc serve wiki
 ```
+
+From `/Users/amos/vixenware`, use `ddc serve vixen/wiki`.
 
 Default port range is 4000–4019. Live reload enabled.
 
@@ -23,19 +25,23 @@ wiki/
 └── starters/               # blank starters for each page type — copy, rename, fill
 ```
 
-## Page types
+## Page Types
 
 Pages have no per-type directory — the page type lives in the frontmatter, not the path. This keeps cross-references stable when a page changes type and keeps `[[Wiki links]]` namespace-free.
 
-| Type               | Purpose                                              |
-| ------------------ | ---------------------------------------------------- |
-| `Vision`           | Long-form aspirational direction.                    |
-| `Milestone`        | Concrete goal with enumerated success criteria.      |
-| `Decision`         | ADR-style record of an architectural choice.         |
-| `Question`         | Open architectural question.                         |
-| `Experiment`       | Hypothesis + result.                                 |
-| `ArchitectureNote` | How something works *today*.                         |
-| `Glossary`         | One term, two or three sentences.                    |
+The live schema defines two page types:
+
+| Type   | Purpose |
+| ------ | ------- |
+| `Doc`  | Synthesized explanation, organized for reading. |
+| `Task` | Work item with status, priority, optional blockers, and tier tags. |
+
+Task statuses are `todo`, `in-progress`, `blocked`, `done`, `superseded`, and
+`abandoned`.
+
+`superseded` is a first-class lifecycle state, not a validation failure. A
+superseded page should be a short tombstone that points to the current model; it
+must not keep a long contradictory body under the tombstone.
 
 ## Frontmatter
 

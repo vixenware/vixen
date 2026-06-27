@@ -18,8 +18,8 @@ Companion to [The demand-driven runtime](/runtime-semantics/) (the engine).
 > `tool.command` at check time and validates the invocation against it
 > (`r[exec.validate.static]`). That is still *evaluation* — the real evaluator,
 > run at compile time — which is why the conclusion below holds. It is not "a
-> type that is a runtime value"; see [[Types are values]] (superseded) for that
-> dead end.
+> type that is a runtime value"; that dead end was removed rather than kept as a
+> route for new work.
 
 ## The thesis
 
@@ -43,17 +43,16 @@ beside the evaluator.
 
 ## Why — the forces, all future-facing
 
-The grammar-forcing CLI resolver ([[Commands & grammars are values]]) is only the
-*first* check that forces. Every direction the system is heading makes the
+The CLI-literal checker is only the first check that const-evaluates through the
+engine. Every direction the system is heading makes the
 unification load-bearing, not incidental:
 
 - **Interleaving.** Checking one `@[ ${cmd} … ]` weaves static (structural lints
   on literal tokens) and dynamic (force the grammar value) together, sharing state
   — the hole types, the diagnostic list — *within one expression*. A crate
   boundary through the middle of that forces a two-pass handshake ferrying state
-  across. As more checks become value-forcing (the explicit trajectory of
-  types-are-values), the boundary cuts through more of them. A fault line that
-  keeps moving is the worst kind.
+  across. As more checks become engine-driven, the boundary cuts through more of
+  them. A fault line that keeps moving is the worst kind.
 
 - **Incrementality and caching, for free.** Per-unit diagnostic caching (the
   [continuous cross-target validation](/executor-abilities/#continuous-cross-target-validation-the-lsp-killer-feature)
@@ -74,8 +73,8 @@ unification load-bearing, not incidental:
 
 - **One gesture.** Hover, completion, and type-checking are the same act — *force a
   value in the live graph and inspect it*. The LSP is a **client of the live
-  engine, not a re-implementation of the checker** ([[Types are values]]). One
-  engine knows how to force; the LSP queries it.
+  engine, not a re-implementation of the checker**. One engine knows how to force;
+  the LSP queries it.
 
 ## What this rejects
 
@@ -119,8 +118,6 @@ taken against the real dependency graph, not guessed.
 
 ## Related
 
-- [[Types are values]] — the semantic stance this is the structural consequence of.
 - [The demand-driven runtime](/runtime-semantics/) — the engine the checker joins.
-- [[Commands & grammars are values]] — the grammar-forcing resolver, the first check to move.
 - [[Executor abilities]] — continuous cross-target validation: the feature needing remote + streaming checks.
 - [Streams as the first Tier-2 primitive](/streams-first-primitive/) — `Stream[Diagnostic]`.

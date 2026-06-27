@@ -7,12 +7,13 @@ page-types {
         // tier(s) the doc primarily concerns; informational
         tiers @optional(@seq(@string))
         tags @optional(@seq(@string))
+        created @optional(@string)
         updated @optional(@string)
     }
 
     Task @object{
         type @string
-        status @enum{todo, in-progress, blocked, done, abandoned}
+        status @enum{todo, in-progress, blocked, done, superseded, abandoned}
         priority @optional(@enum{low, medium, high})
         // tasks this one blocks
         blocks @optional(@seq(@link(@Task)))

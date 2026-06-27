@@ -99,7 +99,7 @@ Layering of crates.io URL construction (string interpolation of crate name + ver
 
 Reminder about Vixen syntax used here:
 
-- **Function application is positional, single-payload.** `f x` is one positional payload; use a tuple `f (x, y)` to pass what looks like multiple args. (See `docs/content/spec/language/core.md`.)
+- **Function application is positional, single-payload.** `f x` is one positional payload; use a tuple `f (x, y)` to pass what looks like multiple args. (See `docs/spec/language/core.md`.)
 - **Juxtaposition (no parens) is allowed when the payload is self-delimiting** — string / array / record / set literals all qualify. Bare identifiers and most expressions still need parens.
 - **`with { … }`** applies the record as keyword args. Not a second positional argument.
 
