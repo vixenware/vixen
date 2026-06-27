@@ -16,6 +16,7 @@
 //! launchd bootstrap; [`mount`] keeps that boundary at the leaf command.
 
 pub mod extension;
+#[cfg(target_os = "macos")]
 pub mod killswitch;
 pub mod mount;
 pub mod probe;
@@ -24,6 +25,20 @@ pub mod repair_status;
 pub mod session;
 pub mod status;
 pub mod uninstall;
+
+/// Terminate `fskitd` — the FSKit wedge kill-switch.
+///
+/// No-op off macOS: there is no `fskitd` to terminate there. The macOS-specific
+/// implementation lives in [`killswitch`] (only compiled on macOS).
+#[cfg(target_os = "macos")]
+pub(crate) fn kill_fskitd() -> eyre::Result<()> {
+    killswitch::terminate_fskitd().map(|_| ())
+}
+
+#[cfg(not(target_os = "macos"))]
+pub(crate) fn kill_fskitd() -> eyre::Result<()> {
+    Ok(())
+}
 
 /// The fixed privileged capabilities. Each maps to one queue directory; a file
 /// appearing there *is* the request. Adding a button is a deliberate widening of the
@@ -76,7 +91,7 @@ impl Button {
             Button::Mount => mount::establish(),
             Button::Unmount => mount::unmount(),
             Button::Remount => mount::remount(),
-            Button::KillFskitd => killswitch::terminate_fskitd().map(|_| ()),
+            Button::KillFskitd => kill_fskitd(),
             Button::Uninstall => uninstall::uninstall_vixenfs(),
         }
     }
@@ -90,7 +105,7 @@ impl Button {
             Button::Mount => mount::establish(),
             Button::Unmount => mount::unmount(),
             Button::Remount => mount::remount(),
-            Button::KillFskitd => killswitch::terminate_fskitd().map(|_| ()),
+            Button::KillFskitd => kill_fskitd(),
             Button::Uninstall => uninstall::uninstall_vixenfs(),
         }
     }

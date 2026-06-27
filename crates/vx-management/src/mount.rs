@@ -23,7 +23,7 @@ use std::time::{Duration, Instant};
 use eyre::{Result, WrapErr, bail};
 use vx_vfs_types::MACOS_VFS_MOUNT_PARENT;
 
-use crate::{killswitch, session};
+use crate::session;
 
 /// Where the block volume mounts — a real `/Volumes` descendant, not an arbitrary path.
 pub use vx_vfs_types::MACOS_VFS_MOUNT_POINT as MOUNT_POINT;
@@ -183,7 +183,7 @@ fn recover_existing_state() -> Result<()> {
             ?remaining,
             "vixenfs still mounted after unmount attempts; terminating fskitd"
         );
-        killswitch::terminate_fskitd()?;
+        crate::kill_fskitd()?;
     }
 
     let remaining = vixenfs_mount_points(&mount_output()?);
