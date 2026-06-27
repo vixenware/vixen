@@ -1,6 +1,6 @@
 [workspace]
 members = ["crates/*", "xtask"]
-exclude = ["crates/tree-sitter-vixen", "crates/windows-projfs"]
+exclude = ["crates/windows-projfs"]
 resolver = "2"
 
 [workspace.package]
@@ -12,8 +12,6 @@ repository = "https://github.com/bearcove/vx"
 [workspace.dependencies]
 moire = "1.0.1"
 vx-services = { path = "crates/vx-services" }
-vx-exec-protocol = { path = "crates/vx-exec-protocol" }
-vx-diagnostics = { path = "crates/vx-diagnostics" }
 margin = { path = "crates/margin" }
 margin-term = { path = "crates/margin-term" }
 vx-io = { path = "crates/vx-io" }
@@ -21,15 +19,6 @@ vx-vfs = { path = "crates/vx-vfs" }
 vx-vfsd = { path = "crates/vx-vfsd" }
 vx-vfs-types = { path = "crates/vx-vfs-types" }
 vx-fskit-types = { path = "crates/vx-fskit-types" }
-vx-span = { path = "crates/vx-span" }
-vx-parser = { path = "crates/vx-parser" }
-vx-package = { path = "crates/vx-package" }
-vx-ir = { path = "crates/vx-ir" }
-vx-stdlib = { path = "crates/vx-stdlib" }
-vx-types = { path = "crates/vx-types" }
-command-model = { path = "crates/command-model" }
-command-grammar-vx = { path = "crates/command-grammar-vx" }
-vxd = { path = "crates/vx-daemon", package = "vx-daemon" }
 
 # facet ecosystem
 facet = { version = "0.50.0-rc.0", features = ["jiff02", "camino"] }
