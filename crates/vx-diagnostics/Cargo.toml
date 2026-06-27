@@ -27,7 +27,7 @@ vx-stdlib = { workspace = true }
 vx-types = { workspace = true }
 
 [dev-dependencies]
-margin = { path = "../../crates-plus/margin" }
+margin.workspace = true
 vx-ir = { path = "../vx-ir" }
 # `compile_source` (the checked front-end) lives in the engine now — checking
 # forces values, so it moved in with the evaluator.

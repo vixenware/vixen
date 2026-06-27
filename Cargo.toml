@@ -1,49 +1,5 @@
 [workspace]
-members = [
-  ## crates+
-  "crates-plus/*",
-
-  ## lang crates
-  "crates/vx-span",
-  "crates/vx-parser",
-  "crates/vx-package",
-  "crates/vx-types",
-  "crates/vx-diagnostics",
-  "crates/vx-ir",
-  "crates/vx-stdlib",
-  "crates/vx-lsp",
-
-  ## eval crates
-  "crates/vx-runtime-graph",
-  "crates/vx-runtime-core",
-  "crates/vx-runtime-driver",
-  "crates/vx-exec-protocol",
-  "crates/vx-runtime",
-
-  ## runtime support
-  "crates/vx-cache-index",
-  "crates/vx-http",
-  "crates/vx-tarball",
-  "crates/landlock-exec",
-
-  ## core crates
-  "crates/vx",
-  "crates/vx-daemon",
-  "crates/vx-io",
-  "crates/vx-services",
-  ## services
-  "crates/vx-store",
-  "crates/vx-runner",
-  "crates/vx-vfsd",
-  "crates/vx-vfs-types",
-  "crates/vx-vfs",
-  "crates/vx-fskit",
-  "crates/vx-fskit-types",
-  ## privileged macOS management daemon (block-device mount + fskitd kill-switch)
-  "crates/vx-management",
-
-  "xtask",
-]
+members = ["crates/*", "xtask"]
 exclude = ["crates/tree-sitter-vixen"]
 resolver = "2"
 
@@ -54,13 +10,12 @@ license = "AGPL-3.0-or-later"
 repository = "https://github.com/bearcove/vx"
 
 [workspace.dependencies]
-# instrumentation
 moire = "1.0.1"
 vx-services = { path = "crates/vx-services" }
 vx-exec-protocol = { path = "crates/vx-exec-protocol" }
 vx-diagnostics = { path = "crates/vx-diagnostics" }
-margin = { path = "crates-plus/margin" }
-margin-term = { path = "crates-plus/margin-term" }
+margin = { path = "crates/margin" }
+margin-term = { path = "crates/margin-term" }
 vx-io = { path = "crates/vx-io" }
 vx-vfs = { path = "crates/vx-vfs" }
 vx-vfsd = { path = "crates/vx-vfsd" }
@@ -129,7 +84,7 @@ async-stream = "0.3"
 bytes = "1"
 
 # FUSE (Linux) — vendored
-fuse3 = { path = "crates-plus/fuse3", features = ["telemetry"] }
+fuse3 = { path = "crates/fuse3", features = ["telemetry"] }
 
 # ProjFS (Windows)
 windows-projfs = { version = "0.1", features = ["dynamic-import"] }
@@ -176,7 +131,7 @@ split-debuginfo = "unpacked"
 strip = "none"
 
 [patch.crates-io]
-windows-projfs = { path = "vendor/windows-projfs" }
+windows-projfs = { path = "crates/windows-projfs" }
 
 [profile.samply]
 inherits = "release"
