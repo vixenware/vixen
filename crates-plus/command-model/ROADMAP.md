@@ -132,10 +132,10 @@ back to runtime-evaluated Vixen IR.
 *for* this; we won't contort the design to keep `command-model` standalone if
 that costs more than it's worth. The Rust crate is the engine; grammars are
 Vixen values that lower to its `Grammar` form. When the engine must *evaluate*
-Vixen (a Turing-complete reducer), it targets the **daemon's** evaluator — never
-`vx-rt`, a defunct duplicate being removed. A dedicated **CLI literal** in Vixen
-(first-class syntax for command invocations) is looking increasingly likely as
-the surface where this intelligence lives.
+Vixen (a Turing-complete reducer), it targets the active `vx-runtime` graph
+evaluator through the daemon boundary, not a retired duplicate runtime. A dedicated
+**CLI literal** in Vixen (first-class syntax for command invocations) is looking
+increasingly likely as the surface where this intelligence lives.
 
 **Scope: comprehensive now, not MVP slices.** CLI argument schemes have been
 stable for 20–30 years — this is not a moving target. So we build the *complete*

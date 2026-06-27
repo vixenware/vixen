@@ -26,4 +26,4 @@ the lowering bridge lands.
 - These `.vx` files use the current Vixen design and **do not run on today's
   runtime** (which is mid-migration). They are the authoring target; next is the
   engine side — an owned `Grammar` + a facet (de)serialization bridge that loads
-  a lowered grammar value, evaluated by the daemon (never `vx-rt`).
+  a lowered grammar value through `vx-runtime`.
