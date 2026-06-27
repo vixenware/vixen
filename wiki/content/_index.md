@@ -2,33 +2,23 @@
 title = "Vixen"
 +++
 
-Spec and design corpus for Vixen. The wiki is the live spec home; Dodeca tracks
-requirements and implementation links as that flow lands.
+Spec and design corpus for Vixen. The wiki is the live spec home.
 
 ## Two products
 
-Vixen has two products. They share some infrastructure, but customers buy and use
-them separately.
-
-- [CCC (Cargo Cloud Cache)](/ccc/) is a Rust CI cache product. It ships as a
-  cargo fork through a rustup mirror. Customers keep typing `cargo build`; CCC
-  sends cargo's resolved unit graph to `ccc-backend` in one RPC and materialises
-  only demanded cache hits.
-- [Vixen Build](/vixen-build/) is a build-system product. Customers opt in with
-  `vx cargo build`; the runner orchestrates while Vixen executors run the build
-  under the sandbox, VFS, package, and cache runtime. Vixen CI is the later
-  `.vx` authoring surface.
-
-CCC can ship without the Vixen runtime. Vixen Build uses CCC's cache/trust
-lessons, but is a separate product with a separate adoption path.
+- [CCC (Cargo Cloud Cache)](/ccc/) — Rust CI cache. Ships as cargo; no Vixen
+  runtime, no `.vx`.
+- [Vixen Build](/vixen-build/) — build system. Ships as `vx cargo build`;
+  executors run builds under the Vixen runtime, sandbox, VFS, package, and cache
+  model.
 
 Start with [Vixen Build](/vixen-build/#settled-decisions) for product decisions.
 
-## Cross-cutting substance
+## Shared Docs
 
-- [Cache and trust](/cache-and-trust/) — disciplines that apply to both products (tightening monotonic, per-cache trust, declared identity). Mechanism differences are noted per product.
-- [Architecture and infrastructure](/architecture-and-infrastructure/) — components and where they run.
-- [Glossary](/glossary/) — short term definitions.
+- [Cache and trust](/cache-and-trust/)
+- [Architecture and infrastructure](/architecture-and-infrastructure/)
+- [Glossary](/glossary/)
 
 ## Vixen Build subsystem docs
 
