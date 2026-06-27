@@ -3,7 +3,7 @@ title = "Vixen Build"
 
 [extra]
 type = "Doc"
-updated = "2026-05-26"
+updated = "2026-06-27"
 +++
 
 A standalone product. **Vixen Build is not CCC.** Different code, different surface, different customer commitment, different value proposition. This doc covers Vixen Build (and Vixen CI as its CI-tier surface) without conflation.
@@ -13,6 +13,32 @@ A standalone product. **Vixen Build is not CCC.** Different code, different surf
 A build system. Language, runtime, sandbox, distributed exec, executor fleet, content-addressed cache with per-edge trust, package manager — all one product. Customer adopts it by running `vx cargo build` (or `vx test`, `vx <whatever>`) instead of `cargo build`. Opt-in, explicit. Customer's runner becomes an orchestration host; actual builds run on Vixen-managed executors.
 
 The Vixen language itself stays internal at first — customers type `vx cargo build` against `@vixen/cargo`, never authoring `.vx`. When customers eventually author `.vx` files (their own CI, their own custom build steps, their own subcommands), that's the Vixen CI surface.
+
+## Settled decisions
+
+- **Vixen Build needs a language.** The build graph is a computation over typed
+  values. The runtime must hash, memoize, ship, inspect, and replay those values
+  uniformly. That requires content-addressed values, no ambient effects, and
+  demand-driven evaluation; those properties are language semantics, not syntax.
+- **Domain logic lives in Vixen packages.** The Rust runtime is the engine:
+  evaluation, sandbox/VFS, HTTP, hashing, parsing intrinsics, PubGrub, and
+  process execution. Cargo, C/C++, protobuf, Xcode, and package-specific rules
+  live in packages such as `@vixen/rust`, versioned like any other dependency.
+- **Heavy algorithms stay native.** PubGrub, TOML/JSON/YAML parsing, hashing,
+  fetch, and process execution are Rust intrinsics. Vixen code wires domain
+  models to those intrinsics so the orchestration remains cacheable and
+  observable.
+- **Customers do not need to author `.vx` for Vixen Build.** Tier 2 is `vx cargo
+  build` against Vixen-authored packages. `.vx` authoring and stability
+  commitments start with the Vixen CI surface.
+- **Performance is a runtime problem.** Most wall-clock time is native work
+  behind `exec`, fetch, parsing, solving, linking, and compilation. The
+  orchestration layer should stay in Vixen; hot pure interiors lower to the
+  interpreter/JIT path when measurements justify it.
+- **CCC does not depend on the Vixen runtime.** CCC is a cargo fork,
+  `ccc-backend`, Store, and descriptor-keyed `landlock-exec` backfill fleet. It
+  funds and exercises shared cache/trust infrastructure, but it does not evaluate
+  Vixen.
 
 ## What customers do
 

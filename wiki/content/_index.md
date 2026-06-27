@@ -1,17 +1,28 @@
 +++
-title = "vixen wiki"
+title = "Vixen"
 +++
 
-Durable home for multi-thread architectural work on Vixen. Substrate is dodeca; substance is human-authored.
+Spec and design corpus for Vixen. The wiki is the live spec home; Dodeca tracks
+requirements and implementation links as that flow lands.
 
 ## Two products
 
-We ship two distinct products. They are not tiers of one product. Conflating them produces broken framing fast.
+Vixen has two products. They share some infrastructure, but customers buy and use
+them separately.
 
-- [The pitch](/pitch/) — one-paragraph overview of each product and how they relate.
-- [FAQ: settled decisions](/faq/) — answers to the objections we are done re-litigating (why a new language, why resolution-in-.vx, performance, "isn't this just <X>"). Point people here.
-- [CCC (Cargo Cloud Cache)](/ccc/) — the standalone Rust-cache product. Forked cargo, rustup mirror, ccc-backend, one-RPC graph lookup.
-- [Vixen Build](/vixen-build/) — the standalone build-system product (with Vixen CI as its public-language surface). `vx cargo build`, Vixen executors, sandbox+VFS, package manager.
+- [CCC (Cargo Cloud Cache)](/ccc/) is a Rust CI cache product. It ships as a
+  cargo fork through a rustup mirror. Customers keep typing `cargo build`; CCC
+  sends cargo's resolved unit graph to `ccc-backend` in one RPC and materialises
+  only demanded cache hits.
+- [Vixen Build](/vixen-build/) is a build-system product. Customers opt in with
+  `vx cargo build`; the runner orchestrates while Vixen executors run the build
+  under the sandbox, VFS, package, and cache runtime. Vixen CI is the later
+  `.vx` authoring surface.
+
+CCC can ship without the Vixen runtime. Vixen Build uses CCC's cache/trust
+lessons, but is a separate product with a separate adoption path.
+
+Start with [Vixen Build](/vixen-build/#settled-decisions) for product decisions.
 
 ## Cross-cutting substance
 

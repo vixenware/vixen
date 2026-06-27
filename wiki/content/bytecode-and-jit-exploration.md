@@ -25,8 +25,7 @@ Plan:
   the oracle for native execution.
 - **Copy-and-patch JIT when it earns its place.** Compile the same lowered Weavy
   representation for hot kernels — pure-function-shaped chunks called repeatedly
-  with similar shapes. Mentioned in the pitch's enterprise feature catalogue
-  (#23) as a sellable capability.
+  with similar shapes.
 
 Design challenge: Vixen is demand-driven. Which parts of the graph want to be
 lowered to Weavy vs which want to stay graph-shaped? Pure functions and

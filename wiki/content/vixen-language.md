@@ -11,7 +11,7 @@ The build language Vixen evaluates. Stays internal at Tier 2; becomes a public A
 
 ## Domain logic lives in Vixen, not in the runtime
 
-> **This is settled and non-negotiable.** "Just shell out to cargo / reuse an existing tool" is not an open question — it throws away the entire value proposition. See [FAQ: settled decisions](/faq/) before raising it.
+> **Settled product decision.** "Just shell out to cargo / reuse an existing tool" throws away Vixen Build's cache, provenance, and observability model. See [Vixen Build: settled decisions](/vixen-build/#settled-decisions).
 
 The Rust runtime is a generic engine. It knows how to evaluate Vixen, mount a sandbox+VFS, talk HTTP, hash bytes, run a PubGrub constraint solver, parse TOML/YAML/JSON into typed Vixen values. It knows nothing about cargo, Rust crates, Xcode, protobuf, or any specific language.
 
@@ -426,7 +426,7 @@ If `body` never reads the accumulator mid-flight, it's a single pass — collect
 
 ### No trait required
 
-`accumulate[M]` is an ordinary unbounded generic: it needs `merge(M, M) -> M` and `identity() -> M` defined for the concrete `M`, resolved at instantiation like every Vixen generic — a missing `merge` is a call-site error, the same duck-typed convention as `to_string`. Vixen has no trait / bound system (see [the FAQ](/faq/)), and accumulators deliberately don't introduce one.
+`accumulate[M]` is an ordinary unbounded generic: it needs `merge(M, M) -> M` and `identity() -> M` defined for the concrete `M`, resolved at instantiation like every Vixen generic — a missing `merge` is a call-site error, the same duck-typed convention as `to_string`. Vixen has no trait / bound system, and accumulators deliberately don't introduce one.
 
 ## Kernels — compiled pure islands
 
