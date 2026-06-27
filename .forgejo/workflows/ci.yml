@@ -120,9 +120,13 @@ jobs:
                     Invoke-WebRequest -Uri 'https://win.rustup.rs/x86_64' -OutFile 'rustup-init.exe'
                     ./rustup-init.exe -y --profile minimal --component clippy
                   }
-                  rustup component add clippy 2>$null
                   if ($env:GITHUB_PATH) { Add-Content -Path $env:GITHUB_PATH -Value $cargoBin }
                   $env:PATH = "$cargoBin;$env:PATH"
+                  cmd /c "cargo clippy --version >NUL 2>NUL"
+                  if ($LASTEXITCODE -ne 0) {
+                    rustup component add clippy
+                    if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+                  }
                   rustc --version
                   cargo --version
                   cargo clippy --version
