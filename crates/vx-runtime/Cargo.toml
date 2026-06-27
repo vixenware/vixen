@@ -34,7 +34,7 @@ vx-package = { path = "../vx-package" }
 # command-model is pure projection (grammar + argv -> classified I/O + canonical
 # form, no I/O). The runtime Command value (what a CLI literal evaluates to and exec
 # consumes) wraps its EffectiveCommand with the execution argv + the outputs.
-command-model = { path = "../../crates-plus/command-model" }
+command-model = { workspace = true }
 # `host.exec` Blake3-hashes the binary it runs (exec implies hash — running a tool
 # depends on its exact bytes), so the probe's CToolchain carries that fingerprint.
 blake3 = { workspace = true }
@@ -63,4 +63,4 @@ copypatch = { workspace = true, features = ["build"] }
 [dev-dependencies]
 # The CLI-literal checker tests reconstruct the front-end pipeline and load grammar
 # packages directly (the same loader vx-ir's `front_end_resolved` uses).
-command-grammar-vx = { path = "../../crates-plus/command-grammar-vx" }
+command-grammar-vx = { workspace = true }

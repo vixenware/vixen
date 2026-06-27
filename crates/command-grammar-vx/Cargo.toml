@@ -12,7 +12,7 @@ description = "Load command-model grammars authored in Vixen (.vx) via the Vixen
 rustdoc-args = ["--html-in-header", "arborium-header.html"]
 
 [dependencies]
-command-model = { path = "../command-model" }
+command-model = { workspace = true }
 # The workspace parser — one shared instance with the rest of Vixen (vx-ir et
 # al.), so a CLI-literal AST here is the *same type* the compiler front-end sees.
 # (Was a git pin during the prototype; now integrated.)

@@ -1,6 +1,6 @@
 [workspace]
 members = ["crates/*", "xtask"]
-exclude = ["crates/tree-sitter-vixen"]
+exclude = ["crates/tree-sitter-vixen", "crates/windows-projfs"]
 resolver = "2"
 
 [workspace.package]
@@ -27,6 +27,8 @@ vx-package = { path = "crates/vx-package" }
 vx-ir = { path = "crates/vx-ir" }
 vx-stdlib = { path = "crates/vx-stdlib" }
 vx-types = { path = "crates/vx-types" }
+command-model = { path = "crates/command-model" }
+command-grammar-vx = { path = "crates/command-grammar-vx" }
 vxd = { path = "crates/vx-daemon", package = "vx-daemon" }
 
 # facet ecosystem

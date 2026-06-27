@@ -141,7 +141,7 @@ impl BundledResolver {
     fn lookup(spec: &str) -> Option<&'static str> {
         match spec {
             "vixen:command-grammar" => Some(include_str!(
-                "../../../crates-plus/command-model/grammars/command-grammar.vx"
+                "../../command-model/grammars/command-grammar.vx"
             )),
             _ => None,
         }

@@ -24,7 +24,7 @@ blake3 = { workspace = true }
 # loader (command-grammar-vx) that turns a grammar package's source into a
 # GrammarSet without evaluation. Checking `@cc[ … ]` against its grammar is a
 # core language feature, so the front-end depends on them directly.
-command-model = { path = "../../crates-plus/command-model" }
-command-grammar-vx = { path = "../../crates-plus/command-grammar-vx" }
+command-model = { workspace = true }
+command-grammar-vx = { workspace = true }
 
 [dev-dependencies]
