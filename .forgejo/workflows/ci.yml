@@ -1,209 +1,154 @@
 name: CI
 
 on:
-  push:
-    branches: [main]
-  pull_request:
-    branches: [main]
-  workflow_dispatch:
+    push:
+        branches: [main]
+    pull_request:
+        branches: [main]
+    workflow_dispatch:
 
 concurrency:
-  group: ci-${{ forgejo.ref }}
-  cancel-in-progress: true
+    group: ci-${{ forgejo.ref }}
+    cancel-in-progress: true
 
 env:
-  CARGO_INCREMENTAL: "1"
-  VX_REPO_URL: https://code.vixen.rs/vixen/vixen.git
-  VX_SHA: ${{ forgejo.sha }}
+    CARGO_INCREMENTAL: "1"
+    VX_REPO_URL: https://code.vixen.rs/vixen/vixen.git
+    VX_SHA: ${{ forgejo.sha }}
 
 jobs:
-  check-mac:
-    name: check (mac)
-    runs-on: mac
-    steps:
-      - name: Checkout repository
-        run: |
-          mkdir -p "$GITHUB_WORKSPACE"
-          cd "$GITHUB_WORKSPACE"
-          git init
-          git remote remove origin 2>/dev/null || true
-          git remote add origin "$VX_REPO_URL"
-          git -c http.extraHeader="Authorization: token ${FORGEJO_TOKEN}" fetch --depth 1 origin "$VX_SHA"
-          git checkout --detach FETCH_HEAD
+    mac:
+        name: mac
+        runs-on: mac
+        steps:
+            - name: Checkout repository
+              run: |
+                  mkdir -p "$GITHUB_WORKSPACE"
+                  cd "$GITHUB_WORKSPACE"
+                  git init
+                  git remote remove origin 2>/dev/null || true
+                  git remote add origin "$VX_REPO_URL"
+                  git -c http.extraHeader="Authorization: token ${FORGEJO_TOKEN}" fetch --depth 1 origin "$VX_SHA"
+                  git checkout --detach FETCH_HEAD
 
-      - name: Prepare Rust toolchain
-        run: |
-          if ! command -v cargo >/dev/null 2>&1; then
-            curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh -s -- -y --profile minimal
-          fi
-          if [ -n "${GITHUB_PATH:-}" ]; then
-            echo "$HOME/.cargo/bin" >> "$GITHUB_PATH"
-          fi
-          . "$HOME/.cargo/env" 2>/dev/null || true
-          rustc --version
-          cargo --version
+            - name: Prepare Rust toolchain
+              run: |
+                  if ! command -v cargo >/dev/null 2>&1; then
+                    curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh -s -- -y --profile minimal --component clippy
+                  fi
+                  rustup component add clippy 2>/dev/null || true
+                  if [ -n "${GITHUB_PATH:-}" ]; then
+                    echo "$HOME/.cargo/bin" >> "$GITHUB_PATH"
+                  fi
+                  . "$HOME/.cargo/env" 2>/dev/null || true
+                  rustc --version
+                  cargo --version
+                  cargo clippy --version
 
-      - run: |
-          . "$HOME/.cargo/env" 2>/dev/null || true
-          CARGO_TARGET_DIR="$HOME/.cache/vixen/forgejo-target" cargo check --workspace --all-targets
+            - name: Install cargo-nextest if needed
+              run: |
+                  . "$HOME/.cargo/env" 2>/dev/null || true
+                  if ! cargo nextest --version >/dev/null 2>&1; then
+                    cargo install cargo-nextest --locked
+                  fi
 
-  check-linux:
-    name: check (linux-x86_64-trusted)
-    runs-on: linux-x86_64-trusted
-    container:
-      image: code.vixen.rs/vixen/vixen-ci:latest
-      volumes:
-        - /srv/ci/cache/vixen:/ci-cache
-    env:
-      CARGO_HOME: /ci-cache/cargo
-      CARGO_TARGET_DIR: /ci-cache/target/check-linux
-    steps:
-      - name: Checkout repository
-        run: |
-          mkdir -p "$GITHUB_WORKSPACE"
-          cd "$GITHUB_WORKSPACE"
-          git init
-          git remote remove origin 2>/dev/null || true
-          git remote add origin "$VX_REPO_URL"
-          git -c http.extraHeader="Authorization: token ${FORGEJO_TOKEN}" fetch --depth 1 origin "$VX_SHA"
-          git checkout --detach FETCH_HEAD
+            - name: Clippy
+              run: |
+                  . "$HOME/.cargo/env" 2>/dev/null || true
+                  CARGO_TARGET_DIR="$HOME/.cache/vixen/forgejo-target" cargo clippy --workspace --all-targets
 
-      - name: Show toolchain
-        run: |
-          mkdir -p "$CARGO_HOME" "$CARGO_TARGET_DIR"
-          rustc --version
-          cargo --version
+            - name: Tests
+              run: |
+                  . "$HOME/.cargo/env" 2>/dev/null || true
+                  CARGO_TARGET_DIR="$HOME/.cache/vixen/forgejo-target" cargo nextest run --workspace --no-fail-fast --status-level fail --final-status-level fail
 
-      - run: cargo check --workspace --all-targets
+    linux:
+        name: linux
+        runs-on: linux-x86_64-trusted
+        container:
+            image: code.vixen.rs/vixen/vixen-ci:latest
+            volumes:
+                - /srv/ci/cache/vixen:/ci-cache
+        env:
+            CARGO_HOME: /ci-cache/cargo
+            CARGO_TARGET_DIR: /ci-cache/target/ci-linux
+        steps:
+            - name: Checkout repository
+              run: |
+                  mkdir -p "$GITHUB_WORKSPACE"
+                  cd "$GITHUB_WORKSPACE"
+                  git init
+                  git remote remove origin 2>/dev/null || true
+                  git remote add origin "$VX_REPO_URL"
+                  git -c http.extraHeader="Authorization: token ${FORGEJO_TOKEN}" fetch --depth 1 origin "$VX_SHA"
+                  git checkout --detach FETCH_HEAD
 
-  clippy-mac:
-    name: clippy (mac)
-    runs-on: mac
-    steps:
-      - name: Checkout repository
-        run: |
-          mkdir -p "$GITHUB_WORKSPACE"
-          cd "$GITHUB_WORKSPACE"
-          git init
-          git remote remove origin 2>/dev/null || true
-          git remote add origin "$VX_REPO_URL"
-          git -c http.extraHeader="Authorization: token ${FORGEJO_TOKEN}" fetch --depth 1 origin "$VX_SHA"
-          git checkout --detach FETCH_HEAD
+            - name: Show toolchain
+              run: |
+                  mkdir -p "$CARGO_HOME" "$CARGO_TARGET_DIR"
+                  rustc --version
+                  cargo --version
+                  cargo clippy --version
+                  cargo nextest --version
 
-      - name: Prepare Rust toolchain
-        run: |
-          if ! command -v cargo >/dev/null 2>&1; then
-            curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh -s -- -y --profile minimal
-          fi
-          if [ -n "${GITHUB_PATH:-}" ]; then
-            echo "$HOME/.cargo/bin" >> "$GITHUB_PATH"
-          fi
-          . "$HOME/.cargo/env" 2>/dev/null || true
-          rustc --version
-          cargo --version
+            - name: Clippy
+              run: cargo clippy --workspace --all-targets
 
-      - name: Prepare clippy
-        run: |
-          . "$HOME/.cargo/env" 2>/dev/null || true
-          rustup component add clippy
+            - name: Tests
+              run: cargo nextest run --workspace --no-fail-fast --status-level fail --final-status-level fail
 
-      - run: |
-          . "$HOME/.cargo/env" 2>/dev/null || true
-          CARGO_TARGET_DIR="$HOME/.cache/vixen/forgejo-target" cargo clippy --workspace --all-targets
+    windows:
+        name: windows
+        runs-on: windows-amd64
+        steps:
+            - name: Checkout repository
+              shell: bash
+              run: |
+                  mkdir -p "$GITHUB_WORKSPACE"
+                  cd "$GITHUB_WORKSPACE"
+                  git init
+                  git remote remove origin 2>/dev/null || true
+                  git remote add origin "$VX_REPO_URL"
+                  git -c http.extraHeader="Authorization: token ${FORGEJO_TOKEN}" fetch --depth 1 origin "$VX_SHA"
+                  git checkout --detach FETCH_HEAD
 
-  clippy-linux:
-    name: clippy (linux-x86_64-trusted)
-    runs-on: linux-x86_64-trusted
-    container:
-      image: code.vixen.rs/vixen/vixen-ci:latest
-      volumes:
-        - /srv/ci/cache/vixen:/ci-cache
-    env:
-      CARGO_HOME: /ci-cache/cargo
-      CARGO_TARGET_DIR: /ci-cache/target/clippy-linux
-    steps:
-      - name: Checkout repository
-        run: |
-          mkdir -p "$GITHUB_WORKSPACE"
-          cd "$GITHUB_WORKSPACE"
-          git init
-          git remote remove origin 2>/dev/null || true
-          git remote add origin "$VX_REPO_URL"
-          git -c http.extraHeader="Authorization: token ${FORGEJO_TOKEN}" fetch --depth 1 origin "$VX_SHA"
-          git checkout --detach FETCH_HEAD
+            - name: Prepare Rust toolchain
+              shell: bash
+              run: |
+                  if ! command -v cargo >/dev/null 2>&1; then
+                    curl --proto '=https' --tlsv1.2 -sSf -o rustup-init.exe https://win.rustup.rs/x86_64
+                    ./rustup-init.exe -y --profile minimal --component clippy
+                    export PATH="$HOME/.cargo/bin:$PATH"
+                  fi
+                  rustup component add clippy 2>/dev/null || true
+                  if [ -n "${GITHUB_PATH:-}" ]; then
+                    echo "$HOME/.cargo/bin" >> "$GITHUB_PATH"
+                  fi
+                  export PATH="$HOME/.cargo/bin:$PATH"
+                  rustc --version
+                  cargo --version
+                  cargo clippy --version
 
-      - name: Show toolchain
-        run: |
-          mkdir -p "$CARGO_HOME" "$CARGO_TARGET_DIR"
-          rustc --version
-          cargo --version
-          cargo clippy --version
+            - name: Install cargo-nextest if needed
+              shell: bash
+              run: |
+                  export PATH="$HOME/.cargo/bin:$PATH"
+                  if ! cargo nextest --version >/dev/null 2>&1; then
+                    cargo install cargo-nextest --locked
+                  fi
 
-      - run: cargo clippy --workspace --all-targets
+            # vx-management is a macOS-only privileged daemon (POSIX libc); it does not
+            # build on Windows. vx-fskit/fuse3/landlock-exec already self-gate, so the
+            # rest of the workspace — including the vx-vfs + windows-projfs path — is
+            # what this job exercises.
+            - name: Clippy
+              shell: bash
+              run: |
+                  export PATH="$HOME/.cargo/bin:$PATH"
+                  cargo clippy --workspace --exclude vx-management --all-targets
 
-  tests-mac:
-    name: tests (mac)
-    runs-on: mac
-    steps:
-      - name: Checkout repository
-        run: |
-          mkdir -p "$GITHUB_WORKSPACE"
-          cd "$GITHUB_WORKSPACE"
-          git init
-          git remote remove origin 2>/dev/null || true
-          git remote add origin "$VX_REPO_URL"
-          git -c http.extraHeader="Authorization: token ${FORGEJO_TOKEN}" fetch --depth 1 origin "$VX_SHA"
-          git checkout --detach FETCH_HEAD
-
-      - name: Prepare Rust toolchain
-        run: |
-          if ! command -v cargo >/dev/null 2>&1; then
-            curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh -s -- -y --profile minimal
-          fi
-          if [ -n "${GITHUB_PATH:-}" ]; then
-            echo "$HOME/.cargo/bin" >> "$GITHUB_PATH"
-          fi
-          . "$HOME/.cargo/env" 2>/dev/null || true
-          rustc --version
-          cargo --version
-
-      - name: Install cargo-nextest if needed
-        run: |
-          . "$HOME/.cargo/env" 2>/dev/null || true
-          if ! cargo nextest --version >/dev/null 2>&1; then
-            cargo install cargo-nextest --locked
-          fi
-
-      - run: |
-          . "$HOME/.cargo/env" 2>/dev/null || true
-          CARGO_TARGET_DIR="$HOME/.cache/vixen/forgejo-target" cargo nextest run --workspace --no-fail-fast --status-level fail --final-status-level fail
-
-  tests-linux:
-    name: tests (linux-x86_64-trusted)
-    runs-on: linux-x86_64-trusted
-    container:
-      image: code.vixen.rs/vixen/vixen-ci:latest
-      volumes:
-        - /srv/ci/cache/vixen:/ci-cache
-    env:
-      CARGO_HOME: /ci-cache/cargo
-      CARGO_TARGET_DIR: /ci-cache/target/tests-linux
-    steps:
-      - name: Checkout repository
-        run: |
-          mkdir -p "$GITHUB_WORKSPACE"
-          cd "$GITHUB_WORKSPACE"
-          git init
-          git remote remove origin 2>/dev/null || true
-          git remote add origin "$VX_REPO_URL"
-          git -c http.extraHeader="Authorization: token ${FORGEJO_TOKEN}" fetch --depth 1 origin "$VX_SHA"
-          git checkout --detach FETCH_HEAD
-
-      - name: Show toolchain
-        run: |
-          mkdir -p "$CARGO_HOME" "$CARGO_TARGET_DIR"
-          rustc --version
-          cargo --version
-          cargo nextest --version
-
-      - run: cargo nextest run --workspace --no-fail-fast --status-level fail --final-status-level fail
+            - name: Tests
+              shell: bash
+              run: |
+                  export PATH="$HOME/.cargo/bin:$PATH"
+                  cargo nextest run --workspace --exclude vx-management --no-fail-fast --status-level fail --final-status-level fail
