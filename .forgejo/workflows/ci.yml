@@ -100,6 +100,9 @@ jobs:
     windows:
         name: windows
         runs-on: windows-amd64
+        env:
+            CARGO_HOME: 'C:\Users\runner\.cargo'
+            CARGO_TARGET_DIR: 'C:\Users\runner\.cache\vixen\target\ci-windows'
         defaults:
             run:
                 shell: powershell
@@ -115,13 +118,16 @@ jobs:
 
             - name: Prepare Rust toolchain
               run: |
-                  $cargoBin = "$env:USERPROFILE\.cargo\bin"
+                  $cargoBin = Join-Path $env:CARGO_HOME "bin"
+                  New-Item -ItemType Directory -Force -Path $env:CARGO_HOME | Out-Null
+                  New-Item -ItemType Directory -Force -Path $env:CARGO_TARGET_DIR | Out-Null
+                  New-Item -ItemType Directory -Force -Path $cargoBin | Out-Null
+                  $env:PATH = "$cargoBin;$env:PATH"
                   if (-not (Get-Command cargo -ErrorAction SilentlyContinue)) {
                     Invoke-WebRequest -Uri 'https://win.rustup.rs/x86_64' -OutFile 'rustup-init.exe'
                     ./rustup-init.exe -y --profile minimal --component clippy
                   }
                   if ($env:GITHUB_PATH) { Add-Content -Path $env:GITHUB_PATH -Value $cargoBin }
-                  $env:PATH = "$cargoBin;$env:PATH"
                   cmd /c "cargo clippy --version >NUL 2>NUL"
                   if ($LASTEXITCODE -ne 0) {
                     rustup component add clippy
