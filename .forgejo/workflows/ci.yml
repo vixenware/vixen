@@ -134,8 +134,14 @@ jobs:
             - name: Install cargo-nextest if needed
               run: |
                   if (-not (Get-Command cargo-nextest -ErrorAction SilentlyContinue)) {
-                    cargo install cargo-nextest --locked
+                    $tmp = New-TemporaryFile | Rename-Item -NewName { $_ -replace 'tmp$', 'zip' } -PassThru
+                    Invoke-WebRequest -OutFile $tmp https://get.nexte.st/latest/windows
+                    $outputDir = if ($Env:CARGO_HOME) { Join-Path $Env:CARGO_HOME "bin" } else { Join-Path $Env:USERPROFILE ".cargo\bin" }
+                    New-Item -ItemType Directory -Force -Path $outputDir | Out-Null
+                    $tmp | Expand-Archive -DestinationPath $outputDir -Force
+                    $tmp | Remove-Item
                   }
+                  cargo nextest --version
 
             # vx-management is a macOS-only privileged daemon (POSIX libc); it does not
             # build on Windows. vx-fskit/fuse3/landlock-exec already self-gate, so the
