@@ -100,55 +100,46 @@ jobs:
     windows:
         name: windows
         runs-on: windows-amd64
+        defaults:
+            run:
+                shell: powershell
         steps:
             - name: Checkout repository
-              shell: bash
               run: |
-                  mkdir -p "$GITHUB_WORKSPACE"
-                  cd "$GITHUB_WORKSPACE"
+                  New-Item -ItemType Directory -Force -Path $env:GITHUB_WORKSPACE | Out-Null
+                  Set-Location $env:GITHUB_WORKSPACE
                   git init
-                  git remote remove origin 2>/dev/null || true
-                  git remote add origin "$VX_REPO_URL"
-                  git -c http.extraHeader="Authorization: token ${FORGEJO_TOKEN}" fetch --depth 1 origin "$VX_SHA"
+                  git remote remove origin 2>$null
+                  git remote add origin $env:VX_REPO_URL
+                  git -c http.extraHeader="Authorization: token $env:FORGEJO_TOKEN" fetch --depth 1 origin $env:VX_SHA
                   git checkout --detach FETCH_HEAD
 
             - name: Prepare Rust toolchain
-              shell: bash
               run: |
-                  if ! command -v cargo >/dev/null 2>&1; then
-                    curl --proto '=https' --tlsv1.2 -sSf -o rustup-init.exe https://win.rustup.rs/x86_64
+                  $cargoBin = "$env:USERPROFILE\.cargo\bin"
+                  if (-not (Get-Command cargo -ErrorAction SilentlyContinue)) {
+                    Invoke-WebRequest -Uri 'https://win.rustup.rs/x86_64' -OutFile 'rustup-init.exe'
                     ./rustup-init.exe -y --profile minimal --component clippy
-                    export PATH="$HOME/.cargo/bin:$PATH"
-                  fi
-                  rustup component add clippy 2>/dev/null || true
-                  if [ -n "${GITHUB_PATH:-}" ]; then
-                    echo "$HOME/.cargo/bin" >> "$GITHUB_PATH"
-                  fi
-                  export PATH="$HOME/.cargo/bin:$PATH"
+                  }
+                  rustup component add clippy 2>$null
+                  if ($env:GITHUB_PATH) { Add-Content -Path $env:GITHUB_PATH -Value $cargoBin }
+                  $env:PATH = "$cargoBin;$env:PATH"
                   rustc --version
                   cargo --version
                   cargo clippy --version
 
             - name: Install cargo-nextest if needed
-              shell: bash
               run: |
-                  export PATH="$HOME/.cargo/bin:$PATH"
-                  if ! cargo nextest --version >/dev/null 2>&1; then
+                  if (-not (Get-Command cargo-nextest -ErrorAction SilentlyContinue)) {
                     cargo install cargo-nextest --locked
-                  fi
+                  }
 
             # vx-management is a macOS-only privileged daemon (POSIX libc); it does not
             # build on Windows. vx-fskit/fuse3/landlock-exec already self-gate, so the
             # rest of the workspace — including the vx-vfs + windows-projfs path — is
             # what this job exercises.
             - name: Clippy
-              shell: bash
-              run: |
-                  export PATH="$HOME/.cargo/bin:$PATH"
-                  cargo clippy --workspace --exclude vx-management --all-targets
+              run: cargo clippy --workspace --exclude vx-management --all-targets
 
             - name: Tests
-              shell: bash
-              run: |
-                  export PATH="$HOME/.cargo/bin:$PATH"
-                  cargo nextest run --workspace --exclude vx-management --no-fail-fast --status-level fail --final-status-level fail
+              run: cargo nextest run --workspace --exclude vx-management --no-fail-fast --status-level fail --final-status-level fail
