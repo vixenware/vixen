@@ -26,7 +26,8 @@ This specifies two artifacts that together unwedge it:
 Claims are tagged **[settled]** (decided), **[lean]** (a proposal needing a
 yes/redirect), **[open]** (collected in §7). Normative requirements are
 blockquoted `r[fskit.*]` rules; the implementation honours them and annotates
-code with `// r[fskit.…]`, to be promoted into the Tracey spec once it lands.
+code with `// r[fskit.…]`, to be tracked from the Dodeca-backed wiki spec once
+that requirement flow lands.
 
 Facts below were **verified on macOS 26 (Darwin 25)** against a live vixen mount,
 not inferred — §2 records them so nobody re-derives them.

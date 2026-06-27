@@ -5,11 +5,14 @@ The boundary between the demand-driven runtime value world and compiled
 (Earlier drafts called these "kernels"; the word was confusing and is
 dropped. "Kernel" is the term.)
 
-**Status: we are rebuilding this path.** The earlier `vx-jit` was deleted
-because it was built on an unsettled language. The language is now settled
-(capabilities-as-objects, no effects, the constraint / accumulator / resolution
-primitives), which makes the kernel story tractable — see [Partition](#partition).
-This doc is the design; it is not yet normative spec text.
+**Status: we are rebuilding this path on Weavy.** The earlier `vx-jit` was
+deleted because it was built on an unsettled language. The language is now
+settled (capabilities-as-objects, no effects, the constraint / accumulator /
+resolution primitives), which makes the kernel story tractable — see
+[Partition](#partition). The intended replacement lowers eager kernels to the
+shared Weavy program/block representation from `~/oss/facet`, so the interpreter
+oracle and copy-and-patch JIT consume one artifact. This doc is the design; it is
+not yet normative spec text.
 
 ## Terms
 

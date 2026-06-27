@@ -18,7 +18,9 @@ checkpoint is the graph-driven execution split:
 - [`wiki/content/runtime-semantics.md`](wiki/content/runtime-semantics.md),
   [`wiki/content/strand-scheduler.md`](wiki/content/strand-scheduler.md), and
   [`wiki/content/exec.md`](wiki/content/exec.md) carry the demand-runtime model.
-- Normative specs live under [`docs/spec`](docs/spec).
+- The wiki is becoming the spec corpus. [`docs/spec`](docs/spec) still exists as
+  transitional source material while the requirements move into Dodeca-backed
+  wiki pages.
 
 ## Local entry points
 
@@ -26,10 +28,6 @@ checkpoint is the graph-driven execution split:
 - `cargo run --bin vixen -- health` checks or starts the daemon target.
 - `cargo run --bin vx -- <command>` is the package-command shortcut path.
 - `cargo nextest run` is the test runner for Rust tests.
-
-Tracey is configured in [`.config/tracey/config.styx`](.config/tracey/config.styx).
-Use `tracey_config` or `tracey_status` against this repo root to discover the
-active spec prefixes and coverage.
 
 The architectural wiki is served with `ddc serve wiki` from this repo root, or
 `ddc serve vixen/wiki` from `/Users/amos/vixenware`.

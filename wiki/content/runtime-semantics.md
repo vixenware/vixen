@@ -304,11 +304,15 @@ never read-tracked. See
 
 ## Status & open questions
 
-**Built** (`vx-runtime`): the kernel IR + interpreter (the JIT oracle); the
-demand-graph extraction; the native copy-and-patch JIT (straight-line +
-control-flow); kernel dispatch on the real eval path; I6 source-fidelity (spans
-ride the IR); [the strand scheduler](/strand-scheduler/) (I1–I7, on stackful
-coroutines); the cross-executor remote-part handle.
+**Built** (`vx-runtime`): the demand-graph extraction; kernel-boundary design
+pressure in the graph model; I6 source-fidelity direction (spans ride the IR);
+[the strand scheduler](/strand-scheduler/) (I1–I7, on stackful coroutines); the
+cross-executor remote-part handle.
+
+**Being rebuilt**: the kernel IR, interpreter oracle, kernel dispatch, and native
+copy-and-patch JIT. The intended replacement is to lower eager pure interiors to
+Weavy's shared program/block representation so interpretation and native codegen
+consume one artifact.
 
 **Open:**
 

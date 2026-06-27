@@ -10,9 +10,9 @@ tags = ["exec", "runtime", "command-model", "sandbox"]
 **Review draft.** This synthesizes three threads — the command-model projection
 layer, the `exec`/`Run` success model, and the demand-driven runtime
 (`vx-runtime`) execution + handle model — into one place. It is not yet
-normative: once the open decisions (§12) are made, the settled parts land in the
-Tracey spec (`r[exec.*]`), with examples in [Vixen Build](/vixen-build/) and
-tests authored ahead of implementation.
+normative: once the open decisions (§12) are made, the settled parts land as
+Dodeca-tracked wiki requirements, with examples in [Vixen Build](/vixen-build/)
+and tests authored ahead of implementation.
 
 Claims are tagged **[settled]** (in the design or stated), **[lean]** (a proposal
 needing a yes/redirect), **[open]** (undecided — collected in §12).

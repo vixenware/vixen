@@ -23,20 +23,17 @@ current execution boundary is the graph-runtime split (`vx-runtime-graph`,
   (the `exec` synthesis — the build primitive).
 - [`docs/design/kernel-abi.md`](docs/design/kernel-abi.md) — kernels (eager pure
   islands) + the copy-and-patch JIT / ABI.
-- [`docs/spec/language/build.md`](docs/spec/language/build.md) —
-  normative evaluation spec (`r[eval.*]`).
-- [`docs/spec/internals.md`](docs/spec/internals.md) — value
-  representation (`i[impl.*]`).
-- [`docs/spec/stdlib/build.md`](docs/spec/stdlib/build.md) — `exec`, abilities,
-  process values, sandbox/cache contracts (`r[exec.*]`, `r[ability.*]`, etc.).
+- The wiki is becoming the spec corpus. `docs/spec` still exists as transitional
+  source material, but do not treat it as a separate authority or add new spec
+  content there unless Amos explicitly redirects the migration.
 - [`docs/design/runners-and-control-plane.md`](docs/design/runners-and-control-plane.md)
   + [`docs/design/product-boundaries.md`](docs/design/product-boundaries.md) —
   execution/distribution architecture (and the app.vixen.rs / CCC / Vixen-build
   split, which the code currently conflates).
-- Tracey config lives at [`.config/tracey/config.styx`](.config/tracey/config.styx).
-  Use `tracey_config` / `tracey_status` with this repo root. Prefixes are:
-  language and stdlib use `r[...]`, internals uses `i[...]`, diagnostics uses
-  `d[...]`.
+- Tracey is no longer a standalone repo tool here. Requirement tracking is being
+  folded into the Dodeca-backed wiki/spec flow, and the old Tracey MCP/config
+  path is temporarily not a thing. Do not recreate `.config/tracey/config.styx`;
+  use Dodeca/wiki requirement tracking as it lands.
 
 ## Non-negotiables (these have been violated repeatedly)
 

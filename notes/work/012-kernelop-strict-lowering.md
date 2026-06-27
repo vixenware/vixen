@@ -1,49 +1,49 @@
-# 012: Replace Span-Keyed `lower_strict.rs` With KernelOp-Based Strict Lowering
+# 012: Lower Eager Kernel Islands To Weavy
 
-Status: Not started.
+Status: Needs rewrite for the Weavy direction. The old `vx-analysis` / `vx-jit`
+plan below is obsolete; do not revive it. The surviving work is to rebuild
+interpretation and JIT from the current graph-runtime model on the shared Weavy
+lowered-program substrate in `/Users/amos/oss/facet/weavy`.
 
 ## Goal
 
-Stop generating vx-jit strict fragments by re-walking the raw parser AST keyed by spans. Instead, generate strict fragments from the already-lowered executable slice (`ExecutableBody.ops`) when those ops are in the strict-compatible subset.
+Lower eager, pure kernel islands from the graph runtime into a Weavy program that
+can be executed by both the Weavy interpreter runner and the copy-and-patch JIT.
 
-This makes “strict compilation” a property of the lowering output, not a property of a second independent AST walk.
+This keeps one semantics source for interpreted and native execution. The old
+span-keyed AST walk and the old `KernelOp`/`ExecutableBody` strict-lowering path
+were attempts to reach that shape before the runtime and language boundary had
+settled.
 
 ## Motivation
 
-The current strict path:
+The direction still matters because Vixen has mixed programs: orchestration,
+cache boundaries, and `exec` stay graph-shaped, while local pure interiors should
+be executable as eager kernels. The delicate part is the boundary:
 
-- is brittle (span matching, wrapper peeling, duplicate expression discovery)
-- bypasses analysis decisions (the strict lowerer ignores `KernelRegion.exprs` and extracted nodes)
-- makes it hard to compile synthesized bodies (thunk bodies and closure bodies) because they do not correspond to a source `FnDecl`
+- kernel discovery belongs to the current graph/runtime model, not a restored
+  bridge analysis crate
+- interpretation and native codegen must share the same lowered representation
+- recursion, `if`, and `match` are kernel-internal only when they do not force a
+  thunk or cross an intrinsic/capability boundary
+- the interpreter is the oracle for the JIT, not a parallel evaluator
 
-KernelOps are already a statement-like IR that is closer to the intended lazy-core direction, and they can be used as the strict fragment source of truth.
+## Rewrite Target
 
-## Work
-
-- Define a strict-compatible subset of `KernelOp` that can be compiled:
-- scalar const ops
-- scalar arithmetic and comparisons
-- string ops if vx-jit supports them (or exclude initially)
-- pure `Select` with strict bool condition
-- Define a new strict lowerer that takes:
-- `params: &[SlotId]`
-- `ops: &[KernelOp]`
-- `result_slot: SlotId`
-- and produces a vx-jit input IR (`VixenTypedFunction`-shaped)
-- Wire this into `vx-analysis` lowering:
-- After `exec_slice::lower_executable_program(...)`, attempt strict-lowering for each `ExecutableBody`.
-- If strict lowering succeeds, set `kernel_kind = Strict { vtf }`, otherwise keep interpreted.
-- Keep the existing AST-based strict lowerer temporarily as a fallback path for bodies that have no KernelOps representation yet (if any).
-- Add tests that validate:
-- a simple scalar function compiles strictly via the KernelOp path
-- mixed bodies (runtime boundaries) stay interpreted
+- Define the graph/runtime subset that may lower into a kernel island.
+- Lower that subset into Weavy's `Lowered` / dense-block program shape.
+- Express calls and recursive structure with Weavy blocks and block calls instead
+  of Rust recursion or a Vixen-specific callable API.
+- Run the lowered program with the Weavy runner first, then compile the same
+  representation through the Weavy copy-and-patch surface once the ABI is ready.
+- Add oracle-style tests that compare graph execution, Weavy interpretation, and
+  native execution for the same lowered kernel when native execution exists.
 
 ## Acceptance
 
-- Existing tests remain green.
-- At least one existing fixture that previously compiled strictly still compiles strictly.
-- We can strict-compile a synthesized closure body or thunk body once 013 is done (or via a targeted unit test).
-
-## Notes
-
-This item is about eliminating duplicate semantics sources. It does not yet implement the full “typed Ref<T>/Obs<T> lazy core” model. It is the incremental step that makes that transition possible without rewriting strict lowering twice.
+- A simple scalar kernel lowers from the graph-runtime representation to Weavy
+  and executes through the interpreter path.
+- A mixed program keeps graph boundaries graph-shaped while lowering only its
+  eager pure interior.
+- The lowered representation used for interpretation is the same representation
+  handed to the JIT path.

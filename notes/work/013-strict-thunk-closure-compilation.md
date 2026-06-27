@@ -1,39 +1,56 @@
-# 013: Strict Compilation For Extracted Thunks + Closure Bodies (Partial Compilation In Mixed Programs)
+# 013: Partial Kernel Compilation In Mixed Graph Programs
 
-Status: Not started.
+Status: Needs rewrite for the Weavy direction. The old `vx-jit`,
+`ExecutableBody`, and `KernelKind::Strict` path below is obsolete; the surviving
+work is partial kernel lowering from the current graph runtime into Weavy.
 
 ## Goal
 
-Enable “compile some parts through vx-jit and evaluate the rest” in the most incremental way: strict-compile the synthesized bodies (thunk bodies and closure bodies) even when the top-level body must remain interpreted due to boundaries or other non-strict ops.
+Allow mixed Vixen programs to keep orchestration and capability boundaries in the
+demand graph while lowering their eager pure interiors into Weavy programs that
+can run interpreted first and natively later.
 
 ## Motivation
 
-Right now, strict compilation tends to be “all or nothing per top-level body”. That blocks the main promise of strict fragments: most real code is mixed, especially build-shaped programs where boundaries exist but lots of local computation is still pure and scalar.
+The old framing was “compile some parts through `vx-jit` and evaluate the rest”.
+That split is still the right product shape, but the units are wrong now. The
+runtime no longer has an eager `ExecutableBody` evaluator to decorate with strict
+kinds; it has a graph runtime. Partial compilation must therefore be expressed
+as graph partitioning plus Weavy lowering.
 
-The extracted thunk bodies are the natural unit of partial compilation because:
+This matters because most useful Vixen programs are mixed:
 
-- they already exist as separate `ExecutableBody` units
-- they represent “demanded cones” (or at least extracted identity points)
-- they are often scalar/pure, making them good strict fragment candidates
+- `exec`, fetch, package probing, sandboxing, and cache boundaries stay graph
+  nodes
+- resolver loops, accumulator merges, constraint checks, cfg evaluation, and
+  scalar/string-heavy glue can be eager kernels
+- the interpreter and the JIT need one lowered representation so native
+  execution has an oracle
 
 ## Work
 
-- Prerequisite: 012 (KernelOp-based strict lowering).
-- Ensure `lower::lower_executable_program` attempts strict compilation for:
-- the entry body
-- any additional bodies in the program map, including synthesized body IDs (>= 10000)
-- Extend whatever runtime/evaluator path consumes `KernelKind::Strict` so it can execute strict kernels for those bodies.
-- Add a regression test fixture where:
-- the top-level body contains a runtime boundary (so it must stay interpreted)
-- but a sibling extracted thunk is pure scalar and gets strict-compiled
+- Prerequisite: 012 rewritten as graph-runtime-to-Weavy kernel lowering.
+- Define the mixed-program partition rule: graph boundaries remain graph-shaped;
+  eligible eager interiors lower to Weavy.
+- Preserve source/span/provenance metadata across the partition so diagnostics and
+  graph visualization can explain why a node stayed graph-shaped or entered a
+  kernel.
+- Execute the lowered kernel through the Weavy interpreter runner as the first
+  oracle.
+- When native support is present, compile the same lowered program through
+  Weavy's copy-and-patch JIT and compare behavior with the interpreter path.
+- Add a regression fixture where a top-level graph crosses a runtime boundary,
+  but a demanded pure interior is lowered and executed as a kernel.
 
 ## Acceptance
 
-- Existing tests remain green.
-- Demonstrate in logs or a unit test assertion that:
-- at least one synthesized body is marked `KernelKind::Strict { .. }`
-- the surrounding program still runs and produces the same result
+- The mixed program still runs on the graph-runtime path.
+- At least one pure interior is visible as a lowered Weavy kernel artifact, not a
+  restored `KernelKind::Strict` flag.
+- Interpreter execution and native execution, when available, agree for the same
+  lowered kernel.
 
 ## Notes
 
-This item is not yet “real eval3 lazy core”. It is a practical stepping stone toward the strict-fragment execution strategy.
+This is not a reason to restore `vx-jit` or an eager evaluator. It is the partial
+execution strategy for the current graph runtime plus Weavy substrate.
