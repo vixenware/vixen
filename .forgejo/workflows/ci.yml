@@ -109,7 +109,6 @@ jobs:
                   New-Item -ItemType Directory -Force -Path $env:GITHUB_WORKSPACE | Out-Null
                   Set-Location $env:GITHUB_WORKSPACE
                   git init
-                  git remote remove origin 2>$null
                   git remote add origin $env:VX_REPO_URL
                   git -c http.extraHeader="Authorization: token $env:FORGEJO_TOKEN" fetch --depth 1 origin $env:VX_SHA
                   git checkout --detach FETCH_HEAD
