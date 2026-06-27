@@ -38,7 +38,7 @@ A typed value describing something an executor can do — `RustToolchain`, `MacT
 
 ## Subgraph elision
 
-The property that separates a cargo fork from a `RUSTC_WRAPPER` wrapper. Because the fork sees the whole dep graph, it can send the entire set of unit identities to ccc-backend in one RPC, get a hit/miss partition back, and materialise only the artifacts the user demands. Intermediate `.rlib`s on cache-hit subgraphs are never written to disk, never fetched. See [The pitch](/pitch/#tier-1-ccc).
+The property that separates a cargo fork from a `RUSTC_WRAPPER` wrapper. Because the fork sees the whole dep graph, it can send the entire set of unit identities to ccc-backend in one RPC, get a hit/miss partition back, and materialise only the artifacts the user demands. Intermediate `.rlib`s on cache-hit subgraphs are never written to disk, never fetched. See [The pitch](/pitch/#ccc-cargo-cloud-cache).
 
 ## Vixen organization
 

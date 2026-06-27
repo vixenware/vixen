@@ -324,14 +324,14 @@ immediately) is reported as such with the diagnostics attached — never swallow
 
 **Reuse (exists today):**
 
-- [`crates/vx-vfs/src/macos/mod.rs`](crates/vx-vfs/src/macos/mod.rs) — `do_mount`
+- `crates/vx-vfs/src/macos/mod.rs` — `do_mount`
   for remount (`r[fskit.facts.remount]`); `read_status` / `ensure_mount_directory`
   for the non-blocking probe (`r[fskit.doctor.detect]`).
-- [`crates/vx-vfsd/src/platform/macos.rs`](crates/vx-vfsd/src/platform/macos.rs) —
+- `crates/vx-vfsd/src/platform/macos.rs` —
   `cleanup_stuck_mount` is currently a **no-op**; this is where the doctor ladder
   lands. `collect_vfs_diagnostics` is the failure-path reporter
   (`r[fskit.doctor.observable]`).
-- [`crates/vx-vfsd/src/platform/linux.rs`](crates/vx-vfsd/src/platform/linux.rs) —
+- `crates/vx-vfsd/src/platform/linux.rs` —
   the **analog** gentle→lazy→nuclear ladder already implemented for FUSE; mirror
   its shape for parity.
 
@@ -343,7 +343,7 @@ immediately) is reported as such with the diagnostics attached — never swallow
   fixed launchd service-target signal + draining the queue dir) plus its
   launchd plist (`QueueDirectories` +
   `RunAtLoad`, no `KeepAlive`), both bundled in
-  [`apps/mac/xcode/Vixen`](apps/mac/xcode/Vixen) per §5's concrete names. The
+  `apps/mac/xcode/Vixen` per §5's concrete names. The
   `SMAppService.daemon(…).register()` call and the helper's signing live in the
   app (`VixenApp.swift`, `Vixen.entitlements`, the xcodeproj build phase copying
   the binary into `Contents/MacOS`). The daemon resolves and signals the fixed

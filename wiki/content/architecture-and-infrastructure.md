@@ -113,7 +113,7 @@ The pool of machines that materialise cache entries on demand-signal misses. Inp
 
 ### What runs on a builder
 
-- **Multiple ccc-backend VMs.** Each dedicated host runs several. ccc-backend instances are stateless edge nodes (see [two-layer deployment](#two-layer-deployment)).
+- **Multiple ccc-backend VMs.** Each dedicated host runs several. ccc-backend instances are stateless edge nodes (see [two-layer deployment](#ccc-backend-the-customer-facing-service--two-layer-deployment)).
 - **vx-store** (or a regional replica). The CAS for cache content.
 - **Backfill workers.** Pick up queued miss-signals, fetch source bytes from declared public locations, build inside the sandbox+VFS, push outputs.
 
@@ -121,7 +121,7 @@ Notably *not* present at Tier 1: `vx-runner`. The runner service ships customer 
 
 ### Backfill runs under landlock-exec, keyed by descriptor
 
-The backfill workers do not just shell out and `cargo build` unsandboxed. They run `rustc` under `landlock-exec` — but **not** through the Vixen runtime. The cache key is hand-derived from the crates.io descriptor `(crate, version, registry-hash, compile-args, toolchain-identity)`; `landlock-exec` enforces that nothing outside that set leaks, so the descriptor stays an honest read-set. No demand evaluator, no `exec` intrinsic, no VFS-observed read-set at Tier 1 — that machinery is Vixen Build's. See [Cache and trust → backfill](/cache-and-trust/#backfill-runs-sandboxed-the-keying-path-differs-by-product) and [CCC → backfill](/ccc/#backfill-is-direct-landlock-exec-not-the-vixen-runtime).
+The backfill workers do not just shell out and `cargo build` unsandboxed. They run `rustc` under `landlock-exec` — but **not** through the Vixen runtime. The cache key is hand-derived from the crates.io descriptor `(crate, version, registry-hash, compile-args, toolchain-identity)`; `landlock-exec` enforces that nothing outside that set leaks, so the descriptor stays an honest read-set. No demand evaluator, no `exec` intrinsic, no VFS-observed read-set at Tier 1 — that machinery is Vixen Build's. See [Cache and trust → backfill](/cache-and-trust/#backfill-runs-sandboxed-the-keying-path-differs-by-product) and [CCC → backfill](/ccc/#trust-model-ccc-specific--backfill-is-direct-landlock-exec-not-the-vixen-runtime).
 
 ## Auth: OIDC
 
@@ -135,7 +135,7 @@ Verifier ships per-CI-provider: GitHub Actions at launch; GitLab CI / Buildkite 
 
 A Tier-2-and-up property. The runtime represents builds as a graph of typed nodes — each with explicit inputs, explicit outputs, executor identity, license metadata, time/duration/resource attribution. Because the graph is the runtime's only model of the build, it carries every property the system needs to answer questions about what produced what.
 
-Practical consequences (enumerated in [the pitch's enterprise feature catalogue](/pitch/#what-tier-2-unlocks)):
+Practical consequences:
 
 - SLSA-grade provenance attestation = graph traversal.
 - License/origin policy = predicate over the graph.

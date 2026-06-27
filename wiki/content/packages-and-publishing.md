@@ -127,7 +127,7 @@ Cost: we operate an index server in addition to Store. A small box; conceptually
 
 ## Store retention applies
 
-Package bytes are pinned (see [Architecture](/architecture-and-infrastructure/#retention-dimension)). Never evicted. Yanks remove the index entry but leave the bytes — lockfiles already referencing the handle continue to build, new resolutions skip the yanked version. Effective equivalent of cargo's yank semantics.
+Package bytes are pinned (see [Architecture](/architecture-and-infrastructure/#store--retention-dimension)). Never evicted. Yanks remove the index entry but leave the bytes — lockfiles already referencing the handle continue to build, new resolutions skip the yanked version. Effective equivalent of cargo's yank semantics.
 
 ## What's still open
 

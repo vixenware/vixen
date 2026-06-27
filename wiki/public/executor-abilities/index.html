@@ -1109,7 +1109,7 @@ struct CudaCapable {
     vram_gb: U64,
 }</code></pre><button class="copy-btn">Copy</button></div><p>Per-language toolchain types are <strong>coherent bundles</strong> — everything you need for <em>this</em> language. <code>RustToolchain</code> exposes not just <code>rustc</code> but also <code>cc</code>, <code>ld</code>, <code>sysroot</code> (whatever the Rust toolchain pairs with for FFI deps). Most build code that wants to compile Rust <em>and</em> has C FFI deps doesn't reach for a separate <code>CToolchain</code>; it uses <code>rust.cc</code> directly. A user who specifically wants to <em>replace</em> the C compiler the Rust toolchain ships with reaches for a <code>CToolchain</code> constraint explicitly.</p>
 <p>The package owns the type. The type is its contribution. New ability domains ship as packages — <code>@vixen/freebsd</code>, <code>@vixen/wasi</code>, whatever — and existing executors and builds keep working while new builds can match against them.</p>
-<p>There is <strong>no <code>ExecutorClass</code>-style stringly-typed selector</strong>. That was the wrong concept; routing is type-driven, not name-driven. Build code does not pass an <code>executor:</code> kwarg to <code>exec</code>. See <a href="#routing-falls-out-of-provenance">Routing falls out of provenance</a>.</p>
+<p>There is <strong>no <code>ExecutorClass</code>-style stringly-typed selector</strong>. That was the wrong concept; routing is type-driven, not name-driven. Build code does not pass an <code>executor:</code> kwarg to <code>exec</code>. See <a href="#routing-via-predicate-identified-values-planner-aggregates-at-exec-sites">Routing via predicate-identified values</a>.</p>
 <h2 id="builds-request-abilities-at-runtime">Builds request abilities at runtime</h2><p>Build code actively requests abilities by applying <code>where (...)</code> directly to an ability type. The body is a boolean expression where free identifiers desugar to fields of the ability type (see <a href="/vixen-language/#constraint-expressions">Vixen language → Constraint expressions</a>):</p>
 <div class="code-block" data-lang="vixen" style="position:relative;"><div class="code-header">vixen</div><pre><code class="language-vixen">let mac = MacToolchain where (xcode >= 14.0 &amp;&amp; arch == arch_arm64)
 
@@ -1180,7 +1180,7 @@ let bin = exec(@[ ${rust.rustc} -C linker=${mac.linker} -o out/app ${workspace "
 </tbody></table>
 <p>Build code touches only layer 1. The orchestrator threads layers 2 and 3 at routing time, after matching layer 1.</p>
 <h2 id="how-abilities-are-advertised">How abilities are advertised</h2><p>Each ability type ships in a <strong>capability probe package</strong> — a package whose manifest declares it provides a probe for a specific ability type.</p>
-<p>Frontmatter at the top of the package's <code>.vx</code> file (see <a href="/vixen-language/">Vixen language</a> frontmatter):</p>
+<p>Frontmatter at the top of the package's <code>.vx</code> file (see <a href="/vixen-language/#frontmatter">Vixen language → Frontmatter</a>):</p>
 <div class="code-block" data-lang="styx" style="position:relative;"><div class="code-header">styx</div><pre><code class="language-styx"><a-pr>id</a-pr> <a-s>"@vixen/mac"</a-s>
 <a-pr>version</a-pr> <a-s>1.0.0</a-s>
 <a-pr>description</a-pr> <a-s>"macOS toolchain capability probe and types"</a-s>

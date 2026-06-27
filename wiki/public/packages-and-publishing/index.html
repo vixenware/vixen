@@ -1149,7 +1149,7 @@ document.addEventListener('click', async (e) => {
 </ol>
 <p>Cost: we operate an index server in addition to Store. A small box; conceptually a published JSON-ish file mapping <code>(scope/name, version) → handle</code>. Tooling has to know about both the index and Store.</p>
 <h2 id="resolution">Resolution</h2><p><a href="/build-and-resolution/#pubgrub-solves-both-cargo-and-vixen-package-resolution">PubGrub solves both</a> — the runtime supplies PubGrub as an intrinsic; the small core Vixen module that ships embedded with the runtime defines Vixen's resolution semantics; PubGrub solves. The UX is cargo-shaped: semver ranges in the manifest, lockfiles, <code>vixen pkg update</code> as the explicit re-resolution command.</p>
-<h2 id="store-retention-applies">Store retention applies</h2><p>Package bytes are pinned (see <a href="/architecture-and-infrastructure/#retention-dimension">Architecture</a>). Never evicted. Yanks remove the index entry but leave the bytes — lockfiles already referencing the handle continue to build, new resolutions skip the yanked version. Effective equivalent of cargo's yank semantics.</p>
+<h2 id="store-retention-applies">Store retention applies</h2><p>Package bytes are pinned (see <a href="/architecture-and-infrastructure/#store--retention-dimension">Architecture</a>). Never evicted. Yanks remove the index entry but leave the bytes — lockfiles already referencing the handle continue to build, new resolutions skip the yanked version. Effective equivalent of cargo's yank semantics.</p>
 <h2 id="what-s-still-open">What's still open</h2>
 <ul>
 <li>Mirroring policy for the index (deferred, same shape as the crates.io discussion).</li>

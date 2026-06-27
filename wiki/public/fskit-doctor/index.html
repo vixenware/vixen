@@ -1307,14 +1307,14 @@ the trigger is dropped by the unsandboxed <code>vx</code> CLI, not the app.</li>
 </ol>
 <h2 id="8.-first-implementation-slice-orientation">8. First implementation slice (orientation)</h2><p><strong>Reuse (exists today):</strong></p>
 <ul>
-<li><a href="/crates/vx-vfs/src/macos/mod.rs"><code>crates/vx-vfs/src/macos/mod.rs</code></a> — <code>do_mount</code>
+<li><code>crates/vx-vfs/src/macos/mod.rs</code> — <code>do_mount</code>
 for remount (<code><a href="/fskit-doctor/#r-fskit.facts.remount" class="rule-ref">r[fskit.facts.remount]</a></code>); <code>read_status</code> / <code>ensure_mount_directory</code>
 for the non-blocking probe (<code><a href="/fskit-doctor/#r-fskit.doctor.detect" class="rule-ref">r[fskit.doctor.detect]</a></code>).</li>
-<li><a href="/crates/vx-vfsd/src/platform/macos.rs"><code>crates/vx-vfsd/src/platform/macos.rs</code></a> —
+<li><code>crates/vx-vfsd/src/platform/macos.rs</code> —
 <code>cleanup_stuck_mount</code> is currently a <strong>no-op</strong>; this is where the doctor ladder
 lands. <code>collect_vfs_diagnostics</code> is the failure-path reporter
 (<code><a href="/fskit-doctor/#r-fskit.doctor.observable" class="rule-ref">r[fskit.doctor.observable]</a></code>).</li>
-<li><a href="/crates/vx-vfsd/src/platform/linux.rs"><code>crates/vx-vfsd/src/platform/linux.rs</code></a> —
+<li><code>crates/vx-vfsd/src/platform/linux.rs</code> —
 the <strong>analog</strong> gentle→lazy→nuclear ladder already implemented for FUSE; mirror
 its shape for parity.</li>
 </ul>
@@ -1326,7 +1326,7 @@ to invoke it (§7.1).</li>
 fixed launchd service-target signal + draining the queue dir) plus its
 launchd plist (<code>QueueDirectories</code> +
 <code>RunAtLoad</code>, no <code>KeepAlive</code>), both bundled in
-<a href="/apps/mac/xcode/Vixen"><code>apps/mac/xcode/Vixen</code></a> per §5's concrete names. The
+<code>apps/mac/xcode/Vixen</code> per §5's concrete names. The
 <code>SMAppService.daemon(…).register()</code> call and the helper's signing live in the
 app (<code>VixenApp.swift</code>, <code>Vixen.entitlements</code>, the xcodeproj build phase copying
 the binary into <code>Contents/MacOS</code>). The daemon resolves and signals the fixed

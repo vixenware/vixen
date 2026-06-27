@@ -63,7 +63,7 @@ unification load-bearing, not incidental:
 
 - **Remote checking.** Cross-target validation runs checks on *remote* executors —
   the same `exec` / observe machinery that already ships observer closures to
-  runners ([[Executor abilities]]). The checker must run *where exec runs*: in the
+  runners ([Executor abilities](/executor-abilities/)). The checker must run *where exec runs*: in the
   engine. A lower-crate checker cannot ship itself to an executor; the engine
   already ships closures and pulls results back.
 
@@ -119,5 +119,5 @@ taken against the real dependency graph, not guessed.
 ## Related
 
 - [The demand-driven runtime](/runtime-semantics/) — the engine the checker joins.
-- [[Executor abilities]] — continuous cross-target validation: the feature needing remote + streaming checks.
+- [Executor abilities](/executor-abilities/) — continuous cross-target validation: the feature needing remote + streaming checks.
 - [Streams as the first Tier-2 primitive](/streams-first-primitive/) — `Stream[Diagnostic]`.

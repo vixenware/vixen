@@ -1072,7 +1072,7 @@ document.addEventListener('click', async (e) => {
             <h1 class="display display-2 page-title">Design and implement Windows sandbox (AppContainer)</h1>
 
             <div class="page-body">
-                <p>Linux has <a href="/architecture-and-infrastructure/#sandbox-state-per-os"><code>landlock-exec</code></a>. macOS seatbelt is recoverable from commit <code>f4effa0a</code>. Windows has neither — no AppContainer code, no Job Object code, no integrity-level work in the tree.</p>
+                <p>Linux has <a href="/architecture-and-infrastructure/#vfs-and-sandbox-stack--sandbox-state-per-os"><code>landlock-exec</code></a>. macOS seatbelt is recoverable from commit <code>f4effa0a</code>. Windows has neither — no AppContainer code, no Job Object code, no integrity-level work in the tree.</p>
 <p>For Tier 2 to ship on Windows runners, we need a Windows sandbox that enforces the same property as Landlock on Linux: a process cannot read bytes outside the declared read-set, cannot write outside the declared write set, cannot talk to the network unless declared, can only exec from declared paths.</p>
 <p>Direction: <strong>AppContainer with capability SIDs scoped to the VFS subtree.</strong> Microsoft's modern primary, used by Edge/Chrome content processes, designed for exactly the "untrusted process with declared resources" case. Restricted tokens + Job Objects as the flexible fallback if AppContainer turns out to misbehave with our toolchains.</p>
 <p>Concrete next step: a spike that gets a <code>Hello, world</code> cargo build running inside AppContainer on a Windows runner, observe what breaks. The list of what breaks tells us whether AppContainer is viable or whether we need to retreat to restricted tokens.</p>

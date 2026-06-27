@@ -84,4 +84,4 @@ Calling cargo's resolver hands you back one opaque step you can't cache incremen
 
 ## "Does CCC need any of this?"
 
-No — and that's deliberate. CCC is a cargo fork + ccc-backend + Store + a descriptor-keyed `landlock-exec` backfill fleet. It never evaluates Vixen. The language and runtime are Vixen Build's substrate, funded by CCC revenue but off CCC's critical path. Keeping them decoupled is a feature, not an accident. See [CCC → backfill is direct landlock-exec](/ccc/#backfill-is-direct-landlock-exec-not-the-vixen-runtime).
+No — and that's deliberate. CCC is a cargo fork + ccc-backend + Store + a descriptor-keyed `landlock-exec` backfill fleet. It never evaluates Vixen. The language and runtime are Vixen Build's substrate, funded by CCC revenue but off CCC's critical path. Keeping them decoupled is a feature, not an accident. See [CCC → backfill is direct landlock-exec](/ccc/#trust-model-ccc-specific--backfill-is-direct-landlock-exec-not-the-vixen-runtime).

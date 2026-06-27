@@ -71,7 +71,7 @@ Free tier with anonymous reads is deferred until grant or VC funding underwrites
 
 A trusted-builder backfill never just shells out and `cargo build` unsandboxed. It runs under the sandbox — landlock on Linux today, seatbelt on macOS once restored, AppContainer on Windows once designed — so the build cannot read bytes outside the declared set. But **how the key is derived** differs by product, and the two paths are deliberately separate:
 
-- **CCC (Tier 1) backfill** keys by **declared identity** — the crates.io descriptor `(crate, version, registry-hash, compile-args, toolchain-identity)`. The worker runs `rustc` under `landlock-exec` directly; no Vixen runtime, no demand evaluator, no sandbox-observed read-set. The descriptor *is* the key; landlock enforces nothing outside it leaked, so the descriptor stays an honest read-set. See [CCC → backfill](/ccc/#backfill-is-direct-landlock-exec-not-the-vixen-runtime).
+- **CCC (Tier 1) backfill** keys by **declared identity** — the crates.io descriptor `(crate, version, registry-hash, compile-args, toolchain-identity)`. The worker runs `rustc` under `landlock-exec` directly; no Vixen runtime, no demand evaluator, no sandbox-observed read-set. The descriptor *is* the key; landlock enforces nothing outside it leaked, so the descriptor stays an honest read-set. See [CCC → backfill](/ccc/#trust-model-ccc-specific--backfill-is-direct-landlock-exec-not-the-vixen-runtime).
 - **Vixen Build (Tier 2) backfill** looks up by the runtime's pre-run `exec`
   request identity and records the **sandbox-observed read-set** as the reuse
   witness — the same path Tier-2 customer work takes. Here the sandbox is the

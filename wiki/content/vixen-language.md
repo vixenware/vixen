@@ -163,14 +163,14 @@ Stdlib intrinsics (`exec`, `acquire`, `Toml::parse`, …) are in scope via an im
 
 A `.vx` file may open with a **frontmatter fence** — a fenced block at the very top of the file, analogous to markdown's `+++`:
 
-```vixen
+````vixen
 ```styx
 id @vixen/grammar-cc
 version 0.1.0
 ```
 
 let { Grammar, Flag } = import "vixen:command-grammar"
-```
+````
 
 The fence carries metadata *about* the module — most importantly a package's manifest (see [Packages and publishing](/packages-and-publishing/)), which is why there is no separate `package.styx`. The tag after the opening fence (`styx` here) names the body's language; the body is **opaque to the Vixen parser** — it is not Vixen, and is parsed by whoever consumes it (styx for the manifest). The parser keeps the whole fence as a single token, reachable as structured data via `SourceFile::frontmatter()` (`lang()` + `content()`), so the runtime reads it back rather than discarding it as a comment would.
 
@@ -380,11 +380,11 @@ fn main(workspace: Tree) with { ..VixenMain } -> Tree (
 
 The workspace is positional; the kwarg block uses the spread form `with { ..VixenMain }` to pull in the standard CLI kwargs (`args: Array[String]`, `env: Map[String, String]`) without spelling them out every time. `main` always returns a `Tree`.
 
-The body is wrapped in `( ... )` per the [bracket conventions](#brackets-----groups-----is-structural-----is-positional). A single-expression body is one expression inside the parens; intermediate steps use `;` between statements with the final expression as the value.
+The body is wrapped in `( ... )` per the [bracket conventions](#brackets-...-groups-...-is-structural-...-is-positional). A single-expression body is one expression inside the parens; intermediate steps use `;` between statements with the final expression as the value.
 
 **Path-prefix reduction.** Notice the Tree literal uses `"target/release" => exec [...]` rather than `"target/release/app" => exec [...] "app"`. Placing an exec result (a Tree) at a directory key grafts the whole subtree there — the binary that the exec wrote to `out/app` lands at `target/release/app` because the exec's write-set tree gets mounted at `target/release`. Common-case shorthand for "this directory is whatever the build wrote."
 
-Paths in the example are ordinary strings. There is no separate path-literal syntax; the path-flavor comes from the value's provenance through Tree projection, not from how the literal was written. See [Paths are strings + provenance](#paths-are-strings--provenance) below.
+Paths in the example are ordinary strings. There is no separate path-literal syntax; the path-flavor comes from the value's provenance through Tree projection, not from how the literal was written. See [Paths are strings + provenance](#paths-are-strings-provenance) below.
 
 ### The returned Tree overlays onto the workspace
 

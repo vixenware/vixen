@@ -144,7 +144,7 @@ So the runtime sees the graph of exec calls produced by `@vixen/cargo`, threads 
 
 ## Step 8: Where each exec actually runs — the scheduler decides
 
-`@vixen/cargo` doesn't pick. It writes `exec` calls that consume ability values (e.g. `mac_toolchain.clang`), and the runtime threads routing constraints from the values' provenance. See [Executor abilities → Routing falls out of provenance](/executor-abilities/#routing-falls-out-of-provenance) and [No soft ranking at the language level](/executor-abilities/#no-soft-ranking-at-the-language-level).
+`@vixen/cargo` doesn't pick. It writes `exec` calls that consume ability values (e.g. `mac_toolchain.clang`), and the runtime threads routing constraints from the values' provenance. See [Executor abilities → Routing via predicate-identified values](/executor-abilities/#routing-via-predicate-identified-values-planner-aggregates-at-exec-sites) and [No soft ranking at the language level](/executor-abilities/#no-soft-ranking-at-the-language-level).
 
 Among eligible executors (those satisfying the ability predicates), the orchestrator weighs invisible-to-build-code variables:
 

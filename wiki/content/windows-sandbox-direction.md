@@ -10,7 +10,7 @@ tags = ["sandbox", "windows", "platform"]
 created = "2026-05-26"
 +++
 
-Linux has [`landlock-exec`](/architecture-and-infrastructure/#sandbox-state-per-os). macOS seatbelt is recoverable from commit `f4effa0a`. Windows has neither — no AppContainer code, no Job Object code, no integrity-level work in the tree.
+Linux has [`landlock-exec`](/architecture-and-infrastructure/#vfs-and-sandbox-stack--sandbox-state-per-os). macOS seatbelt is recoverable from commit `f4effa0a`. Windows has neither — no AppContainer code, no Job Object code, no integrity-level work in the tree.
 
 For Tier 2 to ship on Windows runners, we need a Windows sandbox that enforces the same property as Landlock on Linux: a process cannot read bytes outside the declared read-set, cannot write outside the declared write set, cannot talk to the network unless declared, can only exec from declared paths.
 

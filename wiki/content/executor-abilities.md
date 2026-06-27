@@ -56,7 +56,7 @@ Per-language toolchain types are **coherent bundles** — everything you need fo
 
 The package owns the type. The type is its contribution. New ability domains ship as packages — `@vixen/freebsd`, `@vixen/wasi`, whatever — and existing executors and builds keep working while new builds can match against them.
 
-There is **no `ExecutorClass`-style stringly-typed selector**. That was the wrong concept; routing is type-driven, not name-driven. Build code does not pass an `executor:` kwarg to `exec`. See [Routing falls out of provenance](#routing-falls-out-of-provenance).
+There is **no `ExecutorClass`-style stringly-typed selector**. That was the wrong concept; routing is type-driven, not name-driven. Build code does not pass an `executor:` kwarg to `exec`. See [Routing via predicate-identified values](#routing-via-predicate-identified-values-planner-aggregates-at-exec-sites).
 
 ## Builds request abilities at runtime
 
@@ -182,7 +182,7 @@ Build code touches only layer 1. The orchestrator threads layers 2 and 3 at rout
 
 Each ability type ships in a **capability probe package** — a package whose manifest declares it provides a probe for a specific ability type.
 
-Frontmatter at the top of the package's `.vx` file (see [[Vixen language]] frontmatter):
+Frontmatter at the top of the package's `.vx` file (see [Vixen language → Frontmatter](/vixen-language/#frontmatter)):
 ```styx
 id "@vixen/mac"
 version 1.0.0

@@ -7,8 +7,8 @@ everythingyouneedforthislanguageRustToolchainexposesnotjustrustcbuta
 CToolchainitusesrust.ccdirectlyAuserwhospecificallywantstoreplacetheCcompilertheRust	toolchainshipswithreachesfora
 CToolchain
 constraint
-explicitlyThepackageownsthetypeThetypeisitscontributionNewabilitydomainsshipaspackagesvixenfreebsdvixenwasiwhateverandexisting	executorsandbuildskeepworkingwhilenewbuildscanmatchagainstthemThereisnoExecutorClassstylestringlytypedselectorThatwasthewrongconceptroutingistypedrivennotnamedrivenBuildcodedoesnotpassanexecutorkwargtoexecSeeRoutingfallsoutof
-provenanceBuildsrequest	abilitiesatruntimeBuildcodeactivelyrequests	abilitiesbyapplyingwheredirectlytoanabilitytypeThebodyisaboolean
+explicitlyThepackageownsthetypeThetypeisitscontributionNewabilitydomainsshipaspackagesvixenfreebsdvixenwasiwhateverandexisting	executorsandbuildskeepworkingwhilenewbuildscanmatchagainstthemThereisnoExecutorClassstylestringlytypedselectorThatwasthewrongconceptroutingistypedrivennotnamedrivenBuildcodedoesnotpassanexecutorkwargtoexecSeeRoutingvia	predicate
+identifiedvaluesBuildsrequest	abilitiesatruntimeBuildcodeactivelyrequests	abilitiesbyapplyingwheredirectlytoanabilitytypeThebodyisaboolean
 expressionwherefreeidentifiersdesugartofieldsoftheabilitytypeseeVixenlanguage
 ConstraintexpressionsvixenletmacMacToolchainwherexcode14.0arch
 arch_arm64letrustRustToolchainwhereversion1.91targetscontainsaarch64appledarwinTypewhereisthesinglefleetroutingsurfacefromuserVixennorequestverbnoseparate	intrinsicItproducesa	predicate
@@ -69,7 +69,7 @@ coherentlywithinitselfThree	separablelayersLayerWhatWhereitlivesWhatc
 describingwhatanexecutorcandoBuildlockfileoutputfleetregistry	DiscoveryprobespackagedefinitionsIdentityUUIDendpointsigningkeyFleetregistryExecutorregistrationkeyrotationAvailabilityCurrentloadlatencycachewarmthonlinestateOrchestratorruntime
 ConstantlychangingBuildcodetouchesonlylayer1Theorchestratorthreadslayers2and3atroutingtimeaftermatchinglayer1How	abilitiesare
 advertisedEachabilitytypeshipsina
-capabilityprobepackageapackagewhosemanifestdeclaresitprovidesaprobeforaspecificabilitytypeFrontmatteratthetopofthe	package'svxfileseeVixenlanguagefrontmatterstyxidvixenmacversion1.0.0descriptionmacOS	toolchain
+capabilityprobepackageapackagewhosemanifestdeclaresitprovidesaprobeforaspecificabilitytypeFrontmatteratthetopofthe	package'svxfileseeVixenlanguageFrontmatterstyxidvixenmacversion1.0.0descriptionmacOS	toolchain
 capabilityprobeandtypes
 capability
 advertisesMacToolchainmain.vxvixenstructMacToolchainxcodeSemVer	macos_sdkSemVerarchArch	namespaceMacToolchainfnprobehostHostOptionMacToolchainTheprobelivesinthetype's	namespaceby

@@ -1164,36 +1164,28 @@ let { stable } = import "vixen:rust"</code></pre><button class="copy-btn">Copy</
 <h2 id="frontmatter">Frontmatter</h2><p>A <code>.vx</code> file may open with a <strong>frontmatter fence</strong> — a fenced block at the very top of the file, analogous to markdown's <code>+++</code>:</p>
 <div class="code-block" data-lang="vixen" style="position:relative;"><div class="code-header">vixen</div><pre><code class="language-vixen">```styx
 id @vixen/grammar-cc
-version 0.1.0</code></pre><button class="copy-btn">Copy</button></div><p>let { Grammar, Flag } = import "vixen:command-grammar"</p>
-<div class="code-block" style="position:relative;"><pre><code>
-The fence carries metadata *about* the module — most importantly a package's manifest (see [Packages and publishing](/packages-and-publishing/)), which is why there is no separate `package.styx`. The tag after the opening fence (`styx` here) names the body's language; the body is **opaque to the Vixen parser** — it is not Vixen, and is parsed by whoever consumes it (styx for the manifest). The parser keeps the whole fence as a single token, reachable as structured data via `SourceFile::frontmatter()` (`lang()` + `content()`), so the runtime reads it back rather than discarding it as a comment would.
+version 0.1.0
+```
 
-Only one frontmatter block is allowed, and only at the very top (before any declarations). It is optional: a `.vx` file with no manifest needs no fence.
-
-## Brackets: `( ... )` groups, `{ ... }` is structural, `[ ... ]` is positional
-
-The three bracket pairs carry distinct roles, and the distinction is load-bearing for readability.
-
-### `( ... )` — expression grouping (including function bodies)
-
-`( ... )` always means "an expression, possibly a sequence of statements with the last being the value." This includes:
-
-- **Expression grouping for precedence.** `(a + b) * c`.
-- **Function call payload.** `f(x)` is `f` applied to `x` (one positional payload).
-- **Function declaration parameters.** `fn foo(x: Int, y: Int)`.
-- **Tuples.** `(1, "a", true)` when there are multiple positional elements.
-- **Function bodies.** `fn name(params) -> T (body)`. Same `( ... )` as everywhere else — a function body really is "a grouped expression whose value is the final inner expression."
-- **Closures returning blocks.** `(x) => (let y = x + 1; y)`.
-
-Multi-statement form uses `;` as the separator; the last expression (without trailing `;`) is the value. Example with intermediate steps:
-
-```vixen
-fn build_app(workspace: Tree) -> Tree (
+let { Grammar, Flag } = import "vixen:command-grammar"</code></pre><button class="copy-btn">Copy</button></div><p>The fence carries metadata <em>about</em> the module — most importantly a package's manifest (see <a href="/packages-and-publishing/">Packages and publishing</a>), which is why there is no separate <code>package.styx</code>. The tag after the opening fence (<code>styx</code> here) names the body's language; the body is <strong>opaque to the Vixen parser</strong> — it is not Vixen, and is parsed by whoever consumes it (styx for the manifest). The parser keeps the whole fence as a single token, reachable as structured data via <code>SourceFile::frontmatter()</code> (<code>lang()</code> + <code>content()</code>), so the runtime reads it back rather than discarding it as a comment would.</p>
+<p>Only one frontmatter block is allowed, and only at the very top (before any declarations). It is optional: a <code>.vx</code> file with no manifest needs no fence.</p>
+<h2 id="brackets-...-groups-...-is-structural-...-is-positional">Brackets: ( ... ) groups, { ... } is structural, [ ... ] is positional</h2><p>The three bracket pairs carry distinct roles, and the distinction is load-bearing for readability.</p>
+<h3 id="brackets-...-groups-...-is-structural-...-is-positional--...-expression-grouping-including-function-bodies">( ... ) — expression grouping (including function bodies)</h3><p><code>( ... )</code> always means "an expression, possibly a sequence of statements with the last being the value." This includes:</p>
+<ul>
+<li><strong>Expression grouping for precedence.</strong> <code>(a + b) * c</code>.</li>
+<li><strong>Function call payload.</strong> <code>f(x)</code> is <code>f</code> applied to <code>x</code> (one positional payload).</li>
+<li><strong>Function declaration parameters.</strong> <code>fn foo(x: Int, y: Int)</code>.</li>
+<li><strong>Tuples.</strong> <code>(1, "a", true)</code> when there are multiple positional elements.</li>
+<li><strong>Function bodies.</strong> <code>fn name(params) -> T (body)</code>. Same <code>( ... )</code> as everywhere else — a function body really is "a grouped expression whose value is the final inner expression."</li>
+<li><strong>Closures returning blocks.</strong> <code>(x) => (let y = x + 1; y)</code>.</li>
+</ul>
+<p>Multi-statement form uses <code>;</code> as the separator; the last expression (without trailing <code>;</code>) is the value. Example with intermediate steps:</p>
+<div class="code-block" data-lang="vixen" style="position:relative;"><div class="code-header">vixen</div><pre><code class="language-vixen">fn build_app(workspace: Tree) -> Tree (
     let rust = RustToolchain where (version >= 1.91);
     let bin = exec [rust.rustc, workspace "src/main.rs", "-o", "out/app"] "app";
     Tree %{ "target/release/app" => bin }
 )</code></pre><button class="copy-btn">Copy</button></div><p>The "function body uses parens" choice is the most visually unusual decision the language makes. It buys uniformity: <code>( ... )</code> is one thing everywhere; you never have to scan inside to know what kind of bracket you're reading.</p>
-<h3 id="frontmatter--...-and-...-structural-values-with-named-entries">{ ... } and %{ ... } — structural values with named entries</h3><p>Braces hold "a value whose structure is a set of named entries." The entries' separator inside is always <code>,</code> (or newline; the two are interchangeable). Never <code>;</code> — semicolons live only in <code>( ... )</code>.</p>
+<h3 id="brackets-...-groups-...-is-structural-...-is-positional--...-and-...-structural-values-with-named-entries">{ ... } and %{ ... } — structural values with named entries</h3><p>Braces hold "a value whose structure is a set of named entries." The entries' separator inside is always <code>,</code> (or newline; the two are interchangeable). Never <code>;</code> — semicolons live only in <code>( ... )</code>.</p>
 <p>Two brace forms split records from maps: bare <code>{ ... }</code> is a <strong>record</strong> (fielded entries), and <code>%{ ... }</code> is a <strong>map / tree</strong> (keyed entries). The <code>%</code> sigil is redundant with <code>field:</code> vs <code>key =></code> for non-empty literals, but it's load-bearing for the two cases the separator can't disambiguate — the empty literal (<code>{}</code> is an empty record, <code>%{}</code> an empty map) and the spread-only literal (<code>{ ..r }</code> is a record spread, <code>%{ ..m }</code> a map spread). So <code>%{}</code> is always a writable empty-map literal, no type context required.</p>
 <table><thead><tr><th>Mode</th><th>Form</th><th>Inner shape</th><th>Example</th></tr></thead><tbody>
 <tr><td>Record literal</td><td><code>{ ... }</code></td><td><code>field: value</code></td><td><code>Point { x: 1, y: 2 }</code></td></tr>
@@ -1203,13 +1195,13 @@ fn build_app(workspace: Tree) -> Tree (
 </tbody></table>
 <p>Kwargs application reuses the record form: <code>f payload with { x: 1, y: 2 }</code> is <code>f payload</code> followed by <code>with</code> applied to a record. Struct update is the same — <code>value with { field: new_value }</code> applies <code>with</code> to a record of updates.</p>
 <p>The previously-considered "constraint block" mode (<code>where { … }</code> with comma-separated clauses) is gone — constraints are expressions in <code>( ... )</code>, see <a href="#constraint-expressions">Constraint expressions</a>.</p>
-<h3 id="frontmatter--...-positional-sequences-and-type-parameters">[ ... ] — positional sequences and type parameters</h3><p><code>[ ... ]</code> is positional:</p>
+<h3 id="brackets-...-groups-...-is-structural-...-is-positional--...-positional-sequences-and-type-parameters">[ ... ] — positional sequences and type parameters</h3><p><code>[ ... ]</code> is positional:</p>
 <ul>
 <li>Array literals: <code>[1, 2, 3]</code>.</li>
 <li>Type parameters: <code>Array[String]</code>, <code>Fn[T]</code>.</li>
 <li>exec args: <code>exec [rustc, src, "-o", "out"]</code> is <code>exec</code> applied to an array payload.</li>
 </ul>
-<h3 id="frontmatter--why-this-matters">Why this matters</h3><p><code>{ ... }</code> does six different things in many languages because everyone reaches for braces by default. Vixen splits the workload across three bracket pairs along a meaningful axis:</p>
+<h3 id="brackets-...-groups-...-is-structural-...-is-positional--why-this-matters">Why this matters</h3><p><code>{ ... }</code> does six different things in many languages because everyone reaches for braces by default. Vixen splits the workload across three bracket pairs along a meaningful axis:</p>
 <ul>
 <li>Sequencing of operations → <code>( ... )</code> (grouped expressions, blocks).</li>
 <li>Naming of structural data → <code>{ ... }</code> (records, maps, kwargs).</li>
@@ -1284,9 +1276,9 @@ let combined = c &amp;&amp; other    // structural intersection — still a Cons
 <div class="code-block" data-lang="vixen" style="position:relative;"><div class="code-header">vixen</div><pre><code class="language-vixen">fn main(workspace: Tree) with { ..VixenMain } -> Tree (
     Tree %{ "target/release" => exec [stable.rustc, workspace "src/main.rs", "-o", "out/app"] }
 )</code></pre><button class="copy-btn">Copy</button></div><p>The workspace is positional; the kwarg block uses the spread form <code>with { ..VixenMain }</code> to pull in the standard CLI kwargs (<code>args: Array[String]</code>, <code>env: Map[String, String]</code>) without spelling them out every time. <code>main</code> always returns a <code>Tree</code>.</p>
-<p>The body is wrapped in <code>( ... )</code> per the <a href="#brackets-----groups-----is-structural-----is-positional">bracket conventions</a>. A single-expression body is one expression inside the parens; intermediate steps use <code>;</code> between statements with the final expression as the value.</p>
+<p>The body is wrapped in <code>( ... )</code> per the <a href="#brackets-...-groups-...-is-structural-...-is-positional">bracket conventions</a>. A single-expression body is one expression inside the parens; intermediate steps use <code>;</code> between statements with the final expression as the value.</p>
 <p><strong>Path-prefix reduction.</strong> Notice the Tree literal uses <code>"target/release" => exec [...]</code> rather than <code>"target/release/app" => exec [...] "app"</code>. Placing an exec result (a Tree) at a directory key grafts the whole subtree there — the binary that the exec wrote to <code>out/app</code> lands at <code>target/release/app</code> because the exec's write-set tree gets mounted at <code>target/release</code>. Common-case shorthand for "this directory is whatever the build wrote."</p>
-<p>Paths in the example are ordinary strings. There is no separate path-literal syntax; the path-flavor comes from the value's provenance through Tree projection, not from how the literal was written. See <a href="#paths-are-strings--provenance">Paths are strings + provenance</a> below.</p>
+<p>Paths in the example are ordinary strings. There is no separate path-literal syntax; the path-flavor comes from the value's provenance through Tree projection, not from how the literal was written. See <a href="#paths-are-strings-provenance">Paths are strings + provenance</a> below.</p>
 <h3 id="package-entry-is-fn-main-called-directly--the-returned-tree-overlays-onto-the-workspace">The returned Tree overlays onto the workspace</h3><p>The Tree <code>main</code> returns has <strong>workspace-relative paths</strong>, and <code>vx</code> merges it onto the customer's workspace — overlay semantics, not replace. <code>@vixen/cargo</code>'s <code>main</code> returns a Tree like <code>Tree %{ "target/release/foo" => &lt;bin>, "target/release/build/..." => ..., "Cargo.lock" => ... }</code>; <code>vx</code> lands <code>target/...</code> and updates <code>Cargo.lock</code> because that's where the Tree said they go. The <code>target/</code> convention lives in <code>@vixen/cargo</code>'s implementation, not in <code>vx</code> or the language.</p>
 <p>A minimal subcommand can be as small as "return <code>Tree %{ "out/app" => &lt;bin> }</code>". Make, Bazel, and cargo all spent decades layering convention on top of that statement; the language reduces it to <em>the Tree is what the workspace should look like after the build</em>.</p>
 <p>Mechanism of the overlay (copy vs VFS-mount vs hard-link) is open — see <a href="/materialise-build-output/">Design build-output materialisation</a>.</p>
