@@ -1,6 +1,6 @@
 # vixen/wiki
 
-Durable home for multi-thread architectural work on Vixen. Substrate is dodeca; substance is human-authored. Flat namespace, wiki-style links.
+Durable home for multi-thread architectural work on Vixen. Substrate is dodeca; substance is human-authored. Flat namespace, explicit slug links.
 
 ## Serve
 
@@ -16,7 +16,7 @@ Default port range is 4000–4019. Live reload enabled.
 
 ```
 wiki/
-├── .config/dodeca.styx     # page-types schemas + content/output paths
+├── .config/dodeca.styx     # source schema + site output path
 ├── content/                # every page sits here directly (no subdirs)
 │   ├── _index.md
 │   ├── style.css
@@ -27,7 +27,7 @@ wiki/
 
 ## Page Types
 
-Pages have no per-type directory — the page type lives in the frontmatter, not the path. This keeps cross-references stable when a page changes type and keeps `[[Wiki links]]` namespace-free.
+Pages have no per-type directory — the page type lives in the frontmatter, not the path. This keeps cross-references stable when a page changes type and keeps URLs namespace-free.
 
 The live schema defines two page types:
 
@@ -45,17 +45,17 @@ must not keep a long contradictory body under the tombstone.
 
 ## Frontmatter
 
-TOML (`+++ ... +++`). Standard fields (`title`, …) at the top level; typed fields go inside `[extra]` with a `type` discriminant matching one of the page types declared in `.config/dodeca.styx`. Enum fields (e.g. `status = "living"`) work directly — dodeca's loader lifts the TOML string to the styx tag before validation.
+TOML (`+++ ... +++`). Standard fields (`title`, …) at the top level; typed fields go inside `[extra]` with a `type` discriminant matching one of the page types declared in `.config/dodeca.styx`. Enum fields (e.g. `status = "todo"`) work directly — dodeca's loader lifts the TOML string to the styx tag before validation.
 
 ## Linking
 
-Inside markdown bodies, link to other pages with **wiki-style** syntax:
+Inside markdown bodies, link to other pages with explicit site-root URLs:
 
 ```
-See [[Tier 1 — CCC]] for the lowest-touch deployment.
+See [CCC (Cargo Cloud Cache)](/ccc/) for the lowest-touch deployment.
 ```
 
-Resolution is by **page title**. Dodeca turns `[[Page Title]]` into a link to that page's permalink at render time. Use the canonical title verbatim (case + punctuation).
+Resolution is by **route slug**. Use the filename-derived route with leading and trailing slashes, e.g. `content/cache-and-trust.md` becomes `/cache-and-trust/`.
 
 For typed cross-references in the frontmatter (e.g. `supersedes`, `resolved_by`), use the **slug** (filename without `.md`), e.g. `resolved_by = "cache-key-tightening-is-monotonic"`. Schemas declare these with `@link(@PageType)` and dodeca enforces both existence and type.
 

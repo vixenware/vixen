@@ -1086,7 +1086,7 @@ document.addEventListener('click', async (e) => {
 <ul>
 <li>Two page types: <code>Doc</code> (synthesised explanation, organised for reading) and <code>Task</code> (a thing to do, with status and blocking edges).</li>
 <li>Frontmatter is TOML (<code>+++</code>). Page type lives in <code>[extra].type</code>. Tier tags on docs via <code>[extra].tiers</code>. Task status in <code>[extra].status</code>; <code>superseded</code> is valid, but superseded pages should be short tombstones pointing at the current model, not long contradictory archives.</li>
-<li>Cross-references use either <code>/path/</code> URLs to other docs or <code>[[Page Title]]</code> wiki-style; both resolve through dodeca.</li>
+<li>Cross-references in Markdown use explicit <code>/path/</code> URLs to other docs. Frontmatter cross-references use route slugs declared with <code>@link</code>.</li>
 <li>Substance — visions, decisions, milestone narratives — is human-authored. Agents do scaffolding, search, transcription, validation.</li>
 </ul>
 

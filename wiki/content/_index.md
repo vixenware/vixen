@@ -44,5 +44,5 @@ Open work the docs reference. Each is a `Task` with status, priority, and tier t
 
 - Two page types: `Doc` (synthesised explanation, organised for reading) and `Task` (a thing to do, with status and blocking edges).
 - Frontmatter is TOML (`+++`). Page type lives in `[extra].type`. Tier tags on docs via `[extra].tiers`. Task status in `[extra].status`; `superseded` is valid, but superseded pages should be short tombstones pointing at the current model, not long contradictory archives.
-- Cross-references use either `/path/` URLs to other docs or `[[Page Title]]` wiki-style; both resolve through dodeca.
+- Cross-references in Markdown use explicit `/path/` URLs to other docs. Frontmatter cross-references use route slugs declared with `@link`.
 - Substance — visions, decisions, milestone narratives — is human-authored. Agents do scaffolding, search, transcription, validation.
