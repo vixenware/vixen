@@ -1,0 +1,18 @@
+@schema {id crate:dodeca-config@1, cli ddc}
+
+source {
+    content docs/content
+    impls ()
+    page_types {
+        Doc @object{
+            tags @optional(@seq(@string))
+            type @string
+            created @optional(@string)
+            tiers @optional(@seq(@string))
+            updated @optional(@string)
+        }
+    }
+    skip_domains ()
+}
+
+site {output public}
