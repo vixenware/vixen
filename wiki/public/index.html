@@ -716,6 +716,12 @@ t-b255 { background-color: light-dark(#a6a6a6, #ffffff); }
 t-f { color: var(--c); }
 t-b { background-color: var(--c); }
 </style><style>
+a.wiki-link[data-autolink] {
+    text-decoration: underline;
+    text-decoration-style: dotted;
+    text-underline-offset: 0.2em;
+}
+</style><style>
 .code-block {
     position: relative;
 }
@@ -752,7 +758,7 @@ document.addEventListener('click', async (e) => {
         btn.classList.remove('copied');
     }, 2000);
 });
-</script><link rel="stylesheet" href="/search/asset/d0a549b354b03671/search.css"><script type="module" src="/search/asset/d0a549b354b03671/search.js"></script><style>
+</script><link rel="stylesheet" href="/search/asset/67ceab7822801148/search.css"><script>window.__dodecaSources=[];</script><script type="module" src="/search/asset/67ceab7822801148/search.js"></script><style>
 .code-block .build-info-btn {
     position: sticky;
     float: right;
@@ -1060,6 +1066,7 @@ document.addEventListener('click', async (e) => {
 <h2 id="vixen-build-subsystem-docs">Vixen Build subsystem docs</h2>
 <ul>
 <li><a href="/vixen-language/">Vixen language</a></li>
+<li><a href="/open-language-kernel-strategy/">Open language kernel strategy</a></li>
 <li><a href="/build-and-resolution/">Build and resolution</a></li>
 <li><a href="/packages-and-publishing/">Packages and publishing</a></li>
 <li><a href="/executor-abilities/">Executor abilities</a></li>
@@ -1078,7 +1085,7 @@ document.addEventListener('click', async (e) => {
 <h2 id="conventions">Conventions</h2>
 <ul>
 <li>Two page types: <code>Doc</code> (synthesised explanation, organised for reading) and <code>Task</code> (a thing to do, with status and blocking edges).</li>
-<li>Frontmatter is TOML (<code>+++</code>). Page type lives in <code>[extra].type</code>. Tier tags on docs via <code>[extra].tiers</code>. Task status in <code>[extra].status</code>.</li>
+<li>Frontmatter is TOML (<code>+++</code>). Page type lives in <code>[extra].type</code>. Tier tags on docs via <code>[extra].tiers</code>. Task status in <code>[extra].status</code>; <code>superseded</code> is valid, but superseded pages should be short tombstones pointing at the current model, not long contradictory archives.</li>
 <li>Cross-references use either <code>/path/</code> URLs to other docs or <code>[[Page Title]]</code> wiki-style; both resolve through dodeca.</li>
 <li>Substance — visions, decisions, milestone narratives — is human-authored. Agents do scaffolding, search, transcription, validation.</li>
 </ul>
@@ -1094,7 +1101,7 @@ document.addEventListener('click', async (e) => {
             <section class="type-section">
                 <h2 class="type-section-title">
                     <span class="type-name">Docs</span>
-                    <span class="type-count">17 entries</span>
+                    <span class="type-count">20 entries</span>
                 </h2>
                 <ol class="entry-list">
                     
@@ -1122,6 +1129,13 @@ document.addEventListener('click', async (e) => {
                     <li class="entry">
                         <a href="/ccc" class="entry-link">
                             <span class="entry-title">Cargo Cloud Cache (CCC)</span>
+                            
+                        </a>
+                    </li>
+                    
+                    <li class="entry">
+                        <a href="/checker-lives-in-the-engine" class="entry-link">
+                            <span class="entry-title">The checker lives in the engine</span>
                             
                         </a>
                     </li>
@@ -1155,8 +1169,22 @@ document.addEventListener('click', async (e) => {
                     </li>
                     
                     <li class="entry">
+                        <a href="/fskit-doctor" class="entry-link">
+                            <span class="entry-title">The FSKit doctor &amp; kill-switch</span>
+                            
+                        </a>
+                    </li>
+                    
+                    <li class="entry">
                         <a href="/glossary" class="entry-link">
                             <span class="entry-title">Glossary</span>
+                            
+                        </a>
+                    </li>
+                    
+                    <li class="entry">
+                        <a href="/open-language-kernel-strategy" class="entry-link">
+                            <span class="entry-title">Open language kernel strategy</span>
                             
                         </a>
                     </li>

@@ -1,28 +1,30 @@
-content content
-output public
+@schema {id crate:dodeca-config@1, cli ddc}
 
-page-types {
-    Doc @object{
-        type @string
-        // tier(s) the doc primarily concerns; informational
-        tiers @optional(@seq(@string))
-        tags @optional(@seq(@string))
-        created @optional(@string)
-        updated @optional(@string)
+source {
+    content content
+    impls ()
+    page_types {
+        Doc @object{
+            tags @optional(@seq(@string))
+            type @string
+            created @optional(@string)
+            tiers @optional(@seq(@string))
+            updated @optional(@string)
+        }
+        Task @object{
+            blocked_by @optional(@seq(@link(@Task)))
+            blocks @optional(@seq(@link(@Task)))
+            type @string
+            updated @optional(@string)
+            tags @optional(@seq(@string))
+            tiers @optional(@seq(@string))
+            priority @optional(@enum{medium, low, high})
+            created @string
+            status @enum{todo, in-progress, done, abandoned, blocked, superseded}
+            owner @optional(@string)
+        }
     }
-
-    Task @object{
-        type @string
-        status @enum{todo, in-progress, blocked, done, superseded, abandoned}
-        priority @optional(@enum{low, medium, high})
-        // tasks this one blocks
-        blocks @optional(@seq(@link(@Task)))
-        // tasks this one is blocked by
-        blocked_by @optional(@seq(@link(@Task)))
-        tags @optional(@seq(@string))
-        tiers @optional(@seq(@string))
-        owner @optional(@string)
-        created @string
-        updated @optional(@string)
-    }
+    skip_domains ()
 }
+
+site {output public}

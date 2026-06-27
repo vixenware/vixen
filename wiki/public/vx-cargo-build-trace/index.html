@@ -716,6 +716,12 @@ t-b255 { background-color: light-dark(#a6a6a6, #ffffff); }
 t-f { color: var(--c); }
 t-b { background-color: var(--c); }
 </style><style>
+a.wiki-link[data-autolink] {
+    text-decoration: underline;
+    text-decoration-style: dotted;
+    text-underline-offset: 0.2em;
+}
+</style><style>
 .code-block {
     position: relative;
 }
@@ -752,7 +758,7 @@ document.addEventListener('click', async (e) => {
         btn.classList.remove('copied');
     }, 2000);
 });
-</script><link rel="stylesheet" href="/search/asset/d0a549b354b03671/search.css"><script type="module" src="/search/asset/d0a549b354b03671/search.js"></script><style>
+</script><link rel="stylesheet" href="/search/asset/67ceab7822801148/search.css"><script>window.__dodecaSources=[];</script><script type="module" src="/search/asset/67ceab7822801148/search.js"></script><style>
 .code-block .build-info-btn {
     position: sticky;
     float: right;
@@ -1108,7 +1114,7 @@ let manifest: CargoManifest = Toml::parse[CargoManifest](manifest_blob);</code><
 <p>Layering of crates.io URL construction (string interpolation of crate name + version into the download URL) is the same story as crates.io protocol layering generally: either inline in <code>@vixen/cargo</code> or in a <code>@vixen/crates-io</code> library. Doesn't affect caching.</p>
 <p>Reminder about Vixen syntax used here:</p>
 <ul>
-<li><strong>Function application is positional, single-payload.</strong> <code>f x</code> is one positional payload; use a tuple <code>f (x, y)</code> to pass what looks like multiple args. (See <code>docs/content/spec/language/core.md</code>.)</li>
+<li><strong>Function application is positional, single-payload.</strong> <code>f x</code> is one positional payload; use a tuple <code>f (x, y)</code> to pass what looks like multiple args. (See <code>docs/spec/language/core.md</code>.)</li>
 <li><strong>Juxtaposition (no parens) is allowed when the payload is self-delimiting</strong> — string / array / record / set literals all qualify. Bare identifiers and most expressions still need parens.</li>
 <li><strong><code>with { … }</code></strong> applies the record as keyword args. Not a second positional argument.</li>
 </ul>

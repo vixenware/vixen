@@ -1,342 +1,18 @@
-/vixen-language/Vixen language ‚Äî vixen.wikiÿ2Docupdated20260526VixenlanguageThebuildlanguageVixen	evaluatesStaysinternalatTier2becomesapublicAPIcontractatTier3DomainlogiclivesinVixennotintheruntimeThisissettledandnon
-negotiableJustshellouttocargoreuseanexistingtoolisnotanopenquestionitthrowsawaytheentirevaluepropositionSeeFAQsettled	decisionsbeforeraisingitTheRustruntimeisagenericengineItknowshowtoevaluateVixenmountasandboxVFStalkHTTPhashbytesrunaPubGrub
-constraintsolverparseTOMLYAMLJSONintotypedVixenvaluesItknowsnothingaboutcargoRustcratesXcodeprotobuforanyspecificlanguageAllofthatlivesinVixenpackagesvixenrustknowscargohowa	workspaceisshapedhowfeaturesresolvewhatpatchdoeswhatbuilddependenciesvsdependenciesmeanssemanticallyvixencknowsclangandMSVCvixenprotobufknowsprotocAddingalanguageisaddingapackagenotchangingtheruntimeThisisfromdayoneThecargo
-resolutionmodelisVixencodenotRustcodeTheruntimesuppliesPubGrubasagenericSATshaped
-constraintsolvervixenrustsuppliescargo'ssemanticmodelontopConsequencesCachingofdomainlogicisfree
-Evaluatingwhat'sthedepgraphofthis	workspaceisaVixen
-expressionSameinputssamedepgraphcachehitNobespokecargo
-resolutioncache
-Versioningmattersearly	Customerslockspecificversionsofvixenrust	Upgradingisa
-deliberateactionwitha	downgradepathThepackage	mechanismisalivefromTier2onwardsPerformancelivesintheruntimeIfvixenrustsresolverisslowonhuge
-workspacestheanswerisbytecodeJITbetter
-intrinsicsnotrewritevixenrustinRustSeethebytecodeandJITTaskRuntimeAPIsurfacestayssmallandstableWhat'sexposedas
-intrinsicsistheFFI
-everythingelseisVixenLanguagestaysinternaluntilTier3Aseparate	strategic
-commitmentTier1shipswithnolanguageexposureTier2shipswiththelanguageas	substrate	customersrunvxcargobuildbutneverauthorvxneverseethelanguageTier3isthefirsttierwhere	customerswriteVixen
-ConcretelyAtTier1Tier2novxCLI	authoringsurfacenoFSKitonmacOSinstructionsincustomerfacingdocsnovx	authoring	tutorialsno	stabilitycommitmentsThelanguagecaniteratefreelyunderrealworldloadAtTier3	customersauthorvx	Stabilitycommitmentsstartsemantic
-versioningdeprecationcycles	migrationtoolingLSPIDEsupportTwoyearsofTier2	customersusingVixentobuildtheircargo
-workspacesmeansthelanguageandstdlibhaveseenrealworldpatternsbeforeanyexternal	developerwritesagainstthemTheTier3launchsurfaceisinformedbydatanotspeculationFFIshapebodyabsentdeclarationsare
-intrinsicsAfunctiondeclaredinVixenwithnobodyisaruntime	intrinsicTheruntimesuppliestheimplementationLookingatcratesvxstdlibstdbuild.vxfnexecTargsArray	ExecInputwithenvMapString	ExecInputobserverFnProcessTreeTTThetrailing	semicolonnobodythat'san	intrinsicNospecial
-annotationnonativeeffectnoexternkeywordThe	mechanismis	invisibleatthecallsitecallersdon'tknoworcarewhetherthecalleeisbodyVixenorbodyRustParserRustparsesintoVixentypesAspecificinstanceWhenvixenrustneedstoreada
-Cargo.tomlitdeclaresaVixenstructshapedlikethecargomanifestrenamealiasoptionalannotationsonfieldslikeaserdestruct
-definitionthencallstheparsing	intrinsicTheRustruntimeparsestheTOMLbytesintothatVixentypeusingtheschemadeclaredontheVixensideSchemalivesinVixenparserlivesinRustCurrent
-intrinsicsFromcore.vxandbuild.vxProcess	executionundersandboxexecplus
-everythingintheobserver	signatureContent	addressedfetchacquireurlwithdigestacquireurlwithdigestextractAbilityrequestTypewhereboolean
-expression	predicate
-identifiedvalueplannerresolvesatexecsitesSeeExecutor	abilitiesHostprobingitselfisnotauserVixencallable	intrinsicithappensinsidethedaemonreadingfrom
-capabilityprobepackagesseeExecutor	abilitiesHow	abilitiesare
-advertisedTemplate	renderingrenderTtemplatewithbindingsBlob
-OperationsonStringSymbolTreeStreamMapArrayPathBlobBytesplustheTomlJsonYamlHttp
-namespacesThelistgrowswhentheruntimeneedsanew	primitiveanewsandbox
-capabilityanewsolver	algorithmItdoesnotgrowwhendomainlogicchangesthat'saVixenpackageconcernThestdlibintherepotodaystillcontains	read_fileread_dirglobexistsmetadataasfreefseffect
-intrinsicsplusabuildentry	intrinsictakingaclosureBotharelegacyfrombeforethedesignsimplificationsbelowuserfacingbuildcodeusestheTreeas	workspacefnmaindirectentrypatterninsteadandhost
-filesystemaccessis	reachableonlythroughaHost
-capabilityobtainedfroma	discoveryprobeValuesarehashable
-comparableserialisableAcorelanguagelevelpropertyEveryvaluetheruntimeproducesscalarstructenumvariantfunctionclosuretreeblobstreamisrequiredtobeHashableA	canonicalcontenthashexistsforanyvalueTwovalueswiththesamehashareinterchangeableequalvalueshavethesamehashThehashmixesintocachekeys
-ComparableEqualityis	decidableSame	canonicalformequaldistinct	canonicalformsnotequalNovalueidentityviapointerSerialisableBytesexistAvaluecanbewrittentransmittedstoredcontent	addressedfetchedbackreconstitutedintothesamevalueImplementedformostvalueshapestodayClosuresandstreamsarestillmaturingastateddesigngoalthateveryvalue
-eventuallybefullyserialisablesomeshapesstillneedworkWhythispropertyThecachetheexecutorfleettheclosureshippingstorythedemandwarmedflowthebuildgraphis
-provenancepropertyallreducetoIcanhashthisIcanshipitIcanverifyitcamebackequalCachesstoreandretrieveanyTnonserialisableTcouldn'tbecachedClosureshippingrequiresserialisingtheclosureDemandsignalsare
-serialisedontothequeueEqualityis
-provenancethisoutputwasproducedfromtheseinputsreducestohashinputshandleoutputConsequencesNoidentitycomparisonsValuescomparebycontentnotby
-allocationsiteNomutable
-referencesatthelanguagelevelAvaluecan'tchangecontentwithoutbecominga	differentvalueNo
-reflectiononinternallayoutThelanguageexposesthe	canonicalformtheruntimepickstheinmemoryrepresentationWireformatisimplicitThelanguagedoesn'texposeawritetobytes	primitivevaluesflowthroughcacheandwiretransparentlyFunctionapplicationisthesingle	primitiveThereisone	syntacticformfordo	somethingwithavalueFpayloadfunctionFappliedtopayloadjuxtapositionwithself
-delimitingpayloadsorFpayloadwithparensConstructorsprojectionslookupscallsallthesameshapevixenimport
-vixen:rustimportappliedtoastringTreefoo42bar99Treeconstructorappliedtoamapshapedpayloadexecrustcsrcooutexecappliedtoanarrayshapedpayload	workspacesrcmain.rs	workspaceaTreecallableasStringValueappliedtoastringexecapptheresultofexecitselfaTreeappliedtoastringTheTreetypeisitselfcallabletreesomepathgivesthevalueatthatpathThereisnoseparate
-projectionoperatorMapsworkthesamewayarraysworkthesamewayRecordsusefieldbecausefield
-projectionis
-staticallytypedandknownatcompiletimethat'stheonlycaseusing	differentsyntaxSelf
-delimitingpayloadsnoparensneededforjuxtapositionThechainexecappparsesleftassociativelyasexecappfirstapplyexectothearray	producingthewritesettreethenapplythattreetothestringshapedpathappNooperator
-precedencetothinkaboutClosuresshipas	canonicalIRAdirectconsequenceofvaluesarehashable
-comparableserialisableappliedtoclosuresWhenanexecrunsonaremoteexecutoritsobserverFnProcessTreeTshipstothatexecutorasavaluelikeanyotherThewireformis	canonicalVixenIRsortedrecordfields
-normalisedbindernamesdeterministicorderingforsetsmapsnosourcetext
-whitespaceorcommentsTwoclosuresthatmeanthesamethinghashtothesamebytes
-regardlessofwheretheyweretypedCapturesarerecursivelyvaluesrecursively	canonicalthe	closure'scontenthashisthehashoftheIRmixedwitheach	capture'shashThe	receivingexecutorneedsa
-compatibleruntimetoevaluatetheIRThatcompatibilityisanexecutorabilitystructVixenRuntimeversionSemVerintrinsic_setHashpinnedbythebuild's	predicateMismatchisaroutingfailurecaughtbeforedispatchnotamidbuilderrorSeeExecutor	abilitiesFailuremodesare
-idempotentAclosurethattripsaruntime	invariantreturnsa
-structured
-Diagnosticandpoisonstheexecalostmidevalfailureis	retryableonanothereligibleexecutoramissing	intrinsicmarkstheexecutorstaleonthat	intrinsicRetriesaresafebecausenothingtheclosuredoesontheexecutoris
-observable	elsewhereuntiltheexecresultisSyntaxkwargsusewithnotwhereFunction
-signaturesseparate
-positional	argumentsfromnamed	argumentswithdefaultsviaawithblockfnexecTargsArray	ExecInputwithenvMapString	ExecInputobserverFnProcessTreeTTEarlierthekeywordwaswhereThatcollidedwithRust'sgenericboundswhereandcreated
-persistentreader	confusionwithreadssentencewiseexecargswithenvandobserverNoconflictwithRust	precedent
-Mechanical	migrationeverywhereonfunction
-signaturesbecomeswithwithbecomesreservedwhereisreservedforthe
-constraint
-expression	constructbelow	different	syntacticrolenooverlapwiththeoldkwargsuseImportsModulesarerecordsTheimport
-expressionreturnsamodulevalueboundwithletvixenletconfigimportvixen:configletstableimport
-vixen:rustimportisanordinaryfunctionthestringidentifyingthetargetisitssinglepayloadappliedbyjuxtapositionnoparensneededstringsareself
-delimitingDestructuringletspullselectedexportsThestring
-identifiesthetargetvixennamestdliborfirstpartypackagevixenscopeBarename	workspacelocalsiblingvxfileorapackagedeclaredasa
-dependencyinthemanifestSameshapeacrossallthreesourcesstdlibcrosspackageintrapackageDottedaccessonthereturnedrecordreachesthemodule'sexportsconfig.linux_executorc.discover_toolchainStdlib
-intrinsicsexecacquireTomlparseareinscopeviaanimplicitpreludenoexplicitimport
-vixen:coreneededUserswritingbuildcodeseethe	intrinsicsurfaceasambientidentifiersFrontmatterAvxfilemayopenwithafrontmatterfenceafencedblockattheverytopofthefile	analogousto
-markdown'svixenstyxidvixengrammarccversion0.1.0letGrammarFlagimportvixen:commandgrammarThefencecarriesmetadataaboutthemodulemostimportantlya	package'smanifestseePackagesand
-publishingpackagesand
-publishingwhichiswhythereisnoseparatepackage.styxThetagaftertheopeningfencestyxherenamesthebody'slanguagethebodyisopaquetotheVixenparseritisnotVixenandisparsedbywhoeverconsumesitstyxforthemanifestTheparserkeepsthewholefenceasasingletoken	reachableas
-structureddatavia
-SourceFilefrontmatterlangcontentsotheruntimereadsitbackratherthan
-discardingitasacommentwouldOnlyonefrontmatterblockisallowedandonlyattheverytopbeforeanydeclarationsItisoptionalavxfilewithnomanifestneedsnofenceBracketsgroupsis
-structuralis
-positionalThethreebracketpairscarrydistinctrolesandthedistinctionisloadbearingforreadability
-expressiongrouping	includingfunctionbodiesalwaysmeansan
-expressionpossiblyasequenceof
-statementswiththelastbeingthevalueThisincludes
-Expressiongroupingfor
-precedenceabcFunctioncallpayloadfxisfappliedtoxone
-positionalpayloadFunctiondeclaration
-parametersfnfooxIntyIntTuples1atruewhentherearemultiple
-positionalelementsFunctionbodiesfnnameparamsTbodySameas
-everywhereelseafunctionbodyreallyisagrouped
-expressionwhosevalueisthefinalinner
-expressionClosures	returningblocksxletyx1yMulti	statementformusesasthe	separatorthelast
-expressionwithouttrailingisthevalueExamplewithintermediatestepsvixenfn	build_app	workspaceTreeTreeletrustRustToolchainwhereversion1.91letbinexec
-rust.rustc	workspacesrcmain.rsooutappappTreetargetreleaseappbinThefunctionbodyusesparenschoiceisthemostvisuallyunusualdecisionthelanguagemakesItbuys
-uniformityisonething
-everywhereyouneverhavetoscaninsidetoknowwhatkindofbracketyou'rereadingand
-structuralvalueswithnamedentriesBracesholdavaluewhose	structureisasetofnamedentriesTheentries	separatorinsideisalwaysornewlinethetwoareinterchangeableNever
-semicolonsliveonlyinTwobraceformssplitrecordsfrommapsbareisarecordfieldedentriesandisamaptreekeyedentriesThesigilis	redundantwithfieldvskeyfornonemptyliteralsbutit'sloadbearingforthetwocasesthe	separatorcan'tdisambiguatetheemptyliteralisanemptyrecordanemptymapandthespreadonlyliteralrisarecordspreadmamapspreadSoisalwaysawritableemptymapliteralnotypecontextrequiredModeFormInnershapeExampleRecordliteralfieldvaluePointx1y2MaptreeliteralkeyvalueTreekvRecordspreadrotherwith	VixenMainMapspreadmotherbasekvKwargsapplicationreusestherecordformfpayloadwithx1y2isfpayloadfollowedbywithappliedtoarecordStructupdateisthesamevaluewithfield	new_valueapplieswithtoarecordofupdatesThe
-previously
-considered
-constraintblockmodewherewithcomma	separatedclausesisgoneconstraintsareexpressionsinsee
-Constraintexpressions
-positional	sequencesandtype
-parametersis
-positionalArrayliterals123Type
-parametersArrayStringFnTexecargsexecrustcsrcooutisexecappliedtoanarraypayloadWhythismattersdoessix	differentthingsinmany	languagesbecauseeveryonereachesforbracesbydefaultVixensplitstheworkloadacrossthreebracketpairsalonga
-meaningfulaxis
-Sequencingof
-operationsgroupedexpressionsblocksNamingof
-structuraldatarecordsmapskwargs
-PositionallistingarraystypeparamsWhenyouseeoneyouknowwhichfamilythecontentsbelongtowithouthavingtoscaninsideThecostisone	weirdnessbudgetitemfunctionbodyparensthewinis
-everywhere
-ConstraintexpressionsAfirstclasslanguage	constructfor
-expressing
-structuralrequirementsovertypedvaluesthebuildlanguage
-equivalentofSQL'sWHEREclausescopedtoasingletypeUsedpervasivelyabilityrequestsagainsttheexecutorfleetcargostyle
-dependencydeclarationsversionrangeconstraintsforanypackagemanagertarget
-predicatesanywhereabuildqueries
-structuredvaluesby
-structural
-predicatesShapeTwhere
-expressionliftsa
-ConstraintTintoaRequirementTaroutabledemandtheorchestratororanyresolver	satisfiesbyfindingaconcreteTInsidethe
-expressionthecandidate'sfieldsareinscopeasbareidentifiersafreeversiondesugarstothecandidate'sversionfieldThenamedtypeTestablishesthatfieldscopesoversionissugarforversionwiththe	candidatean
-identifierthatnamesnofieldofTresolvesbyordinaryscopingleavingouterbindingsand	constants	reachablevixenletrustRustToolchainwhereversion1.91targetscontainsaarch64appledarwinletserdeCratewherenameserdeversion1.0featurescontainsderiveMultilineviatheregular
-expressiongroupingvixenletrustRustToolchainwhereversion1.91targetscontainsaarch64appledarwinDisjunctionnegationandanyotherbooleancompositioncomeforfreebecausethebodyisanordinary
-expressionvixenletrustRustToolchainwhereversion1.91version1.90letsafeCratewherefeaturescontainsunstableversion1.0Fieldscopeiskeyedonthenamed	candidatetypeandconfinedtothewherebodyarch
-arch_arm64readsarchasthecandidate'sfieldand
-arch_arm64asanouterconstantAdetached
-constraintvalueonebuiltwithoutanamed	candidateinscopenamesthe	candidate
-explicitlywithversion1.91the
-underlyingformthatbarefieldsdesugarto	Operatorsalwaysproducea
-ConstraintBoolisacoercion
-Comparison	operators
-collection	operatorscontainsinmatchesandthebuiltinsemvermatchersneverreturnBoolTheyalwaysreturna
-ConstraintTafirstclasstypedintrospectable
-composablehashablevalue
-ConstraintTcoercestoBoolbutonlywhereaBoolisdemandedanifwhile	conditionabooleanpositionandonlywhenthe
-constraintisgroundedeveryoperandconcreteCoercingan
-ungrounded
-constraintonestillreferencingthe	candidateisacompileerrorthereisno	candidatetotestitagainstSothesame
-expressionhasonetypeandtwofatesdecidedbycontextnotbytheoperatorvixenversion1.91
-ConstraintSemVerhandedtowhereindexedbytheregistryifv1.91vconcretethe
-ConstraintcoercestoBoolforthe	conditionletcversion1.91atypedvaluecomposeithashithandittowhereletcombinedcother
-structuralintersectionstilla
-ConstraintThisistheLINQ
-ExpressionTreeDiesel
-SQLAlchemycorepattern	sharpenedthereisno	sometimesadelegate	sometimesanASTbranchonoperandconcretenessitisalwaysthe
-structuralvalueandBoolisreachedonlybycoercionatasitethatdemandsonearethe
-structuralcombinatorson
-ConstraintintersectionunionnegationonplainBoolsthey'reordinaryboolean	operatorscoercionbridgesagrounded
-ConstraintintoaBoolcontextWhy
-structuralandwhyaclosedalgebraTheorchestratorandanyconsumerofRequirementTneedstoindexcomposehashandproduceerrormessagesoverconstraintsanopaqueclosureisevaluatablebutnotintrospectable
-StructuralconstraintsgiveusIndexingtheregistryof
-advertised	abilitiesanswersversionXbylookupnotscan	Canonicalhashing
-equivalentrequirementsshareacachekeySpecificerrorsyourequiredversion1.91	available1.891.90Compositionc_ac_bisacombined
-structural
-constraintnotaclosureofclosuresTokeepevery
-constraint	indexabletheoperatorsetisaclosedentirelybuiltinalgebraAwherebodyisbuiltfromfield
-projectionplusthe	operatorsbelowanythingoutsidethatalgebraappliedtothe	candidateisacompileerrornotanopaqueper	candidatefallbackTheregistryonlyeversees	operatorstheruntimedefinessoitcanalwaysindexOpaquescanonly
-predicateswoulddefeatfleetroutingsowedon'tadmitthemanescapehatchifeverneededwouldbe
-explicitlylocalfilteronlyanduserdefined	operatorsaredeferredentirelyBuiltinoperatorsetclosedThefull
-vocabularybuiltintotheruntimenotauser	extensionsurfacecomparisonscollectionscontainsinmatchesregexsemvermatchingfirstclasscarettilde
-comparatorsets	wildcardsexactwithprereleaserulesthewholecargonpmrequirement
-vocabularybooleancomposition
-structuralnestedfield
-projectionversion.major	triple.ostargetsSemverisbuiltinbecauseabuildsystemlivesonittheruntimeownscarettilde
-comparator	semanticsandtheregistryindexesthemnativelyitisnotapackagedeclaredoperatorUserdefined	operatorsaredeferredRoutingbytargettriplefallsoutofordinaryfield
-projectionplus
-comparisontargetscontainsaarch64appledarwin	triple.osdarwinCargo'scfg
-expressionmatchingcfgunixcfgall	target_oslinuxtarget_archx86_64anynotthetargetcfgdependenciestablesisa	differentproblemseeBuildand
-resolutioncfgandtargettablesItis
-resolutiontimedomainlogicinvixenrustaCfgSetfromrustcprintcfg	evaluatedwithbuiltin	operatorsnotafleetrouting
-constraintsoitisnotalanguagelevel
-constraintoperatorNumericliteralrulebuildlanguageflavourVixenisabuildlanguageversionsarethecommoncasefordottednumericvaluesfloatstheunusualoneWetakeversions	seriouslyenoughthat1.2isaversionneverafloat0.131.01.0.01.0.0rc1SemVerliteralsTwoorthreesegmentoptionalprereleasebuildmetadata1.34fF64literalFloatsrequirethefsuffix42	1_000_000U64literalsasbeforeThiskillsthetensionbetweenlookslike0.13serdeversionandlookslike0.13floatinbuildcodetheanswerisalwaysSemVerunlessthefsuffixsays	otherwiseMatcheswhatbuildersactuallywritein
-Cargo.tomlNoeffectannotationscapabilitiesareobjecttypesThelanguagehasnoeffect
-annotationsystemfsdiscoverhostsandboxandsoonarenotintheuserfacingsurfaceCapabilitiesareconveyedby	parametertypesaloneobject
-capabilitystyleWhoeverhasa	referencetoanobjectofa
-capabilitycarryingtypehasthe	runtime's
-permissiontodowhatthattypeallowsWhoeverdoesn'tcan'tNonconstructibletypes
-CapabilitybearingtypesarenonconstructiblebyusercodeOnlytheruntimecanhandyouoneHostruntimegivesaHostvaluetoa
-capabilityprobethe
-Type.probehostfunctiondeclaredina
-capabilityprobepackageseeExecutor	abilitiesUsercodecan'tmanufactureaHostthere'snopublicconstructorTheprobeholdsoneforitsdurationitcancallmethodsonithost.os
-host.which	host.read	host.execwhentheprobereturnstheruntimedropstheHost	referenceProbecoderunsinsidethedaemonprocessnotintheuser'sbuildcodeProcessandthesandboxoutputTreeruntimegivestheseas
-parameterstotheobserverofanexeccallSamenonconstructibilitypropertyTheobservercanreadfromtheProcessstdoutstderrexitcodeandtheTreewritesetwhenitreturnsthe
-referencesdropThetype's	existenceina
-function'sscopeconveysthe	authoritynothingelseneeded
-CapabilityvaluesareregionscopedA
-capabilityvaluelivesonlywithinthecallbacktheruntimehandedittoUsercodemaycallmethodsonititmaynotcaptureitintoaclosurereturnitorstoreitinavaluethatoutlivesthecallbackThisisn'taseparateruleitfallsoutoftwo
-invariantsalreadyinthelanguageValuesareserialisableandaclosurecan'tshipuntilitscapturesresolveHostProcessandthelivesandboxTreearen'tcontentaddressablesotheycanneverbeaclosurecaptureaclosurethattriedtocaptureaHostcouldn'tbe
-serialisedsocouldn'tshiptoanexecutorA
-callback'sreturnvaluecrossesaboundarysoitmaterialisesForProcessandthesandboxTreethat'sgracefulVFScontentinthereturnvaluecommitstothestorethehandlediesthedatacrossesasastorebackedvalueHostisn'tcontentaddressablesoareturnvaluestillholdingaliveHosthasnothingtomaterialiseintoandisacompileerrorSothe
-disciplineisborrowlikecapabilitiesareusablewithintheirregionanddataderivedfromthema
-discovered	toolchainstructastoreTreearealisedStreamflowsoutfreelybutthelivehandleneverescapesThe	asymmetrybetweenProcessTreeescapebymaterialisingandHostcan'tescapeisjustcontentaddressabilityThecostyoulearnyou'veoverreachedonlywhenthethingyoutriedtoreturnorcapturefailstotypeacompileerrorshapedbywhatyoureturnednotflaggedatthecapturesite
-Acceptableandrevisitableifitdoesn'tpanout
-OperationsonaHostarerecordedasobligationsHostisalivemutablehostItcan'tbecontent	addressedSowheneverusercodecallsamethodonaHostvaluetheruntimerecordsthecallitsobservedresultaspartofthevaluetheprobewillreturnTherecordedtupleisthe
-obligationAprobe	returningforexampleaMacToolchainvaluethereturnedstruct'sidentityforcachingpurposesisderivedfromtherecorded
-operationstheirresults
-Downstreamnodes	consumingtheMacToolchainanexecthatmountsthe	toolchainatcompiletimeincorporatethatidentityintotheirowncachekeystransitivelyVerificationraceswiththeworkthatconsumesthe
-capabilityTheruntimererunstherecorded
-operationsagainstthelivehostifarecordedopnowproducesa	differentresultthe
-obligationisbrokenPoisonortakenotespertherulesinExecutor	abilities
-OperationsonProcessandTreedon'tneed	recordingProcessandTreefromanexecarealreadycontent	addressedbythe	sandbox'sreadset
-disciplineTheirmethodsarepure	functionsondeclaredinputsnohiddenworldstateNo
-obligationneededWhattheprobecontextcandoisnarrowerthanwhatanobservercanTheexecobservergetsarichProcessstdoutstderrexitcodeplusawritesetTreeAprobedoesn't	host.execargsreturnsasmalltypedresulttheoutputbytesexitcoderatherthanafullProcessvalueTheprobecontextsurfacestaysnarrowtokeepthe
-obligationtuplesmallandtherecorded
-operations	tractableThisistypelevel
-separationprobecontextauthorneverholdsaProcessvalueobserverneverholdsaHostvalueTheruntimenevercrossesthemCachefriendlinesscomesfromnonimpuritynotfrompositivemarkingAfunctionthatonlytakescontent	addressed
-parametersandproducesavaluefromthemis	trivially	cacheableNo
-annotationneededitsidentityisitssourceplusits
-parameters
-identitiesAfunction	consumingaHostisnot	trivially	cacheableinthesamewayitsresultdependson
-operationsrecordedagainstthehostTheruntimehandlesthatasaspecialcasedrivenbytheHosttypenotbyahost
-annotationpropagatingthroughcallchainsTheresultisthatbuildcodeauthorsdon'tthinkabouteffectsatallTheyconsumethetypedvaluesthey'regivenreturntypedvaluesandtheruntimetakescareoftherestPackageentryisfnmaincalleddirectlyEachVixenpackagethatshipsavxlevel
-subcommandexportsafunctionnamedmainvxtheCLIinvokesmaindirectlythere'snowrapper	intrinsicvixenfnmain	workspaceTreewith	VixenMainTreeTreetargetreleaseexecstable.rustc	workspacesrcmain.rsooutappThe	workspaceis
-positionalthekwargblockusesthespreadformwith	VixenMaintopullinthestandardCLIkwargsargsArrayStringenvMapStringStringwithoutspellingthemouteverytimemainalwaysreturnsaTreeThebodyiswrappedinperthebracketconventionsAsingle
-expressionbodyisone
-expressioninsidetheparensintermediatestepsusebetween
-statementswiththefinal
-expressionasthevaluePathprefix	reductionNoticetheTreeliteralusestargetreleaseexecratherthantargetreleaseappexecappPlacinganexecresultaTreeata	directorykeygraftsthewholesubtreetherethebinarythattheexecwrotetooutapplandsattargetreleaseappbecausetheexec'swritesettreegetsmountedattargetreleaseCommoncase	shorthandforthis	directoryiswhateverthebuildwrotePathsintheexampleareordinarystringsThereisnoseparatepathliteralsyntaxthepathflavorcomesfromthevalue's
-provenancethroughTree
-projectionnotfromhowtheliteralwaswrittenSeePathsarestrings
-provenancebelowThereturnedTreeoverlaysontothe	workspaceTheTreemainreturnshas	workspacerelativepathsandvxmergesitontothe
-customer's	workspaceoverlay	semanticsnotreplacevixencargosmainreturnsaTreelikeTreetargetreleasefoobintargetreleasebuild
-Cargo.lockvxlandstargetandupdates
-Cargo.lockbecausethat'swheretheTreesaidtheygoThetarget
-conventionlivesinvixencargosimplementationnotinvxorthelanguageAminimal
-subcommandcanbeassmallasreturnTreeoutappbinMakeBazelandcargoallspentdecadeslayering
-conventionontopofthat	statementthelanguagereducesittotheTreeiswhatthe	workspaceshouldlooklikeafterthebuild	MechanismoftheoverlaycopyvsVFSmountvshardlinkisopenseeDesignbuildoutputmaterialisationThecurrentstdlibhasabuildentryFnTT	intrinsicthattakesaclosurethat'slegacyThenew
-conventionremovesthatwrapperDemanddriven
-evaluationletxexecdoesnotrunanythingItproducesagraphnodeathunk
-identifiedbyitsinputsandbindsxtoitSameforacquirerenderpubgrub_solveandeveryother	intrinsicthatdoessubstantialworkThebodyofmainisagraphconstructionphasethe	evaluatorthreadsvaluesthroughtheuser'scodebutnoworkhappensForcingactually	computingis	triggeredbydemandfromthehostboundaryThevxCLIforcesmainsreturnvalueForcingaTreelazilyforcesitsentriesforcingaBlobentryforcestheexecnodethatproducedittransitively	Subgraphsnodemandreachesneverrunvxcargobuildpfoo	evaluatesthedepgraph	reachablefromfooandignorestherestofthe	workspaceWithinasingle
-evaluationthe	evaluatormemoiseseverydemandedthunkbyitsidentityTwodemandsforthesamenodeshareoneinflight
-evaluationAcrossevaluationsthe
-persistentcacheplaysthatroleforthesubsetof
-intrinsicswhoseresultsareworthstoring
-Persistentcachecutoffisper	intrinsicNoteveryvalue'sidentityisworthmaterialisingtodiskPure
-arithmeticvalueconstructionstring
-operationsequalitycheaperto	recomputethantoroundtripthroughacacheThe
-persistentcachewritesonlytheresultsof
-intrinsicsthatdidexternalorsubstantialworkexecacquireHttpTomlJsonYamlparsepubgrub_solverenderandtherecorded
-obligationtuplesfrom
-capabilityprobesTrivial
-intrinsicsStringconcatequalityhash
-arithmeticonscalarsTree
-projectionandallpureVixenfunctioncallsstayintheper
-evaluationmemotableThecutoffisapropertyofeach	intrinsicdecidedintheruntimenotauservisibleknob	Cacheablebythetypesystemeveryvaluecanin	principlebecachedisnotthesameasworthcachingthelookupcostbeatsthe	recomputecostSeeCacheandtrustWhich
-intrinsicsget	persistedforthe
-categoriesthedispatch	mechanismandthe	treatmentofpureuser	functionsAccumulatorsAgeneral	primitiveforgraphwide
-reductions
-collectingcontributions	scatteredacrossthedemandedsubgraphandmergingthemintoonevalueFeatureunificationisthe
-motivatingcasebutitgeneralises	gatheringeverylinkflageverylicenseorigin
-obligationeveryrequiredsystemlibrary
-aggregateddiagnosticsallthesameshapeAccumulatorsplusthe
-constraintsolverarethetwofacesofthepropersolver	directionademanddrivenlanguagegetstobegoodatAccumMisavalueyou'rehandeda	parameterWritermonadshapedacc.emitxcontributesanM	acc.valuereadsthecurrent	reductionunderMsmerge
-accumulateMaccbodymintsonerunsbodycollectseveryemitinbodysdemandedsubgraphandreturnsthemergedMBecausethecontributionsetis
-determinedbytheinputsthe	convergedvalueiscontent	addressedand	cacheablelikeanythingelseAcomputational
-capabilitynotan	authorityoneHoldinganAccumMconfersanabilityyoumay
-contributesoitsitsintheobject
-capabilitymodel	alongsideHostProcessTreethreaded
-explicitlyregionscopedtoits
-accumulateblocknonescapingItdiffersononeaxisonlyitcarriesno	authoritynohostaccessnosandboxstatesounlikethe	authoritycapabilitiesitisusermintableratherthanruntimeonlyConstructibilitytracks	authorityaccumulatorshavenonesoyoumintthemfreelyTwoflavourssinglepassandfixpointIfbodyneverreadstheaccumulatormidflightit'sasinglepasscollectandmergeonceIfreading	acc.valuefeedsfurtheremits
-activatingafeaturepullsinmorefeaturerequests
-accumulateiteratestoaleastfixpointThat
-terminateswhenmergeisaboundedjoinsemilatticecommutative
-idempotentfiniteheightwhichfeaturesetunionisThelawsarean
-unenforcedcontracttheauthor
-guaranteesexactlylikeassociativitythelanguagedoesn'tandcan'tcheckthemNotraitrequired
-accumulateMisanordinary	unboundedgenericitneedsmergeMMMandidentityMdefinedfortheconcreteMresolvedatinstantiationlikeeveryVixengenericamissingmergeisacallsiteerrorthesameducktyped
-conventionas	to_stringVixenhasnotraitboundsystemseetheFAQandaccumulatorsdeliberatelydon't	introduceoneKernelscompiledpureislandsMostofabuild'swallclockis
-intrinsicsrustcviaexecfetchesPubGrubalreadynativeTheinterpretedpartisthevxgluebetween
-intrinsicsresolverloopsaccumulatormerges
-constraintandcfg
-evaluationSemVer
-comparisonWhenthatglueisameasured
-bottleneckitcompilesaskernelsAkernelisaneagerpureislandinthelazydemandseaafragmentthattouchesno
-capabilityHostProcessTreeAccumcallsno	intrinsicandforcesnothunkFindingthemischeapbecausetheruntimealreadydrawsthelinethecachepolicy'sPersist	intrinsicnativeboundaryvsInMemorypureinterpretedsplitisthekernelboundaryandthe
-capabilitymodelmakespurityatypelevelpropertyThe	evaluatorforcesakernel'sinputsrunsitto
-completionliftstheresultkernels
-themselvesnevercrossaboundaryCodegeniscopyandpatchaprecompiledstencilperopcopiedandpatchedatruntimenotaheavy
-optimizingbackendsocompilesaresubmillisecondAkernelshipsas	canonicalIRandiscompiledlocallywhereveritlandswhichisthesame	mechanismthatshipsexec	observersandpubgrubdomainclosurestoremote	executors	InterpretbydefaultcompilehotkernelsThisistheconcreteformofperformancelivesintheruntimeJITwhenitearnsitsplaceandthepaththatwasdeletedvxjitisbeingrebuiltnowthatthesettledlanguagemakesthe	partitiontypelevelDesigndocsdesignkernelabi.mdErrorsareDiagnosticsthatpoisonthebuildThereisnoResultTEpropagationsurfaceforusercodeno	exception	machineryWhenan	intrinsicfailsTomlparseon	malformedinputacquireonadigestmismatchHttpona404execonasandbox	violationitemitsa
-structured
-DiagnosticandpoisonsthedemandchainrootedatthefailingcallThebuildcollectsallDiagnosticsthatfiredduring
-evaluationandreportsthemattheendProcessexitcodesareaseparateconcernAnonzeroexitfromaprocesstheobserverisreadingisnotan	automaticpoisontheobserverreceivestheProcessvaluewithitsexitcodeanddecideswhattodoCompilationfailedwiththiserrormessageisavalueflowingthroughusercodetheruntimecouldn'tparseyourTOMLispoisonTheexplicitpoison	primitiveisfailmessageemitsa
-DiagnosticandstopsthecurrentbranchNorecoveryoperator
-ConsideredandrejectedApostfixthatcatchespoisonandyieldsOptionwasonthetablemodelledafterSwift'stryWalkingthroughRustCC	containerimagebuilding	scenariosthecaseforitdidn'tholdupManifestparsefailures
-resolution	conflictssandbox
-violationstheseshouldbefatalCatchingthemyieldsaNoneyoucan'tusefullyactonProcessexitcodesfrom	compilersandbuildscripts
-observableviatheProcessvalueintheobservernotapoisoninthefirstplaceTreelookupsfeature	detectionprobesoptionalconfigfilesdesignthesetoreturnOptionTdirectlyCompositionwithmatchor_else	unwrap_orisclearandexplicitHTTPfetcheswithmirrorsretriesruntimefetchpolicyconcernnotusercodeThepatternrecoverable
-operationsinbuildcodeare	naturallyOption	returningbyAPIdesignThe	genuinelyfatalcaseshavenothingusefultorecovertoThemiddlespacean	operationthatmorallyshouldsucceedbutmightfailandyouwanttofallbackdoesn'texistinbuildcodeWithoutthefootgunsilent
-Diagnostic
-swallowinggoesawayRecoverablefailuresarevisibleintype
-signaturesfatalfailuresendthebuildwitha
-structuredreportIfarealusecaseshowsuplatereasiertoaddthantoremoveitCargo
-resolutionasVixen	lockfilesasoutputsAconsequenceworthcallingoutforthecargoreplacementusecasevixenrustsresolverisVixencodeItreads
-Cargo.tomltalkstothe	crates.ioregistryviatheHttp	intrinsicrunsPubGrub	intrinsicovertheconstraintsandemitsa
-Cargo.lockThebaris
-functionalequivalenceresolvethesameversionscargowouldandproduceaworkingbuildnotabyte	identicallockfileMatchingcargo'sexacttextortiebreakingineverycornerisa
-needlesslyhighbarwedon'tsignupforThe
-resolution	operationisabuildgraphnodeinputsare
-Cargo.tomltheregistryviewatthismomenttheresolvercode'sversionoutputis
-Cargo.lockThefactthattheoutputlandsattheconventionalondiskpathisafilesystem
-conventionnotasemanticmutationWhenthe
-resolutionnodeisrunthecachestoresinputs
-Cargo.locksameinputssamelockfileinstantBut
-resolutionisdemandgatedanordinarybuildwhose	committed
-Cargo.lockstill	satisfies
-Cargo.tomlneverforcesthisnodesoanewupstreampublishdoesnotreresolveThenodeisforcedonlywhenthelockcan'tserveasthesolutionmissingmanifestchangedorexplicitcargoupdatewiththepriorlockfedbackasaninput
-preferenceratherthanthesolutioncargoupdateisjustthatforcedre
-resolutionwiththe
-preferencerelaxedPathsarestrings
-provenanceThereisnodistinctpathliteralsyntaxPathshapedvaluesareordinarystringsdistinguishedfromplainstringsbyvalue
-provenancetheruntimetrackswhichstrings
-originatedasTreeprojectionsorwerederivedfromthemandusesthat
-provenanceforcachekeyingandimplicitmountinginto	sandboxesThepathvsstringdistinctiontheuserbrieflyseesintheliteralformisfakeinexecstable.rustc	workspacesrcmain.rsooutappthefourliteralsareallstringsWhatdiffersoperationallyiswhethereachvaluehastree
-provenancestable.rustcvaluefromaRustToolchain
-projectionHas
-provenanceSandboxseesthe
-provenanceand
-implicitlymountsthe	toolchain	workspacesrcmain.rsTree
-projectionThestringsrcmain.rsisthe
-projectionkeytheresultofthe
-projectionhas
-provenanceMounted
-implicitlyoplainstringNo
-provenancenomountjustargvoutappplainstringThe	sandbox'swritablerootrulesgoverntheoutputlocationtheliteralcarriesno
-provenanceandneedsnoneQuotestyleisneverthediscriminator
-ProvenanceisWhynodistinctquoteformAdistinctliterale.gsrcmain.rsforpathsvsoforstringswas
-consideredandrejectedIn	realisticexeccallsmostliteralvaluesare
-subprocessargvotargetedition2021targettriplesoutputpathsNoneofthemhavea
-meaningfulsemanticclaimtobeingapathvsastringthey'retokensthe
-subprocess
-interpretshoweveritwantsForcingtheauthortopickquotestylewouldmanufactureaquestiontheycan'tmeaningfullyanswerformosttokensandthechoicewouldeitherbe	arbitrary	cognitivecostorasubtlefootgunTheDXwinthistokenvisiblylookslikeapathexistsbutissmallanditcosta	syntacticdistinctionthelanguagedoesn'tneedWherepathflavorsurfacesintypesWhen	something	genuinelywantsthepathAPI	splitting
-componentsjoiningmanipulatingrelativevsabsoluteetcthemethodsliveonthevaluetype
-Path.split	Path.joinandsimilarnotontheliteralformAstringwithtree
-provenancecanbe	inspectedasapaththroughthosemethodsbecausetheruntimeknowsitsshapeCoercionlossof
-provenanceWhenapathshapedvaluewith
-provenanceisconcatenatedortransformedinawaytheruntimecannolongertracke.g	extractedintoahandbuiltsegmentsuffixtemplate
-provenanceislostatthetransformationpointThe	resultingvalueisaplainstringIftheuserwantedtokeep
-provenancethroughthat	operationtheyshoulduseaPathAPIthat	preserves
-provenancethroughjoinsDetailedcoercionrulestobe	specifiedatimplementationtime..domain-logic-lives-in-vixen-not-in-the-runtime/Domain logic lives in Vixen, not in the runtime<domain-logic-lives-in-vixen-not-in-the-runtime--consequencesConsequences«$language-stays-internal-until-tier-3$Language stays internal until Tier 3∂1ffi-shape-body-absent-declarations-are-intrinsics2FFI shape: body-absent declarations are intrinsics≈Vffi-shape-body-absent-declarations-are-intrinsics--parser-rust-parses-into-vixen-types$Parser: Rust parses into Vixen typesúEffi-shape-body-absent-declarations-are-intrinsics--current-intrinsicsCurrent intrinsics‚+values-are-hashable-comparable-serialisable-Values are hashable, comparable, serialisable¶>values-are-hashable-comparable-serialisable--why-this-propertyWhy this property†9values-are-hashable-comparable-serialisable--consequencesConsequencesÒ,function-application-is-the-single-primitive,Function application is the single primitive¥closures-ship-as-canonical-irClosures ship as canonical IR˚	 syntax-kwargs-use-with-not-where"Syntax: kwargs use with, not where importsImportsÆfrontmatterFrontmatterµ=frontmatter--...-and-...-structural-values-with-named-entries={ ... } and %{ ... } ‚Äî structural values with named entriesú9frontmatter--...-positional-sequences-and-type-parameters4[ ... ] ‚Äî positional sequences and type parametersÌfrontmatter--why-this-mattersWhy this mattersçconstraint-expressionsConstraint expressions€constraint-expressions--shapeShapeîPconstraint-expressions--operators-always-produce-a-constraint-bool-is-a-coercion9Operators always produce a Constraint; Bool is a coercionÎ?constraint-expressions--why-structural-and-why-a-closed-algebra(Why structural, and why a closed algebraÀ4constraint-expressions--built-in-operator-set-closedBuilt-in operator set (closed)˜Cconstraint-expressions--numeric-literal-rule-build-language-flavour-Numeric literal rule (build-language flavour)£3no-effect-annotations-capabilities-are-object-types7No effect annotations ‚Äî capabilities are object typesãLno-effect-annotations-capabilities-are-object-types--non-constructible-typesNon-constructible types Xno-effect-annotations-capabilities-are-object-types--capability-values-are-region-scoped#Capability values are region-scopedﬂeno-effect-annotations-capabilities-are-object-types--operations-on-a-host-are-recorded-as-obligations0Operations on a Host are recorded as obligationsÊhno-effect-annotations-capabilities-are-object-types--operations-on-process-and-tree-don-t-need-recording3Operations on Process and Tree don't need recordingÙxno-effect-annotations-capabilities-are-object-types--what-the-probe-context-can-do-is-narrower-than-what-an-observer-canCWhat the probe context can do is narrower than what an observer canõyno-effect-annotations-capabilities-are-object-types--cache-friendliness-comes-from-non-impurity-not-from-positive-markingECache-friendliness comes from non-impurity, not from positive markingˆ(package-entry-is-fn-main-called-directly)Package entry is fn main, called directlyË Wpackage-entry-is-fn-main-called-directly--the-returned-tree-overlays-onto-the-workspace-The returned Tree overlays onto the workspace "demand-driven-evaluationDemand-driven evaluationË#Bdemand-driven-evaluation--persistent-cache-cutoff-is-per-intrinsic(Persistent cache cutoff is per-intrinsicç%accumulatorsAccumulators•&=accumulators--a-computational-capability-not-an-authority-one0A computational capability, not an authority oneØ'3accumulators--two-flavours-single-pass-and-fixpoint&Two flavours: single-pass and fixpoint˛'accumulators--no-trait-requiredNo trait requiredŒ(kernels-compiled-pure-islands!Kernels ‚Äî compiled pure islandsã),errors-are-diagnostics-that-poison-the-build,Errors are Diagnostics that poison the build¯*Berrors-are-diagnostics-that-poison-the-build--no-recovery-operatorNo ? recovery operatorå,.cargo-resolution-as-vixen-lockfiles-as-outputs/Cargo-resolution-as-Vixen, lockfiles-as-outputsÿ-paths-are-strings-provenancePaths are strings + provenance∂/8paths-are-strings-provenance--why-no-distinct-quote-formWhy no distinct quote form›0Apaths-are-strings-provenance--where-path-flavor-surfaces-in-types#Where path-flavor surfaces in types“19paths-are-strings-provenance--coercion-loss-of-provenanceCoercion / loss of provenanceã2
+	/streams/Streams ‚Äî vixen.wikiµDocStreamsAStreamTisthetemporalsiblingoftheTree	producinghandleseeThedemanddrivenruntimeademanddrivensequencewhoseitemsresolveprogressivelyWherea	producingTreeresolvesperpathastreamresolvesperitemIt'sthe	substratethe	streamingexecobserverridesonrun.stream.stdoutaStreamTobserverresultandtheonetheLSPcrosstarget
+validationfeatureneedsThe
+combinatorsurfacealreadylivesincore.vxmapfilterflat_mapflattenmergeTreecollectto_arrayto_mapfor_eachTheshapeperitempullpushaheadoptimizationsettledItemssitat	positions012andresolveastheproduceremitsthemForcingitemNblocksuntilit'sproducedthesamedemandpullastheTreehandleoneaxisoverAnexplicitendmarkernomoreafterN
+terminatesthestreamTheproducerdyingmidstreampoisonsthetailaFailurewhileitemsalreadypulledstandThedemandmodelisperitempullthe	transportmaypushaheadsendarunofitemsbeforethey'redemandedasthe
+predictiveoptimizationthesamepushdon'tonlypullmovetheinputsideusesPull	semanticsoptionalpushColdonamissrealizedonahitsettledOnacachemissthestreamisliveitemsarriveastheproduceremitsthemrustc'sstderrlinesastheyprintOnahitthecachedvalueistherealizeditemsequenceallitemsinorderreplayedno	recomputeSoastream'scachedformisthelistofitemsitproducedCacheabilityis
+combinatordeterminismsettledTheCacheandtrustrule	unchangedAstreamreachingaresultonlythroughordererasingcombinatorsmapfilterflat_mapto_arraymergeonlyiscontent
+determined	cacheableOrderexposingonesnextaracingfindmaketheresulttiming
+determinednon	cacheableIt'sastaticcheckoverthe
+combinatorgraphThisisexactlywhatletsbuild
+pipeliningscheduleonan
+artifact'sarrivalsurfacermetatheinstantrustcemitsitwithoutlettingarrivalorder	determineavalueCrossingtheexecboundary‚ë¢settledA	streamingobserverreturnsStreamTsoexecreturnsStreamTeachitemisaproduced‚ë¢partthatcrossesastheobserveremitsitThisextendstheremoteparthandletodayPartKeyTreePathwithaperitemkinda
+StreamItemstreamindexpartanendmarkerTheconsumerpullsitemsforcingitemiblocksuntilproducedAlreadyemitteditemsstand
+regardlessofthefinalrun.okverdictthesameorthogonalityastheTreehandlerustc'srmetasurvivesafailedcodegenBackpressuredemanddrivensettledshapeopenpolicyBoundedbuffernaturalOSpipebackpressureanditmustrespectdemandAdemandedstream	somethingforcesitsitemsisbufferedwhenthebufferfillstheexecutorstopsdrainingthepipeandtheprocessblocksonwritenaturalbackpressureAn
+undemandedstreamtheobserverignoresstdoutisdrainedand	discardedsoitcan'twedgetheprocessaprocesswillblockwritingtoafullunreadpipebutitisn'tbufferedThisisI1demanddrivenappliedtostreamsdon'tpaytobufferwhatnobodypullsdon'tdeadlocktheprocesseitheropenExactbuffersizingperstreamvssharedisapolicyknobnotashapequestionFinitevssessionsettledexecstreamsarefinitetheprocessendsthestreamsendsitsendmarker	Cacheablestreamsmustbefiniteyoucan'tcachean	unboundedsequenceThefinite	primitiveiswhatthebuildcachepathneedsandit'swhatshipsfirstopendeferredSessioninfinitestreamstheLSPcrosstarget
+validationfeaturewantsalonglivedpereditingsession
+diagnosticstreamliveonlynevercachedendedbythesessionratherthanaprocessThefinitedesigndoesn'tprecludeitastreamthatsimplyneversendsitsendmarkerisinfiniteandtheconsumerpullsuntilitstopscaringbutthesession	machinerystickyexecutoreditdiffinputstreamisdeferredtothatfeaturenotpartofthe	primitiveRelatedexec
+run.streamthe	streamingobserverStreamTresult‚ë¢ThedemanddrivenruntimetheTree	producinghandlethisisthetemporalsiblingofCacheandtrustobservercacheability
+combinatordeterminismExecutor	abilitiesthesessionstreamLSPfeature	ImplementstreamsasthefirstTier2	primitivetheimplementationTask/the-shape-per-item-pull-push-ahead-optimization4The shape ‚Äî per-item pull, push-ahead optimizationQ cold-on-a-miss-realized-on-a-hit!Cold on a miss, realized on a hitª&cacheability-is-combinator-determinism&Cacheability is combinator determinism˜crossing-the-exec-boundary-‚ë¢ Crossing the exec boundary (‚ë¢)∆backpressure-demand-drivenBackpressure ‚Äî demand-drivenúfinite-vs.-sessionFinite vs. sessionårelatedRelatedÑ
