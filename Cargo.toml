@@ -12,8 +12,6 @@ repository = "https://github.com/bearcove/vx"
 [workspace.dependencies]
 moire = "1.0.1"
 vx-services = { path = "crates/vx-services" }
-margin = { path = "crates/margin" }
-margin-term = { path = "crates/margin-term" }
 vx-io = { path = "crates/vx-io" }
 vx-vfs = { path = "crates/vx-vfs" }
 vx-vfsd = { path = "crates/vx-vfsd" }
@@ -21,20 +19,21 @@ vx-vfs-types = { path = "crates/vx-vfs-types" }
 vx-fskit-types = { path = "crates/vx-fskit-types" }
 
 # facet ecosystem
-facet = { version = "0.50.0-rc.0", features = ["jiff02", "camino"] }
-facet-error = { version = "0.50.0-rc.0" }
-facet-json = { version = "0.50.0-rc.0" }
-facet-postcard = { version = "0.50.0-rc.0", features = ["jiff02", "camino"] }
-facet-styx = "5.0.0-rc.0"
+facet = { git = "https://github.com/facet-rs/facet", package = "facet", features = ["jiff02", "camino"] }
+facet-error = { git = "https://github.com/facet-rs/facet", package = "facet-error" }
+facet-json = { git = "https://github.com/facet-rs/facet", package = "facet-json" }
+facet-postcard = { git = "https://github.com/facet-rs/facet", package = "facet-postcard", features = ["jiff02", "camino"] }
+facet-styx = { git = "https://github.com/facet-rs/facet", package = "facet-styx" }
+margin = { git = "https://github.com/facet-rs/facet", package = "margin" }
 
 
 # cmdline parsing
-figue = { version = "5.0.0-rc.0" }
+figue = { git = "https://github.com/facet-rs/facet", package = "figue" }
 
 # vox RPC framework
-vox = { version = "0.10.0-rc.1", features = ["transport-tcp", "transport-local"] }
-vox-types = "0.10.0-rc.1"
-vox-codegen = "0.10.0-rc.2"
+vox = { git = "https://github.com/facet-rs/facet", package = "vox", features = ["transport-tcp", "transport-local"] }
+vox-types = { git = "https://github.com/facet-rs/facet", package = "vox-types" }
+vox-codegen = { git = "https://github.com/facet-rs/facet", package = "vox-codegen" }
 
 # copy-and-patch JIT substrate: executable memory + AArch64
 # relocation patching + build-time stencil extraction. Backend-agnostic — no IR.
