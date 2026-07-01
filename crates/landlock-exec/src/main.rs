@@ -12,8 +12,6 @@
 //! - Network: denied entirely (no BindTcp/ConnectTcp rules added)
 //! - Execution: allowed from VFS_ROOT + system paths
 
-mod uname;
-
 fn main() {
     #[cfg(not(target_os = "linux"))]
     {
@@ -23,15 +21,6 @@ fn main() {
 
     #[cfg(target_os = "linux")]
     {
-        let Ok(uname) = uname::uname() else {
-            panic!("Could not get uname by landlock-exec");
-        };
-        if !uname.release.starts_with("5.13") {
-            panic!(
-                "landlock features are only supported since Linux 5.13, upgrade your kernel version"
-            );
-        };
-
         if let Err(e) = run() {
             eprintln!("landlock-exec error: {e}");
             std::process::exit(1);
