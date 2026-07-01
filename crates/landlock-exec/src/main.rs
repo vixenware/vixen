@@ -12,6 +12,7 @@
 //! - Network: denied entirely (no BindTcp/ConnectTcp rules added)
 //! - Execution: allowed from VFS_ROOT + system paths
 
+#[cfg(target_os = "linux")]
 mod sandbox;
 
 fn main() {
