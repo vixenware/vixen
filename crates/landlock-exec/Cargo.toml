@@ -25,7 +25,7 @@ secmem-proc = "0.3.8"
 libc = { workspace = true }
 
 # GrapheneOS does not support 32-bit.
-[target.'cfg(target_pointer_width = "64")'.dependencies]
+[target.'cfg(all(target_pointer_width = "64", target_os = "linux"))'.dependencies]
 hardened-malloc = { version = "16" }
 
 [lints]
