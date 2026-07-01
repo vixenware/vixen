@@ -12,6 +12,8 @@
 //! - Network: denied entirely (no BindTcp/ConnectTcp rules added)
 //! - Execution: allowed from VFS_ROOT + system paths
 
+#[cfg(target_os = "linux")]
+use magic::cookie;
 use seccompiler::{
     BpfProgram, SeccompAction, SeccompCmpArgLen, SeccompCmpOp, SeccompCondition, SeccompFilter,
     SeccompRule,
@@ -254,8 +256,41 @@ fn run() -> Result<(), String> {
 
     eprintln!("landlock-exec: exec'ing {}", args.program);
 
+    // Find the path to the executable we're going to execute, make sure we have PIE, ASLR and everything else
+    let (file, program) = match which::which(&args.program) {
+        Ok(program) => {
+            let cookie = magic::Cookie::open(cookie::Flags::default())
+                .expect("Could not open Cookie with default flags");
+
+            let cookie = cookie
+                .load(&cookie::DatabasePaths::default())
+                .expect("Could not open DatabasePaths");
+
+            (
+                cookie.file(&program).expect(&format!(
+                    "Could not analyze file `{:?}` with magic",
+                    program
+                )),
+                program,
+            )
+        }
+        Err(err) => return Err(format!("Could not get origin of program: {err}")),
+    };
+
+    if !file.contains("ELF") {
+        return Err(format!(
+            "`{}` is not a valid ELF file, got: {file}",
+            &program.to_string_lossy()
+        ));
+    } else if !file.contains("PIE") {
+        return Err(format!(
+            "`{}` is not a PIE ELF (Position Independent Executable ELF)",
+            program.to_string_lossy()
+        ));
+    }
+
     // Replace this process with the target program
-    let err = Command::new(&args.program).args(&args.program_args).exec(); // This never returns on success
+    let err = Command::new(&program).args(&args.program_args).exec(); // This never returns on success
 
     Err(format!("exec failed: {err}"))
 }
