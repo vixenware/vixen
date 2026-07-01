@@ -279,10 +279,8 @@ fn run() -> Result<(), String> {
                 .expect("Could not open DatabasePaths");
 
             (
-                cookie.file(&program).expect(&format!(
-                    "Could not analyze file `{:?}` with magic",
-                    program
-                )),
+                cookie.file(&program).unwrap_or_else(|_| panic!("Could not analyze file `{:?}` with magic",
+                    program)),
                 program,
             )
         }
@@ -292,7 +290,7 @@ fn run() -> Result<(), String> {
     if !file.contains("ELF") {
         return Err(format!(
             "`{}` is not a valid ELF file, got: {file}",
-            &program.to_string_lossy()
+            program.to_string_lossy()
         ));
     } else if !file.contains("PIE") {
         return Err(format!(
