@@ -18,7 +18,15 @@ landlock = "0.4.5"
 # For identifying files, do not allow running arbitrary executables e.g. in include_bytes macros! or similar
 magic = "0.16.7"
 which = "8.0.4"
+
+# Hardened-malloc
+hardened-malloc = "16.0.2026060603" # By GrapheneOS
+secmem-proc = "0.3.8"
 libc = { workspace = true }
+
+# GrapheneOS does not support 32-bit.
+[target.'cfg(target_pointer_width = "64")'.dependencies]
+hardened-malloc = { version = "16" }
 
 [lints]
 workspace = true

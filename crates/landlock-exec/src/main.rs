@@ -12,6 +12,11 @@
 //! - Network: denied entirely (no BindTcp/ConnectTcp rules added)
 //! - Execution: allowed from VFS_ROOT + system paths
 
+// Set global allocator to GrapheneOS allocator.
+#[cfg(target_pointer_width = "64")]
+#[global_allocator]
+static GLOBAL: hardened_malloc::HardenedMalloc = hardened_malloc::HardenedMalloc;
+
 #[cfg(target_os = "linux")]
 use magic::cookie;
 use seccompiler::{
@@ -23,6 +28,13 @@ use seccompiler::{
 compile_error!("seccomp does not support big-endian architectures");
 
 fn main() {
+    // Harden process before ANYTHING else
+    if let Err(e) = secmem_proc::harden_process() {
+        println!("ERROR: could not harden process, exiting");
+        println!("ERROR: {}", e);
+        return;
+    }
+
     #[cfg(not(target_os = "linux"))]
     {
         eprintln!("landlock-exec: this binary only works on Linux");
