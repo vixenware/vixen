@@ -12,6 +12,14 @@
 //! - Network: denied entirely (no BindTcp/ConnectTcp rules added)
 //! - Execution: allowed from VFS_ROOT + system paths
 
+use seccompiler::{
+    BpfProgram, SeccompAction, SeccompCmpArgLen, SeccompCmpOp, SeccompCondition, SeccompFilter,
+    SeccompRule,
+};
+
+#[cfg(target_endian = "big")]
+compile_error!("seccomp does not support big-endian architectures");
+
 fn main() {
     #[cfg(not(target_os = "linux"))]
     {
@@ -194,6 +202,55 @@ fn run() -> Result<(), String> {
     unsafe {
         libc::prctl(libc::PR_SET_PDEATHSIG, libc::SIGKILL);
     }
+
+    eprintln!("landlock-exec: creating filter");
+
+    let filter: BpfProgram = SeccompFilter::new(
+        [
+            (libc::SYS_accept4, vec![]), // Explicit cancel on socket connection
+            (
+                libc::SYS_fcntl,
+                vec![
+                    SeccompRule::new(vec![
+                        SeccompCondition::new(
+                            1,
+                            SeccompCmpArgLen::Dword,
+                            SeccompCmpOp::Eq,
+                            libc::F_SETFD as u64, // Allow set file descr. flags
+                        )
+                        .unwrap(),
+                        SeccompCondition::new(
+                            2,
+                            SeccompCmpArgLen::Dword,
+                            SeccompCmpOp::Eq,
+                            libc::FD_CLOEXEC as u64, // Allow for setting if the file should code on succesful exec.
+                        )
+                        .unwrap(),
+                    ])
+                    .unwrap(),
+                    SeccompRule::new(vec![
+                        SeccompCondition::new(
+                            1,
+                            SeccompCmpArgLen::Dword,
+                            SeccompCmpOp::Eq,
+                            libc::F_GETFD as u64, // Allow for getting file descr. flags
+                        )
+                        .unwrap(),
+                    ])
+                    .unwrap(),
+                ],
+            ),
+        ]
+        .into(),
+        SeccompAction::Trap,  // For calls that mismatch
+        SeccompAction::Allow, // For calls that match
+        std::env::consts::ARCH.try_into().unwrap(),
+    )
+    .expect("Hard-coded Seccomp filter should not have any error!")
+    .try_into()
+    .expect("Hard-coded Seccomp filter should not have any error when translating!");
+
+    seccompiler::apply_filter(&filter).unwrap();
 
     eprintln!("landlock-exec: exec'ing {}", args.program);
 
