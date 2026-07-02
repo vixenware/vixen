@@ -224,6 +224,17 @@ all. Editor diagnostics (flycheck) become graph queries — consistent with CI b
 Bears directly on: the temp fork's EXIT strategy (upstreaming rmeta span-normalization needs
 someone who speaks the review culture), diagnostics-as-values design (lint-pass internals,
 what's per-lint cacheable), and machine-applicable suggestions as demandable artifacts.
+Amos himself: built proc-macro support in rust-analyzer for nightly rustc (deep proc-macro
+ABI knowledge — relevant to caching expansions under RDR), speaks at the European Rust confs,
+and the network includes Esteban Kuber (rustc diagnostics), Oli Scherer (rustc), Ralf Jung
+(opsem/miri — reportedly a fan), Predrag Gruevski (cargo-semver-checks — NOTE: semver-checks
+computes exactly RDR's question, "did the visible interface change," from rustdoc JSON; a
+technically load-bearing friendship), and Lukas Wirth (rust-analyzer lead; nearly joined,
+revisit when funding/customers land — flycheck-as-graph-query is his home turf).
+
+**Upstreaming strategy**: rustc changes — upstream, yes. Cargo — NOT in the business of
+fixing it: cargo will never grow sandbox/VFS-shaped anything, nor should it. Vixen REPLACES
+cargo (drop-in), it does not contribute to it.
 
 ## 5. Target programs (sketch-and-critique protocol)
 
