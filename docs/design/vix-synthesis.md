@@ -146,7 +146,10 @@ timestamps (ALL observations carry timestamps), refreshed deliberately; perf CI 
 over journaled measurements. Flakiness = a hidden input; retry policy lives in the closure,
 quarantine lists are observations. Test stdout/stderr = captured streams, content-addressed.
 
-**RDR — Relink, Don't Rebuild (the cargo-fork phase's centerpiece)**: dependents' compiles
+**RDR — Relink, Don't Rebuild (the cargo-fork phase's centerpiece)**: FEASIBILITY ALREADY
+DEMONSTRATED — Piotr Osiewicz has a cargo+rustc fork proving it possible (and very hard).
+No feasibility spike needed. Piotr nearly joined; re-approach alongside Lukas once
+funding/customers land. RDR is NOT the current focus — the language is. Original notes: dependents' compiles
 read only upstream rmeta; content-hash cutoff on rmeta makes body-only edits skip every
 downstream recompile — only the link re-runs. Requires a (TEMPORARY) rustc fork whose main
 job is making rmeta byte-stable under body-only edits (spans embedded in metadata are the
