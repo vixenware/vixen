@@ -18,7 +18,7 @@ fn sources() -> Tree {
         url: "https://www.lua.org/ftp/lua-5.4.8.tar.gz",
         sha256: "4f18…d1",
     );
-    extract(tar) / "lua-5.4.8/src"        // extraction is pure; `/` projects into the tree
+    extract(tar) / p"lua-5.4.8/src"       // `/` joins Tree x Path; strings NEVER coerce
 }
 
 /// One translation unit -> one object file, wherever `cc` lives.
@@ -43,8 +43,8 @@ pub fn lua(target: Target) -> Tree {
         _     => [],
     };
 
-    let units = (src glob "*.c")           // the enumeration joins the read-set
-        .filter(|u| u != "lua.c" && u != "luac.c" && u != "onelua.c");
+    let units = src.glob("*.c")            // method, not infix; enumeration joins the read-set
+        .filter(|u| u != p"lua.c" && u != p"luac.c" && u != p"onelua.c");
 
     // map = parallel fan-out under demand; collect = CANONICAL total order (inv. 13)
     let objs: Tree = units.map(|u| object(cc, src, u, defines)).collect();
@@ -87,9 +87,13 @@ everything downstream of `defines` forks.
    commands (rustc: rlib + rmeta + d) return a tree keyed by role — projections select
    (`out / "lua.o"`). Is role-keyed-tree the right return shape?
 
-4. **Paths and trees as algebra**: `tree / "sub/dir"`, `tree glob "*.c"`, `path.with_ext` —
-   projections all, free until demanded. Globs are enumeration reads (read-set). Comfortable,
-   or too cute with `/`?
+4. **Paths and trees as algebra** (REVISED after critique): paths are a DISTINCT literal
+   type — `p"lua-5.4.8/src"` — and strings never coerce to paths. `/` is one join operator
+   over Tree x Path (and Path x Path); a multi-segment path literal carries its own interior
+   slashes, so the join-once vs join-repeatedly redundancy dissolves: `tree / p"a/b/c"` and
+   `tree / seg_a / seg_b` both make sense, and `tree / "a/b"` is a TYPE ERROR. `glob` is a
+   method (`src.glob("*.c")`) — the earlier infix `src glob "*.c"` was an S-expression slip,
+   inconsistent with everything else. Glob patterns are compile-validated in literal position.
 
 5. **match on target in-graph**: condition demanded, one arm constructed. This is the
    control-flow-in-the-graph story in four lines. Any objection to `match` being exactly
