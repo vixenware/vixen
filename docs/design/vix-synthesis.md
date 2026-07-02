@@ -220,6 +220,11 @@ all. Editor diagnostics (flycheck) become graph queries — consistent with CI b
 - Ambient-toolchain edge cases beyond the daemon answer ("other aspects not covered").
 - Rustup subsumption scope (rust toolchains as CAS-deduped capability artifacts).
 
+**Team context**: Amos's cofounder is a clippy contributor — rustc-dev fluency in-house.
+Bears directly on: the temp fork's EXIT strategy (upstreaming rmeta span-normalization needs
+someone who speaks the review culture), diagnostics-as-values design (lint-pass internals,
+what's per-lint cacheable), and machine-applicable suggestions as demandable artifacts.
+
 ## 5. Target programs (sketch-and-critique protocol)
 
 Amos will NOT show prior sketches; the language agent drafts programs, Amos critiques.
