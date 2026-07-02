@@ -148,9 +148,12 @@ quarantine lists are observations. Test stdout/stderr = captured streams, conten
 
 **RDR — Relink, Don't Rebuild (the cargo-fork phase's centerpiece)**: FEASIBILITY ALREADY
 DEMONSTRATED — Piotr Osiewicz has a cargo+rustc fork proving it possible (and very hard).
-No feasibility spike needed. Moreover bearcove/rust-rdr ALREADY packages the osiewicz
-`api-fingerprinting` rustc+cargo branches as an installable rustup toolchain — the wedge
-exists in binary form. Piotr nearly joined; re-approach alongside Lukas once funding/customers
+No feasibility spike needed. bearcove/rust-rdr packaged the osiewicz `api-fingerprinting`
+rustc+cargo branches as an installable rustup toolchain — LAST YEAR; little progress on
+Piotr's side since. A private Discord exists for interested parties; the only other active
+person was David Barsky, since departed to co-found East River (source-control company /
+GitHub replacement — friendly with Amos but partially a competitor: they want CI, vixen
+also solves CI). Piotr nearly joined; re-approach alongside Lukas once funding/customers
 land. RDR is NOT the current focus — the language is. GO decisions: vix grammar v0 (snark,
 open, facet monorepo, lua sketch as first corpus) then demand-engine-as-design-oracle
 (interpret-only: thunks/projections/memo/total-order collect). Original notes: dependents' compiles
