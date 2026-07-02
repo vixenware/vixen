@@ -211,6 +211,25 @@ all. Editor diagnostics (flycheck) become graph queries — consistent with CI b
   gingembre: vix surface syntax = snark grammar ⇒ generated AST ⇒ derived diagnostics
   (state-stack construct context) ⇒ LSP (~assembly given the existing pieces). Command
   grammars reuse the identical pipeline.
+- **picante × fable × vix (the query plane)**: the invariants chosen for BUILD caching —
+  purity, every value hashable and totally ordered, canonical content-addressed closure
+  ASTs — are exactly salsa's preconditions, the ones Rust can't enforce and picante must
+  demand by macro+discipline. Vix enforces them in the language, so a vix/fable function
+  maps to a salsified query with NO annotation and no type-system fuckery: the language
+  cannot express a non-query. Fable closes the data plane: the generated vix AST derives
+  Facet, fable computes over facet values, picante persists memo tables via facet-postcard
+  — one reflection layer from parse tree to memo table. Picante is the demand engine seen
+  from Rust; fable is a query seen from inside. Bootstrap: (v0) interpret-only oracle in
+  Rust — testing QUERY semantics and build semantics as the same thing; (v1) native demand
+  engine implemented ON picante (Rust queries hosting vix thunks, cache persistence free,
+  picante battle-tested by its hardest customer); (v2) self-hosted intelligence queries —
+  resolve/type_of/hover WRITTEN IN vix, running incrementally on the engine; the Rust
+  binder becomes the reference oracle for its own vix reimplementation. Stable-across-edit
+  identity is not a new ItemId scheme — it's canonical-value hashing, the same content
+  addressing that keys the build cache; early cutoff = hash equality = the conservative-
+  caching pillar. Prerequisite exposed: self-hosted queries need vix's user type surface
+  (enums/structs/match over them), which doesn't exist yet — a forcing function for the
+  type-system design round.
 
 **Grammar v0 SHIPPED** (facet monorepo, playgrounds/snark/src/bundled/vix/, commit
 ce8e6d39e on snark-playground-rebased): full lua sketch parses clean (475 nodes, 0 errors),
@@ -221,6 +240,64 @@ Command blocks parse as token soup + {expr} splices; per-command grammars refine
 injection later. Broken input already yields structured errors with state_stack — the
 derived-diagnostics engine is grammar-generic and ready to be pointed at vix.
 
+**Typed AST SHIPPED** (vix crate, commit bc7db70b6): build.rs derives the ENTIRE typed AST
+— types AND the resolved-CST lowering — from the grammar's `field()`s + cardinality (bare →
+T, optional → Option<T>, repeat/sepBy → Vec<T>); hidden choices become enums, mixed
+alternatives become annotated ad-hoc enums (Callee, ArrayElem, CommandPart). The ast()
+annotation file carries only names + leaf decodes. Found & fixed en route: snark dropped
+`field()`s written inside `repeat(...)` (hidden reductions discarded field events instead of
+hoisting them tree-sitter-style, commit 329f5798e). Known gap: fields on anonymous TOKEN
+steps never reach the resolved tree; codegen routes around it via token-set scan.
+
+## 3½. LSP: rings, not a parallel universe
+
+Why most LSPs are rewrites: the compiler's front-end isn't queryable, so editors rebuild it
+from scratch and the two drift forever. Vix's front-end is a grammar + a generated AST + (
+eventually) a demand engine — all queryable. So IDE features layer as rings, each ring paid
+for once:
+
+- **Ring 0 — free from the grammar** (any snark grammar, zero per-language work): syntax
+  highlighting (queries — shipped), syntax diagnostics with construct context (state_stack —
+  shipped), folding (block nodes), selection expansion (CST ancestry), outline (`field("name")`
+  convention), and — the snark-special — **exact completion of legal tokens from the parse
+  state**: per-state lexing means the table KNOWS what may appear at the cursor. The
+  `[-DFOO]`-vs-`a - b` design decision becomes completion behavior automatically: inside an
+  array you're offered flags, in expression position you aren't. Incremental reparse (parse
+  sessions + node reuse) already exists.
+- **Ring 1 — declared semantics** (per grammar, still data not code): which fields are
+  definitions, references, scope roots — tree-sitter's locals.scm/tags.scm convention, or an
+  ast() annotation extension. Buys approximate document-highlight/rename for ANY grammar.
+- **Ring 2 — the binder** (per language, small, over the GENERATED AST): scope tree + symbol
+  table + reference resolution, written against the same typed tree the compiler consumes —
+  when the grammar changes, the AST regenerates and the binder breaks loudly at compile time
+  instead of drifting. For vix v0: fn names, params, lets, closure params, use leaves.
+  Buys real go-to-def / references / rename / hover. **The binder is SHARED with the demand
+  engine** — evaluation needs name resolution too. One resolver, two consumers; the LSP is
+  not even an internal parallel universe.
+- **Ring 3 — the demand engine IS the language server**: check+clippy generalized. Hover =
+  a demand for a node's type/value/closure-hash; "why did this rebuild" = a demand against
+  the journal, answered inline in the editor; go-to-def on a Tree value jumps to the
+  producing rule. IDE features are demands over the same graph; diagnostics stay values.
+
+Delivery vehicle: the playground drives the ring APIs directly through wasm (no JSON-RPC) —
+CodeMirror hover/cmd-click/rename UI, Playwright-verifiable end to end. The protocol server
+(tower-lsp, editor extensions) is a later, thin shell over the same core.
+
+Sequencing: (1) spans into the generated AST (mechanical codegen addition — the one thing
+the AST currently drops), (2) the vix binder (shared prerequisite of oracle AND LSP),
+(3) demand-engine oracle on top (agreed slice), (4) playground IDE ops for vix, (5) Ring 0
+generalization for all bundled grammars, (6) Ring 3 once the oracle answers demands.
+
+**(1)+(2) SHIPPED** (commits 97ccef52e, 05d98b101): every AST node carries its span, leaf
+payloads are Spanned<T> (occurrence-level spans — the rename unit). Binder decisions made
+and testable (critique welcome): command names are VALUE references (`cc!` invokes the
+capability `cc` in scope — renaming the binding renames the invocation); identifier
+patterns (`Linux => …`) are constructor-like with no enum surface yet → recorded in
+`unresolved` alongside prelude-less primitives (fetch, extract) and unimported types (Flag)
+— unresolved references are VALUES for the future type/prelude layers, not errors; kwarg
+names name the callee's parameter; lets are sequential (`let x = f(x)` sees the outer x);
+one namespace for values/types v0. bind() → symbol_at/references/occurrences/rename_edits.
+
 ## 4. Still open (carried forward)
 
 - Streams: the forgotten design details (chunking, replay granularity, backpressure
@@ -228,6 +305,9 @@ derived-diagnostics engine is grammar-generic and ready to be pointed at vix.
 - Solver primitive decomposition (PubGrub-ish, parallel; solver calls back into vix for node
   metadata — it doesn't know a manifest is a manifest). Registry layout/list/search/extract
   written IN vix.
+- User type surface (enums/structs + match over them): required before intelligence
+  queries can self-host in vix (you can't write `type_of` with only Tree/Path/Flag).
+  Doubles as the forcing function for the type-system design round.
 - Aggregation heuristics (cost-model inputs exist from the weavy stencil measurements).
 - Read-set representation ("a different kind of tree") — concrete structure.
 - Windows VFS route: NT kernel driver vs paid fuse-for-windows (ProjFS lacks dir-enum
