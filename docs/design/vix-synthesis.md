@@ -288,6 +288,16 @@ the AST currently drops), (2) the vix binder (shared prerequisite of oracle AND 
 (3) demand-engine oracle on top (agreed slice), (4) playground IDE ops for vix, (5) Ring 0
 generalization for all bundled grammars, (6) Ring 3 once the oracle answers demands.
 
+**(3) ORACLE SHIPPED** (commit d15c85a65, vix::oracle): interpret-only executable model.
+What it makes testable TODAY: memo keys = canonical-AST-hash × args-hash where identity is
+the AST modulo spans (whitespace/comment edits anywhere preserve a fn's hash; real edits
+change exactly that fn's); aggregation unit = named fn call; observations pinned in a
+journal (fetch replays by checksum even across memo misses; acquire fingerprints
+capabilities); partial application as first-class Partial values; collect = canonical total
+order; Miss/Hit/Observation{replayed} event stream. Runs the whole corpus: eval.vix
+demo() = 42.0, types.vix toolchain() end-to-end. Deliberately NOT modeled yet (next design
+probes): laziness/demand-into-bodies, projections-as-lenses, streams, command blocks/exec.
+
 **(1)+(2) SHIPPED** (commits 97ccef52e, 05d98b101): every AST node carries its span, leaf
 payloads are Spanned<T> (occurrence-level spans — the rename unit). Binder decisions made
 and testable (critique welcome): command names are VALUE references (`cc!` invokes the
