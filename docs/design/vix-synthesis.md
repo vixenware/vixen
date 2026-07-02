@@ -53,7 +53,9 @@ tracked — the daemon only guarantees invariance. For mounted trees, reads ARE 
 
 **Read-set** — tier-2 observed identity: exactly what a command actually read from a mounted
 tree — including DIRECTORY ENUMERATIONS (a globber's read-set contains the listing; adding a
-file invalidates globbers but not fixed-path readers; deletion is an observable event). Keyed
+file invalidates globbers but not fixed-path readers; deletion is an observable event) and
+NEGATIVE LOOKUPS (stat-misses: a compiler probing include search paths read the ABSENCE of
+a file — creating that file later must invalidate; the miss is part of the read-set). Keyed
 per (closure, fingerprint). Recorded by the VFS (FSKit on macOS / libfuse3 on Linux / NT
 driver or paid fuse-for-windows on Windows — ProjFS can't track enumeration).
 
