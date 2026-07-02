@@ -99,6 +99,12 @@ payoff of this entire deranged machinery."
 demand traces; time-travel (pure + pinned ⇒ replayable); fable REPL against live graph state.
 Headless builds: captured, available in vixen cloud. This is why no-print is a non-issue.
 
+**Grammar CI** — because invocations are typed and journaled, command-line compatibility is
+checkable WITHOUT running anything, in both directions: "tell me if the new GCC breaks my
+invocations" (validate pinned invocations against the new grammar) and the reverse crater-run —
+"I maintain GCC: will this flag change break any open-source vixen build?" (validate the
+ecosystem's journaled invocations against a candidate grammar).
+
 ## 2. Invariants (quotable)
 
 1. All vix code is pure. Effects exist only in primitives.
@@ -118,6 +124,12 @@ Headless builds: captured, available in vixen cloud. This is why no-print is a n
 11. Cargo.lock is a source of truth (pluggable journal storage; cargo compat is the wedge —
     100% incl. lockfiles; target/ exempt; no CMake-tier compat for other tools).
 12. Capability invariance is daemon-enforced (advertise ⇒ watch ⇒ poison).
+13. Every vix value is hashable AND totally ordered. `collect` over parallel fan-out yields
+    the CANONICAL total order — never arrival order. Scheduling nondeterminism is
+    unobservable by construction. (Non-obvious coming from Rust; load-bearing for caching.)
+14. Command grammars are toolchain-versioned and RIDE WITH the capability: the daemon that
+    advertises `Toolchain<Rustc>@fp` serves the matching grammar; the grammar version is a
+    pinned observation.
 
 ## 3. The welds (how subsystems interlock)
 
@@ -168,7 +180,13 @@ Headless builds: captured, available in vixen cloud. This is why no-print is a n
 - Ambient-toolchain edge cases beyond the daemon answer ("other aspects not covered").
 - Rustup subsumption scope (rust toolchains as CAS-deduped capability artifacts).
 
-## 5. Working rules
+## 5. Target programs (sketch-and-critique protocol)
+
+Amos will NOT show prior sketches; the language agent drafts programs, Amos critiques.
+Agreed first targets: **Lua 5.x** (clean cross-compilation exercise), then libpng/zlib.
+Sketches live in docs/design/sketches/.
+
+## 6. Working rules
 
 Two agents (language ↔ primitives) communicating only through Amos (enforces review +
 separation). The language agent does NOT read the old vixen code/notes (anchoring risk on
