@@ -49,9 +49,9 @@ pub fn lua(target: Target) -> Tree {
     // map = parallel fan-out under demand; collect = CANONICAL total order (inv. 13)
     let objs: Tree = units.map(|u| object(cc, src, u, defines)).collect();
 
-    let lib  = ar! { rcs liblua.a {objs / "*.o"} };
-    let main = object(cc, src, "lua.c", defines);
-    cc! { -o lua {main / "lua.o"} {lib / "liblua.a"} -lm }
+    let lib  = ar! { rcs liblua.a {objs.glob("*.o")} };
+    let main = object(cc, src, p"lua.c", defines);
+    cc! { -o lua {main / p"lua.o"} {lib / p"liblua.a"} -lm }
 }
 ```
 
