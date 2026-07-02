@@ -288,6 +288,20 @@ the AST currently drops), (2) the vix binder (shared prerequisite of oracle AND 
 (3) demand-engine oracle on top (agreed slice), (4) playground IDE ops for vix, (5) Ring 0
 generalization for all bundled grammars, (6) Ring 3 once the oracle answers demands.
 
+**Exec sequencing decided** (ship → advertise → exec): capability = ADDRESS, shipped
+closure = PAYLOAD, exec = demand evaluated where its captured capabilities live. Step 1
+SHIPPED (30f801296): canonical form = generated strip_spans() (spans zeroed) + facet-
+postcard bytes — ONE form for identity and transport; Value derives Facet; ship()/receive()
+move closures between oracles; test proves exec = eval elsewhere (same value by purity,
+same canon_hash across the wire, same hash from differently-formatted identical source).
+Step 2 next: fleet registry — hosts advertise capability instances (kind, fingerprint,
+versions, command-grammar ref); acquire resolves against it; fingerprint mutation between
+calls = poisoning, testable as memo misses. Step 3: exec stub — command block + splices
+resolve against the capability's command grammar into a plan (argv, declared inputs),
+shipped to the advertising host, stub-executed, result = journal observation with declared
+read-set. The interface (payload format, advertisement schema, plan shape, observation
+shape) is the executable contract for the proprietary executor to implement behind.
+
 **(3) ORACLE SHIPPED** (commit d15c85a65, vix::oracle): interpret-only executable model.
 What it makes testable TODAY: memo keys = canonical-AST-hash × args-hash where identity is
 the AST modulo spans (whitespace/comment edits anywhere preserve a fn's hash; real edits
