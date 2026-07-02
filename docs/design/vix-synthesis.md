@@ -130,6 +130,12 @@ ecosystem's journaled invocations against a candidate grammar).
 14. Command grammars are toolchain-versioned and RIDE WITH the capability: the daemon that
     advertises `Toolchain<Rustc>@fp` serves the matching grammar; the grammar version is a
     pinned observation.
+15. Floats have a defined TOTAL order: exactly ordered-float semantics (play fast and loose
+    with IEEE754 where it conflicts with invariant 13).
+16. Syntax spends the FEWEST innovation points: boring, Rust-ish. Explicitly rejected from
+    earlier private sketches: application by juxtaposition, pipeline operator, parens as
+    function bodies, "weird pattern matching." Kept from them: keyword arguments with
+    defaults; DISTINCT literal types for paths vs strings (no string->path coercion).
 
 ## 3. The welds (how subsystems interlock)
 
