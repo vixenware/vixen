@@ -137,6 +137,15 @@ ecosystem's journaled invocations against a candidate grammar).
     function bodies, "weird pattern matching." Kept from them: keyword arguments with
     defaults; DISTINCT literal types for paths vs strings (no string->path coercion).
 
+**Tests & benchmarks (decided)**: a test run is a pure node (closure, inputs) -> verdict;
+test SELECTION = cache semantics (rerun only when read-sets intersect the delta) — and that
+includes the test binary's DATA files, enumeration changes, and file DELETION (the classic
+false-"still passing" in other systems: a deleted fixture must invalidate the verdict).
+Benchmarks are OBSERVATIONS, never pure nodes: journaled with executor fingerprint +
+timestamps (ALL observations carry timestamps), refreshed deliberately; perf CI = queries
+over journaled measurements. Flakiness = a hidden input; retry policy lives in the closure,
+quarantine lists are observations. Test stdout/stderr = captured streams, content-addressed.
+
 ## 3. The welds (how subsystems interlock)
 
 - **Capabilities × memo × journal**: a capability value carries its fingerprint; captured in a
