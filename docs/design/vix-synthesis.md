@@ -212,6 +212,15 @@ all. Editor diagnostics (flycheck) become graph queries — consistent with CI b
   (state-stack construct context) ⇒ LSP (~assembly given the existing pieces). Command
   grammars reuse the identical pipeline.
 
+**Grammar v0 SHIPPED** (facet monorepo, playgrounds/snark/src/bundled/vix/, commit
+ce8e6d39e on snark-playground-rebased): full lua sketch parses clean (475 nodes, 0 errors),
+highlighted live in the playground at 3.7ms via DirectStencil. Notable grammar decision:
+flag atoms are legal ONLY as array elements — per-state lexing makes `a - b` vs `[-DFOO]`
+unambiguous BY CONSTRUCTION (a state either expects a flag or a binary minus, never both).
+Command blocks parse as token soup + {expr} splices; per-command grammars refine via
+injection later. Broken input already yields structured errors with state_stack — the
+derived-diagnostics engine is grammar-generic and ready to be pointed at vix.
+
 ## 4. Still open (carried forward)
 
 - Streams: the forgotten design details (chunking, replay granularity, backpressure
