@@ -146,6 +146,19 @@ timestamps (ALL observations carry timestamps), refreshed deliberately; perf CI 
 over journaled measurements. Flakiness = a hidden input; retry policy lives in the closure,
 quarantine lists are observations. Test stdout/stderr = captured streams, content-addressed.
 
+**RDR — Relink, Don't Rebuild (the cargo-fork phase's centerpiece)**: dependents' compiles
+read only upstream rmeta; content-hash cutoff on rmeta makes body-only edits skip every
+downstream recompile — only the link re-runs. Requires a (TEMPORARY) rustc fork whose main
+job is making rmeta byte-stable under body-only edits (spans embedded in metadata are the
+chief noise source; body edits shift later items' spans). Degradation is SOUND by
+construction: #[inline]/generic bodies legitimately live in rmeta, so their edits correctly
+propagate — content addressing gets the semantics right automatically; the fork only removes
+noise, never signal. rustc's incremental dep-graph: IGNORED COMPLETELY (fingerprint-trust,
+path-entangled, ICE-prone — a local mutable cache, the opposite of the journal). Patched-
+toolchain appetite: OBSCENE (we ship toolchains anyway via rustup subsumption). AST-level
+interface hashing (snark rust grammar) can later provide cutoff decisions without splitting
+crates.
+
 ## 3. The welds (how subsystems interlock)
 
 - **Capabilities × memo × journal**: a capability value carries its fingerprint; captured in a
