@@ -112,6 +112,68 @@ pattern to shadow a known variant name. No case heuristics, no silent
 catch-all-by-typo. (Today's binder already records `Linux`/`Macos` as
 constructor-like unresolved; this rule is where that lands.)
 
+## Round 2 (Amos's critique, landed)
+
+- **Map literals** (was: "Map::from is too austere" — confirmed): bare braces are
+  free in vix (no block/if exprs), so maps get `{ "CC": "clang", "OPT": flag }` —
+  keys are expressions, `{}` is the empty map, and it works as a field DEFAULT:
+  `env: Map<String, String> = {}`.
+- **Partial application** (field defaults kept, and generalized): a trailing bare
+  `..` means "the rest comes later" — the same `..` as record update and pattern
+  rest. `scaled(k: 2, ..)` is a function of the not-yet-given params;
+  `Toolchain { cc: c, .. }` is a partial constructor. Explicit marker on purpose:
+  a FORGOTTEN argument is an error, a partial application is a decision. Typing:
+  the partial's remaining params are the missing non-defaulted ones; defaulted
+  params stay overridable at the completion site.
+- **`t.0.1` SOLVED, no `._0` ugliness**: `tuple_index` is a dedicated integer
+  token, legal only where field names are expected — states where `number` (with
+  its fraction rule) is NOT legal. Per-state lexing means no float token ever
+  forms where none can occur, so nothing needs re-splitting (the rustc token
+  hack rust-analyzer hates). Same mechanism as flags-vs-minus.
+- **Guards**: kept. **Tuple structs**: kept.
+
+## Bounded polymorphism (reasoned out)
+
+What actually generates pressure for bounds, case by case:
+
+1. **Hash/Eq/Ord bounds** — the overwhelming majority of bounds in real Rust
+   collections code. Gone by construction: universal.
+2. **Collection/HOF utilities** (`map`, `filter`, `fold`, `sort_by_key`) — need
+   only first-class fn types + universal ord. No bounds.
+3. **Numeric abstraction** (`fn sum<T: Add>`) — a build language does arithmetic
+   on Ints and Floats, not on abstract rings. Concrete overloads suffice; skip.
+4. **Display/Debug/Serialize** — engine-provided via facet for every value.
+   There is no "printable" bound because there is no unprintable value.
+5. **Abstracting over capabilities** ("any C compiler") — looks like a trait,
+   is actually the COMMAND GRAMMAR / capability-kind layer's job. Type bounds
+   are the wrong tool; the daemon's capability taxonomy is the right one.
+6. **Self-hosted intelligence queries** — match over concrete AST enums;
+   generic helpers covered by (2). No bounds.
+
+What remains is method-shaped abstraction over user types ("anything with a
+`name()`"), which is rare in build code and NONE of our sketches need. Position:
+**ship no bounds; the escape hatch, if self-hosting ever hurts, is structural
+interfaces** (conformance by shape, checked at instantiation — no impl blocks
+for conformance, no coherence, no orphan rules), and never trait objects: the
+demand graph doesn't need dynamic dispatch, and weavy's speculation/IC machinery
+already handles polymorphic call sites better than vtables would.
+
+Monomorphization note: the interpreter doesn't specialize at all; the JIT
+specializes hot instantiations through the existing guard/deopt lanes. Bounds
+absence keeps both trivial.
+
+## Total order = declaration order (clarified)
+
+The question I was asking, concretely: `enum Os { Linux, Macos }` makes
+`Linux < Macos` BECAUSE Linux is declared first. Sort a `[Os]` and Linux sorts
+first; swap the declaration order and the same program's sorted output flips.
+So variant order in SOURCE is semantics, not style — an auto-formatter or a
+well-meaning alphabetizer changes behavior. The saving grace: the shape hash
+changes on reorder anyway, so caching already treats it as a new type; there is
+no INCREMENTAL surprise, only a human one. Alternatives (alphabetical order,
+explicit discriminants) buy little and cost syntax. Staying with declaration
+order unless it bites.
+
 ## impl blocks (destination, not v0.2 of the grammar)
 
 ```vix
