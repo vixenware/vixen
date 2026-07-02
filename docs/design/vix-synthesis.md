@@ -159,6 +159,18 @@ toolchain appetite: OBSCENE (we ship toolchains anyway via rustup subsumption). 
 interface hashing (snark rust grammar) can later provide cutoff decisions without splitting
 crates.
 
+**check + clippy = selections over the SAME graph**: `check` demands only the metadata
+(rmeta) nodes; `build` demands rlib/link nodes which REUSE the very same rmeta nodes as memo
+hits; `clippy` is a sibling node (keyed by the clippy capability riding with the toolchain +
+lint config) whose OUTPUT is diagnostics-as-values — cached, replayed, invalidated by
+read-set intersection exactly like test verdicts. Today's cargo pain (check/build/clippy
+thrashing each other's fingerprints in one mutable target dir; check work thrown away by
+build; rust-analyzer flycheck fighting the CLI) dissolves structurally: they were never
+different MODES, they're different DEMANDS. Fork job addition: make check-rmeta ≡ build-rmeta
+byte-wise so check's work always feeds builds. RDR applies to check even better than to
+build: body-only edit upstream ⇒ dependents' checks all cutoff with NO link step to pay at
+all. Editor diagnostics (flycheck) become graph queries — consistent with CI by construction.
+
 ## 3. The welds (how subsystems interlock)
 
 - **Capabilities × memo × journal**: a capability value carries its fingerprint; captured in a
