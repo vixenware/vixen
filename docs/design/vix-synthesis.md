@@ -288,6 +288,52 @@ the AST currently drops), (2) the vix binder (shared prerequisite of oracle AND 
 (3) demand-engine oracle on top (agreed slice), (4) playground IDE ops for vix, (5) Ring 0
 generalization for all bundled grammars, (6) Ring 3 once the oracle answers demands.
 
+**CWD IN A FULLY SANDBOXED EXEC (answer to Amos's question)**: there is no cwd. Ambient
+cwd is three bugs wearing one trenchcoat: an identity leak (relative argv paths resolve
+against it, so it must join the plan hash or two different computations share a key), a
+determinism leak (tools EMBED cwd in outputs — debug info, __FILE__, depfiles — so a
+fresh-ULID prefix per run poisons the cache with path noise), and a capability leak (a
+cwd outside the mounts is authority the ceiling never granted). The resolution vixen's
+runner shell already gestures at: every plan path is PREFIX-RELATIVE, and the process's
+cwd IS the action prefix root, always, by construction — scratch, empty at start,
+writable. Consequences: (1) the prefix path must be derived from the ACTION IDENTITY
+(hash of the plan), not a fresh ULID, so embedded-path leaks are at least deterministic;
+(2) command grammars carry the per-tool remedy (inject -fdebug-prefix-map/-ffile-prefix-
+map style rewrites) for tools known to embed; (3) read-after-write inside the prefix is
+NOT an observation — the read-set is reads-from-the-WORLD, not reads of your own scratch;
+the VFS must distinguish; (4) `..`/getcwd above the prefix: deny-default seatbelt makes
+the parent opaque; sibling action prefixes must never enumerate.
+
+**REMOTE HANDLES + STREAMING (the vox wire, next implementation slice)**: Outcome stops
+carrying bytes; it carries TreeHandle { hash, home: executor, size }. Bytes live in the
+producing executor's local CAS. The orchestrator moves HANDLES and PLANS (small); trees
+move EXECUTOR→EXECUTOR on demand (pull by hash, chunk stream, verify-on-arrival,
+have()-negotiated dedup so only missing blobs travel). Canonical/central CAS ingestion is
+ASYNC (durability/sharing), never on the critical path. vox service surface v0:
+exec(request) -> stream { Started, Stdout(chunk), OutputTree(handle), Finished(result) };
+fetch_tree(hash) -> chunk stream; have(hashes) -> present-set. Tests go over the REAL
+wire (vox websocket/tcp on localhost), two executor processes, orchestrator pulling
+nothing but handles — "don't skip the wire".
+
+**SCHEDULER, FIRST POLICY (gravity-first, latency-aware)**: placement must never affect
+outputs (purity) — so the scheduler is FREE to be clever. Policy v1: run an action where
+its heaviest missing input already lives; stream the lighter inputs across executors;
+cost(action, host) = max over inputs of (missing_bytes / bandwidth(home→host) + latency)
++ queue_wait(host) + estimated_run (benchmarks are observations — reuse them as the
+estimator). The orchestrator is a control plane only: routing trees through it (or
+through the canonical CAS) systematically is the anti-pattern; executor↔executor
+transfer is the default data path. Requires: handles carry sizes; the fleet learns a
+bandwidth/latency matrix from actual transfers (observations, journaled like everything).
+
+**VIXEN RUNTIME RECON** (real sandbox/VFS state, checked 2026-07): vx-vfsd BUILDS clean
+(41s cold) — FUSE/FSKit-backed VFS daemon with per-action prefix dirs; vx-fskit +
+Vixen.app (Swift package, apps/mac) present with FSKit checkouts; vx-services/runner.rs
+is a protocol SHELL (post-purge, v21) whose shapes converged with the oracle's seam
+types (ExecMount = tree-hash mounted at prefix-relative path; mount → run → flush spine);
+seatbelt PROFILE GENERATION is referenced ("joins next") but not yet implemented —
+that's real derisk surface, not just wiring. Exercising Vixen.app/FSKit end-to-end needs
+a keyboard session (extension approval dialogs).
+
 **COMPOSITION SHIPPED — lua.vix BUILDS inside the oracle** (de6d85e0e): cc!/ar! evaluate
 through the two-tier cache; command names resolve to capability VALUES in scope; Tree
 splices become mounts at ROLE-STABLE paths (/m/0 by splice order — content-derived paths
