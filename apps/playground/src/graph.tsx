@@ -1,14 +1,14 @@
-// The demand graph, v1: a vertical rail of demand events in the order the
-// evaluator demanded them, with arcs joining each Spawn to the Exec that
-// resolved it. Real ancestry edges (which demand caused which) need
-// input/output tree hashes on the oracle's events — next slice, daemon side.
+// The demand graph, v2: events carry run ids, spans and ancestry now, so this
+// renders what actually happened — an indented demand tree (depth = who
+// demanded whom) with EXACT spawn→exec arcs (paired by run id, not guessed),
+// cross-linked to the editor through source spans.
 
-import type { DemandEvent, Serving } from "./generated/daemon";
+import type { DemandEvent, Serving, Span } from "./generated/daemon";
 
 const ROW_H = 30;
 const GUTTER = 46;
+const INDENT = 22;
 const GLYPH_X = GUTTER + 12;
-const LABEL_X = GLYPH_X + 18;
 
 function servingLabel(s: Serving): string {
   switch (s.tag) {
@@ -61,91 +61,151 @@ function label(e: DemandEvent): string {
   }
 }
 
-function glyph(e: DemandEvent, y: number) {
-  const cls = rowClass(e);
+function spanOf(e: DemandEvent): Span | null {
   switch (e.tag) {
-    case "Observation":
-      // A diamond: the boundary with the outside world.
-      return (
-        <rect
-          className={cls}
-          x={GLYPH_X - 5.5}
-          y={y - 5.5}
-          width={11}
-          height={11}
-          transform={`rotate(45 ${GLYPH_X} ${y})`}
-        />
-      );
+    case "Miss":
+    case "Hit":
     case "Spawn":
-      return <circle className={cls} cx={GLYPH_X} cy={y} r={5.5} fill="none" strokeDasharray="2.5 2" />;
     case "Exec":
-      return <rect className={cls} x={GLYPH_X - 6} y={y - 6} width={12} height={12} rx={2.5} />;
+      return e.span;
     default:
-      return <circle className={cls} cx={GLYPH_X} cy={y} r={5.5} />;
+      return null;
   }
 }
 
-export function DemandGraph(props: { events: DemandEvent[]; settled: boolean }) {
-  const { events, settled } = props;
-  const height = events.length * ROW_H + 12;
+function glyph(e: DemandEvent, x: number, y: number) {
+  const cls = rowClass(e);
+  switch (e.tag) {
+    case "Observation":
+      return (
+        <rect
+          className={cls}
+          x={x - 5.5}
+          y={y - 5.5}
+          width={11}
+          height={11}
+          transform={`rotate(45 ${x} ${y})`}
+        />
+      );
+    case "Spawn":
+      return <circle className={cls} cx={x} cy={y} r={5.5} fill="none" strokeDasharray="2.5 2" />;
+    case "Exec":
+      return <rect className={cls} x={x - 6} y={y - 6} width={12} height={12} rx={2.5} />;
+    default:
+      return <circle className={cls} cx={x} cy={y} r={5.5} />;
+  }
+}
 
-  // Pair each Spawn with the Exec that resolved it (FIFO per command name).
+interface Row {
+  event: DemandEvent;
+  depth: number;
+}
+
+/// Reconstruct the demand tree from the event stream. Events arrive in demand
+/// order; `caller`/`in_fn` name the demanding fn, and the last-seen depth of
+/// that fn is the parent level. (Instances of the same fn reuse the latest
+/// depth — exact per-instance ancestry wants run-record parents, later.)
+function layout(events: DemandEvent[]): Row[] {
+  const fnDepth = new Map<string, number>();
+  const runDepth = new Map<bigint, number>();
+  let lastFnDepth = -1;
+  return events.map((e) => {
+    let depth = 0;
+    switch (e.tag) {
+      case "Miss":
+      case "Hit": {
+        const parent = e.caller !== null ? fnDepth.get(e.caller) : undefined;
+        depth = parent !== undefined ? parent + 1 : 0;
+        if (e.tag === "Miss") {
+          fnDepth.set(e.func, depth);
+          lastFnDepth = depth;
+        }
+        break;
+      }
+      case "Spawn": {
+        const parent = e.in_fn !== null ? fnDepth.get(e.in_fn) : undefined;
+        depth = parent !== undefined ? parent + 1 : 0;
+        runDepth.set(e.run, depth);
+        break;
+      }
+      case "Exec":
+        depth = runDepth.get(e.run) ?? 0;
+        break;
+      case "Observation":
+        depth = lastFnDepth + 1;
+        break;
+      case "Done":
+      case "Failed":
+        depth = 0;
+        break;
+    }
+    return { event: e, depth };
+  });
+}
+
+export function DemandGraph(props: {
+  events: DemandEvent[];
+  settled: boolean;
+  cursor: number | null;
+  onSelectSpan: (span: Span) => void;
+}) {
+  const { events, settled, cursor, onSelectSpan } = props;
+  const rows = layout(events);
+  const height = rows.length * ROW_H + 12;
+
+  // Exact spawn↔exec pairing: the run id IS the edge.
+  const spawnRowOfRun = new Map<bigint, number>();
   const arcs: Array<{ from: number; to: number }> = [];
-  const open = new Map<string, number[]>();
-  events.forEach((e, i) => {
-    if (e.tag === "Spawn") {
-      const q = open.get(e.command) ?? [];
-      q.push(i);
-      open.set(e.command, q);
-    } else if (e.tag === "Exec") {
-      const q = open.get(e.command);
-      const from = q?.shift();
+  rows.forEach(({ event: e }, i) => {
+    if (e.tag === "Spawn") spawnRowOfRun.set(e.run, i);
+    else if (e.tag === "Exec") {
+      const from = spawnRowOfRun.get(e.run);
       if (from !== undefined) arcs.push({ from, to: i });
     }
   });
-  // Once the evaluation settles, a spawn with no Exec is the language being
-  // maximally lazy: its outputs were only ever PROJECTED (single paths pulled
-  // from the live run), so nothing forced the flush. Projection doesn't force.
-  const neverFlushed = new Set<number>();
-  if (settled) {
-    for (const q of open.values()) for (const i of q) neverFlushed.add(i);
-  }
+  const flushedRuns = new Set(
+    events.filter((e) => e.tag === "Exec").map((e) => (e.tag === "Exec" ? e.run : 0n)),
+  );
 
   const rowY = (i: number) => i * ROW_H + ROW_H / 2 + 6;
+  const glyphX = (depth: number) => GLYPH_X + depth * INDENT;
 
   return (
     <svg className="demand-graph" width="100%" height={height}>
-      {/* The demand rail. */}
-      <line
-        className="rail"
-        x1={GLYPH_X}
-        y1={rowY(0)}
-        x2={GLYPH_X}
-        y2={rowY(events.length - 1)}
-      />
-      {/* Spawn → Exec arcs: the life of a pending tree, from dispatch to
-          whatever the exec cache served. */}
       {arcs.map((a, i) => {
         const y1 = rowY(a.from);
         const y2 = rowY(a.to);
+        const x = glyphX(rows[a.from].depth);
         const bulge = Math.min(GUTTER - 6, 14 + (y2 - y1) / 10);
         return (
           <path
             key={i}
             className="arc"
-            d={`M ${GLYPH_X - 8} ${y1} C ${GLYPH_X - bulge} ${y1}, ${GLYPH_X - bulge} ${y2}, ${GLYPH_X - 8} ${y2}`}
+            d={`M ${x - 8} ${y1} C ${x - bulge} ${y1}, ${x - bulge} ${y2}, ${x - 8} ${y2}`}
             fill="none"
           />
         );
       })}
-      {events.map((e, i) => {
+      {rows.map(({ event: e, depth }, i) => {
         const y = rowY(i);
+        const x = glyphX(depth);
+        const span = spanOf(e);
+        const cursorHit =
+          span !== null && cursor !== null && cursor >= span.start && cursor < span.end;
+        const neverFlushed = settled && e.tag === "Spawn" && !flushedRuns.has(e.run);
         return (
-          <g key={i} className="row">
-            {glyph(e, y)}
-            <text className={`lbl ${rowClass(e)}`} x={LABEL_X} y={y + 4}>
+          <g
+            key={i}
+            className={`row${span ? " row-linked" : ""}${cursorHit ? " row-cursor" : ""}`}
+            onClick={span ? () => onSelectSpan(span) : undefined}
+          >
+            {cursorHit && (
+              <rect className="cursor-hit" x={0} y={y - ROW_H / 2 + 2} width="100%" height={ROW_H - 4} rx={5} />
+            )}
+            {glyph(e, x, y)}
+            <text className={`lbl ${rowClass(e)}`} x={x + 18} y={y + 4}>
               {label(e)}
-              {neverFlushed.has(i) && (
+              {neverFlushed && (
                 <tspan className="lazy-note"> — projected only, never flushed</tspan>
               )}
             </text>

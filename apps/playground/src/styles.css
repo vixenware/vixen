@@ -294,6 +294,22 @@ text.ev-spawn {
   font-style: normal;
 }
 
+.demand-graph .row-linked {
+  cursor: pointer;
+}
+
+.demand-graph .row-linked:hover .lbl {
+  text-decoration: underline;
+  text-decoration-color: var(--text-faint);
+}
+
+.demand-graph .cursor-hit {
+  fill: var(--accent);
+  fill-opacity: 0.1;
+  stroke: var(--accent);
+  stroke-opacity: 0.35;
+}
+
 text.ev-miss,
 text.ev-hit,
 text.ev-exec-ran,

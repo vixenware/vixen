@@ -1,8 +1,9 @@
 import { useRef, useState } from "react";
-import { Editor } from "./editor";
+import { Editor, type EditorApi } from "./editor";
 import { connect, startEval, type EvalSession } from "./daemon";
 import type { DaemonClient, DemandEvent } from "./generated/daemon";
 import { DemandGraph } from "./graph";
+import { byteToUtf16, utf16ToByte } from "./offsets";
 import luaSample from "./samples/lua.vix?raw";
 
 type Status = "idle" | "connecting" | "running" | "stepping" | "done" | "failed";
@@ -13,6 +14,10 @@ export function App() {
   const source = useRef(luaSample);
   const client = useRef<DaemonClient | null>(null);
   const session = useRef<EvalSession | null>(null);
+  const editor = useRef<EditorApi | null>(null);
+  // The exact source the daemon evaluated — spans index into THIS, not into
+  // whatever the editor holds now.
+  const evalSource = useRef(luaSample);
 
   const [url, setUrl] = useState(DEFAULT_URL);
   const [entry, setEntry] = useState("lua");
@@ -20,6 +25,9 @@ export function App() {
   const [status, setStatus] = useState<Status>("idle");
   const [events, setEvents] = useState<DemandEvent[]>([]);
   const [outcome, setOutcome] = useState<string | null>(null);
+  // The cursor position in BYTE space (converted from CodeMirror's UTF-16),
+  // comparable against event spans directly.
+  const [cursor, setCursor] = useState<number | null>(null);
 
   const busy = status === "connecting" || status === "running" || status === "stepping";
 
@@ -31,8 +39,9 @@ export function App() {
       if (!client.current) {
         client.current = await connect(url);
       }
+      evalSource.current = source.current;
       const s = startEval(client.current, {
-        source: source.current,
+        source: evalSource.current,
         entry,
         mode: { tag: stepMode ? "Step" : "Run" },
       });
@@ -101,7 +110,12 @@ export function App() {
       </header>
       <main>
         <section className="pane editor-pane">
-          <Editor initial={luaSample} onChange={(s) => (source.current = s)} />
+          <Editor
+            initial={luaSample}
+            onChange={(s) => (source.current = s)}
+            onCursor={(utf16) => setCursor(utf16ToByte(evalSource.current, utf16))}
+            api={(a) => (editor.current = a)}
+          />
         </section>
         <section className="pane demand-pane">
           <div className="toolbar">
@@ -140,6 +154,13 @@ export function App() {
               <DemandGraph
                 events={events}
                 settled={status === "done" || status === "failed"}
+                cursor={cursor}
+                onSelectSpan={(s) =>
+                  editor.current?.selectSpan(
+                    byteToUtf16(evalSource.current, s.start),
+                    byteToUtf16(evalSource.current, s.end),
+                  )
+                }
               />
             )}
           </div>
