@@ -288,6 +288,18 @@ the AST currently drops), (2) the vix binder (shared prerequisite of oracle AND 
 (3) demand-engine oracle on top (agreed slice), (4) playground IDE ops for vix, (5) Ring 0
 generalization for all bundled grammars, (6) Ring 3 once the oracle answers demands.
 
+**COMPOSITION SHIPPED — lua.vix BUILDS inside the oracle** (de6d85e0e): cc!/ar! evaluate
+through the two-tier cache; command names resolve to capability VALUES in scope; Tree
+splices become mounts at ROLE-STABLE paths (/m/0 by splice order — content-derived paths
+would leak the world into the identity and kill tier 2); collect over trees = canonical
+merge (outputs-as-mounts chains execs). End to end: fetch → extract → subtree →
+glob/filter → 3 compiles + archive + link; warm rebuild = ONE event (Hit{lua}). The seam
+composes: fn-memo MISS (arg tree changed) resolving to exec Tier2Cutoff (nothing read
+changed) — each cache doing its half. TWO SKETCH BUGS THE ORACLE CAUGHT: {src / unit}
+alone compiles a unit without its headers (object() gains -I {src}); ar! with
+{objs.glob("*.o")} splices bare relative paths with no anchoring mount (the TREE is the
+right splice). The oracle is doing its job: running programs falsifies sketches.
+
 **THE EXEC SEAM (two-tier keys), designed and derisked** (94897f9ea, vix::exec): the
 runtime ANSWERS QUESTIONS ("what happened when I ran this" = the observed read-set; "what
 is the world now" = Snapshot point queries) and enforces the ceiling; the language OWNS
