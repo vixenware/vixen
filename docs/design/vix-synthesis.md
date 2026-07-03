@@ -288,6 +288,36 @@ the AST currently drops), (2) the vix binder (shared prerequisite of oracle AND 
 (3) demand-engine oracle on top (agreed slice), (4) playground IDE ops for vix, (5) Ring 0
 generalization for all bundled grammars, (6) Ring 3 once the oracle answers demands.
 
+**ASYNC DEBUGGABILITY — CAN WE BEAT RUST? YES, STRUCTURALLY (design conclusion)**: Rust
+async debugging is bad for two root reasons — (1) the logical AWAIT CHAIN is thrown away
+(a backtrace inside a suspended async fn shows executor `poll` frames, not who-awaited-whom;
+tokio-console reconstructs task trees via instrumentation, per-process only), and (2) the
+live STATE is hidden in the opaque compiler-generated `{async_fn_env}` enum (locals migrate
+per state discriminant; DWARF describes them poorly). Vix's advantage is not a trick but a
+consequence of the design: it KEEPS BOTH AS DATA. The demand graph IS the await chain; the
+Value stack IS the live state (explicit Ctx + driver buffers, already exposed by
+`suspension()`). Debugging = reading a data structure, not reverse-engineering a binary.
+Levers, in tiers:
+- T0 (match Swift, beat Rust, cheap — reuses jit::dwarf + fault→source + the GDB/LLDB JIT
+  interface we already register): Swift-style suspend-point annotations — mark each yield
+  PC, describe the continuation (resume_offset + state ptr) as a DWARF location expr, expose
+  the parked operand stack as synthetic DWARF locals; per-resume-region local locations
+  (DWARF5 loc lists) because we own the layout. Stock LLDB then lands on the right vix
+  `.await` line and shows parked state.
+- T1 (the real win, in wtf): the async backtrace IS the demand PATH — a DAG we hold, not a
+  stack we lost — with the awaited RESOURCE NAMED at the leaf ("suspended on fetch sha256:…,
+  4.2MB, from executor mur"). A linear debugger can't represent a DAG; this belongs in the
+  browser UI.
+- T2 (categorical, ~free): time-travel across suspends via purity + journal (pure+pinned ⇒
+  replayable) — step BACKWARD across an await as a query, not rr-class recording.
+Beyond Rust AND Swift AND tokio-console (consequences of distributed + content-addressed +
+demand-explicit): IDENTITY BREAKPOINTS (break on a node's closure hash — "stop when THIS
+computation is demanded, on any executor" — and demand-EDGE breakpoints: first-demanded vs
+completed); DISTRIBUTED async backtrace (the demand path crosses hosts — task suspends on A,
+awaited value produced on B). Decision: take the DWARF path only to the Swift tier (people
+live in LLDB, it's cheap); put the real effort into wtf (DAG backtrace, named resources,
+identity/edge breakpoints, time-travel) where the wins are categorical.
+
 **WEAVY ASYNC — THE GRAPH-STAGE PREREQUISITE (crux PROVEN)** (df5b477d5, weavy-async-spike):
 Amos's two wrinkles on the graph stage — (a) lower demand-driven evaluation to weavy,
 (b) suspend points via RUST ASYNC (coroutines tried, impractical). This is the prerequisite
