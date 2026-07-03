@@ -288,6 +288,19 @@ the AST currently drops), (2) the vix binder (shared prerequisite of oracle AND 
 (3) demand-engine oracle on top (agreed slice), (4) playground IDE ops for vix, (5) Ring 0
 generalization for all bundled grammars, (6) Ring 3 once the oracle answers demands.
 
+**LUA BUILDS ACROSS MACHINES** (5de24869a): the composition turn. The oracle's command
+blocks dispatch through vix::oracle::ExecBackend (sync, wasm-clean) to vix_wire::
+FleetBackend — N executors, placement Gravity (run where the most inputs live) or
+RoundRobin; missing mounts gravity-pull from any peer that has them BEFORE the
+orchestrator ever uploads (uploads = orchestrator-born trees only); every byte movement
+lands in a transfer log (the scheduler's food). Flagship probes: lua(target) end-to-end
+over two real websocket executors — 5 fresh execs spread round-robin, the linked binary
+returns, warm rebuild is ONE event (Hit{lua}, fleet not consulted); the transfer log
+shows executor→executor pulls, and a tree's first movement may be an upload but
+afterwards it must gravity-pull. FLAGGED GAP: result trees still materialize at the
+orchestrator (Value::Tree carries bytes) — remote-handle Trees in the language are the
+next step; observers are already the way around it.
+
 **PRODUCING-vs-L1 ANSWERED** (bbb92eacd): the pre-purge open question closes. Mid-flight
 there is NO cache entry — there is a live run to JOIN. Three states: absent → spawn
 (tier-2 checked first, now on the wire path); in-flight → ATTACH (subscribe to the run's
