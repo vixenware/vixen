@@ -288,6 +288,55 @@ the AST currently drops), (2) the vix binder (shared prerequisite of oracle AND 
 (3) demand-engine oracle on top (agreed slice), (4) playground IDE ops for vix, (5) Ring 0
 generalization for all bundled grammars, (6) Ring 3 once the oracle answers demands.
 
+**ARCHEOLOGY RECOVERED (git history of vixen/, purge-lost, salvage-worthy)**:
+- **Seatbelt profile generation** (d3c2b328, June; earlier f4effa0a, Feb): SBPL
+  allow-default base (dyld/libsystem must run) → deny network* → deny file-write* except
+  output roots + /dev — bounds the write-set the VFS flushes to exactly the declared
+  outputs. THE TRAP: canonicalize roots first; macOS resolves symlinks (/tmp →
+  /private/tmp, the FSKit mount) BEFORE the seatbelt check, so an unresolved path never
+  matches. Real host test (no VFS needed): allowed root writable, sibling denied, reads
+  fine. Read confinement deliberately deferred = "design cache key + sandbox together".
+- **Observer closures** (b02c042f, 6914d2ae, 2ed62906): exec is a BOUNDARY, not an
+  intrinsic. An invocation is a backtick literal; `with { observer: (run) => … }`
+  decorates it. The observer is GENERIC OVER ITS RETURN TYPE: it ships to the executor,
+  evaluates THERE (same evaluator semantics), and only its RESULT (or store-backed
+  handles) crosses back — the observer's return type IS the exec node's type. The
+  observer's identity JOINS the cache key (proven: `(run) => run.ok` vs
+  `(run) => id(run.ok)` are different bundles, must not alias in L1). `Run` is what the
+  observer sees: `run.ok`, `run.stream.{stdout, stderr, out}` — fields poison if demanded
+  before they land.
+- **How this solves early rmeta**: the output tree is a PRODUCING handle — per-path
+  progressive: `tree[path]` resolves as the producer writes it, blocks if not yet
+  written, poisons if never; the whole-tree hash exists only at flush. So a consumer
+  demanding `out / "libA.rmeta"` unblocks the moment rustc writes the rmeta, while the
+  rlib is still in flight — before the atomic tree hash CAN exist. Cargo pipelining
+  falls out of demand granularity instead of being a special case. Canonical test
+  existed: cargo_pipelining_serves_rmeta_before_rlib. Granularity per kind: tree→path,
+  stdout→chunk, observer→field, scalar→atomic. Tree value model settled: Resolved (CAS
+  hash, immutable) | Producing (progressive); merge = right-wins (tentative; log-clobber
+  open). LIVE OPEN QUESTION carried forward: producing-handle vs L1-key collision —
+  pipelining starts before the output hash exists, so what does the cache entry point at
+  mid-flight?
+- **The vox precedent** (747305f8, f8e50cde): the remote-handle harness already ran over
+  vox once (transport-local), and strands parked on cross-executor parts. "Don't skip
+  the wire" has a proven prior.
+- **Exec ontology** (2ed62906): Command = the grammar, a static CONSTANT (gcc and clang
+  are different commands; "any C compiler" is a layer above). Tool = command + executor
+  identity + binary + fingerprint + probed params (mixed static/runtime, filled on
+  injection). Invocation = the backtick literal; forcing runs it. Two-tier validation:
+  compile-time const-eval of tool.command validates tokens offline; exec-time, the
+  injected provider's version parameterises the predicates (version-aware diagnostics).
+  Capabilities as DI: build code requests `Type where (predicate)`, executors probe +
+  advertise providers, the control plane matches + injects; ROUTING FALLS OUT OF
+  PROVENANCE. (Note: vix-the-open-language currently spells invocations `cc! { … }`
+  rather than backticks — surface question to reconcile, semantics identical.)
+
+Convergence note: oracle exec step 1 (canonical closure shipping) + this recovered
+design = observer closures are implementable in the oracle NOW — an observer is a
+shipped vix closure evaluated executor-side against a Run value; its result is what
+crosses. The vox executor slice should implement observer + Producing handles from day
+one rather than atomic Outcome bytes.
+
 **CWD IN A FULLY SANDBOXED EXEC (answer to Amos's question)**: there is no cwd. Ambient
 cwd is three bugs wearing one trenchcoat: an identity leak (relative argv paths resolve
 against it, so it must join the plan hash or two different computations share a key), a
