@@ -90,7 +90,10 @@ containing "[1m]" — API-priced, off-subscription (nearly happened once;
 Amos caught it mid-dispatch). Big context → claude/claude-sonnet-5 (1M
 native, on subscription). Implementation → codex/gpt-5.5 thinking-high
 modeId "auto-review". Digestion/mapping → sonnet-5. Cheap lookups →
-haiku-4-5.
+haiku-4-5. DIGEST RULE (Amos): digest agents QUOTE VERBATIM — cut out the
+parts that matter and quote them exactly, labeled by speaker, line refs;
+agent prose is connective tissue only. Never work from a digest's
+reinterpretation when ruling on design.
 
 **Priorities (agreed):**
 1. **THE KEYSTONE — DONE (synthesis §3§, task #45). Was: IN PROGRESS: the constitution
