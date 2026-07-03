@@ -608,6 +608,45 @@ patterns (`Linux => …`) are constructor-like with no enum surface yet → reco
 names name the callee's parameter; lets are sequential (`let x = f(x)` sees the outer x);
 one namespace for values/types v0. bind() → symbol_at/references/occurrences/rename_edits.
 
+## 3¾. The daemon and the wire to the IDE — SHIPPED
+
+The IDE talks to a REAL daemon; nothing is simulated. facet side (through
+fd500061c): `vix-daemon` — the Daemon vox service (`eval(req, control:
+Rx<StepCommand>, events: Tx<DemandEvent>)`), the oracle's live event sink
+feeding it, `vixd` (serve bin), `gen_ts` (TypeScript client generator, output
+path as arg — the surface is open protocol). Both daemon tests green over a
+real websocket. vixenware side (apps/playground, through a2876584): browser
+IDE — CodeMirror editor, demand button, live demand rail (misses, memo hits,
+observations, spawn→exec arcs colored by serving class), STEP/RESUME gating
+one demand event per click, verified in a real browser against a real vixd
+evaluating lua.vix.
+
+Findings that matter beyond the slice:
+
+- **Stepping a demand-driven language = gating the event stream.** The sink
+  blocks the oracle thread per event on a permit; Step grants one; Resume
+  stops gating. The protocol is transport-generic — the same gate applied
+  executor-side gives remote closure stepping (base functionality, next).
+- **The graph SHOWS projection-doesn't-force.** lua.vix settles with the
+  archive and main's object spawned but never flushed (only ever
+  path-projected); the IDE annotates them "projected only, never flushed."
+  The debugger UI and the language semantics agree because the UI renders
+  the semantics, not a simulation of them.
+- Two deadlocks found by making tests time-bounded (nextest default profile
+  now caps at 60s/kill 180s): eval() held its own channel sender halves
+  (recv never saw None); Resume disabled the gate branch while the sink
+  kept requesting permits (Step credits + always-drain fixed it).
+- vox robustness fix (fd500061c): WsListener no longer dies when a TCP
+  client fails the websocket upgrade (a port scan killed vixd).
+- Wire clients must treat post-terminal channel resets
+  (rpc.request.scope.terminal) as shutdown, not error — Rust tolerates by
+  construction, the TS client needed it explicit.
+
+Next on this axis: run ids in Spawn/Exec events (true spawn↔exec pairing +
+ancestry edges for a real DAG render), warm-oracle actor thread (statefulness
+across evals — the anti-Nix whitespace-edit demo), executor-side step gating.
+Division-of-labor record: docs/design/open-proprietary-division.md.
+
 ## 4. Still open (carried forward)
 
 - Streams: the forgotten design details (chunking, replay granularity, backpressure
