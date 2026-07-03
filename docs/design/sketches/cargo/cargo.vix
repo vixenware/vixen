@@ -1,0 +1,94 @@
+// cargo.vix — sketch v0: build a Rust workspace member, registry deps and
+// all. Written AS IF the primitives existed; every ??-marked construct is a
+// decision the sketch is demanding. This file is the forcing function for
+// the version-resolution design round (they are one cycle).
+
+use vix::{Tree, Path, Target};
+use caps::{Rustc, Registry};
+
+/// A parsed manifest. TOML arrives as a vix VALUE via `toml()` — decision
+/// D1: deserialization is a pure fn Tree-path → Value, structural typing
+/// against a declared shape, same journal/pin story as everything else.
+struct Manifest {
+    name: String,
+    version: String,
+    deps: [Requirement],
+    features: Map<String, [String]>,
+}
+
+/// What Cargo.toml's `[dependencies]` rows become.
+struct Requirement {
+    name: String,
+    req: VersionReq,        // ?? D2: VersionReq is a language type or a
+    features: [String],     //    registry-capability type? (lean: caps)
+    optional: Bool,
+}
+
+/// One resolved node: an exact package identity. NOTE: no source URL — the
+/// checksum IS the identity (fetch doctrine); the registry only HINTS where
+/// bytes live.
+struct PkgId {
+    name: String,
+    version: String,
+    checksum: String,
+}
+
+/// D3 — THE SOLVER SEAM. `solve` is a PRIMITIVE (like exec/fetch): the
+/// PubGrub-style search runs runtime-side, but every fact it consumes is
+/// demanded back FROM vix as a pure, memoized, journal-pinned question:
+///   - available_versions(registry, name)   — an OBSERVATION (pinned)
+///   - manifest_of(registry, pkg: PkgId)    — pure (checksum-addressed)
+/// So resolution = pure function of (roots × pinned registry views). The
+/// lockfile is NOT a separate artifact: it is the journal slice covering
+/// available_versions pins + the solve result memo. `cargo update` =
+/// ignore-and-refresh those pins. (D4: is the solve RESULT itself pinned,
+/// or recomputed from pins? lean: recomputed — it's pure given the pins.)
+fn resolve(reg: Registry, roots: [Requirement]) -> [PkgId] {
+    solve(reg, roots)
+}
+
+/// Fetch + unpack one package's source tree, by content.
+fn pkg_src(reg: Registry, pkg: PkgId) -> Tree {
+    // D5: registry.fetch is fetch-with-checksum; the URL template is the
+    // registry capability's business (its fingerprint covers index rules).
+    extract(reg.fetch(pkg.checksum)) / p"src-root"  // ?? layout probing
+}
+
+/// Compile one crate. D6 — the rmeta move, language-level: downstream
+/// crates project `libfoo.rmeta` out of the STILL-RUNNING upstream rustc;
+/// only the final binary link demands full rlibs (identity). This is the
+/// producing-handles weld carrying the whole crate graph's pipelining.
+fn crate_obj(rustc: Rustc, pkg: PkgId, src: Tree, deps: [Tree], edition: String) -> Tree {
+    let externs = deps.map(|d| ["--extern", d / p"lib.rmeta"]);  // ?? naming
+    rustc! {
+        --edition {edition}
+        --crate-name {pkg.name}
+        {externs}
+        -O {src / p"lib.rs"}
+        -o {p"lib".with_ext("rlib")}
+    }
+}
+
+/// The whole dependency closure, demand-driven: nothing about pkg N is
+/// fetched/parsed/compiled unless the graph demands it. D7: recursion over
+/// the resolved set — `graph` here is a Map keyed by PkgId; memoization
+/// makes the sharing (diamond deps compile once) fall out of fn identity,
+/// NOT out of explicit graph bookkeeping.
+fn build_dep(rustc: Rustc, reg: Registry, resolved: [PkgId], pkg: PkgId) -> Tree {
+    let src = pkg_src(reg, pkg);
+    let man = manifest_of(reg, pkg);
+    let dep_ids = resolved.filter(|r| man.deps.any(|d| d.name == r.name));  // ?? D8 feature unification
+    let dep_libs = dep_ids.map(|d| build_dep(rustc, reg, resolved, d)).collect();
+    crate_obj(rustc, pkg, src, dep_libs, man_edition(man))
+}
+
+/// The entry: build a workspace member for a target.
+pub fn build(target: Target, workspace: Tree, member: String) -> Tree {
+    let rustc = Rustc::acquire(target);
+    let reg = Registry::acquire("crates-io");   // a capability: index rules,
+                                                // URL templates, fingerprint
+    let man = toml(workspace / p"Cargo.toml");  // D1 again, root manifest
+    let resolved = resolve(reg, man.deps);
+    let deps = resolved.map(|p| build_dep(rustc, reg, resolved, p)).collect();
+    crate_obj(rustc, member_pkg(man, member), workspace / p"src", deps, "2024")
+}
