@@ -516,3 +516,19 @@ text.ev-failed {
 .lg-joined { color: var(--violet); }
 .lg-obs { color: var(--text-dim); }
 .lg-replay { color: var(--ok); }
+
+.ev-scheduled {
+  stroke: var(--info);
+}
+
+text.ev-scheduled {
+  fill: var(--text-dim);
+}
+
+.lg-scheduled {
+  color: var(--info);
+}
+
+.demand-graph .row-ghost {
+  opacity: 0.45;
+}

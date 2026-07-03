@@ -29,9 +29,11 @@ function rowClass(e: DemandEvent): string {
       return "ev-miss";
     case "Hit":
       return "ev-hit";
-    case "Spawn":
+    case "Created":
       return "ev-spawn";
-    case "Exec":
+    case "Scheduled":
+      return "ev-scheduled";
+    case "Finished":
       return `ev-exec ev-exec-${e.serving.tag.toLowerCase()}`;
     case "Observation":
       return e.replayed ? "ev-obs-replayed" : "ev-obs-cold";
@@ -55,9 +57,11 @@ function label(e: DemandEvent): string {
       const args = trunc(e.args.map(([, v]) => v).join(", "), 46);
       return `fn ${e.func}(${args})`;
     }
-    case "Spawn":
+    case "Created":
       return `${e.command}: ${trunc(e.describe[0] ?? "", 56)}`;
-    case "Exec": {
+    case "Scheduled":
+      return `${e.command}: run ${e.run}`;
+    case "Finished": {
       const names = e.outputs.map(([p]) => p.split("/").pop() ?? p).join(", ");
       return `→ ${trunc(names, 52)}`;
     }
@@ -77,9 +81,11 @@ function statusText(e: DemandEvent): string {
       return "memo miss — evaluated";
     case "Hit":
       return "memo hit — served from cache";
-    case "Spawn":
-      return "dispatched (pending tree)";
-    case "Exec":
+    case "Created":
+      return "thunk created (pending tree)";
+    case "Scheduled":
+      return "execution scheduled — first demand touched this run";
+    case "Finished":
       return servingLabel(e.serving);
     case "Observation":
       return e.replayed ? "replayed pin" : "observed the world (cold)";
@@ -104,8 +110,9 @@ function spanOf(e: DemandEvent): Span | null {
   switch (e.tag) {
     case "Miss":
     case "Hit":
-    case "Spawn":
-    case "Exec":
+    case "Created":
+    case "Scheduled":
+    case "Finished":
       return e.span;
     default:
       return null;
@@ -126,9 +133,11 @@ function glyph(e: DemandEvent, x: number, y: number) {
           transform={`rotate(45 ${x} ${y})`}
         />
       );
-    case "Spawn":
+    case "Created":
       return <circle className={cls} cx={x} cy={y} r={5.5} fill="none" strokeDasharray="2.5 2" />;
-    case "Exec":
+    case "Scheduled":
+      return <rect className={cls} x={x - 5.5} y={y - 5.5} width={11} height={11} rx={2.5} fill="none" />;
+    case "Finished":
       return <rect className={cls} x={x - 6} y={y - 6} width={12} height={12} rx={2.5} />;
     default:
       return <circle className={cls} cx={x} cy={y} r={5.5} />;
@@ -161,13 +170,14 @@ function layout(events: DemandEvent[]): Row[] {
         }
         break;
       }
-      case "Spawn": {
+      case "Created": {
         const parent = e.in_fn !== null ? fnDepth.get(e.in_fn) : undefined;
         depth = parent !== undefined ? parent + 1 : 0;
         runDepth.set(e.run, depth);
         break;
       }
-      case "Exec":
+      case "Scheduled":
+      case "Finished":
         depth = runDepth.get(e.run) ?? 0;
         break;
       case "Observation":
@@ -185,26 +195,42 @@ function layout(events: DemandEvent[]): Row[] {
 export function DemandGraph(props: {
   events: DemandEvent[];
   settled: boolean;
+  showAll: boolean;
   cursor: number | null;
   onSelect: (event: DemandEvent) => void;
 }) {
-  const { events, settled, cursor, onSelect } = props;
-  const rows = layout(events);
+  const { events, settled, showAll, cursor, onSelect } = props;
+  // Work-only by default: hide what we did NOT pay for — memo hits,
+  // replayed pins, and thunks that were never even scheduled. "all" shows
+  // the full demand story including the laziness wins.
+  const scheduledRuns = new Set(
+    events.filter((e) => e.tag === "Scheduled").map((e) => (e.tag === "Scheduled" ? e.run : 0n)),
+  );
+  const paid = (e: DemandEvent): boolean => {
+    switch (e.tag) {
+      case "Hit":
+        return false;
+      case "Observation":
+        return !e.replayed;
+      case "Created":
+        return scheduledRuns.has(e.run);
+      default:
+        return true;
+    }
+  };
+  const rows = layout(events).filter((r) => showAll || paid(r.event));
   const height = rows.length * ROW_H + 12;
 
   // Exact spawn↔exec pairing: the run id IS the edge.
   const spawnRowOfRun = new Map<bigint, number>();
   const arcs: Array<{ from: number; to: number }> = [];
   rows.forEach(({ event: e }, i) => {
-    if (e.tag === "Spawn") spawnRowOfRun.set(e.run, i);
-    else if (e.tag === "Exec") {
+    if (e.tag === "Created") spawnRowOfRun.set(e.run, i);
+    else if (e.tag === "Scheduled" || e.tag === "Finished") {
       const from = spawnRowOfRun.get(e.run);
       if (from !== undefined) arcs.push({ from, to: i });
     }
   });
-  const flushedRuns = new Set(
-    events.filter((e) => e.tag === "Exec").map((e) => (e.tag === "Exec" ? e.run : 0n)),
-  );
 
   const rowY = (i: number) => i * ROW_H + ROW_H / 2 + 6;
   const glyphX = (depth: number) => GLYPH_X + depth * INDENT;
@@ -214,7 +240,8 @@ export function DemandGraph(props: {
       <div className="legend">
         <span className="lg lg-miss">● miss</span>
         <span className="lg lg-hit">● hit</span>
-        <span className="lg lg-spawn">◌ dispatched</span>
+        <span className="lg lg-spawn">◌ created</span>
+        <span className="lg lg-scheduled">□ scheduled</span>
         <span className="lg lg-ran">■ ran</span>
         <span className="lg lg-t1">■ tier-1</span>
         <span className="lg lg-t2">■ tier-2</span>
@@ -243,11 +270,11 @@ export function DemandGraph(props: {
         const span = spanOf(e);
         const cursorHit =
           span !== null && cursor !== null && cursor >= span.start && cursor < span.end;
-        const neverFlushed = settled && e.tag === "Spawn" && !flushedRuns.has(e.run);
+        const ghost = settled && e.tag === "Created" && !scheduledRuns.has(e.run);
         return (
           <g
             key={i}
-            className={`row${span ? " row-linked" : ""}${cursorHit ? " row-cursor" : ""}`}
+            className={`row${span ? " row-linked" : ""}${cursorHit ? " row-cursor" : ""}${ghost ? " row-ghost" : ""}`}
             onClick={() => onSelect(e)}
           >
             {cursorHit && (
@@ -256,14 +283,13 @@ export function DemandGraph(props: {
             {glyph(e, x, y)}
             <text className={`lbl ${rowClass(e)}`} x={x + 18} y={y + 4}>
               {label(e)}
-              {neverFlushed && <tspan className="lazy-note"> — never flushed</tspan>}
             </text>
             {atLabel(e) !== null && (
               <text className="at" x="100%" y={y + 4} textAnchor="end" dx={-8}>
                 {atLabel(e)}
               </text>
             )}
-            <title>{statusText(e)}</title>
+            <title>{ghost ? "thunk created — never demanded (you did not pay for this)" : statusText(e)}</title>
           </g>
         );
       })}

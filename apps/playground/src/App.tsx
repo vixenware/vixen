@@ -30,6 +30,7 @@ export function App() {
   // comparable against event spans directly.
   const [cursor, setCursor] = useState<number | null>(null);
   const [inspected, setInspected] = useState<DemandEvent | null>(null);
+  const [showAll, setShowAll] = useState(false);
 
   const busy = status === "connecting" || status === "running" || status === "stepping";
 
@@ -129,6 +130,14 @@ export function App() {
             <label className="steptoggle">
               <input
                 type="checkbox"
+                checked={showAll}
+                onChange={(e) => setShowAll(e.target.checked)}
+              />
+              all
+            </label>
+            <label className="steptoggle">
+              <input
+                type="checkbox"
                 checked={stepMode}
                 onChange={(e) => setStepMode(e.target.checked)}
                 disabled={busy}
@@ -157,13 +166,14 @@ export function App() {
               <DemandGraph
                 events={events}
                 settled={status === "done" || status === "failed"}
+                showAll={showAll}
                 cursor={cursor}
                 onSelect={(e) => {
                   setInspected(e);
                   const span =
-                    e.tag === "Miss" || e.tag === "Hit" || e.tag === "Spawn" || e.tag === "Exec"
-                      ? e.span
-                      : null;
+                    e.tag === "Done" || e.tag === "Failed" || e.tag === "Observation"
+                      ? null
+                      : e.span;
                   if (span) {
                     editor.current?.selectSpan(
                       byteToUtf16(evalSource.current, span.start),

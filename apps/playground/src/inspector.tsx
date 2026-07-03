@@ -6,7 +6,7 @@
 
 import type { DemandEvent } from "./generated/daemon";
 
-function pair(events: DemandEvent[], run: bigint, tag: "Spawn" | "Exec"): DemandEvent | null {
+function pair(events: DemandEvent[], run: bigint, tag: "Created" | "Scheduled" | "Finished"): DemandEvent | null {
   for (const e of events) {
     if (e.tag === tag && e.run === run) return e;
   }
@@ -33,22 +33,20 @@ export function Inspector(props: {
       args = e.args;
       break;
     }
-    case "Spawn": {
-      title = `run ${e.run} — ${e.command}, dispatched`;
-      describe = e.describe;
-      argv = e.argv;
-      const ex = pair(events, e.run, "Exec");
-      if (ex?.tag === "Exec") outputs = ex.outputs;
-      break;
-    }
-    case "Exec": {
-      title = `run ${e.run} — ${e.command}, resolved`;
-      outputs = e.outputs;
-      const sp = pair(events, e.run, "Spawn");
-      if (sp?.tag === "Spawn") {
-        describe = sp.describe;
-        argv = sp.argv;
+    case "Created":
+    case "Scheduled":
+    case "Finished": {
+      const created = e.tag === "Created" ? e : pair(events, e.run, "Created");
+      const finished = e.tag === "Finished" ? e : pair(events, e.run, "Finished");
+      const scheduled = e.tag === "Scheduled" ? e : pair(events, e.run, "Scheduled");
+      const state =
+        finished !== null ? "finished" : scheduled !== null ? "scheduled" : "created";
+      title = `run ${e.run} — ${e.command}, ${state}`;
+      if (created?.tag === "Created") {
+        describe = created.describe;
+        argv = created.argv;
       }
+      if (finished?.tag === "Finished") outputs = finished.outputs;
       break;
     }
     case "Observation":
@@ -103,10 +101,11 @@ export function Inspector(props: {
           ))}
         </div>
       )}
-      {e.tag === "Spawn" && outputs.length === 0 && (
+      {(e.tag === "Created" || e.tag === "Scheduled") && outputs.length === 0 && (
         <p className="inspector-note">
-          Pending tree — never flushed. Only projected paths were demanded; the run has no
-          completion to show. Projection doesn't force.
+          {pair(events, e.run, "Scheduled") === null
+            ? "Thunk only — never demanded. You did not pay for this run."
+            : "Scheduled by a path projection; the full tree was never needed, so no completion is logged. Projection doesn't force."}
         </p>
       )}
     </div>
