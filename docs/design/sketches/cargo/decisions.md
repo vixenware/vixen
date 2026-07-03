@@ -157,3 +157,30 @@ content-addressed; no pin needed). Needs: the shape-checking semantics
   for now; if the problem space of crates.io ever compresses/distributes,
   that's a Vixen-Cloud-tier product dream (the plural is the product),
   not OSS core. Facts stay process/snapshot-scoped.
+
+
+## Walkthrough rulings, round 2
+
+- **Separate compilation contexts**: "not even a question" — no feature
+  unification across normal/build/proc-macro contexts, separate solves.
+- **Default features**: implementation properties only, no solver
+  machinery. Closed.
+- **BEYOND CARGO — declared feature exclusions (Amos)**: mutual-exclusion
+  lists and negative features (multiple TLS backends: pick ONE) are
+  first-class incompatibility clauses in OUR manifest layer — resolution-
+  time conflict with a derivation-tree diagnostic instead of cargo's
+  duplicate-symbol compile error. Features stay additive for PROPAGATION;
+  declared exclusions make some demand-combinations infeasible (drives
+  version re-choice or a good error; the solver still never chooses
+  features). Delivery hook: cargo ignores [package.metadata.*] tables —
+  crates could ship [package.metadata.vixen.features] exclusions on
+  crates.io TODAY without cargo caring.
+- **The marble-sculpture realism worry (Amos)**: pure negative carving
+  doesn't scale as a search strategy — recorded position: the sculpture
+  describes the KNOWLEDGE (facts = negative space, compact after range
+  widening), not the SEARCH (hypotheses walk points; a trail is tiny; the
+  "infinite remainder" is never represented). The volumes/frontier layer
+  is SEVERABLE: with frontier = one region and one worker it degenerates
+  to CDCL — so the exciting engine is an additive parallelization layer
+  over a sound core, and its realism question reduces to "can the frontier
+  representation stay compact", answerable empirically later.
