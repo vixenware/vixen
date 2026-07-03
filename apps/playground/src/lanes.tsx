@@ -137,22 +137,20 @@ export function Lanes(props: {
       : "lane-bar lane-bar-ghost";
 
     barItems.push(
-      <g
+      <rect
         key={`bar-${runId}`}
+        x={x0}
+        y={y0}
+        width={w}
+        height={barH}
+        rx={2}
+        className={barClass}
+        fill={finished ? undefined : "url(#lane-hatch)"}
         style={{ cursor: "pointer" }}
         onClick={() => onSelect(clickTarget)}
       >
-        <rect
-          x={x0}
-          y={y0}
-          width={w}
-          height={barH}
-          rx={2}
-          className={barClass}
-          fill={finished ? undefined : "url(#lane-hatch)"}
-        />
         <title>{tooltipText}</title>
-      </g>,
+      </rect>,
     );
   }
 
@@ -167,14 +165,18 @@ export function Lanes(props: {
     const describe0 = created.describe[0] ?? created.command;
 
     tickItems.push(
-      <g
+      <line
         key={`tick-${runId}`}
+        className="lane-tick"
+        x1={x}
+        y1={y0}
+        x2={x}
+        y2={y0 + barH}
         style={{ cursor: "pointer" }}
         onClick={() => onSelect(created)}
       >
-        <line className="lane-tick" x1={x} y1={y0} x2={x} y2={y0 + barH} />
         <title>{`${describe0}\ncreated — not scheduled`}</title>
-      </g>,
+      </line>,
     );
   }
 
