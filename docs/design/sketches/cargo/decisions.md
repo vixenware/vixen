@@ -184,3 +184,19 @@ content-addressed; no pin needed). Needs: the shape-checking semantics
   to CDCL — so the exciting engine is an additive parallelization layer
   over a sound core, and its realism question reduces to "can the frontier
   representation stay compact", answerable empirically later.
+
+
+## The evening it became real (2026-07-03)
+
+crates/reg-mock (c2d26a49, 26724f35): mock sparse registry + REAL cargo as
+oracle. Order-dependence hypothesis: NEGATIVE on a simple multi-solution
+fixture (cargo normalized; kept #[ignore] with verdict — now an open hunt,
+not a fact). crates/vix-solve (ba73c793, 814e5c62): pubgrub 0.4 placeholder
+core behind the ecosystem-neutral Facts trait; features as virtual packages
+(collapsed from output); declared EXCLUSIONS work with derivation-tree
+errors (the beyond-cargo feature, already resolving); 5 differential tests
+green vs real cargo; deterministic-result asserted. FINDING for the March
+engine: pubgrub's positive-dependency model CANNOT express weak deps
+(dep?/feat) faithfully — deferred, surfaced structurally in
+SolveResult::deferred_weak_dependencies. The March engine must support
+guarded implications natively; that is now a requirement, not a nicety.
