@@ -33,17 +33,21 @@ struct PkgId {
     checksum: String,
 }
 
-/// D3 — THE SOLVER SEAM. `solve` is a PRIMITIVE (like exec/fetch): the
-/// PubGrub-style search runs runtime-side, but every fact it consumes is
-/// demanded back FROM vix as a pure, memoized, journal-pinned question:
-///   - available_versions(registry, name)   — an OBSERVATION (pinned)
-///   - manifest_of(registry, pkg: PkgId)    — pure (checksum-addressed)
-/// So resolution = pure function of (roots × pinned registry views). The
-/// lockfile is NOT a separate artifact: it is the journal slice covering
-/// available_versions pins + the solve result memo. `cargo update` =
-/// ignore-and-refresh those pins. (D4: is the solve RESULT itself pinned,
-/// or recomputed from pins? lean: recomputed — it's pure given the pins.)
-fn resolve(reg: Registry, roots: [Requirement]) -> [PkgId] {
+/// One node of the SOLVED graph — see decisions.md D3/D4/D8. `solve` is a
+/// primitive: the search runs runtime-side, every fact it consumes is a
+/// pure/pinned vix question (available_versions = pinned observation,
+/// manifest_of = checksum-addressed). Feature UNIFICATION happens inside
+/// solve (features ⟷ optional deps ⟷ versions are mutually recursive —
+/// that's the solver's problem, not the language's). The lockfile is the
+/// journal slice covering resolution's pins; the result is recomputed, not
+/// pinned.
+struct ResolvedPkg {
+    id: PkgId,
+    features: [String],   // unified: union over dependents, per universe
+    deps: [Int],          // indices into the resolved graph
+}
+
+fn resolve(reg: Registry, roots: [Requirement]) -> [ResolvedPkg] {
     solve(reg, roots)
 }
 
@@ -58,28 +62,32 @@ fn pkg_src(reg: Registry, pkg: PkgId) -> Tree {
 /// crates project `libfoo.rmeta` out of the STILL-RUNNING upstream rustc;
 /// only the final binary link demands full rlibs (identity). This is the
 /// producing-handles weld carrying the whole crate graph's pipelining.
-fn crate_obj(rustc: Rustc, pkg: PkgId, src: Tree, deps: [Tree], edition: String) -> Tree {
-    let externs = deps.map(|d| ["--extern", d / p"lib.rmeta"]);  // ?? naming
+fn crate_obj(rustc: Rustc, pkg: PkgId, src: Tree, deps: [Tree], features: [String], edition: String) -> Tree {
+    let externs = deps.map(|d| ["--extern", d / p"lib.rmeta"]);  // ?? D6 naming
+    let cfgs = features.map(|f| ["--cfg", "feature=\"" + f + "\""]);
     rustc! {
         --edition {edition}
         --crate-name {pkg.name}
-        {externs}
+        {externs} {cfgs}
         -O {src / p"lib.rs"}
         -o {p"lib".with_ext("rlib")}
     }
 }
 
-/// The whole dependency closure, demand-driven: nothing about pkg N is
-/// fetched/parsed/compiled unless the graph demands it. D7: recursion over
-/// the resolved set — `graph` here is a Map keyed by PkgId; memoization
-/// makes the sharing (diamond deps compile once) fall out of fn identity,
-/// NOT out of explicit graph bookkeeping.
-fn build_dep(rustc: Rustc, reg: Registry, resolved: [PkgId], pkg: PkgId) -> Tree {
-    let src = pkg_src(reg, pkg);
-    let man = manifest_of(reg, pkg);
-    let dep_ids = resolved.filter(|r| man.deps.any(|d| d.name == r.name));  // ?? D8 feature unification
-    let dep_libs = dep_ids.map(|d| build_dep(rustc, reg, resolved, d)).collect();
-    crate_obj(rustc, pkg, src, dep_libs, man_edition(man))
+/// The whole dependency closure, demand-driven: nothing about node N is
+/// fetched/parsed/compiled unless the graph demands it. D7: recursion +
+/// MEMO IS the build graph — a diamond dep is one (id × features × deps)
+/// memo key, compiled once, with zero explicit graph bookkeeping. The
+/// D8 name-filtering hack is dead: the solved graph's indices are data.
+fn build_dep(rustc: Rustc, reg: Registry, resolved: [ResolvedPkg], ix: Int) -> Tree {
+    let node = resolved[ix];
+    let src = pkg_src(reg, node.id);
+    let man = manifest_of(reg, node.id);
+    let dep_libs = node.deps.map(|d| build_dep(rustc, reg, resolved, d)).collect();
+    // features are identity: they become --cfg argv items, hence part of
+    // the normalized plan, hence part of BOTH cache tiers. Unification
+    // upstream is what makes this sharing-correct.
+    crate_obj(rustc, node.id, src, dep_libs, node.features, man_edition(man))
 }
 
 /// The entry: build a workspace member for a target.
@@ -89,6 +97,9 @@ pub fn build(target: Target, workspace: Tree, member: String) -> Tree {
                                                 // URL templates, fingerprint
     let man = toml(workspace / p"Cargo.toml");  // D1 again, root manifest
     let resolved = resolve(reg, man.deps);
-    let deps = resolved.map(|p| build_dep(rustc, reg, resolved, p)).collect();
-    crate_obj(rustc, member_pkg(man, member), workspace / p"src", deps, "2024")
+    // roots of the solved graph = direct deps of the member
+    let deps = root_indices(resolved, man.deps)
+        .map(|i| build_dep(rustc, reg, resolved, i)).collect();
+    crate_obj(rustc, member_pkg(man, member), workspace / p"src", deps,
+              member_features(man, member), "2024")
 }
