@@ -288,7 +288,13 @@ the AST currently drops), (2) the vix binder (shared prerequisite of oracle AND 
 (3) demand-engine oracle on top (agreed slice), (4) playground IDE ops for vix, (5) Ring 0
 generalization for all bundled grammars, (6) Ring 3 once the oracle answers demands.
 
-**ARCHEOLOGY RECOVERED (git history of vixen/, purge-lost, salvage-worthy)**:
+**ARCHEOLOGY RECOVERED (git history of vixen/, purge-lost, salvage-worthy)**. Standing
+caveat from Amos: these are EARLIER, half-cooked iterations — recovered for their
+INTENT/IMPETUS, not as corrections to apply wholesale. Where they disagree with the
+current arc (surface syntax, ontology details, DI machinery), the current design wins
+unless we deliberately re-decide. What we take: observer-generic-over-return-type,
+observer identity in the key, per-path Producing handles, the seatbelt profile shape +
+canonicalization trap, and the vox-wire precedent.
 - **Seatbelt profile generation** (d3c2b328, June; earlier f4effa0a, Feb): SBPL
   allow-default base (dyld/libsystem must run) → deny network* → deny file-write* except
   output roots + /dev — bounds the write-set the VFS flushes to exactly the declared
