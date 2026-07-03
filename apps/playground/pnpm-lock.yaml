@@ -4,11 +4,6 @@ settings:
   autoInstallPeers: true
   excludeLinksFromLockfile: false
 
-overrides:
-  '@bearcove/vox-core': file:../../../../oss/facet-cc/vox/typescript/packages/vox-core
-  '@bearcove/vox-wire': file:../../../../oss/facet-cc/vox/typescript/packages/vox-wire
-  '@bearcove/vox-tcp': file:../../../../oss/facet-cc/vox/typescript/packages/vox-tcp
-
 importers:
 
   .:
@@ -17,11 +12,11 @@ importers:
         specifier: 0.2.0-rc.0
         version: 0.2.0-rc.0
       '@bearcove/vox-core':
-        specifier: file:../../../../oss/facet-cc/vox/typescript/packages/vox-core
-        version: file:../../../../oss/facet-cc/vox/typescript/packages/vox-core
+        specifier: link:../../../../oss/facet-cc/vox/typescript/packages/vox-core
+        version: link:../../../../oss/facet-cc/vox/typescript/packages/vox-core
       '@bearcove/vox-ws':
-        specifier: file:../../../../oss/facet-cc/vox/typescript/packages/vox-ws
-        version: file:../../../../oss/facet-cc/vox/typescript/packages/vox-ws
+        specifier: link:../../../../oss/facet-cc/vox/typescript/packages/vox-ws
+        version: link:../../../../oss/facet-cc/vox/typescript/packages/vox-ws
       '@codemirror/commands':
         specifier: ^6.7.0
         version: 6.10.4
@@ -53,23 +48,8 @@ importers:
 
 packages:
 
-  '@bearcove/phon-engine@0.2.0-rc.0':
-    resolution: {integrity: sha512-Os+VaRe7QdmDaYlVeS+OLiaouOAF/Y2bZGiSo+EcXzqC1se09w/aKCFc5LnJYn+104jQ3rLqZKQdyKc+6kzIkg==}
-
   '@bearcove/phon-schema@0.2.0-rc.0':
     resolution: {integrity: sha512-YivXOWBa5X2Lo3EjYR0WFbvnjfMHSDmirGocjc00WTWw/QTKnpbgQAnYtXU5uV3SySl6O+SsXmmfMxqc2Apl9Q==}
-
-  '@bearcove/vox-core@file:../../../../oss/facet-cc/vox/typescript/packages/vox-core':
-    resolution: {directory: ../../../../oss/facet-cc/vox/typescript/packages/vox-core, type: directory}
-
-  '@bearcove/vox-tcp@file:../../../../oss/facet-cc/vox/typescript/packages/vox-tcp':
-    resolution: {directory: ../../../../oss/facet-cc/vox/typescript/packages/vox-tcp, type: directory}
-
-  '@bearcove/vox-wire@file:../../../../oss/facet-cc/vox/typescript/packages/vox-wire':
-    resolution: {directory: ../../../../oss/facet-cc/vox/typescript/packages/vox-wire, type: directory}
-
-  '@bearcove/vox-ws@file:../../../../oss/facet-cc/vox/typescript/packages/vox-ws':
-    resolution: {directory: ../../../../oss/facet-cc/vox/typescript/packages/vox-ws, type: directory}
 
   '@codemirror/commands@6.10.4':
     resolution: {integrity: sha512-Ryk9y9T0FFVF0cUGhAknveAyUOl/A1qReTFi+qPKtOh2Z9F4AUBz3XOrYD4ZEgZirdugVzHvd/2/Wcwy5OliTg==}
@@ -424,33 +404,9 @@ packages:
 
 snapshots:
 
-  '@bearcove/phon-engine@0.2.0-rc.0':
-    dependencies:
-      '@bearcove/phon-schema': 0.2.0-rc.0
-
   '@bearcove/phon-schema@0.2.0-rc.0':
     dependencies:
       '@noble/hashes': 2.2.0
-
-  '@bearcove/vox-core@file:../../../../oss/facet-cc/vox/typescript/packages/vox-core':
-    dependencies:
-      '@bearcove/phon-engine': 0.2.0-rc.0
-      '@bearcove/phon-schema': 0.2.0-rc.0
-      '@bearcove/vox-wire': file:../../../../oss/facet-cc/vox/typescript/packages/vox-wire
-
-  '@bearcove/vox-tcp@file:../../../../oss/facet-cc/vox/typescript/packages/vox-tcp':
-    dependencies:
-      '@bearcove/vox-core': file:../../../../oss/facet-cc/vox/typescript/packages/vox-core
-
-  '@bearcove/vox-wire@file:../../../../oss/facet-cc/vox/typescript/packages/vox-wire':
-    dependencies:
-      '@bearcove/phon-engine': 0.2.0-rc.0
-      '@bearcove/phon-schema': 0.2.0-rc.0
-
-  '@bearcove/vox-ws@file:../../../../oss/facet-cc/vox/typescript/packages/vox-ws':
-    dependencies:
-      '@bearcove/vox-core': file:../../../../oss/facet-cc/vox/typescript/packages/vox-core
-      '@bearcove/vox-tcp': file:../../../../oss/facet-cc/vox/typescript/packages/vox-tcp
 
   '@codemirror/commands@6.10.4':
     dependencies:

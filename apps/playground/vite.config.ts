@@ -3,7 +3,8 @@ import { defineConfig } from "vite";
 export default defineConfig({
   server: {
     fs: {
-      allow: ["../.."],
+      // The vox TS runtime is link:'d from the sibling facet checkout.
+      allow: ["../..", "../../../../oss/facet-cc"],
     },
   },
   build: {

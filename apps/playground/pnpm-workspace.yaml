@@ -1,12 +1,9 @@
 # Standalone pnpm root. The vox TS runtime comes from the sibling facet
-# checkout (open source); overrides make its internal workspace:* references
-# resolve to the same checkout. Publish rc packages when this gets annoying.
+# checkout (open source) via link: deps — plain symlinks, so the packages'
+# own workspace node_modules resolve their internal deps (run `pnpm install`
+# in <facet>/vox first). Publish rc packages when this gets annoying.
 packages:
   - "."
-overrides:
-  "@bearcove/vox-core": "file:../../../../oss/facet-cc/vox/typescript/packages/vox-core"
-  "@bearcove/vox-wire": "file:../../../../oss/facet-cc/vox/typescript/packages/vox-wire"
-  "@bearcove/vox-tcp": "file:../../../../oss/facet-cc/vox/typescript/packages/vox-tcp"
 minimumReleaseAgeExclude:
   - "@bearcove/phon-engine@0.2.0-rc.0"
   - "@bearcove/phon-schema@0.2.0-rc.0"

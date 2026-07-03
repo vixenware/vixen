@@ -1,0 +1,306 @@
+:root {
+  color-scheme: dark;
+
+  --bg: #0e1116;
+  --panel: #131820;
+  --code-bg: #0b0e13;
+  --line: #232a33;
+  --line-soft: #1a1f28;
+  --text: #d8dee5;
+  --text-dim: #8c97a4;
+  --text-faint: #5c6671;
+  --accent: #e3b25a;
+  --accent-ink: #1a130a;
+  --ok: #5cc089;
+  --err: #f07a68;
+  --info: #7fb2ff;
+  --teal: #6fc3e8;
+  --violet: #c9a2ff;
+
+  --ui: ui-sans-serif, system-ui, -apple-system, sans-serif;
+  --mono: "JetBrains Mono", "SFMono-Regular", Consolas, monospace;
+}
+
+* {
+  box-sizing: border-box;
+}
+
+body {
+  margin: 0;
+  background: var(--bg);
+  color: var(--text);
+  font-family: var(--ui);
+  font-size: 14px;
+}
+
+.shell {
+  display: flex;
+  flex-direction: column;
+  height: 100vh;
+}
+
+header {
+  display: flex;
+  align-items: baseline;
+  gap: 10px;
+  padding: 10px 16px;
+  border-bottom: 1px solid var(--line);
+  background: var(--panel);
+}
+
+.brand {
+  font-weight: 700;
+  letter-spacing: 0.04em;
+  color: var(--accent);
+}
+
+.brand-sub {
+  color: var(--text-faint);
+  font-size: 12px;
+}
+
+.conn {
+  margin-left: auto;
+}
+
+input,
+button {
+  font: inherit;
+  color: var(--text);
+  background: var(--code-bg);
+  border: 1px solid var(--line);
+  border-radius: 6px;
+  padding: 4px 8px;
+}
+
+.conn input {
+  width: 220px;
+  font-family: var(--mono);
+  font-size: 12px;
+}
+
+main {
+  flex: 1;
+  display: grid;
+  grid-template-columns: minmax(360px, 1fr) minmax(420px, 1fr);
+  min-height: 0;
+}
+
+.pane {
+  min-width: 0;
+  min-height: 0;
+  display: flex;
+  flex-direction: column;
+}
+
+.editor-pane {
+  border-right: 1px solid var(--line);
+}
+
+.editor {
+  flex: 1;
+  overflow: auto;
+}
+
+.editor .cm-editor {
+  height: 100%;
+  background: var(--code-bg);
+  font-family: var(--mono);
+  font-size: 13px;
+}
+
+.editor .cm-gutters {
+  background: var(--code-bg);
+  border-right: 1px solid var(--line-soft);
+  color: var(--text-faint);
+}
+
+.toolbar {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  padding: 8px 12px;
+  border-bottom: 1px solid var(--line);
+  background: var(--panel);
+}
+
+.toolbar label {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  color: var(--text-dim);
+  font-size: 12px;
+}
+
+.entry input {
+  width: 90px;
+  font-family: var(--mono);
+  font-size: 12px;
+}
+
+button.primary {
+  background: var(--accent);
+  color: var(--accent-ink);
+  border-color: var(--accent);
+  font-weight: 600;
+}
+
+button:disabled {
+  opacity: 0.45;
+}
+
+.status {
+  margin-left: auto;
+  font-size: 12px;
+  color: var(--text-dim);
+}
+
+.status-done {
+  color: var(--ok);
+}
+
+.status-failed {
+  color: var(--err);
+}
+
+.status-running,
+.status-stepping {
+  color: var(--accent);
+}
+
+.graph-scroll {
+  flex: 1;
+  overflow: auto;
+  padding: 6px 10px;
+}
+
+.hint {
+  color: var(--text-dim);
+  max-width: 44ch;
+  line-height: 1.5;
+  padding: 12px;
+}
+
+.hint code {
+  font-family: var(--mono);
+  color: var(--accent);
+}
+
+.outcome {
+  border-top: 1px solid var(--line);
+  background: var(--panel);
+  max-height: 30%;
+  overflow: auto;
+}
+
+.outcome pre {
+  margin: 0;
+  padding: 10px 14px;
+  font-family: var(--mono);
+  font-size: 12px;
+  white-space: pre-wrap;
+  word-break: break-all;
+}
+
+.outcome-failed pre {
+  color: var(--err);
+}
+
+/* ---- the demand graph ---- */
+
+.demand-graph .rail {
+  stroke: var(--line-soft);
+  stroke-width: 1.5;
+}
+
+.demand-graph .arc {
+  stroke: var(--text-faint);
+  stroke-width: 1;
+  opacity: 0.8;
+}
+
+.demand-graph .lbl {
+  font-family: var(--mono);
+  font-size: 12px;
+  fill: var(--text);
+}
+
+.demand-graph circle,
+.demand-graph rect {
+  stroke-width: 1.5;
+}
+
+.ev-miss {
+  fill: var(--accent);
+  stroke: var(--accent);
+}
+
+.ev-hit {
+  fill: var(--ok);
+  stroke: var(--ok);
+}
+
+.ev-spawn {
+  stroke: var(--info);
+}
+
+text.ev-spawn {
+  fill: var(--text-dim);
+}
+
+.ev-exec-ran {
+  fill: var(--err);
+  stroke: var(--err);
+}
+
+.ev-exec-tier1hit {
+  fill: var(--ok);
+  stroke: var(--ok);
+}
+
+.ev-exec-tier2cutoff {
+  fill: var(--teal);
+  stroke: var(--teal);
+}
+
+.ev-exec-joined {
+  fill: var(--violet);
+  stroke: var(--violet);
+}
+
+.ev-obs-cold {
+  fill: none;
+  stroke: var(--text-dim);
+}
+
+.ev-obs-replayed {
+  fill: var(--ok);
+  stroke: var(--ok);
+  fill-opacity: 0.35;
+}
+
+.ev-done {
+  fill: var(--ok);
+  stroke: var(--ok);
+}
+
+.ev-failed {
+  fill: var(--err);
+  stroke: var(--err);
+}
+
+.lazy-note {
+  fill: var(--text-faint);
+  font-style: normal;
+}
+
+text.ev-miss,
+text.ev-hit,
+text.ev-exec-ran,
+text.ev-exec-tier1hit,
+text.ev-exec-tier2cutoff,
+text.ev-exec-joined,
+text.ev-done,
+text.ev-failed {
+  fill: var(--text);
+}
