@@ -217,7 +217,7 @@ all. Editor diagnostics (flycheck) become graph queries — consistent with CI b
   demand by macro+discipline. Vix enforces them in the language, so a vix/fable function
   maps to a salsified query with NO annotation and no type-system fuckery: the language
   cannot express a non-query. Fable closes the data plane: the generated vix AST derives
-  Facet, fable computes over facet values, picante persists memo tables via facet-postcard
+  Facet, fable computes over facet values, picante persists memo tables via facet serialization (phon, per the codec decision)
   — one reflection layer from parse tree to memo table. Picante is the demand engine seen
   from Rust; fable is a query seen from inside. Bootstrap: (v0) interpret-only oracle in
   Rust — testing QUERY semantics and build semantics as the same thing; (v1) native demand
@@ -436,8 +436,8 @@ in the plan, and the observation-upgrade flow ("eval while ignoring this pin").
 
 **Exec sequencing decided** (ship → advertise → exec): capability = ADDRESS, shipped
 closure = PAYLOAD, exec = demand evaluated where its captured capabilities live. Step 1
-SHIPPED (30f801296): canonical form = generated strip_spans() (spans zeroed) + facet-
-postcard bytes — ONE form for identity and transport; Value derives Facet; ship()/receive()
+SHIPPED (30f801296): canonical form = generated strip_spans() (spans zeroed) +
+phon bytes — ONE form for identity and transport; Value derives Facet; ship()/receive()
 move closures between oracles; test proves exec = eval elsewhere (same value by purity,
 same canon_hash across the wire, same hash from differently-formatted identical source).
 Step 2 next: fleet registry — hosts advertise capability instances (kind, fingerprint,
