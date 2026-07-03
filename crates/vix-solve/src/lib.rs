@@ -1,5 +1,6 @@
 //! Cargo-shaped version resolution over ecosystem-neutral package facts.
 
+use std::cell::RefCell;
 use std::cmp::Reverse;
 use std::collections::{BTreeMap, BTreeSet};
 use std::convert::Infallible;
@@ -10,8 +11,7 @@ use std::path::{Path, PathBuf};
 use eyre::{Context, Result, bail, eyre};
 use facet::Facet;
 use pubgrub::{
-    DefaultStringReporter, Dependencies, DependencyConstraints, DependencyProvider, PubGrubError,
-    Reporter as _, resolve,
+    DefaultStringReporter, Dependencies, DependencyProvider, PubGrubError, Reporter as _, resolve,
 };
 use semver::{Version, VersionReq};
 use thiserror::Error;
@@ -112,7 +112,7 @@ pub struct SolveResult {
     pub deferred_weak_dependencies: Vec<DeferredWeakDependency>,
 }
 
-#[derive(Clone, Debug, Eq, PartialEq)]
+#[derive(Clone, Debug, Eq, Ord, PartialEq, PartialOrd)]
 pub struct DeferredWeakDependency {
     pub package: String,
     pub version: Version,
@@ -143,7 +143,7 @@ pub fn solve(
             tree.collapse_no_versions();
             return Err(SolveError::NoSolution {
                 report: provider.decorate_report(DefaultStringReporter::report(&tree)),
-                deferred_weak_dependencies: provider.deferred_weak_dependencies,
+                deferred_weak_dependencies: provider.deferred_weak_dependencies(),
             });
         }
         Err(err) => return Err(SolveError::Facts(eyre!("{err:?}"))),
@@ -311,7 +311,7 @@ struct PubgrubProvider<'a, F> {
     facts: &'a F,
     root_deps: Vec<RootDependency>,
     exclusions: Vec<EncodedExclusion>,
-    deferred_weak_dependencies: Vec<DeferredWeakDependency>,
+    deferred_weak_dependencies: RefCell<BTreeSet<DeferredWeakDependency>>,
 }
 
 #[derive(Clone, Debug)]
@@ -340,7 +340,7 @@ impl<'a, F: Facts> PubgrubProvider<'a, F> {
             facts,
             root_deps,
             exclusions,
-            deferred_weak_dependencies: Vec::new(),
+            deferred_weak_dependencies: RefCell::new(BTreeSet::new()),
         })
     }
 
@@ -409,8 +409,20 @@ impl<'a, F: Facts> PubgrubProvider<'a, F> {
 
         Ok(SolveResult {
             graph,
-            deferred_weak_dependencies: self.deferred_weak_dependencies,
+            deferred_weak_dependencies: self
+                .deferred_weak_dependencies
+                .into_inner()
+                .into_iter()
+                .collect(),
         })
+    }
+
+    fn deferred_weak_dependencies(&self) -> Vec<DeferredWeakDependency> {
+        self.deferred_weak_dependencies
+            .borrow()
+            .iter()
+            .cloned()
+            .collect()
     }
 
     fn decorate_report(&self, mut report: String) -> String {
@@ -517,7 +529,14 @@ impl<F: Facts> PubgrubProvider<'_, F> {
             }
             PackageId::Feature { package, feature } => {
                 let metadata = self.facts.deps_of(package, version)?;
-                feature_dependencies(package, version, feature, &metadata, &self.exclusions)
+                feature_dependencies(
+                    package,
+                    version,
+                    feature,
+                    &metadata,
+                    &self.exclusions,
+                    &self.deferred_weak_dependencies,
+                )
             }
             PackageId::Conflict { .. } => Ok(Vec::new()),
         }
@@ -569,6 +588,7 @@ fn feature_dependencies(
     feature: &str,
     metadata: &VersionMetadata,
     exclusions: &[EncodedExclusion],
+    deferred_weak_dependencies: &RefCell<BTreeSet<DeferredWeakDependency>>,
 ) -> Result<Vec<(PackageId, VersionSet)>> {
     let mut deps = vec![(
         PackageId::Crate(package.to_owned()),
@@ -612,6 +632,17 @@ fn feature_dependencies(
             let dep = dependency_by_key(metadata, dep_name)?;
             add_dependency_activation(&mut deps, dep)?;
         } else if let Some((dep_name, dep_feature)) = enable.split_once("?/") {
+            // TODO: encode this when the search core can express "if dependency package
+            // is already activated, also activate this feature" as a guarded implication.
+            deferred_weak_dependencies
+                .borrow_mut()
+                .insert(DeferredWeakDependency {
+                    package: package.to_owned(),
+                    version: version.clone(),
+                    feature: feature.to_owned(),
+                    target: dep_name.to_owned(),
+                    target_feature: dep_feature.to_owned(),
+                });
             tracing::debug!(
                 package,
                 version = %version,
@@ -840,6 +871,42 @@ mod tests {
     }
 
     #[test]
+    fn weak_feature_dependencies_are_reported_as_deferred() -> Result<()> {
+        let fixture = RegistryBuilder::new()
+            .package(
+                Package::new("root", "1.0.0")
+                    .dep(Dependency::normal("addon", "=1.0.0").optional(true))
+                    .feature("default", Vec::<String>::new())
+                    .feature("weak", ["addon?/extra"]),
+            )
+            .package(
+                Package::new("addon", "1.0.0")
+                    .feature("default", Vec::<String>::new())
+                    .feature("extra", Vec::<String>::new()),
+            )
+            .write()?;
+        let facts = FixtureFacts::from_registry_root(fixture.root())?;
+
+        let solved = solve(
+            &facts,
+            vec![RootDependency::new("root", "=1.0.0").feature("weak")],
+        )?;
+
+        assert_eq!(
+            solved.deferred_weak_dependencies,
+            vec![DeferredWeakDependency {
+                package: "root".to_owned(),
+                version: Version::new(1, 0, 0),
+                feature: "weak".to_owned(),
+                target: "addon".to_owned(),
+                target_feature: "extra".to_owned(),
+            }]
+        );
+        assert_eq!(package_set(&solved), names_versions([("root", "1.0.0")]));
+        Ok(())
+    }
+
+    #[test]
     fn feature_exclusion_conflict_names_both_demanding_packages() -> Result<()> {
         let fixture = RegistryBuilder::new()
             .package(
@@ -890,6 +957,13 @@ mod tests {
             .iter()
             .filter(|package| package.name != "oracle-project")
             .map(|package| (package.name.clone(), package.version.clone()))
+            .collect()
+    }
+
+    fn names_versions<const N: usize>(items: [(&str, &str); N]) -> BTreeSet<(String, String)> {
+        items
+            .into_iter()
+            .map(|(name, version)| (name.to_owned(), version.to_owned()))
             .collect()
     }
 
