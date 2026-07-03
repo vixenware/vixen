@@ -133,6 +133,34 @@ The uncomfortable corollary: the moat is not in this repo's *code* either.
 It's in the corpus, the reputation, and the default-ness. The code here is
 closed because it's ours, not because closedness protects it.
 
+## The host runtime — a third home (direction agreed 2026-07-03, name pending)
+
+The sandbox/VFS layer (today: Vixen.app — FSKit extension, sandbox, build
+server, one installable app) goes **open source**, but NOT into the facet
+monorepo. Three homes:
+
+1. **facet** (open): language + protocol + libraries. Crates, not apps.
+2. **A new open repo**, Vixenware-maintained, MIT/Apache (BSL would kill the
+   attestation argument): the HOST RUNTIME — what Vixen.app is today. FSKit
+   ext (macOS forces the signed-app shape anyway), sandbox profile gen, exec
+   runner, the installable daemon. Consumes the facet crates. This repo is
+   the TEE-measured artifact, so it wants to be small, self-contained, and
+   reproducibly buildable — a crisp audit surface. Vixenware signs official
+   builds (a trust anchor and a convenience, checkable via repro builds).
+   This is the Tailscale-client / Datadog-agent shape: the privileged thing
+   on the customer's machine is open; the network it talks to is the company.
+3. **vixenware/vixen** (private): the plural.
+
+Consequence for daemons: facet's `vixd` stays the protocol REFERENCE
+(oracle-backed, no real sandbox); the installable daemon people run ships
+from the runtime repo, implementing the same open service.
+
+Name: not Vixen-branded (keeps the vix-open/Vixen-paid line clean). Fox
+register candidates: **den** (a fox's home — the local host runtime) and
+**skulk** (collective noun for foxes — the paid fleet). "Install Den, buy
+the Skulk." Amos to decide; "Vixen Foundation"-style brand-carrying names
+are the alternative if maintainership legibility wins.
+
 ## Playground placement (decided)
 
 - Language playground (snark): facet repo. Open.
