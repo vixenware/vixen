@@ -721,6 +721,33 @@ the trace view gains rails/lanes (Perfetto-shaped) once the fleet backend
 streams genuinely concurrent runs; the local oracle is synchronous, so
 lanes degenerate there (fine — the schema leads, the backend catches up).
 
+## 3‡. Warm daemon + the type-closure identity hole (2026-07-03)
+
+Warm-oracle actor SHIPPED (facet 3549b6dff, by a delegated GPT-5.5 agent
+against briefs/warm-oracle-actor.md; reviewed and accepted here). The
+anti-Nix demo is now an executable invariant: a comment-only edit re-evals
+to EXACTLY [Hit{lua}, Done] over the wire.
+
+The brief's planted question surfaced a REAL identity hole, confirmed by
+the agent: memo keys are (fn_canon_hash × args), but a fn's canon hash
+does not cover the TYPE DECLARATIONS it references. Edit an enum's variant
+order (or a struct's fields) without touching a fn, and that fn's memo
+entry survives while holding Values shaped under the OLD declarations
+(variant indices, field lists) — a false positive, our one forbidden
+outcome.
+
+**DECISION (taste record grade): fn identity must be a CLOSURE HASH over
+the fn's canonical AST plus the canonical ASTs of every type declaration
+it references, transitively.** This is not a patch, it's the existing
+invariant — "closure hash in every memo key" — applied to types: a
+referenced enum/struct declaration is part of a fn's closure exactly like
+a captured capability is. Implementation shape: binder already resolves
+type references; compute type-decl canon hashes at load; fn_hash :=
+hash(fn canon, sorted referenced-type canons, transitive). Delegable once
+briefed; the warm daemon is safe for demos meanwhile (single-user, and
+type edits are visible as wrong results, not silent corruption of a
+shared cache — but it must land before any shared cache does).
+
 ## 4. Still open (carried forward)
 
 - Streams: the forgotten design details (chunking, replay granularity, backpressure
