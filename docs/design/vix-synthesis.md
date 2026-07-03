@@ -365,6 +365,17 @@ PHASED PLAN (async-weavy, then the graph stage on top):
    prerequisite for running.
 3. weavy IR gains a suspend/await op + a Poll ABI; graduate the spike into weavy::jit::async
    (delete the spike). JIT'd code implements Future::poll; it can .await real Rust futures.
+4-core.[DONE a81a10201] THE GRAPH DEMAND ENGINE (vix::graph) — nothing forces locally, proven.
+   Node model (pure data: Const/Input/Apply/Cond) + a demand-driven async Future driver: building
+   the graph computes nothing; polling backpropagates demand from the selected output; a worklist
+   fixpoint pulls the frontier and parks on outstanding Input boundaries. Six invariants are
+   executable tests: build-computes-nothing; demand-pulls-only-the-reachable-closure (a node no
+   selection depends on never runs); unused-Cond-arm-never-runs (dynamic demand — control flow
+   lives in the graph); shared-node-computes-once (memo by identity); independent-inputs-resolve-
+   concurrently (JOINT Need — Apply demands all inputs at once, ~max not sum); async-boundary-
+   suspends-and-resumes (demand IS the await; pending_frontier() = what it's blocked on).
+   Interpret-first (core::future, tokio dev-only, wasm-clean). i64 v1; Value + weavy-async
+   lowering + differential-vs-oracle next.
 4. THE GRAPH STAGE (nothing forces locally): lowering AST+env -> nodes (computes nothing);
    the driver backpropagates demand from selected outputs; nodes declare Need(set) JOINTLY
    (parallelism default); aggregation BATCHES demand at fused-node boundaries (perf, not
