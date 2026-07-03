@@ -73,7 +73,11 @@ one, across compactions. IMPLEMENTATION GOES TO GPT-5.5 HIGH ONLY
 (provider "codex/gpt-5.5", thinkingOptionId "high", modeId "auto-review" —
 NOT "auto": auto parks the agent on human approvals; auto-review routes
 them to the auto-reviewer. Learned when the rebase agent sat 20 minutes on
-a git-worktree fetch approval). Also: facet-cc is a linked WORKTREE of
+a git-worktree fetch approval).
+DESIGN DECISIONS ARE MADE WITH AMOS, IN THE THREAD — propose with options
+and a recommendation, wait for his ruling. Auto-rule ONLY implementation
+choices inside already-agreed designs. (Breached once on cargo D3/D4/D8;
+corrected. A2 in the engine constitution is also pending his ruling.) Also: facet-cc is a linked WORKTREE of
 ~/oss/facet (shared .git — never check out the same branch in both). Amos and I hold the design line here. When work
 turns mechanical I write a detailed, SELF-CONTAINED agent prompt (context,
 files, acceptance criteria, the oracle it must keep green); Amos dispatches

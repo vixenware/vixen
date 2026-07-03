@@ -1,9 +1,12 @@
 # cargo.vix ⊗ version resolution — decisions
 
 *The design cycle's ledger: each D-marker in cargo.vix gets its ruling here.
-Sketch and rulings co-evolve; the sketch is the test of every ruling.*
+Sketch and rulings co-evolve; the sketch is the test of every ruling.
+STATUS CORRECTION: D3/D4/D8 below were marked RULED unilaterally — process
+breach, called out by Amos. They are PROPOSED until ruled together. The
+sketch v0.2 embodies the proposals so they can be critiqued concretely.*
 
-## D3 — the solver seam (RULED)
+## D3 — the solver seam (PROPOSED, pending Amos)
 
 `solve` is a primitive (like exec/fetch): the PubGrub-style SEARCH runs
 runtime-side, but every FACT it consumes is demanded back from vix as a
@@ -17,7 +20,7 @@ Resolution is therefore a pure function of (roots × pinned registry views).
 The runtime search is an implementation detail exactly the way an executor
 is: it answers a question whose correctness the language can restate.
 
-## D4 — pin the solve result, or recompute from pins? (RULED: recompute)
+## D4 — pin the solve result, or recompute from pins? (PROPOSED: recompute — but see the solver-upgrade question)
 
 The journal pins only the OBSERVATIONS (version listings; manifests need no
 pin, they're content-addressed). The solve result is recomputed — it's pure
@@ -28,7 +31,7 @@ is the named, committable journal slice covering resolution's pins.**
 become journal-slice merges (pin-per-line; mostly append/replace — a better
 story than Cargo.lock's).
 
-## D8 — feature unification (RULED: inside `solve`)
+## D8 — feature unification (PROPOSED: inside `solve` — the two-phase alternative deserves real discussion)
 
 Features are mutually recursive with version selection: enabling a feature
 can enable an optional dep, which changes the graph, which changes

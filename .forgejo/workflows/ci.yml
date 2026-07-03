@@ -19,7 +19,7 @@ env:
 jobs:
     mac:
         name: mac
-        runs-on: mac
+        runs-on: aarch64-apple-darwin
         steps:
             - name: Checkout repository
               run: |
@@ -64,7 +64,7 @@ jobs:
 
     linux:
         name: linux
-        runs-on: linux-x86_64-trusted
+        runs-on: linux-x86_64
         container:
             image: code.vixen.rs/vixen/vixen-ci:latest
             volumes:
