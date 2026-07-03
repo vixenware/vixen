@@ -19,6 +19,18 @@
 
   --ui: ui-sans-serif, system-ui, -apple-system, sans-serif;
   --mono: "JetBrains Mono", "SFMono-Regular", Consolas, monospace;
+
+  /* syntax captures (same palette as the snark playground, dark values) */
+  --cap-property: #7fb2ff;
+  --cap-comment: #6b7a6b;
+  --cap-number: #c9a2ff;
+  --cap-function: #6fc3e8;
+  --cap-keyword: #f0976b;
+  --cap-punct: #93a0ad;
+  --cap-string: #8cd29a;
+  --cap-type: #e3b25a;
+  --cap-variable: #d8dee5;
+  --cap-default: #aeb7c0;
 }
 
 * {
@@ -204,6 +216,64 @@ button:disabled {
 
 .outcome-failed pre {
   color: var(--err);
+}
+
+/* ---- code intelligence (snark captures + occurrences) ---- */
+
+.cap-comment,
+.cap-comment-documentation {
+  color: var(--cap-comment);
+}
+
+.cap-keyword {
+  color: var(--cap-keyword);
+}
+
+.cap-number {
+  color: var(--cap-number);
+}
+
+.cap-string,
+.cap-string-special,
+.cap-string-special-path {
+  color: var(--cap-string);
+}
+
+.cap-constant,
+.cap-constant-builtin {
+  color: var(--cap-number);
+}
+
+.cap-function,
+.cap-function-call,
+.cap-function-macro,
+.cap-function-method {
+  color: var(--cap-function);
+}
+
+.cap-constructor,
+.cap-type {
+  color: var(--cap-type);
+}
+
+.cap-property {
+  color: var(--cap-property);
+}
+
+.cap-variable-parameter {
+  color: var(--cap-variable);
+}
+
+.cap-operator,
+.cap-punctuation-delimiter,
+.cap-punctuation-special {
+  color: var(--cap-punct);
+}
+
+.occurrence {
+  background: rgb(227 178 90 / 16%);
+  outline: 1px solid rgb(227 178 90 / 35%);
+  border-radius: 2px;
 }
 
 /* ---- the demand graph ---- */

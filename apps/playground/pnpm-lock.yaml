@@ -11,6 +11,9 @@ importers:
       '@bearcove/phon-schema':
         specifier: 0.2.0-rc.0
         version: 0.2.0-rc.0
+      '@bearcove/snark-wasm':
+        specifier: link:../../../../oss/facet-cc/snark-wasm
+        version: link:../../../../oss/facet-cc/snark-wasm
       '@bearcove/vox-core':
         specifier: link:../../../../oss/facet-cc/vox/typescript/packages/vox-core
         version: link:../../../../oss/facet-cc/vox/typescript/packages/vox-core
