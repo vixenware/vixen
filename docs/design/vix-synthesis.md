@@ -351,6 +351,18 @@ PHASED PLAN (async-weavy, then the graph stage on top):
    weavy-async-spike/DESIGN.md.
 2. Multi-await resumption: the await stencil writes its OWN resume offset into Ctx (a real
    resumable state machine, not one-await); several suspend points per chain.
+3-pre.[DONE 6bb5dac9e] weavy::jit::async GRADUATED — and the key correction: the async lane is
+   the EVALUATION substrate, so it must NOT be JIT-gated (iOS/wasm FORBID JIT — no executable
+   pages / no native codegen — and that's where a runtime often lives). Two backends, one
+   semantics, behind a `Machine` trait: Interp (pure Rust, always available, no unsafe — the
+   REFERENCE) and the JIT copy-and-patch lane (feature-gated accelerator that must MATCH).
+   AsyncExec::new picks JIT-when-available else interpreter; ::interpret forces portable;
+   suspend/resume + trace + suspension() are backend-agnostic (same debuggability on an iPhone
+   and a build server). Proven: weavy passes WITHOUT jit (portability), and with jit a
+   differential test asserts interp==JIT on result AND suspension trace for every program.
+   STANDING RULE (added to the invariants list): the evaluation substrate is interpret-first;
+   JIT is an accelerator that must never diverge from the interpreter and is never a
+   prerequisite for running.
 3. weavy IR gains a suspend/await op + a Poll ABI; graduate the spike into weavy::jit::async
    (delete the spike). JIT'd code implements Future::poll; it can .await real Rust futures.
 4. THE GRAPH STAGE (nothing forces locally): lowering AST+env -> nodes (computes nothing);
