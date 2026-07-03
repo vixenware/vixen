@@ -85,8 +85,15 @@ and supervises those agents separately; results feed back here and I rule
 on integration. Spec and implement interleaved. Commit continuously so the
 thread can end mid-stride with nothing lost.
 
+**MODEL RULES (Amos-installed, absolute):** NEVER use any model string
+containing "[1m]" — API-priced, off-subscription (nearly happened once;
+Amos caught it mid-dispatch). Big context → claude/claude-sonnet-5 (1M
+native, on subscription). Implementation → codex/gpt-5.5 thinking-high
+modeId "auto-review". Digestion/mapping → sonnet-5. Cheap lookups →
+haiku-4-5.
+
 **Priorities (agreed):**
-1. **THE KEYSTONE — graph engine == oracle. IN PROGRESS: the constitution
+1. **THE KEYSTONE — DONE (synthesis §3§, task #45). Was: IN PROGRESS: the constitution
    is written and committed — docs/design/engine-demand-semantics.md. READ
    IT FIRST; it is normative (node vocabulary, Identity/Path demand kinds,
    the exhaustive strictness-point list, the equivalence contract the
@@ -101,7 +108,14 @@ thread can end mid-stride with nothing lost.
    event stream. This is what killed attempts 1–4; once it holds, every
    future optimization has a machine-checkable definition of "didn't break
    vix". Do the semantic core myself; delegate mechanical extension.
-2. **cargo.vix ⊗ version resolution — ONE design cycle** (Amos: "I don't
+2. **cargo.vix ⊗ version resolution — ACTIVE. D3/D4 RULED with Amos, D8
+   direction fixed (inside solve, not two-phase; features-as-terms depth
+   PAUSED pending reconciliation with the March 2026 discussion — 219KB
+   recovered doc digested into docs/design/march-solver-recovered.md by a
+   sonnet-5 agent; reconcile its tension list WITH AMOS before closing
+   D8's four sub-decisions: universes, determinism spec, additivity
+   contract, default-features sugar). Ledger: sketches/cargo/decisions.md.**
+   Original framing: **cargo.vix ⊗ version resolution — ONE design cycle** (Amos: "I don't
    think we can have one without the other"; each is the other's test).
    Sketch cargo.vix until it demands a decision, make the decision, sketch
    onward. Lockfile-as-pinned-journal sits at the seam. Produces the
