@@ -312,6 +312,13 @@ suspend on real network I/O natively, no interpreter loop, no coroutine parallel
 
 PHASED PLAN (async-weavy, then the graph stage on top):
 1. [DONE] crux: suspend/resume of a copy-and-patch chain over real async.
+1b.[DONE a7b1ae91b] phase 2 — N suspend points: each await bakes its own resume offset +
+   index into the immediate stream; host readiness/value arrays ⇒ independent awaits resolve
+   CONCURRENTLY (chain visits them in program order but the driver polls all inputs).
+   Driver guard: parked ⇒ don't re-enter unless the BLOCKED await is ready (each real node
+   registers only on its own input). Debuggability first-class: suspension trace (which await
+   parked, at what stack depth) + live parked-state inspection (operand-stack snapshot). See
+   weavy-async-spike/DESIGN.md.
 2. Multi-await resumption: the await stencil writes its OWN resume offset into Ctx (a real
    resumable state machine, not one-await); several suspend points per chain.
 3. weavy IR gains a suspend/await op + a Poll ABI; graduate the spike into weavy::jit::async
