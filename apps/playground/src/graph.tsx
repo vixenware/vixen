@@ -42,22 +42,61 @@ function rowClass(e: DemandEvent): string {
   }
 }
 
+function trunc(s: string, n: number): string {
+  return s.length > n ? s.slice(0, n - 1) + "…" : s;
+}
+
+/// The label says WHAT; the glyph's shape/color says HOW (status words live
+/// in the tooltip and the legend, not in the row).
 function label(e: DemandEvent): string {
   switch (e.tag) {
     case "Miss":
-      return `fn ${e.func} — miss, evaluating`;
-    case "Hit":
-      return `fn ${e.func} — memo hit`;
+    case "Hit": {
+      const args = trunc(e.args.map(([, v]) => v).join(", "), 46);
+      return `fn ${e.func}(${args})`;
+    }
     case "Spawn":
-      return `spawn ${e.command} (pending tree)`;
-    case "Exec":
-      return `exec ${e.command} — ${servingLabel(e.serving)}`;
+      return `${e.command}: ${trunc(e.describe[0] ?? "", 56)}`;
+    case "Exec": {
+      const names = e.outputs.map(([p]) => p.split("/").pop() ?? p).join(", ");
+      return `→ ${trunc(names, 52)}`;
+    }
     case "Observation":
-      return `${e.key} — ${e.replayed ? "replayed pin" : "observed (cold)"}`;
+      return trunc(e.key, 56);
     case "Done":
       return "done";
     case "Failed":
       return "failed";
+  }
+}
+
+/// Full status, for the row tooltip.
+function statusText(e: DemandEvent): string {
+  switch (e.tag) {
+    case "Miss":
+      return "memo miss — evaluated";
+    case "Hit":
+      return "memo hit — served from cache";
+    case "Spawn":
+      return "dispatched (pending tree)";
+    case "Exec":
+      return servingLabel(e.serving);
+    case "Observation":
+      return e.replayed ? "replayed pin" : "observed the world (cold)";
+    case "Done":
+      return "evaluation finished";
+    case "Failed":
+      return "evaluation failed";
+  }
+}
+
+function atLabel(e: DemandEvent): string | null {
+  switch (e.tag) {
+    case "Done":
+    case "Failed":
+      return null;
+    default:
+      return `+${(Number(e.at) / 1000).toFixed(1)}ms`;
   }
 }
 
@@ -147,9 +186,9 @@ export function DemandGraph(props: {
   events: DemandEvent[];
   settled: boolean;
   cursor: number | null;
-  onSelectSpan: (span: Span) => void;
+  onSelect: (event: DemandEvent) => void;
 }) {
-  const { events, settled, cursor, onSelectSpan } = props;
+  const { events, settled, cursor, onSelect } = props;
   const rows = layout(events);
   const height = rows.length * ROW_H + 12;
 
@@ -171,7 +210,19 @@ export function DemandGraph(props: {
   const glyphX = (depth: number) => GLYPH_X + depth * INDENT;
 
   return (
-    <svg className="demand-graph" width="100%" height={height}>
+    <div>
+      <div className="legend">
+        <span className="lg lg-miss">● miss</span>
+        <span className="lg lg-hit">● hit</span>
+        <span className="lg lg-spawn">◌ dispatched</span>
+        <span className="lg lg-ran">■ ran</span>
+        <span className="lg lg-t1">■ tier-1</span>
+        <span className="lg lg-t2">■ tier-2</span>
+        <span className="lg lg-joined">■ joined</span>
+        <span className="lg lg-obs">◇ observed</span>
+        <span className="lg lg-replay">◆ replayed</span>
+      </div>
+      <svg className="demand-graph" width="100%" height={height}>
       {arcs.map((a, i) => {
         const y1 = rowY(a.from);
         const y2 = rowY(a.to);
@@ -197,7 +248,7 @@ export function DemandGraph(props: {
           <g
             key={i}
             className={`row${span ? " row-linked" : ""}${cursorHit ? " row-cursor" : ""}`}
-            onClick={span ? () => onSelectSpan(span) : undefined}
+            onClick={() => onSelect(e)}
           >
             {cursorHit && (
               <rect className="cursor-hit" x={0} y={y - ROW_H / 2 + 2} width="100%" height={ROW_H - 4} rx={5} />
@@ -205,13 +256,18 @@ export function DemandGraph(props: {
             {glyph(e, x, y)}
             <text className={`lbl ${rowClass(e)}`} x={x + 18} y={y + 4}>
               {label(e)}
-              {neverFlushed && (
-                <tspan className="lazy-note"> — projected only, never flushed</tspan>
-              )}
+              {neverFlushed && <tspan className="lazy-note"> — never flushed</tspan>}
             </text>
+            {atLabel(e) !== null && (
+              <text className="at" x="100%" y={y + 4} textAnchor="end" dx={-8}>
+                {atLabel(e)}
+              </text>
+            )}
+            <title>{statusText(e)}</title>
           </g>
         );
       })}
-    </svg>
+      </svg>
+    </div>
   );
 }

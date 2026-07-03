@@ -390,3 +390,129 @@ text.ev-done,
 text.ev-failed {
   fill: var(--text);
 }
+
+/* ---- the inspector ---- */
+
+.inspector {
+  border-top: 1px solid var(--line);
+  background: var(--panel);
+  max-height: 40%;
+  overflow: auto;
+  padding: 10px 14px;
+  font-size: 12px;
+}
+
+.inspector-head {
+  display: flex;
+  align-items: center;
+}
+
+.inspector-title {
+  font-family: var(--mono);
+  color: var(--accent);
+  font-weight: 600;
+}
+
+.inspector-close {
+  margin-left: auto;
+  border: none;
+  background: none;
+  color: var(--text-faint);
+  font-size: 16px;
+  cursor: pointer;
+  padding: 0 4px;
+}
+
+.inspector-describe {
+  margin: 8px 0;
+  padding-left: 16px;
+}
+
+.inspector-describe .d0 {
+  color: var(--text);
+  font-weight: 600;
+}
+
+.inspector-describe .d1 {
+  color: var(--text-dim);
+}
+
+.inspector-args {
+  border-collapse: collapse;
+  margin: 6px 0;
+}
+
+.inspector-args td {
+  padding: 1px 12px 1px 0;
+  font-family: var(--mono);
+}
+
+.arg-name {
+  color: var(--text-dim);
+}
+
+.inspector-argv {
+  margin: 6px 0;
+  padding: 6px 8px;
+  background: var(--code-bg);
+  border: 1px solid var(--line-soft);
+  border-radius: 6px;
+  font-family: var(--mono);
+  white-space: pre-wrap;
+  word-break: break-all;
+  color: var(--text-dim);
+}
+
+.outputs-head {
+  color: var(--text-faint);
+  text-transform: uppercase;
+  letter-spacing: 0.06em;
+  font-size: 10px;
+  margin: 8px 0 4px;
+}
+
+.output-row {
+  display: flex;
+  gap: 14px;
+  font-family: var(--mono);
+}
+
+.output-path {
+  color: var(--cap-string);
+}
+
+.output-hash {
+  color: var(--text-faint);
+}
+
+.inspector-note {
+  color: var(--text-dim);
+  max-width: 52ch;
+}
+
+.demand-graph .at {
+  font-family: var(--mono);
+  font-size: 10px;
+  fill: var(--text-faint);
+}
+
+/* ---- legend ---- */
+
+.legend {
+  display: flex;
+  gap: 12px;
+  flex-wrap: wrap;
+  padding: 6px 12px 2px;
+  font-size: 11px;
+  color: var(--text-dim);
+}
+
+.lg-miss { color: var(--accent); }
+.lg-hit { color: var(--ok); }
+.lg-spawn { color: var(--info); }
+.lg-ran { color: var(--err); }
+.lg-t1 { color: var(--ok); }
+.lg-t2 { color: var(--teal); }
+.lg-joined { color: var(--violet); }
+.lg-obs { color: var(--text-dim); }
+.lg-replay { color: var(--ok); }

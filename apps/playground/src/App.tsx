@@ -3,6 +3,7 @@ import { Editor, type EditorApi } from "./editor";
 import { connect, startEval, type EvalSession } from "./daemon";
 import type { DaemonClient, DemandEvent } from "./generated/daemon";
 import { DemandGraph } from "./graph";
+import { Inspector } from "./inspector";
 import { byteToUtf16, utf16ToByte } from "./offsets";
 import luaSample from "./samples/lua.vix?raw";
 
@@ -28,12 +29,14 @@ export function App() {
   // The cursor position in BYTE space (converted from CodeMirror's UTF-16),
   // comparable against event spans directly.
   const [cursor, setCursor] = useState<number | null>(null);
+  const [inspected, setInspected] = useState<DemandEvent | null>(null);
 
   const busy = status === "connecting" || status === "running" || status === "stepping";
 
   async function demand() {
     setEvents([]);
     setOutcome(null);
+    setInspected(null);
     setStatus("connecting");
     try {
       if (!client.current) {
@@ -155,15 +158,25 @@ export function App() {
                 events={events}
                 settled={status === "done" || status === "failed"}
                 cursor={cursor}
-                onSelectSpan={(s) =>
-                  editor.current?.selectSpan(
-                    byteToUtf16(evalSource.current, s.start),
-                    byteToUtf16(evalSource.current, s.end),
-                  )
-                }
+                onSelect={(e) => {
+                  setInspected(e);
+                  const span =
+                    e.tag === "Miss" || e.tag === "Hit" || e.tag === "Spawn" || e.tag === "Exec"
+                      ? e.span
+                      : null;
+                  if (span) {
+                    editor.current?.selectSpan(
+                      byteToUtf16(evalSource.current, span.start),
+                      byteToUtf16(evalSource.current, span.end),
+                    );
+                  }
+                }}
               />
             )}
           </div>
+          {inspected !== null && (
+            <Inspector event={inspected} events={events} onClose={() => setInspected(null)} />
+          )}
           {outcome !== null && (
             <div className={`outcome outcome-${status}`}>
               <pre>{outcome}</pre>
