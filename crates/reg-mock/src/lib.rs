@@ -3,7 +3,7 @@
 use std::collections::{BTreeMap, BTreeSet};
 use std::fs;
 use std::io::{Cursor, Read};
-use std::net::{SocketAddr, TcpListener};
+use std::net::SocketAddr;
 use std::path::{Path, PathBuf};
 use std::process::Command;
 use std::sync::Arc;
@@ -355,18 +355,14 @@ impl RegistryFixture {
 
 impl MockRegistryServer {
     pub fn start(fixture: RegistryFixture) -> Result<Self> {
-        let listener =
-            TcpListener::bind("127.0.0.1:0").wrap_err("binding registry HTTP listener")?;
-        listener
-            .set_nonblocking(true)
-            .wrap_err("setting registry HTTP listener nonblocking")?;
-        let addr = listener
-            .local_addr()
-            .wrap_err("reading registry HTTP listener addr")?;
+        let server =
+            Server::http("127.0.0.1:0").map_err(|err| eyre!("starting tiny_http server: {err}"))?;
+        let addr = server
+            .server_addr()
+            .to_ip()
+            .ok_or_else(|| eyre!("tiny_http returned a non-IP listen address"))?;
         patch_config(fixture.root(), addr)?;
 
-        let server = Server::from_listener(listener, None)
-            .map_err(|err| eyre!("starting tiny_http server: {err}"))?;
         let root = fixture.root().to_path_buf();
         let stop = Arc::new(AtomicBool::new(false));
         let thread_stop = Arc::clone(&stop);
@@ -865,6 +861,7 @@ mod tests {
     }
 
     #[test]
+    #[ignore = "hypothesis landed negative: Cargo produced identical lockfiles for reversed dependency order on this multiple-solution fixture"]
     fn dependency_order_changes_lockfile_when_multiple_valid_solutions_exist() -> Result<()> {
         let server = RegistryBuilder::new()
             .package(
