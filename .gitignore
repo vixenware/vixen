@@ -37,3 +37,7 @@ zoo/libpng-src/
 /work
 /.envrc
 .cache
+
+# node
+node_modules
+dist
