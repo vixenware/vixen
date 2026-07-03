@@ -288,6 +288,17 @@ the AST currently drops), (2) the vix binder (shared prerequisite of oracle AND 
 (3) demand-engine oracle on top (agreed slice), (4) playground IDE ops for vix, (5) Ring 0
 generalization for all bundled grammars, (6) Ring 3 once the oracle answers demands.
 
+**THE WIRE SHIPPED — vix-wire** (be907a803): the executor as a vox service over real
+websockets, carrying the recovered intent on current seam types. Producing handles:
+PathReady streams per output as the tool writes it; the canonical rmeta-before-rlib test
+passes over the socket (consumer fetches lib.rmeta mid-run while gated "codegen" blocks —
+no whole-tree hash exists yet). Observer closures: shipped vix closures evaluated ON the
+executor against Run; `|run| run.out.glob("*.o")` crosses back as [main.o] — the
+projection, never the world. Gravity: pull_from moves trees executor→executor; the
+orchestrator holds hashes, never bytes. Still open, on purpose: producing-path caching
+(the L1-before-hash question) and observer identity joining the wire-side key (local
+ExecCache has it; the wire path doesn't cache yet); seatbelt lands runtime-side.
+
 **ARCHEOLOGY RECOVERED (git history of vixen/, purge-lost, salvage-worthy)**. Standing
 caveat from Amos: these are EARLIER, half-cooked iterations — recovered for their
 INTENT/IMPETUS, not as corrections to apply wholesale. Where they disagree with the
