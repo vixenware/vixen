@@ -288,6 +288,23 @@ the AST currently drops), (2) the vix binder (shared prerequisite of oracle AND 
 (3) demand-engine oracle on top (agreed slice), (4) playground IDE ops for vix, (5) Ring 0
 generalization for all bundled grammars, (6) Ring 3 once the oracle answers demands.
 
+**THE LANGUAGE IS DEMAND-DRIVEN NOW, NOT JUST ITS CACHES** (df988a97b, answering Amos's
+caution): audit found evaluation strict while identity/caching were demand-faithful —
+producing handles died at the language boundary. Fixed at the exec layer with ONE RULE:
+**projection doesn't force; identity does.** Command blocks dispatch and return a pending
+tree immediately; `pending / path` demands one path (blocks only until the producer
+writes it); hash/cmp/ship, mounts, methods, and collect-merges force the flush;
+Oracle::call deep-forces its result (demand enters at the edge, inner evaluation stays
+lazy). Free consequences: map spawns ALL compiles before collect awaits any (parallel
+fan-out from sequential source), and runs whose outputs are only projected NEVER flush —
+demand-truthful accounting (lua.vix: 5 spawns, 3 flushes; main's object and the archive
+are only ever projected — less transfer, and true even across machines). Acceptance probe
+UNPASSABLE under strict evaluation: a vix program splices {a_out / p"lib.rmeta"} into B's
+compile; B finishes while A is still gated in codegen; A dispatches but never flushes.
+Demand is the await, IN THE LANGUAGE. Still strict (deliberately, for now): scalar
+evaluation order inside bodies (thunk-level laziness = the graph-driver/fable stage);
+pending trees force at fn-arg memo hashing (identity, correct).
+
 **LUA BUILDS ACROSS MACHINES** (5de24869a): the composition turn. The oracle's command
 blocks dispatch through vix::oracle::ExecBackend (sync, wasm-clean) to vix_wire::
 FleetBackend — N executors, placement Gravity (run where the most inputs live) or
