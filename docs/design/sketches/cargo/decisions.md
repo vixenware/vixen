@@ -67,6 +67,22 @@ that no feature ever activates can fail a build that should succeed.
 Depth (term language, universes, determinism, additivity) being designed
 in-thread; this section gets the outcome.
 
+VERIFICATION vs the March verbatim record (march-solver-recovered-verbatim.md
+§tension-iii): the features-as-propagated-Horn-terms framing is a JULY
+invention, NOT recovered — March never modeled feature activation as
+propagation (features were always a union-join INPUT threaded through
+recursive calls; msg 22 sketch). What March DOES support verbatim: the
+decision-vs-propagation architecture itself — msg 4: "make an explicit
+decision (an assumption)... keep the learned incompatibility but retract the
+assumption level. That is basically PubGrub/CDCL recast in Vixen terms" —
+and incompatibilities-over-terms (msg 4, line 252). July's framing SUBSUMES
+March's union view: the final feature set IS the union of derived positive
+literals. The new claim to scrutinize when ruling: "version choices are the
+ONLY decision points" — believed true for cargo (features are only ever
+demanded, never freely chosen; weak features dep?/feat are guarded Horn
+implications, still propagation), stated here so the ruling is on exact
+words, not paraphrase.
+
 Superseded framing below:
 
 Features are mutually recursive with version selection: enabling a feature
