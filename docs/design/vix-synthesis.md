@@ -288,6 +288,43 @@ the AST currently drops), (2) the vix binder (shared prerequisite of oracle AND 
 (3) demand-engine oracle on top (agreed slice), (4) playground IDE ops for vix, (5) Ring 0
 generalization for all bundled grammars, (6) Ring 3 once the oracle answers demands.
 
+**WEAVY ASYNC — THE GRAPH-STAGE PREREQUISITE (crux PROVEN)** (df5b477d5, weavy-async-spike):
+Amos's two wrinkles on the graph stage — (a) lower demand-driven evaluation to weavy,
+(b) suspend points via RUST ASYNC (coroutines tried, impractical). This is the prerequisite
+and its scope is large; the riskiest unknown is derisked FIRST.
+
+THE INSIGHT (worth engraving): a copy-and-patch chain ALREADY keeps its state off the C
+stack (Ctx is an explicit struct: prog + operand-stack pointer + host cells), and the
+`become` guaranteed-tail-call discipline means no stencil holds live C-stack state across
+its continuation. So the whole chain runs in ONE stack frame (the driver's call); any
+stencil SUSPENDS by returning up (losing nothing) instead of tail-calling through; resume
+re-enters at the awaited stencil's offset (chain_fn). It IS the two-successor guard stencil
+with the slow path repurposed from "deopt to interpreter" to "yield Pending to the
+executor" — the mechanism has existed since the guard lane. Proven over real tokio: a JIT'd
+`push 40; await X; add` parks (asserted), X arrives 50ms later from another task, resumes to
+42; ready values run straight through the native fast path.
+
+WHY THIS IS THE KEYSTONE: "nothing forces locally" + "suspend points" are the SAME
+requirement from two sides. A node that awaits its inputs IS a future; the demand driver IS
+an executor; a cross-executor part landing over vox IS a woken waker. Our awaited things are
+ALREADY tokio futures (exec flush, fetch_path, producing handle) — so JIT'd vix nodes
+suspend on real network I/O natively, no interpreter loop, no coroutine parallel-stack hack.
+
+PHASED PLAN (async-weavy, then the graph stage on top):
+1. [DONE] crux: suspend/resume of a copy-and-patch chain over real async.
+2. Multi-await resumption: the await stencil writes its OWN resume offset into Ctx (a real
+   resumable state machine, not one-await); several suspend points per chain.
+3. weavy IR gains a suspend/await op + a Poll ABI; graduate the spike into weavy::jit::async
+   (delete the spike). JIT'd code implements Future::poll; it can .await real Rust futures.
+4. THE GRAPH STAGE (nothing forces locally): lowering AST+env -> nodes (computes nothing);
+   the driver backpropagates demand from selected outputs; nodes declare Need(set) JOINTLY
+   (parallelism default); aggregation BATCHES demand at fused-node boundaries (perf, not
+   semantics). Each JIT'd node = an async state machine; Need = .await on input nodes; the
+   recursive oracle stays the reference for differential testing.
+Rule to hold through all of it (Amos, verbatim-ish): nothing forces locally — not
+application, member access, operators, conditionals. Everything is a graph; demand
+backpropagates from selected outputs; aggregation catches/BATCHES demand for performance.
+
 **THE LANGUAGE IS DEMAND-DRIVEN NOW, NOT JUST ITS CACHES** (df988a97b, answering Amos's
 caution): audit found evaluation strict while identity/caching were demand-faithful —
 producing handles died at the language boundary. Fixed at the exec layer with ONE RULE:
