@@ -288,6 +288,19 @@ the AST currently drops), (2) the vix binder (shared prerequisite of oracle AND 
 (3) demand-engine oracle on top (agreed slice), (4) playground IDE ops for vix, (5) Ring 0
 generalization for all bundled grammars, (6) Ring 3 once the oracle answers demands.
 
+**PRODUCING-vs-L1 ANSWERED** (bbb92eacd): the pre-purge open question closes. Mid-flight
+there is NO cache entry — there is a live run to JOIN. Three states: absent → spawn
+(tier-2 checked first, now on the wire path); in-flight → ATTACH (subscribe to the run's
+broadcast under the same lock as its event log — no gap/dup; replay log, ride feed; one
+process, many demands; output spaces alias one producing tree); complete → replay, and
+only then does a journalable record exist. SERVE-BEFORE-CACHE: pipelining rides the
+producing handle early, the journal records only completed runs, in-flight state
+evaporates on failure (crash-safe by construction). Observer identity splits the key:
+RUN dedups by plan × capability × mounts; VALUE memoizes by run × observer-hash — one
+run, many observers, each distinct. Every demand reports its serving class
+(Fresh/Joined/Tier1/Tier2) — scheduling and "why did this rebuild" both feed on this.
+Proven over real sockets with a tool-run counter as ground truth.
+
 **THE WIRE SHIPPED — vix-wire** (be907a803): the executor as a vox service over real
 websockets, carrying the recovered intent on current seam types. Producing handles:
 PathReady streams per output as the tool writes it; the canonical rmeta-before-rlib test
