@@ -132,6 +132,34 @@ NOT introduce host callbacks or closures into node state; keep nodes plain
 data. The pending frontier must be enumerable at any suspension (the toy's
 `pending_frontier()` generalizes to: all nodes blocked on runs).
 
+## Amendments (from chunk-1's ambiguity report, ruled 2026-07-03)
+
+**A1 — logical operators are conditionals, not strict operators.** §3.4 as
+written was wrong for `&&`/`||`: they demand the LEFT operand's Identity,
+and the right only when the left doesn't decide. Short-circuit is demand-
+driven evaluation in miniature; the oracle already behaved this way and the
+engine mirrors it. (§3.4 applies to arithmetic/comparison.)
+
+**A2 — closures capture NODES; identity forces captures.** The oracle
+captures already-evaluated frame values (eager); chunk-1 mirrored it for
+parity, forcing visible bindings at closure creation. The RULING is the
+opposite and follows the system's own logic: closure creation captures env
+NODES (lazy — creating a closure computes nothing); hashing/comparing/
+shipping a closure (identity uses) forces its captures, exactly like every
+other identity-forces case. Implementation is a LOCKSTEP change (oracle +
+engine + harness updated together) — deferred to its own brief; until then
+both evaluators agree on the eager behavior and the harness pins that.
+
+**A3 — duplicate named-argument bindings are an ERROR.** Chunk-1 found the
+oracle lets a duplicate binding through: memo hashing sees the first value
+while body lookup can see the later shadowing — memo key and evaluation can
+diverge, which is false-positive-shaped. Both evaluators must reject
+duplicate bindings at the call boundary. Small lockstep fix; fold into
+chunk 2.
+
+**Parity note recorded**: unselected match arms are unevaluated in BOTH
+evaluators (oracle parity, not an engine-lazier divergence).
+
 ## 7. What v1 defers (recorded so nobody "fixes" them silently)
 
 - Per-field struct laziness (v1: pick strict-except-trees, note in code).
