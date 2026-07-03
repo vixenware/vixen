@@ -132,6 +132,14 @@ NOT introduce host callbacks or closures into node state; keep nodes plain
 data. The pending frontier must be enumerable at any suspension (the toy's
 `pending_frontier()` generalizes to: all nodes blocked on runs).
 
+## §6 addendum (from chunk-2, implementation fact)
+
+The Scheduled/Finished latches need per-run state OUTSIDE the node
+vocabulary: `scheduled: HashSet<run>` (first-touch latch) and
+`unlogged_runs: HashMap<run, (command, span)>` (once-only Finished +
+metadata). Consequence for the weavy lowering: the suspended state is the
+arena PLUS the run-latch tables — both must live in the lowered Ctx.
+
 ## Amendments (from chunk-1's ambiguity report, ruled 2026-07-03)
 
 **A1 — logical operators are conditionals, not strict operators.** §3.4 as

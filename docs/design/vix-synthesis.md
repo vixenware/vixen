@@ -748,6 +748,29 @@ briefed; the warm daemon is safe for demos meanwhile (single-user, and
 type edits are visible as wrong results, not silent corruption of a
 shared cache — but it must land before any shared cache does).
 
+## 3§. THE KEYSTONE HOLDS (2026-07-03)
+
+vix/src/engine.rs — the demand-driven evaluator, real Values, lazy
+EVERYWHERE — evaluates the full corpus (eval.vix, types.vix, lua.vix
+including the exec seam) with the equivalence contract GREEN against the
+oracle: values exactly equal; Finished multisets equal; Scheduled counts
+equal; engine Misses/Created ⊆ oracle's (lazier, never eagerer);
+observation sets equal; PLUS the divergence tests that prove the laziness
+is real (unused fn bindings never demanded; unused cmd! blocks never even
+register a run — no Created, nothing; unselected match arms unevaluated).
+Duplicate named args now error in both evaluators (A3). Normative design:
+engine-demand-semantics.md (with amendments); built by two delegated
+GPT-5.5 chunks against briefs, reviewed here; commits through 65221bbd3.
+
+Every future substrate (weavy lowering, JIT, fleet replay) now has a
+machine-checkable definition of "didn't break vix": the harness in
+vix/tests/engine.rs. This is the artifact that de-risks the fifth attempt.
+
+Wart recorded from chunk-2: the oracle's demand_path fallback conflates
+"path not in tree" (an error) with "path not yet produced" (wait/flush) —
+both evaluators mirror it; the wire engine must eventually distinguish
+them (add to open list).
+
 ## 4. Still open (carried forward)
 
 - Streams: the forgotten design details (chunking, replay granularity, backpressure
