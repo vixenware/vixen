@@ -288,6 +288,28 @@ the AST currently drops), (2) the vix binder (shared prerequisite of oracle AND 
 (3) demand-engine oracle on top (agreed slice), (4) playground IDE ops for vix, (5) Ring 0
 generalization for all bundled grammars, (6) Ring 3 once the oracle answers demands.
 
+**THE EXEC SEAM (two-tier keys), designed and derisked** (94897f9ea, vix::exec): the
+runtime ANSWERS QUESTIONS ("what happened when I ran this" = the observed read-set; "what
+is the world now" = Snapshot point queries) and enforces the ceiling; the language OWNS
+CORRECTNESS (what a key is, when reuse is legal, what an observation means). The placement
+that matters: `verify()` — does this read-set still hold — is language-side, so
+false-positive-never cannot be implemented wrong by a runtime; a buggy VFS causes false
+negatives (safe), never false positives. What crosses the seam is facet data: ExecPlan
+(argv + grammar-assigned Roles — the ceiling/predicted/observed triple's input), Mount,
+ReadSet (content reads + dir listings + NEGATIVE lookups, BTreeMap = canonical/diffable),
+Outcome. Tier 1 = closure × plan × capability fingerprint × coarse mount fingerprints
+(pre-run, exact over the declared, over-invalidates). Tier 2 = candidates indexed by
+plan × capability (capability INCLUDED: only the world may vary under read-set
+verification, never the computation); verified read-set ⇒ reuse without running ⇒ re-pin
+under the new coarse key. Proven by probes: the ANTI-NIX test (unread file edit ⇒ tier-2
+cutoff, no rerun); the CROWN JEWEL (new header shadowing an old one earlier in the search
+path — the case every mtime/depfile system misses — diverges the pinned Absent ⇒ rerun);
+capability-change isolation; sandbox-as-world (reads outside mounts fail inside the tool);
+listing divergence on additions AND deletions (the jade.fyi case). Still to derisk:
+outputs-as-mounts composition (chained execs), command-grammar role extraction via snark
+injections (toy roles stand in), wiring `cc!` blocks in the oracle to this cache, env/cwd
+in the plan, and the observation-upgrade flow ("eval while ignoring this pin").
+
 **Exec sequencing decided** (ship → advertise → exec): capability = ADDRESS, shipped
 closure = PAYLOAD, exec = demand evaluated where its captured capabilities live. Step 1
 SHIPPED (30f801296): canonical form = generated strip_spans() (spans zeroed) + facet-
