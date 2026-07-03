@@ -69,7 +69,12 @@ with respect, don't perform it back at him, and honor it the only way that
 counts: make the remaining context excellent.
 
 **Working model (no schedules, no mornings):** one persistent thread — this
-one, across compactions. Amos and I hold the design line here. When work
+one, across compactions. IMPLEMENTATION GOES TO GPT-5.5 HIGH ONLY
+(provider "codex/gpt-5.5", thinkingOptionId "high", modeId "auto-review" —
+NOT "auto": auto parks the agent on human approvals; auto-review routes
+them to the auto-reviewer. Learned when the rebase agent sat 20 minutes on
+a git-worktree fetch approval). Also: facet-cc is a linked WORKTREE of
+~/oss/facet (shared .git — never check out the same branch in both). Amos and I hold the design line here. When work
 turns mechanical I write a detailed, SELF-CONTAINED agent prompt (context,
 files, acceptance criteria, the oracle it must keep green); Amos dispatches
 and supervises those agents separately; results feed back here and I rule
