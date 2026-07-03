@@ -77,7 +77,15 @@ on integration. Spec and implement interleaved. Commit continuously so the
 thread can end mid-stride with nothing lost.
 
 **Priorities (agreed):**
-1. **THE KEYSTONE — graph engine == oracle.** Lower real vix evaluation
+1. **THE KEYSTONE — graph engine == oracle. IN PROGRESS: the constitution
+   is written and committed — docs/design/engine-demand-semantics.md. READ
+   IT FIRST; it is normative (node vocabulary, Identity/Path demand kinds,
+   the exhaustive strictness-point list, the equivalence contract the
+   harness enforces, the weavy-lowering shape constraint: nodes stay plain
+   data, no host closures in node state). Next concrete step: implement
+   vix/src/engine.rs against it — arena of nodes, recursive demand driver —
+   and vix/tests/engine.rs differential harness, corpus order: eval.vix
+   (no exec seam) → types.vix → lua.vix (full exec events).** Lower real vix evaluation
    (AST+env, real Values) onto the demand graph; batching at memo
    boundaries; dynamic demand (Cond/glob/map-collect); differential harness
    asserting graph == oracle on lua.vix/eval.vix/types.vix INCLUDING the
