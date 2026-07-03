@@ -642,9 +642,30 @@ Findings that matter beyond the slice:
   (rpc.request.scope.terminal) as shutdown, not error — Rust tolerates by
   construction, the TS client needed it explicit.
 
-Next on this axis: run ids in Spawn/Exec events (true spawn↔exec pairing +
-ancestry edges for a real DAG render), warm-oracle actor thread (statefulness
-across evals — the anti-Nix whitespace-edit demo), executor-side step gating.
+SHIPPED SAME DAY, round 2 (the console arc, per Amos: uploaded code + full
+trace = an IDE over what happened; facet 21df18e9d/78d89d85b, playground
+e8a0ba71/17be8bb6):
+
+- Events carry IDENTITY + SOURCE: run ids (Spawn↔Exec paired exactly — the
+  FIFO-guess mispairing died), spans (fn decl / cmd!{} block), ancestry
+  (caller/in_fn via a cold-path fn stack). EventSink is now +Send (it had
+  silently made Oracle !Send).
+- The rail became an indented demand TREE (depth = who demanded whom); the
+  projected-only annotations now land on the true never-flushed runs.
+- Cross-highlighting both directions: graph row click → editor selects the
+  span; cursor → demand rows born from that code get outlined. Off-by-4
+  caught by Amos: spans are UTF-8 bytes, CodeMirror is UTF-16 — em-dashes
+  in comments skewed selections; offsets.ts converts against the exact
+  evaluated source snapshot.
+- Snark intelligence in the editor: vix::ide::highlights_json (embedded
+  highlights.scm over weavy-report tree events, sorted captures) exported
+  as vixHighlights beside vixBindings — clients need ZERO grammar assets.
+  Playground colors + occurrence-boxes through two wasm calls.
+
+Still queued on this axis: warm-oracle actor thread (anti-Nix demo),
+executor-side step gating, richer DAG edges (input/output tree hashes per
+run — data-flow edges, not just ancestry), go-to-def/rename in the
+playground editor.
 Division-of-labor record: docs/design/open-proprietary-division.md.
 
 ## 4. Still open (carried forward)
