@@ -155,6 +155,16 @@ Consequence for daemons: facet's `vixd` stays the protocol REFERENCE
 (oracle-backed, no real sandbox); the installable daemon people run ships
 from the runtime repo, implementing the same open service.
 
+**Development vs release topology (2026-07-03):** the runtime repo (working
+name: den) is a RELEASE repo, kept small — it consumes facet crates, never
+contains the language. facet remains the development substrate for
+everything open (the monorepo's ~120 crates are a velocity asset; the
+language/protocol/daemon co-evolve in one motion there). Don't create den
+until there's an installable artifact to hand an outsider: as the measured
+artifact it wants pinned PUBLISHED crate versions (reproducibility), which
+is exactly the discipline you don't want during rapid co-evolution. The
+playground migrates to den only when den ships a daemon for it to dashboard.
+
 Name: not Vixen-branded (keeps the vix-open/Vixen-paid line clean). Fox
 register candidates: **den** (a fox's home — the local host runtime) and
 **skulk** (collective noun for foxes — the paid fleet). "Install Den, buy
