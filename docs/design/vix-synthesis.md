@@ -668,6 +668,59 @@ run — data-flow edges, not just ancestry), go-to-def/rename in the
 playground editor.
 Division-of-labor record: docs/design/open-proprietary-division.md.
 
+## 3⅞. Command grammars are snark grammars (decided 2026-07-03)
+
+Amos: "there's too much good in snark not to want to extend it to this
+usecase." The tool grammars (cc, ar, rustc, …) are SNARK grammars, and one
+grammar yields FIVE products:
+
+1. **Roles / mount ceiling** — Input/Output/SearchDir captures (roles.scm)
+   seed the sandbox ceiling and predict the read-set (the existing weld).
+2. **Identity via normalization** — bidirectional: parse to the typed
+   invocation AST, re-serialize CANONICALLY. The grammar marks which arg
+   classes commute (-D set-like modulo later-wins; -O last-wins) and which
+   are position-sensitive (-I, -l). `gcc -c blah.c -O2` == `gcc -O2 -c
+   blah.c` in tier-1. This is the SAME move as vix's own AST identity
+   (strip spans → phon bytes → hash): identity = canonicalized parse,
+   everywhere — cache keys are semantics-shaped, not byte-shaped.
+3. **Salience / description** — salience.scm marks the OBJECT of an
+   invocation vs modifiers vs noise; the UI synthesizes a fluid,
+   important-first, multi-level description ("compile lapi.c → lapi.o,
+   optimized, all warnings, headers from src/"; hover deepens). Icons ship
+   per tool in the grammar bundle.
+4. **Validation + conservative fallback** — an argv item the grammar can't
+   parse degrades to the WIDEST assumption (could-read-anything ⇒
+   tier-1-only caching for that run), never "ignore". Unparseable is slow,
+   never unsound.
+5. **Highlighting** — any surface showing a command line colors it free.
+
+**Encoding (no snark engine change needed)**: argv is already tokenized and
+shell escaping is OUT of our purview by construction (cmd!{} splices are
+values; "path with space" is one item — quoting hell is structurally
+impossible). Feed snark the items NUL-joined (argv items cannot contain
+NUL): sequence-level grammar treats NUL as the only hard boundary;
+item-INTERNAL structure (-DFOO=1, --sysroot=/x, -Wl,-rpath,/y) is ordinary
+character-level parsing; injections give islands (-Wl, is a linker-language
+island inside a cc invocation). Spans map to (item index, offset).
+Parametrizing snark's alphabet over tokens is the eventual principled
+extension (PL-core territory) — an encoding optimization, not a
+prerequisite.
+
+**The snark playground becomes the grammar author's IDE**: paste argv, see
+roles/description-levels/normal-form live. That's how tool grammars get
+written and reviewed.
+
+**Shipping**: the grammar is a versioned artifact traveling WITH the tool
+capability (cc at fingerprint X carries the grammar for its dialect) —
+descriptions and normalization are pinned by the same identity discipline
+as everything else. (Strengthens the open "who ships command grammars"
+question toward: the capability does.)
+
+**Timing**: demand events also grow monotonic timestamps (eval-relative) —
+the trace view gains rails/lanes (Perfetto-shaped) once the fleet backend
+streams genuinely concurrent runs; the local oracle is synchronous, so
+lanes degenerate there (fine — the schema leads, the backend catches up).
+
 ## 4. Still open (carried forward)
 
 - Streams: the forgotten design details (chunking, replay granularity, backpressure
