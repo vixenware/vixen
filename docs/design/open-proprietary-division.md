@@ -161,13 +161,20 @@ register candidates: **den** (a fox's home — the local host runtime) and
 the Skulk." Amos to decide; "Vixen Foundation"-style brand-carrying names
 are the alternative if maintainership legibility wins.
 
-## Playground placement (decided)
+## Playground placement (decided; refined after the third-home split)
 
 - Language playground (snark): facet repo. Open.
-- Build/daemon playground (browser IDE ↔ vixd): **this repo**, apps/playground.
-  Public demos of it should be "ugly on purpose": a demonstration that the
-  data exists — not the product console. The polished, scaled, historical
-  "what happened to my build" experience is the product.
+- Build/daemon playground (browser IDE ↔ vixd): TODAY in **this repo**,
+  apps/playground — but that's a workbench, not a home. Its final home is
+  the **host runtime repo**: it is really the daemon's own local dashboard
+  (single-eval, live-session introspection — adoption table stakes), and
+  "install the app, open localhost, see your build" should be one artifact.
+  Migrate when the runtime repo is born.
+- The line between open dashboard and private console is per-CAPABILITY:
+  live single-eval = open; historical / cross-build / team / fleet = product.
+  The console may consume the dashboard's components and add the plural.
+  Public demos of exploration features stay "ugly on purpose": proof the
+  data exists, not the product.
 - Note: the playground consumes the *open* generated TS client (gen_ts in
   vix-daemon, output path passed as an argument) and the open vox TS runtime
   from the facet checkout (sibling-path file: deps for now; publish rc
