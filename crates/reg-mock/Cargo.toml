@@ -1,0 +1,24 @@
+[package]
+name = "reg-mock"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+
+[dependencies]
+eyre.workspace = true
+facet = { version = "0.50.0-rc.5" }
+facet-json = { version = "0.50.0-rc.5" }
+flate2 = "1.1.9"
+hex = { version = "0.4.3", default-features = false, features = ["std"] }
+sha2 = "0.11.0"
+tar = { version = "0.4.46", default-features = false }
+tempfile.workspace = true
+tiny_http = "0.12.0"
+tracing.workspace = true
+
+[dev-dependencies]
+pretty_assertions = "1.4.1"
+
+[lints]
+workspace = true
