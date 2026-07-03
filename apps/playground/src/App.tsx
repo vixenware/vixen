@@ -3,6 +3,7 @@ import { Editor, type EditorApi } from "./editor";
 import { connect, startEval, type EvalSession } from "./daemon";
 import type { DaemonClient, DemandEvent } from "./generated/daemon";
 import { DemandGraph } from "./graph";
+import { Lanes } from "./lanes";
 import { Inspector } from "./inspector";
 import { byteToUtf16, utf16ToByte } from "./offsets";
 import luaSample from "./samples/lua.vix?raw";
@@ -31,6 +32,7 @@ export function App() {
   const [cursor, setCursor] = useState<number | null>(null);
   const [inspected, setInspected] = useState<DemandEvent | null>(null);
   const [showAll, setShowAll] = useState(false);
+  const [view, setView] = useState<"trace" | "lanes">("trace");
 
   const busy = status === "connecting" || status === "running" || status === "stepping";
 
@@ -127,14 +129,30 @@ export function App() {
               entry
               <input value={entry} onChange={(e) => setEntry(e.target.value)} spellCheck={false} />
             </label>
-            <label className="steptoggle">
-              <input
-                type="checkbox"
-                checked={showAll}
-                onChange={(e) => setShowAll(e.target.checked)}
-              />
-              all
-            </label>
+            <div className="view-toggle">
+              <button
+                className={view === "trace" ? "view-btn view-btn-active" : "view-btn"}
+                onClick={() => setView("trace")}
+              >
+                trace
+              </button>
+              <button
+                className={view === "lanes" ? "view-btn view-btn-active" : "view-btn"}
+                onClick={() => setView("lanes")}
+              >
+                lanes
+              </button>
+            </div>
+            {view === "trace" && (
+              <label className="steptoggle">
+                <input
+                  type="checkbox"
+                  checked={showAll}
+                  onChange={(e) => setShowAll(e.target.checked)}
+                />
+                all
+              </label>
+            )}
             <label className="steptoggle">
               <input
                 type="checkbox"
@@ -162,12 +180,29 @@ export function App() {
                 spawn, exec serving class and observation streams here as it happens — in step
                 mode, one demand event per step.
               </p>
-            ) : (
+            ) : view === "trace" ? (
               <DemandGraph
                 events={events}
                 settled={status === "done" || status === "failed"}
                 showAll={showAll}
                 cursor={cursor}
+                onSelect={(e) => {
+                  setInspected(e);
+                  const span =
+                    e.tag === "Done" || e.tag === "Failed" || e.tag === "Observation"
+                      ? null
+                      : e.span;
+                  if (span) {
+                    editor.current?.selectSpan(
+                      byteToUtf16(evalSource.current, span.start),
+                      byteToUtf16(evalSource.current, span.end),
+                    );
+                  }
+                }}
+              />
+            ) : (
+              <Lanes
+                events={events}
                 onSelect={(e) => {
                   setInspected(e);
                   const span =
