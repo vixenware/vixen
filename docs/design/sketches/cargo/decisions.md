@@ -128,3 +128,32 @@ content-addressed; no pin needed). Needs: the shape-checking semantics
 - D7: recursion + memo as THE build-graph mechanism — holds up in the
   sketch; needs the engine's memo (keystone) to be the evaluator for the
   claim to be load-bearing.
+
+
+## Walkthrough rulings (2026-07-03, easing-back-in session)
+
+- **Import, don't imitate**: divergent lockfiles vs cargo are FINE (Amos's
+  March position, reaffirmed); an existing Cargo.lock imports as the
+  initial result pin. Bit-compatibility with cargo's tie-breaking is a
+  non-goal — cargo's result provably-someday depends on THE ORDER OF
+  DEPENDENCIES IN Cargo.toml (Amos; prove it with the mock registry).
+- **Vocabulary**: standard solver jargon — DECISIONS vs PROPAGATION.
+  Decisions are provisional HYPOTHESES; prefer the "carving out chunks of
+  the search space" framing over "unmaking choices". Features form a
+  join-semilattice (additive, union).
+- **Features**: never chosen BY THE SOLVER — user-opted features of direct
+  deps are part of the problem statement (roots); everything else is
+  propagation. The solver's only decision points are versions (claim
+  survives, restated precisely).
+- **THE ORACLE IS CARGO, not a second homemade solver**: build a mock
+  crates.io API (index + downloads) so real cargo runs against constructed
+  registries in tests. NO "boring reference solver" — two novel
+  implementations checked only against each other is a known agent
+  antipattern (Amos). Harness asserts: (a) our solution validity;
+  (b) equality with cargo on instances with a UNIQUE solution;
+  (c) optimality under OUR canonical order elsewhere. The
+  Cargo.toml-order-dependence proof falls out of this harness free.
+- **Shared fact cache across users**: parked. Space too vast to matter
+  for now; if the problem space of crates.io ever compresses/distributes,
+  that's a Vixen-Cloud-tier product dream (the plural is the product),
+  not OSS core. Facts stay process/snapshot-scoped.
