@@ -472,3 +472,13 @@ GATE remaining: (1) facade trio (live sink/step gating, entry-param
 metadata, value renderer — dispatched), (2) vix-daemon migration
 (recon done, waits on trio), (3) Amos sign-off, THEN Phase C
 deletion of oracle.rs+engine.rs as its own commit. Do not batch.
+
+**THE FUNERAL IS EXECUTED (2026-07-05, PR #2433 open, verified
+217/217 personally + empty rg proof).** Branch oracle-engine-funeral,
+four commits: type extraction → fleet design (fleet-on-the-machine.md
+in facet-cc docs) → vix-wire migration (ValueBundle/
+MachineExecBackend/MachinePendingRun; observer closures ship as
+PendingInvocations; code = content-addressed flesh; lua ACROSS TWO
+MACHINES ON THE MACHINE) → deletion: oracle.rs, engine.rs, graph.rs,
+5,445 lines. A5's clause satisfied: ONE IMPLEMENTATION REMAINS.
+Merge is Amos's button on PR #2433.
