@@ -186,6 +186,40 @@ requires; (b) a per-program divergence assertion in the harness —
 engine Finished ⊊ oracle Finished on merge-projection programs,
 asserted, the oracle staying eager as the canonical reference.
 
+**A5 — THE TWO-EVALUATOR ERA ENDS; AIM FOR THE FINAL SHAPE (Amos,
+2026-07-04, stark correction, landed same day).** The eager oracle is
+the disease this document existed to cure: it is what every agent
+builds when handed the demand-driven vision ("let me start with
+something essentially imperative"). Naming it an oracle and building
+the lazy engine against it was one step better and still wrong —
+"there is no intermediate path. We have to go straight for the final
+thing." Ruled:
+- THE evaluator of vix is the weavy-async lowering: this document's
+  demand graph, driven as an async runtime (workers, work-stealing —
+  suspend-ABI ruling), interpreter lane first. JIT stencils are the ONE
+  deferrable part (interpret-first survives unchanged).
+- The oracle and the recursive-driver engine are FROZEN as of this
+  amendment: no new semantics land in them, ever. No more lockstep.
+  Semantics land ONCE, in the final evaluator. The differential harness
+  converts to ABSOLUTE assertions (pinned values, event multisets,
+  journal pins, laziness invariants); at corpus parity both frozen
+  evaluators are DELETED. "Kept forever as reference" is revoked —
+  tests pin behavior; implementations die.
+- THE VALUE/TYPE MODEL (ruled): types come from Rust OR from vix.
+  Rust-defined types: facet describes their layout — that is how
+  lowering knows how to build and read them. Vix-defined types: their
+  ABI is ours to choose and must be OPTIMIZED (roughly what a Rust enum
+  would do — never everything-boxed-forever), as long as the layout is
+  RECORDED as a first-class description and OBSERVABLE from Rust
+  (introspection). One description vocabulary, two authorities. Scalars
+  live unboxed on the operand stack; composites/trees/closures are
+  handles into content-addressed stores; the shared boxed Value enum is
+  a frozen-evaluator artifact and dies with them.
+- WORKING-MODEL CHANGE: the design line DRIVES the foundation
+  implementation directly (vix/src/machine) — conventions are
+  established in code, not briefs, so later agents contribute to an
+  established shape instead of reproducing the disease.
+
 ## 7. What v1 defers (recorded so nobody "fixes" them silently)
 
 - Per-field struct laziness (v1: pick strict-except-trees, note in code).
