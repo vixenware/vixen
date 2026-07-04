@@ -304,3 +304,28 @@ moves on demand.
    closures (only partial-application-of-named-fn lowers).
 4. Corpus parity → delete the frozen evaluators (A5's funeral
    clause). ← NEXT.
+
+## Loop identity RULED (co-design with Amos, 2026-07-05)
+
+The React-key problem DISSOLVES in a pure demand language —
+content-keying already gives insert-stability (old elements memo-hit,
+only new computes; alloc_array_pending mechanics exist). Four rules,
+all Amos-confirmed:
+1. POSITION IS NEVER IMPLICIT. A body needing the index takes it as
+   an explicit input; suffix invalidation on insert is then honest
+   (template loop.index compiles to the coupled form knowingly).
+2. DUPLICATES JOIN. Content-equal elements = one invocation, memo-
+   joined — purity makes sharing correct. The collected result
+   preserves multiplicity and order ([y,y]: one computation, two
+   slots) — a lowering detail.
+3. CONTEXT IS EXPLICIT INPUT (is_last, windows, neighbors) — never
+   ambient; the memo key tells the truth.
+4. key_by SHAPES OUTPUTS ONLY (naming keys of collected maps) —
+   computation identity is content, never the user's job.
+THE GENERALIZATION (from Amos's logged-in/logged-out probe, which
+self-resolved — "session state is also an input"): there are NO
+genuine compute-separately cases, only HIDDEN INPUTS; the discipline
+is making them explicit. Cousin of the secrets-taint law: ambient
+state is the enemy for identity and security alike.
+Gates cleared: template for-loops, runtime iteration, keyed
+collections — all now lowering work, no new machinery.
