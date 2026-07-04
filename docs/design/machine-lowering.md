@@ -125,12 +125,37 @@ known at construction — key-presence is structural; contrast
 pending TREES where path-presence costs a run because shape IS the
 producer's output: demand exactly the question asked). Composites
 cross memo boundaries as identities (lazy); scalars coerce at the
-boundary (strict). Pendingness is tracked STATICALLY in slot
-schemas — no runtime is-it-bits checks (A6), and no
-pending-polymorphic params (that would be laziness coloring,
-GHC-levity research territory — the bits/identity split makes the
-coloring question never arise). No operation in the language is
-named or shaped like `force`.
+boundary (strict).
+
+P3-AMENDED-AGAIN (Amos: "you've painted yourself into a corner
+where you can't represent values in the map that aren't quite
+there yet" — CONCEDED; the earlier "pendingness tracked statically,
+no runtime checks anywhere" was an OVERCLAIM): static tracking
+holds for FRAME SLOTS; it CANNOT hold for container entries
+selected by runtime data (a Map<String,Float> holding a literal
+next to a promoted producer is representationally heterogeneous,
+and get(k) with runtime k cannot be statically resolved). THE
+HONEST MECHANISM: a pending-capable value is a DECLARED SHAPE —
+Realized<T> = Ready(T) | Pending(invocation identity) —
+discriminant IN LAYOUT (A6-legal: the ban is
+kind-markers-on-operands, not declared discriminants). The
+coercion at a container-fed bits-position is a READ BARRIER: one
+discriminant branch at a COMPILER-PLACED site — Ready loads bits,
+Pending INVOKEs through the driver. Statically PLACED, dynamically
+RESOLVED. AddF64 still eats raw bits; barriers run before ops, at
+chosen sites, never inside them. Representation is the LOWERER's
+choice per context: raw bits where realization is provable (frame
+scalars, strict boundary args — fib pays zero barriers),
+Realized<T> where not (containers that ever receive a promoted
+insert). Users never see Realized — the coloring lives in lowering
+as a representation choice, not in the type system as a user
+obligation (GHC boxed/unboxed with polarity flipped: flat by
+default, boxed only at promotion sites). COST PATH: the barrier is
+a GUARD — the gingembre-era guard/IC stencil machinery (speculate
+Ready, deopt to the demand path) is the designated optimization,
+already built, already DWARF'd. Devirtualizing never-pending
+containers back to raw representation is a later dial. No
+operation in the language is named or shaped like `force`.
 
 P-HAZARD (flagged in review, must die before warm reload): the
 pending store encoding carries fn_ref — a program-table INDEX —
