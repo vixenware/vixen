@@ -132,3 +132,18 @@ disaster recovery = re-demand against empty reality; journal
 survives, placement re-solves warm, images re-materialize p2p.
 "Restore the cluster" and "cold cache build" are the same
 operation, because they always were.
+
+## Round 5: forges (git/jj)
+
+Git IS a CAS: repo=flesh, commit=content-addressed snapshot;
+ingestion = REF OBSERVATION ("main was abc123 when observed" — same
+kind as unpinned fetch, same policy verbs). VIXEN IS THE CI ENGINE,
+FORGE IS UI: check runs = rendered claims-with-evidence; "reproduce
+CI locally" finally real (same journal, same identities). A PR IS A
+COUNTERFACTUAL (third appearance): build merge-commit warm against
+main's memo; check comment shows blast radius from reload diff.
+Merge queues = demand scheduling; batch tests = joint demand. JJ IS
+THE NATIVE VCS: op log ≈ journal generations, stable change-ids ≈
+invocation-identity-vs-content; and TREE-CONTENT KEYING MAKES
+REBASES FREE (SHAs churn, tree hashes don't, memo survives history
+rewriting) — pitch slide on its own.
