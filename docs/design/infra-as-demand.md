@@ -101,3 +101,34 @@ MISSING (four, bounded, none touch the engine core):
 BOUNDARY (state plainly): vixen manages control-plane truth, not
 runtime supervision — kubelet keeps its job; a service's "output"
 is a claim continuously re-verified.
+
+## Round 4: k8s WITHOUT k8s (the decomposition)
+
+etcd→journal (monotone claims; only exclusive custody needs
+linearization); API server→vox+facet+push inlet (watch=journal
+subscription); SCHEDULER→RODIN (bin-packing IS constraint solving:
+learned placement facts widened across similar nodes, warm
+re-solves, kubectl-drain = the counterfactual surface WITH
+derivations — the scheduler that accumulates a claim namespace
+about your cluster); controllers/operators→standing demands in vix
+(a CRD+operator = a function); registry→the store (p2p flesh,
+build and deploy share one store); LB/discovery→endpoints as
+derived values, DATA-PLANE CONFIG AS BUILD ARTIFACT (envoy/CNI
+stay; their config becomes demand-driven); RBAC→tenant claim
+policy.
+
+GENUINELY NEW (two): (1) STANDING RUNS — effects whose success is
+staying alive: leases + executor process custody + restart =
+re-reconcile on liveness-probe failure (vix-wire executor becomes
+the kubelet; crosses round-3's boundary deliberately); (2)
+LEASES/LINEARIZATION for exclusive custody (placement during
+partitions) — one small consensus island in a monotone world.
+Sociotechnical gap named: operator/chart ecosystem = years, our
+counter is operators-are-twenty-lines, but no architecture buys
+ecosystems.
+
+DEMO THAT ENDS ARGUMENTS: cluster state = one demanded value →
+disaster recovery = re-demand against empty reality; journal
+survives, placement re-solves warm, images re-materialize p2p.
+"Restore the cluster" and "cold cache build" are the same
+operation, because they always were.
