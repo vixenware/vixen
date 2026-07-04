@@ -143,3 +143,11 @@ G. **Events + explain.** Rodin's event vocabulary (region claimed/refuted,
 March verbatim record: march-solver-recovered-verbatim.md (quotes, dragons).
 Decisions ledger: sketches/cargo/decisions.md. Placeholder + oracle:
 crates/vix-solve, crates/reg-mock.
+
+## RULING (Amos, 2026-07-04): multi-version coexistence
+Rodin adopts CARGO'S MODEL: version domains keyed by (package name ×
+semver-major compatibility class), not one domain per name. syn 1.x
+and syn 2.x are separate domains that coexist in one solution. 'We
+have to align with cargo here.' Region/domain shapes change
+accordingly; the 68 MultipleLockedVersionsUnsupported divergences
+are the acceptance test.
