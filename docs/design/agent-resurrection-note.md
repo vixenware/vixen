@@ -545,3 +545,8 @@ adjudicated (monomorphization intended, fn types = pending sugar,
 literals-only coercion, strict exhaustiveness hard-error, separate
 namespaces, accumulate-LSP/fail-fast-machine + report-all,
 AbiClass facts w/ content-hashed structural type ids).
+
+RULED (Amos): THE CHECKER IS WRITTEN IN VIX — "in code that is for
+now unchecked! But... not for long." The collapsed ladder is the
+plan of record: ast() → spec+corpus → vix checker → fixpoint
+self-check. Unchecked-vix era is temporary by design.
