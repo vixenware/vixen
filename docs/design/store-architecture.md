@@ -107,3 +107,11 @@ provenance catches input-side anomalies — different halves, same
 journal. All retro-queryable ("every dep whose channel regressed
 this year") — in the self-hosted future, a vix query over the
 journal.
+
+Addendum (Amos): three heads ≠ 3x storage — agreeing heads produce
+identical bytes, which dedupe to one CAS copy; only claims triple
+(rows + signatures, ~nothing). Redundancy costs COMPUTE (sampled),
+not storage. Storage forks only when outputs fork — the incident
+case, where every divergent copy is evidence. Free signal: the
+redundant tier's dedupe ratio IS the alarm — drift above ~1 means
+divergence before anyone reads a claim.
