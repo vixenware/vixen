@@ -82,7 +82,15 @@ blocked belongs to weavy::task.*
 ## Order of implementation
 
 1. Driver skeleton + node vocabulary over cached lowerings; scalars
-   only; eval.vix's arithmetic core end to end; corpus values pinned.
+   only. DONE (vix::machine::driver, d47d31cf5): the three
+   suppression mechanisms trace-asserted; INVOKE protocol (memo
+   boundary = HostCall+Await; hit = sync fill, miss = spawn+park).
+   CORRECTION from recon: eval.vix is NOT an arithmetic core — it is
+   the self-hosting shape (recursive enums, strings, Map, match) and
+   belongs to slice 2/3. Slice 1's corpus program is a NEW minimal
+   sample (scalar fns, lets, arithmetic, recursive memo-boundary
+   calls — fib in vix) with its own pinned contract; the AST lowering
+   (machine/lower.rs) targets it first.
 2. Store + handles; composite results; types.vix.
 3. Exec seam as await-fed runs; merge-demand.vix — THE MILESTONE:
    left.o absent, both lanes, trace-asserted.
