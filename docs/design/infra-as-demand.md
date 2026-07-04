@@ -147,3 +147,32 @@ THE NATIVE VCS: op log ≈ journal generations, stable change-ids ≈
 invocation-identity-vs-content; and TREE-CONTENT KEYING MAKES
 REBASES FREE (SHAs churn, tree hashes don't, memo survives history
 rewriting) — pitch slide on its own.
+
+## Round 6: missed domains (Amos: "what have I completely missed?")
+
+TOP THREE BLIND SPOTS: (1) DATA ENGINEERING — dbt is a worse vix
+("data build tool"!): models=graph, incremental
+materialization=hand-memo, lineage=journal drawn badly,
+backfills=counterfactuals, partitions=lazy tree branches, dashboard
+trust=claims. (2) ML PIPELINES — tracking=journal, DVC=store,
+reproduce-model=recompute-from-pins, sweeps=joint demand,
+evals=differential oracles; REGULATORY KICKER: AI-Act training-data
+attestation = provenance-by-construction, compliance artifact = a
+journal slice. (3) GAME ASSET PIPELINES — Unreal DDC is literally a
+content-addressed derived-data cache; asset cooking = cc!-shaped
+DAGs at scale, per-platform variants, probe intelligence on
+formats, warm-cache economics in artist-hours; underserved.
+
+SWEEP: EDA/silicon (days-long stages, tape-out provenance);
+scientific reproducibility (replication crisis = missing journal;
+"rerun figure 3" = projection); simulation sweeps; compliance/GRC
+as computation (SOC2 evidence = journal queries); dev environments
+(flakes niche, warm team shells); render farms (per-tile memo);
+org-scale code intelligence (self-hosted query plane → Sourcegraph
+shape).
+
+META: every domain independently discovered it needed a build
+system, built a bad one, named it something else (DDC, dbt, DVC,
+orchestrators). Pitch template: your DAG tool is our special case;
+your cache is our store; your lineage is our journal; we can PROVE
+ours.
