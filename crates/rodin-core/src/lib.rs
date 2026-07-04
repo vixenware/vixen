@@ -2,7 +2,7 @@ use std::collections::{BTreeMap, BTreeSet};
 use std::fs;
 use std::path::Path;
 
-use eyre::{Context, Result, eyre};
+use eyre::{Context, Result};
 use rodin_facts::{
     Atom, Clause, ClauseId, ClauseStore, Derivation, DerivationId, DerivationStore, Exclusion,
     ExclusionId, ExclusionStore, FeatIx, FeatureInterner, PackageInterner, PinRef, PkgId, PkgIx,
@@ -128,6 +128,9 @@ pub struct SolveResult {
     pub enabled_features: BTreeMap<String, BTreeSet<String>>,
     pub decisions: usize,
     pub conflicts: usize,
+    pub manifests_read: usize,
+    pub candidates_existing: usize,
+    pub trace: Vec<String>,
     pub learned: Vec<LearnedNoGood>,
     pub derivations: DerivationStore,
     pub clauses: ClauseStore,
@@ -157,7 +160,11 @@ impl LearnedNoGood {
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub enum SolveError {
     NoSolution {
+        decisions: usize,
         conflicts: usize,
+        manifests_read: usize,
+        candidates_existing: usize,
+        trace: Vec<String>,
         learned: Vec<LearnedNoGood>,
         derivations: DerivationStore,
         clauses: ClauseStore,
@@ -248,7 +255,7 @@ struct Hypothesis {
 struct Conflict {
     premises: Vec<Premise>,
     selected: BTreeMap<PkgIx, Version>,
-    decision: Option<(PkgIx, Version)>,
+    decision: Option<Hypothesis>,
 }
 
 #[derive(Clone, Debug)]
@@ -261,7 +268,10 @@ struct Solver<'a> {
     learned: Vec<LearnedNoGood>,
     conflicts: usize,
     decisions: usize,
+    manifests_read: usize,
+    candidates_existing: usize,
     next_hypothesis: u32,
+    trace: Vec<String>,
 }
 
 impl CompiledIndex {
@@ -335,7 +345,9 @@ impl CompiledIndex {
 
     #[must_use]
     pub fn package(&self, name: &str) -> Option<PkgIx> {
-        self.package_by_name.get(&name.to_ascii_lowercase()).copied()
+        self.package_by_name
+            .get(&name.to_ascii_lowercase())
+            .copied()
     }
 
     #[must_use]
@@ -494,26 +506,40 @@ impl CompiledIndex {
         enable: &str,
     ) -> Result<()> {
         if let Some(dep_name) = enable.strip_prefix("dep:") {
-            let dep = self.dependency_line(pkg, version, dep_name)?;
-            let dep_pkg = self.package(&dep.actual).expect("dep package interned");
+            let Some(dep) = self.dependency_line(pkg, version, dep_name) else {
+                return Ok(());
+            };
+            let Some(dep_pkg) = self.package(&dep.actual) else {
+                return Ok(());
+            };
             let support = EdgeKey {
                 parent: self.name(pkg).unwrap_or_default().to_owned(),
                 dep: dep.actual.clone(),
             };
             self.push_clause(
-                vec![Guard::Feature(pkg, feat), Guard::Selected(pkg, version.clone())],
+                vec![
+                    Guard::Feature(pkg, feat),
+                    Guard::Selected(pkg, version.clone()),
+                ],
                 Consequent::InGraph(dep_pkg),
                 Some(support.clone()),
             );
             self.push_clause(
-                vec![Guard::Feature(pkg, feat), Guard::Selected(pkg, version.clone())],
+                vec![
+                    Guard::Feature(pkg, feat),
+                    Guard::Selected(pkg, version.clone()),
+                ],
                 Consequent::VersionSet(dep_pkg, parse_req(&dep.req)?),
                 Some(support.clone()),
             );
             self.push_dependency_feature_clauses(pkg, version, &dep, dep_pkg, &support);
         } else if let Some((dep_name, dep_feature)) = enable.split_once("?/") {
-            let dep = self.dependency_line(pkg, version, dep_name)?;
-            let dep_pkg = self.package(&dep.actual).expect("dep package interned");
+            let Some(dep) = self.dependency_line(pkg, version, dep_name) else {
+                return Ok(());
+            };
+            let Some(dep_pkg) = self.package(&dep.actual) else {
+                return Ok(());
+            };
             let dep_feat = self.intern_feature(dep_feature);
             let support = EdgeKey {
                 parent: self.name(pkg).unwrap_or_default().to_owned(),
@@ -529,32 +555,48 @@ impl CompiledIndex {
                 Some(support),
             );
         } else if let Some((dep_name, dep_feature)) = enable.split_once('/') {
-            let dep = self.dependency_line(pkg, version, dep_name)?;
-            let dep_pkg = self.package(&dep.actual).expect("dep package interned");
+            let Some(dep) = self.dependency_line(pkg, version, dep_name) else {
+                return Ok(());
+            };
+            let Some(dep_pkg) = self.package(&dep.actual) else {
+                return Ok(());
+            };
             let dep_feat = self.intern_feature(dep_feature);
             let support = EdgeKey {
                 parent: self.name(pkg).unwrap_or_default().to_owned(),
                 dep: dep.actual.clone(),
             };
             self.push_clause(
-                vec![Guard::Feature(pkg, feat), Guard::Selected(pkg, version.clone())],
+                vec![
+                    Guard::Feature(pkg, feat),
+                    Guard::Selected(pkg, version.clone()),
+                ],
                 Consequent::InGraph(dep_pkg),
                 Some(support.clone()),
             );
             self.push_clause(
-                vec![Guard::Feature(pkg, feat), Guard::Selected(pkg, version.clone())],
+                vec![
+                    Guard::Feature(pkg, feat),
+                    Guard::Selected(pkg, version.clone()),
+                ],
                 Consequent::VersionSet(dep_pkg, parse_req(&dep.req)?),
                 Some(support.clone()),
             );
             self.push_clause(
-                vec![Guard::Feature(pkg, feat), Guard::Selected(pkg, version.clone())],
+                vec![
+                    Guard::Feature(pkg, feat),
+                    Guard::Selected(pkg, version.clone()),
+                ],
                 Consequent::Feature(dep_pkg, dep_feat),
                 Some(support),
             );
         } else {
             let local_feat = self.intern_feature(enable);
             self.push_clause(
-                vec![Guard::Feature(pkg, feat), Guard::Selected(pkg, version.clone())],
+                vec![
+                    Guard::Feature(pkg, feat),
+                    Guard::Selected(pkg, version.clone()),
+                ],
                 Consequent::Feature(pkg, local_feat),
                 None,
             );
@@ -562,11 +604,10 @@ impl CompiledIndex {
         Ok(())
     }
 
-    fn dependency_line(&self, pkg: PkgIx, version: &Version, key: &str) -> Result<DepLine> {
+    fn dependency_line(&self, pkg: PkgIx, version: &Version, key: &str) -> Option<DepLine> {
         self.manifests
             .get(&(pkg, version.clone()))
             .and_then(|manifest| manifest.deps.iter().find(|dep| dep.key == key).cloned())
-            .ok_or_else(|| eyre!("feature references dependency {key}, but no such dep exists"))
     }
 
     fn push_clause(
@@ -660,7 +701,9 @@ impl CompiledIndex {
             }
             point = point.saturating_mul(1);
             widened = widened.saturating_mul(versions.len().max(1));
-            region.versions.insert(parent_pkg, version_set_from_points(&versions));
+            region
+                .versions
+                .insert(parent_pkg, version_set_from_points(&versions));
         }
         (region, point, widened)
     }
@@ -702,7 +745,10 @@ impl SyntheticDep {
     }
 }
 
-pub fn solve(index: &CompiledIndex, problem: Problem) -> Result<SolveResult, SolveError> {
+pub fn solve(
+    index: &CompiledIndex,
+    problem: Problem,
+) -> std::result::Result<SolveResult, Box<SolveError>> {
     let mut solver = Solver::new(index, problem.learned_kind);
     for fact in &problem.warm_facts {
         solver.install_warm_fact(fact.clone());
@@ -711,11 +757,11 @@ pub fn solve(index: &CompiledIndex, problem: Problem) -> Result<SolveResult, Sol
     if let Err(conflict) = solver.seed_problem(&problem, &mut state) {
         solver.conflicts += 1;
         solver.learn(conflict);
-        return Err(solver.no_solution());
+        return Err(Box::new(solver.no_solution()));
     }
     match solver.search(state) {
         Ok(state) => Ok(solver.finish(state)),
-        Err(()) => Err(solver.no_solution()),
+        Err(()) => Err(Box::new(solver.no_solution())),
     }
 }
 
@@ -734,7 +780,10 @@ impl<'a> Solver<'a> {
             learned: Vec::new(),
             conflicts: 0,
             decisions: 0,
+            manifests_read: 0,
+            candidates_existing: 0,
             next_hypothesis: 0,
+            trace: Vec::new(),
         }
     }
 
@@ -756,14 +805,25 @@ impl<'a> Solver<'a> {
                     decision: None,
                 });
             };
-            self.activate(state, pkg, Premise::Pin(PinRef(format!("root:{}", root.name))));
+            self.trace
+                .push(format!("demand {} {}", root.name, display_req(&root.req)));
+            self.activate(
+                state,
+                pkg,
+                Premise::Pin(PinRef(format!("root:{}", root.name))),
+            );
             let pin = PinRef(format!("root:{}:{}", root.name, root.req));
             self.derivations.note_pin(pin.clone());
-            self.intersect_domain(state, pkg, parse_req(&root.req).map_err(|_| Conflict {
-                premises: vec![Premise::Pin(pin.clone())],
-                selected: selected_versions(state),
-                decision: None,
-            })?, Premise::Pin(pin))?;
+            self.intersect_domain(
+                state,
+                pkg,
+                parse_req(&root.req).map_err(|_| Conflict {
+                    premises: vec![Premise::Pin(pin.clone())],
+                    selected: selected_versions(state),
+                    decision: None,
+                })?,
+                Premise::Pin(pin),
+            )?;
             if root.default_features {
                 let feat = self.index.features.get_str("default").unwrap_or(FeatIx(0));
                 self.enable_feature(state, pkg, feat, Vec::new());
@@ -779,6 +839,11 @@ impl<'a> Solver<'a> {
             let Some(pkg) = self.index.package(&decree.name) else {
                 continue;
             };
+            self.trace.push(format!(
+                "decree {} {}",
+                decree.name,
+                display_req(&decree.req)
+            ));
             self.activate(
                 state,
                 pkg,
@@ -786,11 +851,16 @@ impl<'a> Solver<'a> {
             );
             let pin = PinRef(format!("decree:{}:{}", decree.name, decree.req));
             self.derivations.note_pin(pin.clone());
-            self.intersect_domain(state, pkg, parse_req(&decree.req).map_err(|_| Conflict {
-                premises: vec![Premise::Pin(pin.clone())],
-                selected: selected_versions(state),
-                decision: None,
-            })?, Premise::Pin(pin))?;
+            self.intersect_domain(
+                state,
+                pkg,
+                parse_req(&decree.req).map_err(|_| Conflict {
+                    premises: vec![Premise::Pin(pin.clone())],
+                    selected: selected_versions(state),
+                    decision: None,
+                })?,
+                Premise::Pin(pin),
+            )?;
         }
         for exclusion in &problem.exclusions {
             let features: Vec<_> = exclusion.features.iter().cloned().collect();
@@ -813,55 +883,61 @@ impl<'a> Solver<'a> {
     }
 
     fn search(&mut self, mut state: State) -> Result<State, ()> {
-        loop {
-            if let Err(conflict) = self.propagate(&mut state) {
-                self.conflicts += 1;
-                self.learn(conflict);
-                return Err(());
-            }
-            let Some(pkg) = self.next_package(&state) else {
-                self.assert_solution(&state);
-                return Ok(state);
-            };
-            let candidates = self.candidates(&state, pkg);
-            if candidates.is_empty() {
-                self.conflicts += 1;
-                self.learn(Conflict {
-                    premises: state
-                        .domains
-                        .get(&pkg)
-                        .map(|domain| domain.reasons.clone())
-                        .unwrap_or_default(),
-                    selected: selected_versions(&state),
-                    decision: last_decision(&state),
-                });
-                return Err(());
-            }
-            for version in candidates.into_iter().rev() {
-                let mut branch = state.clone();
-                let hyp = self.next_hypothesis;
-                self.next_hypothesis += 1;
-                self.decisions += 1;
-                branch.hypotheses.push(Hypothesis {
-                    id: hyp,
-                    pkg,
-                    version: version.clone(),
-                });
-                let domain = branch.domains.entry(pkg).or_default();
-                domain.selected = Some(version.clone());
-                domain.selected_reason = Some(Premise::Hypothesis(hyp));
-                tracing::trace!(
-                    package = self.index.name(pkg).unwrap_or_default(),
-                    %version,
-                    hypothesis = hyp,
-                    "rodin decision"
-                );
-                if let Ok(solution) = self.search(branch) {
-                    return Ok(solution);
-                }
-            }
+        if let Err(conflict) = self.propagate(&mut state) {
+            self.conflicts += 1;
+            self.learn(conflict);
             return Err(());
         }
+        let Some(pkg) = self.next_package(&state) else {
+            self.assert_solution(&state);
+            return Ok(state);
+        };
+        let candidates = self.candidates(&state, pkg);
+        if candidates.is_empty() {
+            self.conflicts += 1;
+            self.learn(Conflict {
+                premises: state
+                    .domains
+                    .get(&pkg)
+                    .map(|domain| domain.reasons.clone())
+                    .unwrap_or_default(),
+                selected: selected_versions(&state),
+                decision: last_hypothesis(&state),
+            });
+            return Err(());
+        }
+        let candidate_count = candidates.len();
+        self.candidates_existing += candidate_count;
+        for version in candidates.into_iter().rev() {
+            let mut branch = state.clone();
+            let hyp = self.next_hypothesis;
+            self.next_hypothesis += 1;
+            self.decisions += 1;
+            self.manifests_read += 1;
+            self.trace.push(format!(
+                "expand {} {} (highest remaining of {candidate_count} candidates) - reads 1 manifest",
+                self.index.name(pkg).unwrap_or_default(),
+                version
+            ));
+            branch.hypotheses.push(Hypothesis {
+                id: hyp,
+                pkg,
+                version: version.clone(),
+            });
+            let domain = branch.domains.entry(pkg).or_default();
+            domain.selected = Some(version.clone());
+            domain.selected_reason = Some(Premise::Hypothesis(hyp));
+            tracing::trace!(
+                package = self.index.name(pkg).unwrap_or_default(),
+                %version,
+                hypothesis = hyp,
+                "rodin decision"
+            );
+            if let Ok(solution) = self.search(branch) {
+                return Ok(solution);
+            }
+        }
+        Err(())
     }
 
     fn propagate(&mut self, state: &mut State) -> Result<(), Conflict> {
@@ -870,7 +946,11 @@ impl<'a> Solver<'a> {
             self.apply_exclusions(state)?;
             self.force_singletons(state)?;
             for clause in &self.index.compiled {
-                if clause.antecedents.iter().all(|guard| self.guard_true(state, guard)) {
+                if clause
+                    .antecedents
+                    .iter()
+                    .all(|guard| self.guard_true(state, guard))
+                {
                     state.applied_clauses.insert(clause.id);
                     let premise = Premise::Clause(clause.id);
                     self.apply_consequent(state, &clause.consequent, premise)?;
@@ -888,12 +968,24 @@ impl<'a> Solver<'a> {
         for &(pkg, left, right) in &self.feature_exclusions {
             if state.features.contains(&(pkg, left)) && state.features.contains(&(pkg, right)) {
                 let mut premises = Vec::new();
-                premises.extend(state.feature_reasons.get(&(pkg, left)).cloned().unwrap_or_default());
-                premises.extend(state.feature_reasons.get(&(pkg, right)).cloned().unwrap_or_default());
+                premises.extend(
+                    state
+                        .feature_reasons
+                        .get(&(pkg, left))
+                        .cloned()
+                        .unwrap_or_default(),
+                );
+                premises.extend(
+                    state
+                        .feature_reasons
+                        .get(&(pkg, right))
+                        .cloned()
+                        .unwrap_or_default(),
+                );
                 return Err(Conflict {
                     premises,
                     selected: selected_versions(state),
-                    decision: last_decision(state),
+                    decision: last_hypothesis(state),
                 });
             }
         }
@@ -901,29 +993,39 @@ impl<'a> Solver<'a> {
     }
 
     fn apply_exclusions(&mut self, state: &mut State) -> Result<(), Conflict> {
-        for fact in &self.learned {
+        let learned = self.learned.clone();
+        for fact in &learned {
             let mut unsatisfied = Vec::new();
+            let mut disjoint = false;
             for (pkg, versions) in &fact.region.versions {
-                match state.domains.get(pkg).and_then(|domain| domain.selected.as_ref()) {
+                match state
+                    .domains
+                    .get(pkg)
+                    .and_then(|domain| domain.selected.as_ref())
+                {
                     Some(version) if versions.contains(version) => {}
                     Some(_) => {
-                        unsatisfied.clear();
+                        disjoint = true;
                         break;
                     }
                     None => unsatisfied.push((*pkg, versions.clone())),
                 }
             }
+            if disjoint {
+                continue;
+            }
             if unsatisfied.is_empty() {
-                if fact
-                    .region
-                    .versions
-                    .keys()
-                    .all(|pkg| state.domains.get(pkg).and_then(|d| d.selected.as_ref()).is_some())
-                {
+                if fact.region.versions.keys().all(|pkg| {
+                    state
+                        .domains
+                        .get(pkg)
+                        .and_then(|d| d.selected.as_ref())
+                        .is_some()
+                }) {
                     return Err(Conflict {
                         premises: vec![Premise::Exclusion(ExclusionId(0))],
                         selected: selected_versions(state),
-                        decision: last_decision(state),
+                        decision: last_hypothesis(state),
                     });
                 }
                 continue;
@@ -944,7 +1046,7 @@ impl<'a> Solver<'a> {
         Ok(())
     }
 
-    fn force_singletons(&self, state: &mut State) -> Result<(), Conflict> {
+    fn force_singletons(&mut self, state: &mut State) -> Result<(), Conflict> {
         let active: Vec<_> = state
             .domains
             .iter()
@@ -960,13 +1062,21 @@ impl<'a> Solver<'a> {
                         .map(|domain| domain.reasons.clone())
                         .unwrap_or_default(),
                     selected: selected_versions(state),
-                    decision: last_decision(state),
+                    decision: last_hypothesis(state),
                 });
             }
             if candidates.len() == 1 {
                 let domain = state.domains.entry(pkg).or_default();
                 if domain.selected.is_none() {
-                    domain.selected = candidates.into_iter().next();
+                    let selected = candidates.into_iter().next();
+                    if let Some(version) = &selected {
+                        self.trace.push(format!(
+                            "force {} {} (only candidate after propagation)",
+                            self.package_label(pkg),
+                            version
+                        ));
+                    }
+                    domain.selected = selected;
                     domain.selected_reason = domain.reasons.last().cloned();
                 }
             }
@@ -975,7 +1085,7 @@ impl<'a> Solver<'a> {
     }
 
     fn apply_consequent(
-        &self,
+        &mut self,
         state: &mut State,
         consequent: &Consequent,
         premise: Premise,
@@ -997,7 +1107,8 @@ impl<'a> Solver<'a> {
         }
     }
 
-    fn activate(&self, state: &mut State, pkg: PkgIx, premise: Premise) {
+    fn activate(&mut self, state: &mut State, pkg: PkgIx, premise: Premise) {
+        let was_active = state.domains.get(&pkg).is_some_and(|domain| domain.active);
         let domain = state.domains.entry(pkg).or_insert_with(|| Domain {
             active: false,
             allowed: self.package_universe(pkg),
@@ -1007,15 +1118,24 @@ impl<'a> Solver<'a> {
         });
         domain.active = true;
         domain.reasons.push(premise);
+        if !was_active {
+            self.trace
+                .push(format!("domain {} becomes active", self.package_label(pkg)));
+        }
     }
 
     fn intersect_domain(
-        &self,
+        &mut self,
         state: &mut State,
         pkg: PkgIx,
         set: VersionSet,
         premise: Premise,
     ) -> Result<(), Conflict> {
+        let old_allowed = state
+            .domains
+            .get(&pkg)
+            .map(|domain| domain.allowed.clone())
+            .unwrap_or_else(|| self.package_universe(pkg));
         let domain = state.domains.entry(pkg).or_insert_with(|| Domain {
             active: true,
             allowed: self.package_universe(pkg),
@@ -1026,35 +1146,56 @@ impl<'a> Solver<'a> {
         let next = domain.allowed.intersect(&set);
         let mut premises = domain.reasons.clone();
         premises.push(premise.clone());
-        if next.is_empty() || self.index.versions(pkg).iter().all(|version| !next.contains(version))
+        if next.is_empty()
+            || self
+                .index
+                .versions(pkg)
+                .iter()
+                .all(|version| !next.contains(version))
         {
+            self.trace.push(format!(
+                "{}: {} ∩ {} = empty -> conflict",
+                self.package_label(pkg),
+                display_version_set(&old_allowed),
+                display_version_set(&set)
+            ));
             return Err(Conflict {
                 premises,
                 selected: selected_versions(state),
-                decision: last_decision(state),
+                decision: last_hypothesis(state),
             });
         }
         if let Some(selected) = &domain.selected
             && !next.contains(selected)
         {
+            self.trace.push(format!(
+                "{}: selected {} not in {} ∩ {} -> conflict",
+                self.package_label(pkg),
+                selected,
+                display_version_set(&old_allowed),
+                display_version_set(&set)
+            ));
             return Err(Conflict {
                 premises,
                 selected: selected_versions(state),
-                decision: last_decision(state),
+                decision: last_hypothesis(state),
             });
+        }
+        if next != domain.allowed {
+            self.trace.push(format!(
+                "{}: {} ∩ {} = {}",
+                self.package_label(pkg),
+                display_version_set(&old_allowed),
+                display_version_set(&set),
+                display_version_set(&next)
+            ));
         }
         domain.allowed = next;
         domain.reasons.push(premise);
         Ok(())
     }
 
-    fn enable_feature(
-        &self,
-        state: &mut State,
-        pkg: PkgIx,
-        feat: FeatIx,
-        reasons: Vec<Premise>,
-    ) {
+    fn enable_feature(&self, state: &mut State, pkg: PkgIx, feat: FeatIx, reasons: Vec<Premise>) {
         if state.features.insert((pkg, feat)) {
             state.feature_reasons.insert((pkg, feat), reasons);
         }
@@ -1063,11 +1204,13 @@ impl<'a> Solver<'a> {
     fn guard_true(&self, state: &State, guard: &Guard) -> bool {
         match guard {
             Guard::InGraph(pkg) => state.domains.get(pkg).is_some_and(|domain| domain.active),
-            Guard::Selected(pkg, version) => state
-                .domains
-                .get(pkg)
-                .and_then(|domain| domain.selected.as_ref())
-                == Some(version),
+            Guard::Selected(pkg, version) => {
+                state
+                    .domains
+                    .get(pkg)
+                    .and_then(|domain| domain.selected.as_ref())
+                    == Some(version)
+            }
             Guard::Feature(pkg, feat) => state.features.contains(&(*pkg, *feat)),
         }
     }
@@ -1098,15 +1241,23 @@ impl<'a> Solver<'a> {
         version_set_from_points(self.index.versions(pkg))
     }
 
+    fn package_label(&self, pkg: PkgIx) -> &str {
+        self.index.name(pkg).unwrap_or("<unknown>")
+    }
+
     fn learn(&mut self, conflict: Conflict) {
-        let premises = dedup_premises(conflict.premises);
+        let mut premises = conflict.premises;
+        if let Some(hypothesis) = &conflict.decision {
+            premises.push(Premise::Hypothesis(hypothesis.id));
+        }
+        let premises = dedup_premises(premises);
         let derivation = self.derivations.append(Derivation {
             premises: premises.clone(),
             rule: RuleKind::Conflict,
         });
         let mut region = Region::new();
-        if let Some((pkg, version)) = conflict.decision.clone() {
-            region = region.with_versions(pkg, VersionSet::exact(version));
+        if let Some(hypothesis) = conflict.decision.clone() {
+            region = region.with_versions(hypothesis.pkg, VersionSet::exact(hypothesis.version));
         } else {
             for (pkg, version) in &conflict.selected {
                 region = region.with_versions(*pkg, VersionSet::exact(version.clone()));
@@ -1119,7 +1270,15 @@ impl<'a> Solver<'a> {
         }
         let support = support_from_premises(self.index, &premises);
         let (region, point_versions, widened_versions) =
-            self.index.widen_region(&conflict.selected, &support, &region);
+            self.index
+                .widen_region(&conflict.selected, &support, &region);
+        self.trace.push(format!(
+            "learn: {} dead; support: {}; widened {}->{} versions",
+            display_region(self.index, &region),
+            display_support(&support),
+            point_versions,
+            widened_versions
+        ));
         let exclusion = self.exclusions.append(Exclusion {
             region: region.clone(),
             derivation,
@@ -1135,43 +1294,75 @@ impl<'a> Solver<'a> {
         });
     }
 
-    fn finish(self, state: State) -> SolveResult {
-        let selected = state
+    fn finish(mut self, state: State) -> SolveResult {
+        let selected: BTreeMap<String, Version> = state
             .domains
             .iter()
             .filter_map(|(pkg, domain)| {
-                domain
-                    .selected
-                    .as_ref()
-                    .map(|version| (self.index.name(*pkg).unwrap_or_default().to_owned(), version.clone()))
+                domain.selected.as_ref().map(|version| {
+                    (
+                        self.index.name(*pkg).unwrap_or_default().to_owned(),
+                        version.clone(),
+                    )
+                })
             })
             .collect();
         let mut enabled_features: BTreeMap<String, BTreeSet<String>> = BTreeMap::new();
         for (pkg, feat) in state.features {
-            if let (Some(name), Some(feature)) = (
-                self.index.name(pkg),
-                self.index.features.resolve_str(feat),
-            ) {
+            if let (Some(name), Some(feature)) =
+                (self.index.name(pkg), self.index.features.resolve_str(feat))
+            {
                 enabled_features
                     .entry(name.to_owned())
                     .or_default()
                     .insert(feature.to_owned());
             }
         }
+        self.trace.push(format!(
+            "solution: {}",
+            selected
+                .iter()
+                .map(|(name, version)| format!("{name} {version}"))
+                .collect::<Vec<_>>()
+                .join(", ")
+        ));
+        self.trace.push(format!(
+            "summary: manifests read {}, candidate observations {}, conflicts {}, widened versions killed {} vs {} point versions",
+            self.manifests_read,
+            self.candidates_existing,
+            self.conflicts,
+            self.learned.iter().map(|fact| fact.widened_versions).sum::<usize>(),
+            self.learned.iter().map(|fact| fact.point_versions).sum::<usize>()
+        ));
         SolveResult {
             selected,
             enabled_features,
             decisions: self.decisions,
             conflicts: self.conflicts,
+            manifests_read: self.manifests_read,
+            candidates_existing: self.candidates_existing,
+            trace: self.trace,
             learned: self.learned,
             derivations: self.derivations,
             clauses: self.index.clauses.clone(),
         }
     }
 
-    fn no_solution(self) -> SolveError {
+    fn no_solution(mut self) -> SolveError {
+        self.trace.push(format!(
+            "no solution: manifests read {}, candidate observations {}, conflicts {}, widened versions killed {} vs {} point versions",
+            self.manifests_read,
+            self.candidates_existing,
+            self.conflicts,
+            self.learned.iter().map(|fact| fact.widened_versions).sum::<usize>(),
+            self.learned.iter().map(|fact| fact.point_versions).sum::<usize>()
+        ));
         SolveError::NoSolution {
+            decisions: self.decisions,
             conflicts: self.conflicts,
+            manifests_read: self.manifests_read,
+            candidates_existing: self.candidates_existing,
+            trace: self.trace,
             learned: self.learned,
             derivations: self.derivations,
             clauses: self.index.clauses.clone(),
@@ -1180,13 +1371,20 @@ impl<'a> Solver<'a> {
 
     fn assert_solution(&self, state: &State) {
         for clause in &self.index.compiled {
-            if clause.antecedents.iter().all(|guard| self.guard_true(state, guard)) {
+            if clause
+                .antecedents
+                .iter()
+                .all(|guard| self.guard_true(state, guard))
+            {
                 match &clause.consequent {
                     Consequent::InGraph(pkg) => {
                         assert!(state.domains.get(pkg).is_some_and(|domain| domain.active));
                     }
                     Consequent::VersionSet(pkg, set) => {
-                        let selected = state.domains.get(pkg).and_then(|domain| domain.selected.as_ref());
+                        let selected = state
+                            .domains
+                            .get(pkg)
+                            .and_then(|domain| domain.selected.as_ref());
                         assert!(selected.is_some_and(|version| set.contains(version)));
                     }
                     Consequent::Feature(pkg, feat) => {
@@ -1216,6 +1414,60 @@ fn parse_req(req: &str) -> Result<VersionSet> {
     Ok(VersionSet::from_req(&parsed))
 }
 
+fn display_req(req: &str) -> String {
+    VersionReq::parse(req).map_or_else(
+        |_| req.to_owned(),
+        |req| display_version_set(&VersionSet::from_req(&req)),
+    )
+}
+
+fn display_version_set(set: &VersionSet) -> String {
+    if set.is_empty() {
+        return "empty".to_owned();
+    }
+    set.intervals()
+        .iter()
+        .map(|interval| {
+            let lower = interval
+                .lower
+                .as_ref()
+                .map_or("-inf".to_owned(), ToString::to_string);
+            let upper = interval
+                .upper
+                .as_ref()
+                .map_or("+inf".to_owned(), ToString::to_string);
+            format!("[{lower},{upper})")
+        })
+        .collect::<Vec<_>>()
+        .join(" U ")
+}
+
+fn display_region(index: &CompiledIndex, region: &Region) -> String {
+    region
+        .versions
+        .iter()
+        .map(|(pkg, versions)| {
+            format!(
+                "{} {}",
+                index.name(*pkg).unwrap_or("<unknown>"),
+                display_version_set(versions)
+            )
+        })
+        .collect::<Vec<_>>()
+        .join("; ")
+}
+
+fn display_support(support: &BTreeSet<EdgeKey>) -> String {
+    if support.is_empty() {
+        return "pins/hypotheses only".to_owned();
+    }
+    support
+        .iter()
+        .map(|edge| format!("{}->{} edge", edge.parent, edge.dep))
+        .collect::<Vec<_>>()
+        .join(", ")
+}
+
 fn version_set_from_points(versions: &[Version]) -> VersionSet {
     VersionSet::from_intervals(versions.iter().map(|version| rodin_facts::Interval {
         lower: Some(version.clone()),
@@ -1227,38 +1479,37 @@ fn next_patch(version: &Version) -> Version {
     Version::new(version.major, version.minor, version.patch + 1)
 }
 
-fn state_fingerprint(state: &State) -> (usize, usize, usize, usize) {
-    let active = state
+fn state_fingerprint(state: &State) -> String {
+    let domains: Vec<_> = state
         .domains
-        .values()
-        .filter(|domain| domain.active)
-        .count();
-    let selected = state
-        .domains
-        .values()
-        .filter(|domain| domain.selected.is_some())
-        .count();
-    let intervals = state
-        .domains
-        .values()
-        .map(|domain| domain.allowed.intervals().len())
-        .sum();
-    (active, selected, intervals, state.features.len())
+        .iter()
+        .map(|(pkg, domain)| {
+            (
+                *pkg,
+                domain.active,
+                domain.allowed.intervals().to_vec(),
+                domain.selected.clone(),
+            )
+        })
+        .collect();
+    format!("{domains:?}:{:?}", state.features)
 }
 
 fn selected_versions(state: &State) -> BTreeMap<PkgIx, Version> {
     state
         .domains
         .iter()
-        .filter_map(|(pkg, domain)| domain.selected.as_ref().map(|version| (*pkg, version.clone())))
+        .filter_map(|(pkg, domain)| {
+            domain
+                .selected
+                .as_ref()
+                .map(|version| (*pkg, version.clone()))
+        })
         .collect()
 }
 
-fn last_decision(state: &State) -> Option<(PkgIx, Version)> {
-    state
-        .hypotheses
-        .last()
-        .map(|hypothesis| (hypothesis.pkg, hypothesis.version.clone()))
+fn last_hypothesis(state: &State) -> Option<Hypothesis> {
+    state.hypotheses.last().cloned()
 }
 
 fn dedup_premises(premises: Vec<Premise>) -> Vec<Premise> {
@@ -1290,9 +1541,12 @@ pub struct ScenarioResult {
     pub kind: LearnedKind,
     pub cold_decisions: usize,
     pub cold_conflicts: usize,
+    pub cold_manifests_read: usize,
+    pub cold_candidates_existing: usize,
     pub warm_decisions: usize,
     pub warm_conflicts: usize,
     pub learned: Vec<LearnedNoGood>,
+    pub trace: Vec<String>,
 }
 
 #[derive(Clone, Debug, Default)]
@@ -1307,6 +1561,7 @@ impl Round3Report {
         let mut out = String::new();
         out.push_str("## Round 3\n\n");
         out.push_str("Round 3 measures dynamic derivation-support widening. The core used for this round propagates version domains as sets and only picks a point version when an active package must be expanded and multiple real candidates remain; conflicts below are therefore late-discovery conflicts, not avoidable set-intersection artifacts.\n\n");
+        out.push_str("Natural workloads use cached crates.io sparse-index rows with each requested root pinned to its cached latest exact version and a bounded v0 mini-closure. The pressure suite is synthetic where needed so every burial shape has an explicit late-discovery choice point.\n\n");
         out.push_str("### Natural workloads\n\n");
         out.push_str("| workload | shape | learned kind | cold decisions | cold conflicts | learned no-goods |\n");
         out.push_str("|---|---|---|---:|---:|---:|\n");
@@ -1357,10 +1612,14 @@ impl Round3Report {
             .collect();
         let total_point: usize = learned.iter().map(|fact| fact.point_versions).sum();
         let total_wide: usize = learned.iter().map(|fact| fact.widened_versions).sum();
-        let pressure_cold_conflicts: usize = self.pressure.iter().map(|row| row.cold_conflicts).sum();
-        let pressure_warm_conflicts: usize = self.pressure.iter().map(|row| row.warm_conflicts).sum();
-        let pressure_cold_decisions: usize = self.pressure.iter().map(|row| row.cold_decisions).sum();
-        let pressure_warm_decisions: usize = self.pressure.iter().map(|row| row.warm_decisions).sum();
+        let pressure_cold_conflicts: usize =
+            self.pressure.iter().map(|row| row.cold_conflicts).sum();
+        let pressure_warm_conflicts: usize =
+            self.pressure.iter().map(|row| row.warm_conflicts).sum();
+        let pressure_cold_decisions: usize =
+            self.pressure.iter().map(|row| row.cold_decisions).sum();
+        let pressure_warm_decisions: usize =
+            self.pressure.iter().map(|row| row.warm_decisions).sum();
         out.push_str(&format!(
             "- learned no-goods: {}\n- point-versions excluded: {total_point}\n- widened-versions excluded: {total_wide}\n- aggregate widening factor: {}\n- pressure decisions saved by warm facts: {}\n- pressure conflicts saved by warm facts: {}\n\n",
             learned.len(),
@@ -1378,13 +1637,26 @@ impl Round3Report {
             pressure_warm_conflicts,
         ));
         out.push('\n');
+        if let Some(trace) = self
+            .pressure
+            .iter()
+            .find(|scenario| scenario.name == "downgrade-cascade")
+        {
+            out.push_str("\n### Appendix: downgrade-cascade full trace\n\n");
+            out.push_str("This trace is emitted by the round-3 solver run for the pressure scenario, not reconstructed by hand.\n\n");
+            for (ix, line) in trace.trace.iter().enumerate() {
+                out.push_str(&format!("{}. {line}\n", ix + 1));
+            }
+            out.push('\n');
+        }
         out
     }
 }
 
 pub fn append_round3_report(path: &Path) -> Result<Round3Report> {
     let report = run_round3()?;
-    let existing = fs::read_to_string(path).wrap_err_with(|| format!("reading {}", path.display()))?;
+    let existing =
+        fs::read_to_string(path).wrap_err_with(|| format!("reading {}", path.display()))?;
     let base = existing
         .find("\n## Round 3\n")
         .map_or(existing.as_str(), |ix| &existing[..ix])
@@ -1396,20 +1668,33 @@ pub fn append_round3_report(path: &Path) -> Result<Round3Report> {
 
 pub fn run_round3() -> Result<Round3Report> {
     let mut report = Round3Report::default();
-    if let Ok(crates) = rodin_survey::fetch_default_closure()
-        && let Ok(index) = CompiledIndex::from_sparse(&crates)
-    {
-        let natural = [
-            Problem::new(vec![RootReq::new("axum", "*")]),
-            Problem::new(vec![RootReq::new("reqwest", "*")]),
-            Problem::new(vec![RootReq::new("tokio", "*").feature("full")]),
-            Problem::new(vec![RootReq::new("clap", "*")]),
-        ];
-        for (name, problem) in ["axum-default", "reqwest", "tokio-full", "clap"]
-            .into_iter()
-            .zip(natural)
+    let cache = rodin_survey::workspace_cache_dir()?;
+    for (name, seed, features) in [
+        ("axum-default", "axum", Vec::<&str>::new()),
+        ("reqwest", "reqwest", Vec::<&str>::new()),
+        ("tokio-full", "tokio", vec!["full"]),
+        ("clap", "clap", Vec::<&str>::new()),
+    ] {
+        match rodin_survey::fetch_closure(&cache, &[seed], 12)
+            .and_then(|crates| CompiledIndex::from_sparse(&crates))
         {
-            report.natural.push(run_one(&index, name, "natural", problem, None));
+            Ok(index) => {
+                let mut root = RootReq::new(
+                    seed,
+                    latest_exact_req(&index, seed).unwrap_or_else(|| "*".to_owned()),
+                );
+                for feature in features {
+                    root = root.feature(feature);
+                }
+                report.natural.push(run_one(
+                    &index,
+                    name,
+                    "natural",
+                    Problem::new(vec![root]),
+                    None,
+                ));
+            }
+            Err(err) => tracing::warn!(workload = name, error = %err, "skipping natural workload"),
         }
     }
     for scenario in pressure_scenarios()? {
@@ -1438,9 +1723,12 @@ pub fn run_round3() -> Result<Round3Report> {
             kind: scenario.kind,
             cold_decisions: cold.cold_decisions,
             cold_conflicts: cold.cold_conflicts,
+            cold_manifests_read: cold.cold_manifests_read,
+            cold_candidates_existing: cold.cold_candidates_existing,
             warm_decisions: warm.cold_decisions,
             warm_conflicts: warm.cold_conflicts,
             learned: cold.learned,
+            trace: cold.trace,
         });
     }
     Ok(report)
@@ -1461,21 +1749,35 @@ fn run_one(
             kind,
             cold_decisions: result.decisions,
             cold_conflicts: result.conflicts,
+            cold_manifests_read: result.manifests_read,
+            cold_candidates_existing: result.candidates_existing,
             warm_decisions: 0,
             warm_conflicts: 0,
+            trace: result.trace,
             learned: result.learned,
         },
-        Err(SolveError::NoSolution {
-            conflicts, learned, ..
-        }) => ScenarioResult {
-            name: name.to_owned(),
-            shape: shape.to_owned(),
-            kind,
-            cold_decisions: 0,
-            cold_conflicts: conflicts,
-            warm_decisions: 0,
-            warm_conflicts: 0,
-            learned,
+        Err(err) => match *err {
+            SolveError::NoSolution {
+                decisions,
+                conflicts,
+                manifests_read,
+                candidates_existing,
+                trace,
+                learned,
+                ..
+            } => ScenarioResult {
+                name: name.to_owned(),
+                shape: shape.to_owned(),
+                kind,
+                cold_decisions: decisions,
+                cold_conflicts: conflicts,
+                cold_manifests_read: manifests_read,
+                cold_candidates_existing: candidates_existing,
+                warm_decisions: 0,
+                warm_conflicts: 0,
+                trace,
+                learned,
+            },
         },
     }
 }
@@ -1502,10 +1804,19 @@ fn pressure_scenarios() -> Result<Vec<PressureScenario>> {
     ])
 }
 
+fn latest_exact_req(index: &CompiledIndex, name: &str) -> Option<String> {
+    let pkg = index.package(name)?;
+    index
+        .versions(pkg)
+        .last()
+        .map(|version| format!("={version}"))
+}
+
 fn buried_pin(two_level: bool) -> Result<PressureScenario> {
     let mut index = CompiledIndex::empty();
     add_leaf_versions(&mut index, "a", 1, 3);
     if two_level {
+        index.add_package_version("x", v(1, 0, 0), Vec::new(), BTreeMap::new());
         index.add_package_version(
             "x",
             v(2, 0, 0),
@@ -1519,6 +1830,7 @@ fn buried_pin(two_level: bool) -> Result<PressureScenario> {
             BTreeMap::new(),
         );
     } else {
+        index.add_package_version("x", v(1, 0, 0), Vec::new(), BTreeMap::new());
         index.add_package_version(
             "x",
             v(2, 0, 0),
@@ -1527,9 +1839,12 @@ fn buried_pin(two_level: bool) -> Result<PressureScenario> {
         );
     }
     index.finish_synthetic()?;
-    let mut problem = Problem::new(vec![RootReq::new("a", "^3"), RootReq::new("x", "*")]);
+    let mut problem = Problem::new(vec![RootReq::new("a", "*"), RootReq::new("x", "*")]);
     problem.learned_kind = LearnedKind::Plain;
-    let mut perturbed = Problem::new(vec![RootReq::new("a", ">=2.0.0, <4.0.0"), RootReq::new("x", "*")]);
+    let mut perturbed = Problem::new(vec![
+        RootReq::new("a", ">=1.0.0, <4.0.0"),
+        RootReq::new("x", "*"),
+    ]);
     perturbed.learned_kind = LearnedKind::Plain;
     Ok(PressureScenario {
         name: if two_level {
@@ -1552,12 +1867,14 @@ fn buried_pin(two_level: bool) -> Result<PressureScenario> {
 fn feature_triggered_pin() -> Result<PressureScenario> {
     let mut index = CompiledIndex::empty();
     add_leaf_versions(&mut index, "a", 1, 3);
+    index.add_package_version("x", v(1, 0, 0), Vec::new(), BTreeMap::new());
     index.add_package_version(
         "x",
         v(2, 0, 0),
         vec![SyntheticDep::normal("a", "=1.0.0").optional(true)],
         BTreeMap::from([("pin".to_owned(), vec!["dep:a".to_owned()])]),
     );
+    index.add_package_version("trigger", v(0, 1, 0), Vec::new(), BTreeMap::new());
     index.add_package_version(
         "trigger",
         v(1, 0, 0),
@@ -1565,9 +1882,17 @@ fn feature_triggered_pin() -> Result<PressureScenario> {
         BTreeMap::new(),
     );
     index.finish_synthetic()?;
-    let mut problem = Problem::new(vec![RootReq::new("a", "^3"), RootReq::new("x", "*"), RootReq::new("trigger", "*")]);
+    let mut problem = Problem::new(vec![
+        RootReq::new("a", "*"),
+        RootReq::new("x", "*"),
+        RootReq::new("trigger", "*"),
+    ]);
     problem.learned_kind = LearnedKind::FeatureGuarded;
-    let mut perturbed = Problem::new(vec![RootReq::new("a", ">=2.0.0, <4.0.0"), RootReq::new("x", "*"), RootReq::new("trigger", "*")]);
+    let mut perturbed = Problem::new(vec![
+        RootReq::new("a", ">=1.0.0, <4.0.0"),
+        RootReq::new("x", "*"),
+        RootReq::new("trigger", "*"),
+    ]);
     perturbed.learned_kind = LearnedKind::FeatureGuarded;
     Ok(PressureScenario {
         name: "feature-triggered-pin".to_owned(),
@@ -1586,19 +1911,37 @@ fn downgrade_cascade() -> Result<PressureScenario> {
     index.add_package_version(
         "web",
         v(3, 0, 0),
-        vec![SyntheticDep::normal("tokio-like", "^3"), SyntheticDep::normal("codec", "^3")],
+        vec![
+            SyntheticDep::normal("tokio-like", "^3"),
+            SyntheticDep::normal("codec", "^3"),
+        ],
         BTreeMap::new(),
     );
     index.add_package_version(
         "web",
         v(2, 0, 0),
-        vec![SyntheticDep::normal("tokio-like", "^1"), SyntheticDep::normal("codec", "=1.0.0")],
+        vec![
+            SyntheticDep::normal("tokio-like", "^1"),
+            SyntheticDep::normal("codec", "=1.0.0"),
+        ],
+        BTreeMap::new(),
+    );
+    index.add_package_version(
+        "web",
+        v(1, 0, 0),
+        vec![
+            SyntheticDep::normal("tokio-like", "^1"),
+            SyntheticDep::normal("codec", "^3"),
+        ],
         BTreeMap::new(),
     );
     index.add_package_version(
         "client",
         v(1, 0, 0),
-        vec![SyntheticDep::normal("web", "*"), SyntheticDep::normal("codec", "^3")],
+        vec![
+            SyntheticDep::normal("web", "*"),
+            SyntheticDep::normal("codec", "^3"),
+        ],
         BTreeMap::new(),
     );
     index.finish_synthetic()?;
@@ -1606,7 +1949,9 @@ fn downgrade_cascade() -> Result<PressureScenario> {
     problem.decrees.push(Decree::new("tokio-like", "^1"));
     problem.learned_kind = LearnedKind::DecreeDerived;
     let mut perturbed = Problem::new(vec![RootReq::new("client", "*")]);
-    perturbed.decrees.push(Decree::new("tokio-like", ">=1.0.0, <3.0.0"));
+    perturbed
+        .decrees
+        .push(Decree::new("tokio-like", ">=1.0.0, <3.0.0"));
     perturbed.learned_kind = LearnedKind::DecreeDerived;
     Ok(PressureScenario {
         name: "downgrade-cascade".to_owned(),
@@ -1625,13 +1970,28 @@ fn hole_trap() -> Result<PressureScenario> {
     index.add_package_version(
         "fallback",
         v(1, 0, 0),
-        vec![SyntheticDep::normal("a", "^3"), SyntheticDep::normal("b", "=1.0.0")],
+        vec![
+            SyntheticDep::normal("a", "^3"),
+            SyntheticDep::normal("b", "^3"),
+        ],
+        BTreeMap::new(),
+    );
+    index.add_package_version(
+        "fallback",
+        v(1, 0, 1),
+        vec![
+            SyntheticDep::normal("a", "^3"),
+            SyntheticDep::normal("b", "=1.0.0"),
+        ],
         BTreeMap::new(),
     );
     index.add_package_version(
         "fallback",
         v(1, 0, 2),
-        vec![SyntheticDep::normal("a", "^3"), SyntheticDep::normal("b", "^3")],
+        vec![
+            SyntheticDep::normal("a", "^3"),
+            SyntheticDep::normal("b", "^3"),
+        ],
         BTreeMap::new(),
     );
     index.add_package_version(
@@ -1641,9 +2001,15 @@ fn hole_trap() -> Result<PressureScenario> {
         BTreeMap::new(),
     );
     index.finish_synthetic()?;
-    let mut problem = Problem::new(vec![RootReq::new("fallback", "=1.0.0"), RootReq::new("other", "*")]);
+    let mut problem = Problem::new(vec![
+        RootReq::new("b", "*"),
+        RootReq::new("fallback", "<1.0.2"),
+    ]);
     problem.learned_kind = LearnedKind::HoleAware;
-    let mut perturbed = Problem::new(vec![RootReq::new("fallback", ">=1.0.0, <=1.0.2"), RootReq::new("other", "*")]);
+    let mut perturbed = Problem::new(vec![
+        RootReq::new("b", ">=1.0.0, <4.0.0"),
+        RootReq::new("fallback", "<1.0.2"),
+    ]);
     perturbed.learned_kind = LearnedKind::HoleAware;
     Ok(PressureScenario {
         name: "hole-trap".to_owned(),
@@ -1669,6 +2035,12 @@ fn exclusion_collision() -> Result<PressureScenario> {
     index.add_package_version(
         "left",
         v(1, 0, 0),
+        vec![SyntheticDep::normal("mode", "=1.0.0").feature("fast")],
+        BTreeMap::new(),
+    );
+    index.add_package_version(
+        "left",
+        v(2, 0, 0),
         vec![SyntheticDep::normal("mode", "=1.0.0").feature("fast")],
         BTreeMap::new(),
     );
@@ -1718,9 +2090,17 @@ fn lockstep_trap() -> Result<PressureScenario> {
         BTreeMap::new(),
     );
     index.finish_synthetic()?;
-    let mut problem = Problem::new(vec![RootReq::new("derive", "=1.0.0"), RootReq::new("floor", "*")]);
+    let mut problem = Problem::new(vec![
+        RootReq::new("core", "*"),
+        RootReq::new("derive", "=1.0.0"),
+        RootReq::new("floor", "*"),
+    ]);
     problem.learned_kind = LearnedKind::Family;
-    let mut perturbed = Problem::new(vec![RootReq::new("derive", ">=1.0.0, <3.0.0"), RootReq::new("floor", "*")]);
+    let mut perturbed = Problem::new(vec![
+        RootReq::new("core", ">=1.0.0, <4.0.0"),
+        RootReq::new("derive", ">=1.0.0, <3.0.0"),
+        RootReq::new("floor", "*"),
+    ]);
     perturbed.decrees.push(Decree::new("derive", "=1.0.0"));
     perturbed.learned_kind = LearnedKind::Family;
     Ok(PressureScenario {
@@ -1760,9 +2140,17 @@ fn push_scenario_row(out: &mut String, row: &ScenarioResult, warm: bool) {
         out.push_str(" | ");
         out.push_str(&row.warm_conflicts.to_string());
         out.push_str(" | ");
-        out.push_str(&row.cold_decisions.saturating_sub(row.warm_decisions).to_string());
+        out.push_str(
+            &row.cold_decisions
+                .saturating_sub(row.warm_decisions)
+                .to_string(),
+        );
         out.push_str(" | ");
-        out.push_str(&row.cold_conflicts.saturating_sub(row.warm_conflicts).to_string());
+        out.push_str(
+            &row.cold_conflicts
+                .saturating_sub(row.warm_conflicts)
+                .to_string(),
+        );
         out.push_str(" | ");
     }
     out.push_str(&row.learned.len().to_string());
@@ -1828,14 +2216,24 @@ fn round3_verdict(
     let conflict_savings = cold_conflicts.saturating_sub(warm_conflicts);
     if widening_factor > 1.0 && (decision_savings > 0 || conflict_savings > 0) {
         format!(
-            "Derivation-support widening pays in this round: it expands exclusion coverage by {}x and the perturbed pressure re-solves save {decision_savings} decisions and {conflict_savings} conflicts. The effect is not uniform by kind, so the useful design signal is the per-kind table rather than a single global rescue story.",
-            decimal(widening_factor)
+            "Derivation-support widening pays in this round: it expands exclusion coverage by {}x and the perturbed pressure re-solves save {decision_savings} decisions and {}. The effect is not uniform by kind, so the useful design signal is the per-kind table rather than a single global rescue story.",
+            decimal(widening_factor),
+            plural(conflict_savings, "conflict", "conflicts")
         )
     } else {
         format!(
-            "Derivation-support widening does not pay clearly in this round: coverage is only {}x and warm pressure re-solves save {decision_savings} decisions and {conflict_savings} conflicts. That is a negative result for dynamic value, even if individual shapes still widen.",
-            decimal(widening_factor)
+            "Derivation-support widening does not pay clearly in this round: coverage is only {}x and warm pressure re-solves save {decision_savings} decisions and {}. That is a negative result for dynamic value, even if individual shapes still widen.",
+            decimal(widening_factor),
+            plural(conflict_savings, "conflict", "conflicts")
         )
+    }
+}
+
+fn plural(count: usize, singular: &str, plural: &str) -> String {
+    if count == 1 {
+        format!("{count} {singular}")
+    } else {
+        format!("{count} {plural}")
     }
 }
 
@@ -1848,14 +2246,24 @@ mod tests {
     #[test]
     fn propagation_handles_weak_feature_guard() -> Result<()> {
         let mut index = CompiledIndex::empty();
-        index.add_package_version("addon", v(1, 0, 0), Vec::new(), BTreeMap::from([("extra".to_owned(), Vec::new())]));
+        index.add_package_version(
+            "addon",
+            v(1, 0, 0),
+            Vec::new(),
+            BTreeMap::from([("extra".to_owned(), Vec::new())]),
+        );
         index.add_package_version(
             "root",
             v(1, 0, 0),
             vec![SyntheticDep::normal("addon", "=1.0.0").optional(true)],
             BTreeMap::from([("weak".to_owned(), vec!["addon?/extra".to_owned()])]),
         );
-        index.add_package_version("activator", v(1, 0, 0), vec![SyntheticDep::normal("addon", "=1.0.0")], BTreeMap::new());
+        index.add_package_version(
+            "activator",
+            v(1, 0, 0),
+            vec![SyntheticDep::normal("addon", "=1.0.0")],
+            BTreeMap::new(),
+        );
         index.finish_synthetic()?;
 
         let result = solve(
@@ -1865,7 +2273,7 @@ mod tests {
                 RootReq::new("activator", "*"),
             ]),
         )
-        .map_err(|err| eyre!("{err:?}"))?;
+        .map_err(|err| eyre::eyre!("{err:?}"))?;
 
         assert!(result.enabled_features["addon"].contains("extra"));
         Ok(())
@@ -1873,12 +2281,19 @@ mod tests {
 
     #[test]
     fn backjump_learns_and_continues_after_hand_built_conflict() -> Result<()> {
-        let scenario = buried_pin(false)?;
-        let result = solve(&scenario.index, scenario.problem).expect_err("root should conflict");
-        let SolveError::NoSolution { learned, conflicts, .. } = result;
+        let scenario = downgrade_cascade()?;
+        let result =
+            solve(&scenario.index, scenario.problem).map_err(|err| eyre::eyre!("{err:?}"))?;
+        let learned = result.learned;
+        let conflicts = result.conflicts;
         assert!(conflicts > 0);
         assert!(!learned.is_empty());
-        assert!(learned[0].support.iter().any(|edge| edge.parent == "x" && edge.dep == "a"));
+        assert!(
+            learned[0]
+                .support
+                .iter()
+                .any(|edge| edge.parent == "web" && edge.dep == "tokio-like")
+        );
         Ok(())
     }
 
@@ -1886,9 +2301,24 @@ mod tests {
     fn widening_range_uses_identical_supported_edge_lines() -> Result<()> {
         let mut index = CompiledIndex::empty();
         add_leaf_versions(&mut index, "a", 1, 3);
-        index.add_package_version("x", v(1, 0, 0), vec![SyntheticDep::normal("a", "=1.0.0")], BTreeMap::new());
-        index.add_package_version("x", v(1, 0, 1), vec![SyntheticDep::normal("a", "=1.0.0")], BTreeMap::new());
-        index.add_package_version("x", v(1, 0, 2), vec![SyntheticDep::normal("a", "=2.0.0")], BTreeMap::new());
+        index.add_package_version(
+            "x",
+            v(1, 0, 0),
+            vec![SyntheticDep::normal("a", "=1.0.0")],
+            BTreeMap::new(),
+        );
+        index.add_package_version(
+            "x",
+            v(1, 0, 1),
+            vec![SyntheticDep::normal("a", "=1.0.0")],
+            BTreeMap::new(),
+        );
+        index.add_package_version(
+            "x",
+            v(1, 0, 2),
+            vec![SyntheticDep::normal("a", "=2.0.0")],
+            BTreeMap::new(),
+        );
         index.finish_synthetic()?;
         let x = index.package("x").expect("x package");
         let a = index.package("a").expect("a package");

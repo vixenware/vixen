@@ -778,3 +778,80 @@ Round 2 keeps the Round 1 closure and sparse-index cache fixed, then asks whethe
 ### Round 2 verdict
 
 Family fusion finds real structure: 83 of 4513 unique edges are lockstep (1.839131% by edge count, 3.501598% by dep rows). It improves whole-manifest blocks from 8139 to 7894, and overall versions/block from 1.880944 to 1.939321, but that is still not a big collapse: fused median is 1.833333, p90 is 5.333333, and only 30.5% of crates have <=5 blocks. Per-edge granularity is much stronger: 4430 non-lockstep edges collapse to 23207 edge blocks over 310719 parent-version observations, with median 11, p90 41.666667, max 220, and 77.291196% of edges at <=5 blocks. So family fusion alone does not rescue the whole-manifest frontier bet; per-edge granularity is the only round-2 hypothesis that looks empirically useful, and it points away from whole-manifest metadata blocks as the primary volume unit.
+
+## Round 3
+
+Round 3 measures dynamic derivation-support widening. The core used for this round propagates version domains as sets and only picks a point version when an active package must be expanded and multiple real candidates remain; conflicts below are therefore late-discovery conflicts, not avoidable set-intersection artifacts.
+
+Natural workloads use cached crates.io sparse-index rows with each requested root pinned to its cached latest exact version and a bounded v0 mini-closure. The pressure suite is synthetic where needed so every burial shape has an explicit late-discovery choice point.
+
+### Natural workloads
+
+| workload | shape | learned kind | cold decisions | cold conflicts | learned no-goods |
+|---|---|---|---:|---:|---:|
+| axum-default | natural | plain | 0 | 1 | 1 |
+| reqwest | natural | plain | 0 | 1 | 1 |
+| tokio-full | natural | plain | 0 | 1 | 1 |
+| clap | natural | plain | 0 | 1 | 1 |
+
+### Pressure workloads
+
+| workload | shape | learned kind | cold decisions | cold conflicts | warm decisions | warm conflicts | decisions saved | conflicts saved | learned no-goods |
+|---|---|---|---:|---:|---:|---:|---:|---:|---:|
+| buried-pin | buried pin | plain | 3 | 1 | 1 | 0 | 2 | 1 | 1 |
+| buried-pin-two-level | buried pin, two levels deep | plain | 3 | 1 | 3 | 1 | 0 | 0 | 1 |
+| feature-triggered-pin | feature-triggered pin | feature-guarded | 4 | 1 | 4 | 1 | 0 | 0 | 1 |
+| downgrade-cascade | downgrade cascade | decree-derived | 3 | 2 | 5 | 3 | 0 | 0 | 2 |
+| hole-trap | hole trap | hole-aware | 3 | 1 | 1 | 0 | 2 | 1 | 1 |
+| exclusion-collision | exclusion collision | exclusion | 2 | 2 | 0 | 1 | 2 | 1 | 2 |
+| lockstep-trap | lockstep trap | family | 0 | 1 | 0 | 1 | 0 | 0 | 1 |
+
+### Widening by learned-fact kind
+
+| kind | no-goods | widened share | median factor | p90 factor | max factor | point versions | widened versions |
+|---|---:|---:|---:|---:|---:|---:|---:|
+| plain | 6 | 66.666667 | 4 | 50 | 50 | 6 | 90 |
+| feature-guarded | 1 | 0 | 1 | 1 | 1 | 1 | 1 |
+| decree-derived | 2 | 0 | 1 | 1 | 1 | 2 | 2 |
+| hole-aware | 1 | 0 | 1 | 1 | 1 | 1 | 1 |
+| exclusion | 2 | 50 | 2 | 2 | 2 | 2 | 3 |
+| family | 1 | 0 | 1 | 1 | 1 | 1 | 1 |
+
+### Round 3 aggregate
+
+- learned no-goods: 13
+- point-versions excluded: 13
+- widened-versions excluded: 98
+- aggregate widening factor: 7.538462
+- pressure decisions saved by warm facts: 4
+- pressure conflicts saved by warm facts: 2
+
+### Round 3 verdict
+
+Derivation-support widening pays in this round: it expands exclusion coverage by 7.538462x and the perturbed pressure re-solves save 4 decisions and 2 conflicts. The effect is not uniform by kind, so the useful design signal is the per-kind table rather than a single global rescue story.
+
+### Appendix: downgrade-cascade full trace
+
+This trace is emitted by the round-3 solver run for the pressure scenario, not reconstructed by hand.
+
+1. demand client [-inf,+inf)
+2. domain client becomes active
+3. decree tokio-like [1.0.0,2.0.0)
+4. domain tokio-like becomes active
+5. tokio-like: [1.0.0,1.0.1) U [2.0.0,2.0.1) U [3.0.0,3.0.1) ∩ [1.0.0,2.0.0) = [1.0.0,1.0.1)
+6. force tokio-like 1.0.0 (only candidate after propagation)
+7. force client 1.0.0 (only candidate after propagation)
+8. domain codec becomes active
+9. codec: [1.0.0,1.0.1) U [2.0.0,2.0.1) U [3.0.0,3.0.1) ∩ [3.0.0,4.0.0) = [3.0.0,3.0.1)
+10. domain web becomes active
+11. force codec 3.0.0 (only candidate after propagation)
+12. expand web 3.0.0 (highest remaining of 3 candidates) - reads 1 manifest
+13. tokio-like: [1.0.0,1.0.1) ∩ [3.0.0,4.0.0) = empty -> conflict
+14. learn: tokio-like [1.0.0,1.0.1); codec [3.0.0,3.0.1); web [3.0.0,3.0.1); client [1.0.0,1.0.1) dead; support: web->tokio-like edge; widened 1->1 versions
+15. expand web 2.0.0 (highest remaining of 3 candidates) - reads 1 manifest
+16. codec: [3.0.0,3.0.1) ∩ [1.0.0,1.0.1) = empty -> conflict
+17. learn: tokio-like [1.0.0,1.0.1); codec [3.0.0,3.0.1); web [2.0.0,2.0.1); client [1.0.0,1.0.1) dead; support: client->codec edge, web->codec edge; widened 1->1 versions
+18. expand web 1.0.0 (highest remaining of 3 candidates) - reads 1 manifest
+19. solution: client 1.0.0, codec 3.0.0, tokio-like 1.0.0, web 1.0.0
+20. summary: manifests read 3, candidate observations 3, conflicts 2, widened versions killed 2 vs 2 point versions
+

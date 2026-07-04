@@ -2200,6 +2200,7 @@ dependencies = [
  "rodin-survey",
  "semver",
  "tracing",
+ "tracing-subscriber",
 ]
 
 [[package]]
