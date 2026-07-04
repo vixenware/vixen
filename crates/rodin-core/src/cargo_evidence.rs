@@ -3,6 +3,7 @@ use std::fmt::Write as _;
 use std::fs::{self, File};
 use std::io::Read as _;
 use std::path::{Path, PathBuf};
+use std::process::Command;
 use std::time::Instant;
 
 use eyre::{Context, Result, bail};
@@ -28,6 +29,13 @@ const ROUND_TARGET_TRIPLE: &str = "aarch64-apple-darwin";
 #[derive(Clone, Debug, Facet, PartialEq)]
 pub struct CargoEvidenceReport {
     pub workspace: String,
+    pub fresh_lock_oracle: CargoFreshLockOracle,
+    pub projections: Vec<CargoProjectionReport>,
+}
+
+#[derive(Clone, Debug, Facet, PartialEq)]
+pub struct CargoProjectionReport {
+    pub projection: CargoProjectionMode,
     pub lock_packages: usize,
     pub lock_unique_names: usize,
     pub workspace_roots: usize,
@@ -36,8 +44,53 @@ pub struct CargoEvidenceReport {
     pub indexed_edges: usize,
     pub extraction_gaps: Vec<CargoExtractionGap>,
     pub solve: CargoSolveStats,
-    pub oracle: CargoOracleReport,
+    pub historical_oracle: CargoOracleReport,
+    pub fresh_oracle: Option<CargoOracleReport>,
     pub warm_counterfactual: Option<CargoWarmCounterfactual>,
+}
+
+#[derive(Clone, Copy, Debug, Eq, Facet, Ord, PartialEq, PartialOrd)]
+#[repr(C)]
+pub enum CargoProjectionMode {
+    FixedTargetRuntime,
+    LockUnionDev,
+}
+
+impl CargoProjectionMode {
+    fn label(self) -> &'static str {
+        match self {
+            Self::FixedTargetRuntime => "fixed-target runtime",
+            Self::LockUnionDev => "lock-union dev-included",
+        }
+    }
+
+    fn includes_target(self, target: Option<&str>) -> bool {
+        match self {
+            Self::FixedTargetRuntime => target.is_none_or(target_matches_round),
+            Self::LockUnionDev => true,
+        }
+    }
+
+    fn includes_dev_dependency(
+        self,
+        package_name: &str,
+        workspace_members: &BTreeSet<String>,
+    ) -> bool {
+        match self {
+            Self::FixedTargetRuntime => workspace_members.contains(package_name),
+            Self::LockUnionDev => true,
+        }
+    }
+}
+
+#[derive(Clone, Debug, Facet, PartialEq)]
+pub struct CargoFreshLockOracle {
+    pub attempted: bool,
+    pub solved: bool,
+    pub lock_packages: usize,
+    pub lock_unique_names: usize,
+    pub wall_ms: u64,
+    pub message: String,
 }
 
 #[derive(Clone, Debug, Eq, Facet, PartialEq)]
@@ -78,10 +131,18 @@ pub struct CargoSolveStats {
 
 #[derive(Clone, Debug, Facet, PartialEq)]
 pub struct CargoOracleReport {
+    pub oracle: CargoOracleKind,
     pub exact_matches: usize,
     pub compared_names: usize,
     pub match_rate: f64,
     pub divergences: Vec<CargoDivergence>,
+}
+
+#[derive(Clone, Copy, Debug, Eq, Facet, Ord, PartialEq, PartialOrd)]
+#[repr(C)]
+pub enum CargoOracleKind {
+    HistoricalLock,
+    FreshLock,
 }
 
 #[derive(Clone, Debug, Eq, Facet, PartialEq)]
@@ -133,6 +194,7 @@ struct ExtractedCargoUniverse {
 }
 
 struct ExtractionModel<'a> {
+    projection: CargoProjectionMode,
     target_names: &'a BTreeSet<String>,
     workspace_members: &'a BTreeSet<String>,
 }
@@ -196,19 +258,82 @@ struct LockDep {
 #[must_use]
 pub fn render_cargo_evidence_markdown(report: &CargoEvidenceReport) -> String {
     let mut out = String::new();
-    out.push_str("## Round 6: Cargo feature activation evidence\n\n");
+    out.push_str("## Round 7: Sharpened Cargo oracle evidence\n\n");
     let _ = writeln!(
         out,
-        "Source snapshot: `{}` Cargo.lock plus local Cargo registry source/cache artifacts. The extractor is offline-only, reads local Cargo.toml files and `.crate` archives directly, indexes cached registry alternatives for locked package names, models Cargo-compatible coexisting domains keyed by package name and compatibility class, and evaluates target-conditionals against `{ROUND_TARGET_TRIPLE}`.\n",
+        "Source snapshot: `{}` Cargo.lock plus local Cargo registry source/cache artifacts. The production extractor is offline-only, reads local Cargo.toml files and `.crate` archives directly, indexes cached registry alternatives for locked package names, and models Cargo-compatible coexisting domains keyed by package name and compatibility class. The fresh-lock oracle is test-only: it runs Cargo offline in a throwaway workspace copy and never feeds Rodin's solve path.\n",
         report.workspace
     );
-    out.push_str("### Extraction\n\n");
-    out.push_str(
-        "Readable manifests contribute real requirement ranges and feature tables. Cargo.lock supplies the oracle snapshot and, where a dependency line names an exact locked version, a compatibility-class hint for rebinding that range into the right Rodin domain. Feature activation uses Rodin feature atoms with resolver-v2 scopes: normal features unify, build/dev scopes do not unify with normal, build dependencies are active for the host, dev dependencies are active only for workspace members, and target-conditional edges are filtered by the fixed round target.\n\n",
-    );
+
+    out.push_str("### Fresh-lock oracle\n\n");
     let _ = writeln!(
         out,
-        "- lock package entries: {}\n- lock unique package names: {}\n- workspace roots: {}\n- indexed package names: {}\n- indexed package versions: {}\n- indexed dependency edges: {}\n- extraction/modeling gaps: {}\n",
+        "| attempted | solved | lock packages | unique names | wall ms | message |\n|---|---|---:|---:|---:|---|\n| {} | {} | {} | {} | {} | {} |\n",
+        report.fresh_lock_oracle.attempted,
+        report.fresh_lock_oracle.solved,
+        report.fresh_lock_oracle.lock_packages,
+        report.fresh_lock_oracle.lock_unique_names,
+        report.fresh_lock_oracle.wall_ms,
+        markdown_cell(&report.fresh_lock_oracle.message)
+    );
+
+    out.push_str("### Oracle matrix\n\n");
+    out.push_str("| projection | oracle | exact matches | compared | match rate | divergences | decisions | conflicts | wall ms |\n");
+    out.push_str("|---|---|---:|---:|---:|---:|---:|---:|---:|\n");
+    for projection in &report.projections {
+        for oracle in projection.oracles() {
+            let _ = writeln!(
+                out,
+                "| {} | {:?} | {} | {} | {:.2}% | {} | {} | {} | {} |",
+                projection.projection.label(),
+                oracle.oracle,
+                oracle.exact_matches,
+                oracle.compared_names,
+                oracle.match_rate * 100.0,
+                oracle.divergences.len(),
+                projection.solve.decisions,
+                projection.solve.conflicts,
+                projection.solve.wall_ms
+            );
+        }
+    }
+    out.push('\n');
+
+    for projection in &report.projections {
+        render_projection_markdown(&mut out, projection);
+    }
+    out
+}
+
+impl CargoProjectionReport {
+    fn oracles(&self) -> Vec<&CargoOracleReport> {
+        let mut out = vec![&self.historical_oracle];
+        if let Some(fresh) = &self.fresh_oracle {
+            out.push(fresh);
+        }
+        out
+    }
+}
+
+fn render_projection_markdown(out: &mut String, report: &CargoProjectionReport) {
+    let _ = writeln!(out, "### Projection: {}\n", report.projection.label());
+    match report.projection {
+        CargoProjectionMode::FixedTargetRuntime => {
+            let _ = writeln!(
+                out,
+                "Product-default projection: target-conditionals are evaluated against `{ROUND_TARGET_TRIPLE}`, build dependencies are active for the host, and dev dependencies are active only for workspace members.\n"
+            );
+        }
+        CargoProjectionMode::LockUnionDev => {
+            out.push_str(
+                "Lock-comparison projection: target-conditional dependency edges are unioned and dev dependencies are included so Rodin is compared against Cargo.lock's target-independent, dev-inclusive snapshot shape.\n\n",
+            );
+        }
+    }
+    out.push_str("#### Extraction\n\n");
+    let _ = writeln!(
+        out,
+        "- historical lock package entries: {}\n- historical lock unique package names: {}\n- workspace roots: {}\n- indexed package names: {}\n- indexed package versions: {}\n- indexed dependency edges: {}\n- extraction/modeling gaps: {}\n",
         report.lock_packages,
         report.lock_unique_names,
         report.workspace_roots,
@@ -217,7 +342,7 @@ pub fn render_cargo_evidence_markdown(report: &CargoEvidenceReport) -> String {
         report.indexed_edges,
         report.extraction_gaps.len()
     );
-    out.push_str("### Solve numbers\n\n");
+    out.push_str("#### Solve numbers\n\n");
     let _ = writeln!(
         out,
         "| solved | decisions | conflicts | learned facts | point versions | widened versions | widening factor | wall ms |\n|---|---:|---:|---:|---:|---:|---:|---:|\n| {} | {} | {} | {} | {} | {} | {:.3} | {} |\n",
@@ -237,38 +362,11 @@ pub fn render_cargo_evidence_markdown(report: &CargoEvidenceReport) -> String {
         }
         out.push('\n');
     }
-    out.push_str("### Cargo.lock oracle\n\n");
-    let _ = writeln!(
-        out,
-        "- exact locked-domain matches: {}/{} ({:.2}%)\n- divergences: {}\n",
-        report.oracle.exact_matches,
-        report.oracle.compared_names,
-        report.oracle.match_rate * 100.0,
-        report.oracle.divergences.len()
-    );
-    out.push_str("| divergence kind | count |\n|---|---:|\n");
-    for (kind, count) in divergence_counts(&report.oracle.divergences) {
-        let _ = writeln!(out, "| {kind:?} | {count} |");
-    }
-    out.push('\n');
-    out.push_str("| kind | package | Cargo.lock | Rodin | classification |\n");
-    out.push_str("|---|---|---|---|---|\n");
-    for divergence in &report.oracle.divergences {
-        let _ = writeln!(
-            out,
-            "| {:?} | `{}` | `{}` | `{}` | {} |",
-            divergence.kind,
-            divergence.package,
-            divergence.cargo_lock_versions.join(", "),
-            divergence
-                .rodin_version
-                .clone()
-                .unwrap_or_else(|| "-".to_owned()),
-            divergence.classification
-        );
+    for oracle in report.oracles() {
+        render_oracle_markdown(out, oracle);
     }
     if let Some(warm) = &report.warm_counterfactual {
-        out.push_str("\n### Warm counterfactual\n\n");
+        out.push_str("\n#### Warm counterfactual\n\n");
         let _ = writeln!(
             out,
             "Dropped root dependency `{}`. Warm/cold selected sets equal: `{}`.\n",
@@ -294,7 +392,7 @@ pub fn render_cargo_evidence_markdown(report: &CargoEvidenceReport) -> String {
             warm.diff_changed.len()
         );
     }
-    out.push_str("\n### Extraction and modeling gap samples\n\n");
+    out.push_str("\n#### Extraction and modeling gap samples\n\n");
     out.push_str("| gap kind | count |\n|---|---:|\n");
     for (kind, count) in gap_counts(&report.extraction_gaps) {
         let _ = writeln!(out, "| {kind:?} | {count} |");
@@ -315,13 +413,64 @@ pub fn render_cargo_evidence_markdown(report: &CargoEvidenceReport) -> String {
             report.extraction_gaps.len() - 60
         );
     }
-    out
+    out.push('\n');
+}
+
+fn render_oracle_markdown(out: &mut String, report: &CargoOracleReport) {
+    let _ = writeln!(out, "#### {:?} oracle\n", report.oracle);
+    let _ = writeln!(
+        out,
+        "- exact locked-domain matches: {}/{} ({:.2}%)\n- divergences: {}\n",
+        report.exact_matches,
+        report.compared_names,
+        report.match_rate * 100.0,
+        report.divergences.len()
+    );
+    out.push_str("| divergence kind | count |\n|---|---:|\n");
+    for (kind, count) in divergence_counts(&report.divergences) {
+        let _ = writeln!(out, "| {kind:?} | {count} |");
+    }
+    out.push('\n');
+    out.push_str("| classification | count |\n|---|---:|\n");
+    for (classification, count) in divergence_classification_counts(&report.divergences) {
+        let _ = writeln!(out, "| {} | {} |", markdown_cell(&classification), count);
+    }
+    out.push('\n');
+    out.push_str("| kind | package | Cargo.lock | Rodin | classification |\n");
+    out.push_str("|---|---|---|---|---|\n");
+    for divergence in &report.divergences {
+        let _ = writeln!(
+            out,
+            "| {:?} | `{}` | `{}` | `{}` | {} |",
+            divergence.kind,
+            divergence.package,
+            divergence.cargo_lock_versions.join(", "),
+            divergence
+                .rodin_version
+                .clone()
+                .unwrap_or_else(|| "-".to_owned()),
+            divergence.classification
+        );
+    }
+    out.push('\n');
+}
+
+fn markdown_cell(value: &str) -> String {
+    value.replace('|', "\\|").replace('\n', "<br>")
 }
 
 fn divergence_counts(divergences: &[CargoDivergence]) -> BTreeMap<CargoDivergenceKind, usize> {
     let mut counts = BTreeMap::new();
     for divergence in divergences {
         *counts.entry(divergence.kind.clone()).or_default() += 1;
+    }
+    counts
+}
+
+fn divergence_classification_counts(divergences: &[CargoDivergence]) -> BTreeMap<String, usize> {
+    let mut counts = BTreeMap::new();
+    for divergence in divergences {
+        *counts.entry(divergence.classification.clone()).or_default() += 1;
     }
     counts
 }
@@ -365,9 +514,169 @@ pub fn run_facet_cc_evidence() -> Result<CargoEvidenceReport> {
 
 pub fn run_cargo_evidence(workspace: &Path, registry_src: &Path) -> Result<CargoEvidenceReport> {
     let registry_cache = default_registry_cache_for_src(registry_src);
+    let fresh_lock = run_fresh_lock_oracle(workspace)?;
+    let projection_modes = [
+        CargoProjectionMode::FixedTargetRuntime,
+        CargoProjectionMode::LockUnionDev,
+    ];
+    let mut projections = Vec::new();
+    for projection in projection_modes {
+        projections.push(run_projection_evidence(
+            workspace,
+            registry_src,
+            &registry_cache,
+            projection,
+            fresh_lock.lock.as_deref(),
+        )?);
+    }
+    Ok(CargoEvidenceReport {
+        workspace: workspace.display().to_string(),
+        fresh_lock_oracle: fresh_lock.report,
+        projections,
+    })
+}
+
+struct FreshLockRun {
+    report: CargoFreshLockOracle,
+    lock: Option<Vec<LockPackage>>,
+}
+
+fn run_fresh_lock_oracle(workspace: &Path) -> Result<FreshLockRun> {
+    let start = Instant::now();
+    let temp_root = std::env::temp_dir().join(format!(
+        "rodin-fresh-lock-oracle-{}-{}",
+        std::process::id(),
+        fresh_lock_nonce()
+    ));
+    let copy = temp_root.join("workspace");
+    let mut cleanup = true;
+    let result = (|| -> Result<FreshLockRun> {
+        copy_workspace_for_oracle(workspace, &copy)?;
+        let output = Command::new("cargo")
+            .arg("generate-lockfile")
+            .arg("--offline")
+            .env("CARGO_NET_OFFLINE", "true")
+            .current_dir(&copy)
+            .output()
+            .wrap_err("running fresh-lock Cargo oracle")?;
+        let wall_ms = start.elapsed().as_millis().try_into().unwrap_or(u64::MAX);
+        if !output.status.success() {
+            return Ok(FreshLockRun {
+                report: CargoFreshLockOracle {
+                    attempted: true,
+                    solved: false,
+                    lock_packages: 0,
+                    lock_unique_names: 0,
+                    wall_ms,
+                    message: command_tail(&output.stderr),
+                },
+                lock: None,
+            });
+        }
+        let lock_text = fs::read_to_string(copy.join("Cargo.lock"))
+            .wrap_err("reading fresh-lock oracle Cargo.lock")?;
+        let lock = parse_lock(&lock_text)?;
+        let lock_unique_names = lock
+            .iter()
+            .map(|package| package.name.clone())
+            .collect::<BTreeSet<_>>()
+            .len();
+        Ok(FreshLockRun {
+            report: CargoFreshLockOracle {
+                attempted: true,
+                solved: true,
+                lock_packages: lock.len(),
+                lock_unique_names,
+                wall_ms,
+                message: "cargo generate-lockfile --offline succeeded in throwaway copy".to_owned(),
+            },
+            lock: Some(lock),
+        })
+    })();
+    if let Err(err) = &result {
+        cleanup = temp_root.exists();
+        tracing::warn!(error = %err, "fresh-lock Cargo oracle failed before reporting");
+    }
+    if cleanup {
+        let _ = fs::remove_dir_all(&temp_root);
+    }
+    match result {
+        Ok(run) => Ok(run),
+        Err(err) => Ok(FreshLockRun {
+            report: CargoFreshLockOracle {
+                attempted: true,
+                solved: false,
+                lock_packages: 0,
+                lock_unique_names: 0,
+                wall_ms: start.elapsed().as_millis().try_into().unwrap_or(u64::MAX),
+                message: err.to_string(),
+            },
+            lock: None,
+        }),
+    }
+}
+
+fn fresh_lock_nonce() -> u128 {
+    std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|duration| duration.as_nanos())
+        .unwrap_or_default()
+}
+
+fn command_tail(bytes: &[u8]) -> String {
+    let text = String::from_utf8_lossy(bytes);
+    let mut lines = text.lines().rev().take(8).collect::<Vec<_>>();
+    lines.reverse();
+    let message = lines.join("\n");
+    if message.is_empty() {
+        "cargo generate-lockfile --offline failed without stderr".to_owned()
+    } else {
+        message
+    }
+}
+
+fn copy_workspace_for_oracle(src: &Path, dst: &Path) -> Result<()> {
+    fs::create_dir_all(dst).wrap_err_with(|| format!("creating {}", dst.display()))?;
+    for entry in fs::read_dir(src).wrap_err_with(|| format!("reading {}", src.display()))? {
+        let entry = entry?;
+        let name = entry.file_name();
+        let name_text = name.to_string_lossy();
+        if matches!(
+            name_text.as_ref(),
+            ".git" | "target" | ".direnv" | ".jj" | "node_modules"
+        ) {
+            continue;
+        }
+        let from = entry.path();
+        let to = dst.join(&name);
+        let ty = entry.file_type()?;
+        if ty.is_dir() {
+            copy_workspace_for_oracle(&from, &to)?;
+        } else if ty.is_file() {
+            fs::copy(&from, &to)
+                .wrap_err_with(|| format!("copying {} to {}", from.display(), to.display()))?;
+        }
+    }
+    Ok(())
+}
+
+fn run_projection_evidence(
+    workspace: &Path,
+    registry_src: &Path,
+    registry_cache: &Path,
+    projection: CargoProjectionMode,
+    fresh_lock: Option<&[LockPackage]>,
+) -> Result<CargoProjectionReport> {
     let extract_start = Instant::now();
-    let extracted = extract_cargo_universe(workspace, registry_src, &registry_cache)?;
+    let extracted = extract_cargo_universe(
+        workspace,
+        registry_src,
+        registry_cache,
+        projection,
+        fresh_lock,
+    )?;
     tracing::info!(
+        projection = ?projection,
         elapsed_ms = extract_start.elapsed().as_millis(),
         indexed_edges = extracted.indexed_edges,
         gaps = extracted.gaps.len(),
@@ -385,10 +694,10 @@ pub fn run_cargo_evidence(workspace: &Path, registry_src: &Path) -> Result<Cargo
     let indexed_versions = extracted.index.version_count();
 
     let start = Instant::now();
-    tracing::info!("rodin cargo evidence solve starting");
+    tracing::info!(projection = ?projection, "rodin cargo evidence solve starting");
     let solved = solve(&extracted.index, extracted.problem.clone());
     let wall_ms = start.elapsed().as_millis().try_into().unwrap_or(u64::MAX);
-    tracing::info!(wall_ms, "rodin cargo evidence solve finished");
+    tracing::info!(projection = ?projection, wall_ms, "rodin cargo evidence solve finished");
     let (selected, solve_stats, learned, derivations) = match solved {
         Ok(result) => {
             let stats = solve_stats(
@@ -420,15 +729,32 @@ pub fn run_cargo_evidence(workspace: &Path, registry_src: &Path) -> Result<Cargo
             }
         },
     };
-    let oracle = compare_to_lock(&extracted.lock_versions, &selected, &extracted.gaps);
-    let warm_counterfactual = if solve_stats.solved {
-        warm_counterfactual(&extracted, &selected, &learned, &derivations).ok()
-    } else {
-        None
-    };
+    let fresh_domains = fresh_lock.map(locked_domains);
+    let historical_oracle = compare_to_lock(
+        CargoOracleKind::HistoricalLock,
+        &extracted.lock_versions,
+        &selected,
+        &extracted.gaps,
+        fresh_domains.as_deref(),
+    );
+    let fresh_oracle = fresh_domains.as_ref().map(|fresh| {
+        compare_to_lock(
+            CargoOracleKind::FreshLock,
+            fresh,
+            &selected,
+            &extracted.gaps,
+            None,
+        )
+    });
+    let warm_counterfactual =
+        if solve_stats.solved && projection == CargoProjectionMode::FixedTargetRuntime {
+            warm_counterfactual(&extracted, &selected, &learned, &derivations).ok()
+        } else {
+            None
+        };
 
-    Ok(CargoEvidenceReport {
-        workspace: workspace.display().to_string(),
+    Ok(CargoProjectionReport {
+        projection,
         lock_packages,
         lock_unique_names,
         workspace_roots: roots,
@@ -437,7 +763,8 @@ pub fn run_cargo_evidence(workspace: &Path, registry_src: &Path) -> Result<Cargo
         indexed_edges: extracted.indexed_edges,
         extraction_gaps: extracted.gaps,
         solve: solve_stats,
-        oracle,
+        historical_oracle,
+        fresh_oracle,
         warm_counterfactual,
     })
 }
@@ -568,31 +895,54 @@ fn extract_cargo_universe(
     workspace: &Path,
     registry_src: &Path,
     registry_cache: &Path,
+    projection: CargoProjectionMode,
+    fresh_lock: Option<&[LockPackage]>,
 ) -> Result<ExtractedCargoUniverse> {
     let lock_path = workspace.join("Cargo.lock");
     let lock = parse_lock(&fs::read_to_string(&lock_path).wrap_err("reading Cargo.lock")?)?;
     let lock_by_name = lock_versions_by_name(&lock);
     let locked_domains = locked_domains(&lock);
-    let registry_sources = registry_sources_by_name(&lock);
+    let mut registry_sources = registry_sources_by_name(&lock);
+    if let Some(fresh) = fresh_lock {
+        registry_sources.extend(registry_sources_by_name(fresh));
+    }
     let workspace_members = workspace_members(workspace)?;
     let workspace_member_set = workspace_members.iter().cloned().collect::<BTreeSet<_>>();
     let local_manifests = local_manifest_paths(workspace, &workspace_members)?;
     let mut gaps = Vec::new();
     let mut index = CompiledIndex::empty();
     let mut indexed_edges = 0;
-    let target_names: BTreeSet<_> = lock_by_name.keys().cloned().collect();
+    let mut target_names: BTreeSet<_> = lock_by_name.keys().cloned().collect();
+    if let Some(fresh) = fresh_lock {
+        target_names.extend(fresh.iter().map(|package| package.name.clone()));
+    }
     let model = ExtractionModel {
+        projection,
         target_names: &target_names,
         workspace_members: &workspace_member_set,
     };
 
     for package_name in &target_names {
-        let versions = candidate_versions(package_name, &lock, registry_src, registry_cache)?;
+        let versions = candidate_versions_with_fresh(
+            package_name,
+            &lock,
+            fresh_lock,
+            registry_src,
+            registry_cache,
+        )?;
         for version in versions {
             let source = lock
                 .iter()
                 .find(|pkg| pkg.name == *package_name && pkg.version == version)
                 .and_then(|pkg| pkg.source.clone())
+                .or_else(|| {
+                    fresh_lock.and_then(|fresh| {
+                        fresh
+                            .iter()
+                            .find(|pkg| pkg.name == *package_name && pkg.version == version)
+                            .and_then(|pkg| pkg.source.clone())
+                    })
+                })
                 .or_else(|| registry_sources.get(package_name).cloned());
             let manifest = manifest_text(
                 workspace,
@@ -624,7 +974,14 @@ fn extract_cargo_universe(
             }
             let locked_package = lock
                 .iter()
-                .find(|pkg| pkg.name == *package_name && pkg.version == version);
+                .find(|pkg| pkg.name == *package_name && pkg.version == version)
+                .or_else(|| {
+                    fresh_lock.and_then(|fresh| {
+                        fresh
+                            .iter()
+                            .find(|pkg| pkg.name == *package_name && pkg.version == version)
+                    })
+                });
             let deps = deps_for_version(
                 package_name,
                 &version,
@@ -726,17 +1083,24 @@ struct ManifestDepBuilder<'a, 'b> {
 
 impl ManifestDepBuilder<'_, '_> {
     fn push(&mut self, dep: &ManifestDep) {
-        if let Some(target) = &dep.target
-            && !target_matches_round(target)
-        {
+        if !self.model.projection.includes_target(dep.target.as_deref()) {
             self.gaps.push(CargoExtractionGap {
                 kind: CargoExtractionGapKind::TargetConditionalDependency,
                 package: self.package_version(),
-                detail: format!("{} gated by {target}", dep.actual),
+                detail: format!(
+                    "{} gated by {}",
+                    dep.actual,
+                    dep.target.as_deref().unwrap_or("<none>")
+                ),
             });
             return;
         }
-        if dep.kind == DepKind::Dev && !self.model.workspace_members.contains(self.package_name) {
+        if dep.kind == DepKind::Dev
+            && !self
+                .model
+                .projection
+                .includes_dev_dependency(self.package_name, self.model.workspace_members)
+        {
             self.gaps.push(CargoExtractionGap {
                 kind: CargoExtractionGapKind::DevDependency,
                 package: self.package_version(),
@@ -791,9 +1155,11 @@ impl ManifestDepBuilder<'_, '_> {
 }
 
 fn compare_to_lock(
+    oracle: CargoOracleKind,
     lock_versions: &[LockedDomain],
     selected: &BTreeMap<String, Version>,
     gaps: &[CargoExtractionGap],
+    fresh_reference: Option<&[LockedDomain]>,
 ) -> CargoOracleReport {
     let mut exact_matches = 0;
     let mut divergences = Vec::new();
@@ -807,12 +1173,15 @@ fn compare_to_lock(
             Some(selected) if selected == &locked.version => exact_matches += 1,
             Some(selected) => divergences.push(CargoDivergence {
                 kind: CargoDivergenceKind::VersionMismatch,
-                package: label,
+                package: label.clone(),
                 cargo_lock_versions: vec![locked.version.to_string()],
                 rodin_version: Some(selected.to_string()),
-                classification:
-                    "same package compatibility class selected a different version from Cargo.lock"
-                        .to_owned(),
+                classification: classify_version_mismatch(
+                    oracle,
+                    &label,
+                    selected,
+                    fresh_reference,
+                ),
             }),
             None => divergences.push(CargoDivergence {
                 kind: CargoDivergenceKind::MissingInRodin,
@@ -830,13 +1199,13 @@ fn compare_to_lock(
                 package: name.clone(),
                 cargo_lock_versions: Vec::new(),
                 rodin_version: Some(version.to_string()),
-                classification: "selected from cached registry universe but absent from Cargo.lock"
-                    .to_owned(),
+                classification: classify_extra_selection(oracle, name, version, fresh_reference),
             });
         }
     }
     let compared_names = lock_versions.len();
     CargoOracleReport {
+        oracle,
         exact_matches,
         compared_names,
         match_rate: if compared_names == 0 {
@@ -848,11 +1217,61 @@ fn compare_to_lock(
     }
 }
 
+fn classify_version_mismatch(
+    oracle: CargoOracleKind,
+    label: &str,
+    selected: &Version,
+    fresh_reference: Option<&[LockedDomain]>,
+) -> String {
+    if oracle == CargoOracleKind::HistoricalLock
+        && fresh_reference
+            .and_then(|fresh| fresh_version_for_label(fresh, label))
+            .is_some_and(|fresh| fresh == selected)
+    {
+        "fresh-lock oracle selects Rodin's version; historical lock divergence vindicated"
+            .to_owned()
+    } else {
+        "same package compatibility class selected a different version from Cargo.lock".to_owned()
+    }
+}
+
+fn classify_extra_selection(
+    oracle: CargoOracleKind,
+    label: &str,
+    selected: &Version,
+    fresh_reference: Option<&[LockedDomain]>,
+) -> String {
+    if oracle == CargoOracleKind::HistoricalLock
+        && fresh_reference
+            .and_then(|fresh| fresh_version_for_label(fresh, label))
+            .is_some_and(|fresh| fresh == selected)
+    {
+        "fresh-lock oracle includes Rodin's selected domain; historical extra-selection vindicated"
+            .to_owned()
+    } else {
+        "selected from cached registry universe but absent from Cargo.lock".to_owned()
+    }
+}
+
+fn fresh_version_for_label<'a>(fresh: &'a [LockedDomain], label: &str) -> Option<&'a Version> {
+    fresh
+        .iter()
+        .find(|locked| domain_label(&locked.name, locked.class) == label)
+        .map(|locked| &locked.version)
+}
+
 fn classify_missing_locked_domain(locked: &LockedDomain, gaps: &[CargoExtractionGap]) -> String {
     let package_version = format!("{}@{}", locked.name, locked.version);
     let mut kinds = BTreeSet::new();
     for gap in gaps.iter().filter(|gap| gap.package == package_version) {
-        kinds.insert(gap.kind.clone());
+        if matches!(
+            gap.kind,
+            CargoExtractionGapKind::ManifestMissing
+                | CargoExtractionGapKind::ManifestDependencyUnparsed
+                | CargoExtractionGapKind::SemverRequirementRejected
+        ) {
+            kinds.insert(gap.kind.clone());
+        }
     }
     for gap in gaps
         .iter()
@@ -889,6 +1308,20 @@ fn gap_detail_mentions_package(detail: &str, name: &str) -> bool {
         || detail
             .strip_prefix(name)
             .is_some_and(|rest| matches!(rest.as_bytes().first(), Some(b' ' | b'@' | b':')))
+}
+
+fn candidate_versions_with_fresh(
+    name: &str,
+    lock: &[LockPackage],
+    fresh_lock: Option<&[LockPackage]>,
+    registry_src: &Path,
+    registry_cache: &Path,
+) -> Result<Vec<Version>> {
+    let mut combined = lock.to_vec();
+    if let Some(fresh) = fresh_lock {
+        combined.extend_from_slice(fresh);
+    }
+    candidate_versions(name, &combined, registry_src, registry_cache)
 }
 
 fn candidate_versions(

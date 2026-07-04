@@ -18,6 +18,7 @@ pub mod cargo_evidence;
 
 pub use cargo_evidence::{
     CargoDivergence, CargoDivergenceKind, CargoEvidenceReport, CargoExtractionGap,
+    CargoFreshLockOracle, CargoOracleKind, CargoProjectionMode, CargoProjectionReport,
     CargoWarmCounterfactual, append_cargo_evidence_round, render_cargo_evidence_markdown,
     run_cargo_evidence, run_facet_cc_evidence,
 };
