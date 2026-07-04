@@ -302,3 +302,25 @@ After confirmation, the smallest faithful code path would be:
 That cut fixes the parked question without introducing persistent remote fact
 sharing yet. The later persistent shape can replace the inline proof bundle with
 content-addressed lazy proof fetches under the store claim policy.
+
+## RULINGS (Amos, 2026-07-04 — all six decided)
+
+1. Inline Arc<ProofGraph> now; WarmProofSource::Lazy stays a declared,
+   unimplemented variant (the seam ships, the mock doesn't).
+2. WITNESSES from the first cut — no local-id remapping, no
+   "same CompiledIndex only" boundary (index-in-durable-artifact is
+   the fn_ref bug class, caught in vix the same day).
+3. Widening becomes a REAL proof node (RuleKind::Widen) — a widened
+   fact's proof must prove the widened claim, not the narrower point.
+4. Invalid widen cert + valid conflict proof → SHRINK to point
+   region, minted as a NEW fact whose derivation is the conflict
+   proof alone (fully verified, ours to claim).
+5. WarmFactVerifier OUTSIDE the solver producing VerifiedWarmFacts;
+   solve() accepts only that type — unverified facts are a compile
+   error, not a runtime check.
+6. RecordFact gains proof_digest + verification status now;
+   structural explain-vocabulary waits.
+Endorsed as written: full replay for process-local v0.1, fail-closed
+per fact + continue cold, quarantine claim-digest before source,
+no-proof warm facts rejected by default (trusted/no-replay only as
+an explicit policy gate).
