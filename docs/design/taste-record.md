@@ -55,17 +55,25 @@ numbers and is gone). The design target: constructors bind field NODES,
 giving per-field laziness for free, consistent with env-maps-names-to-
 nodes. Sequence it as a lockstep change when it next brushes real work.
 
-**5. Path-demand through merged trees (in plain words).** Say a program
-builds `let m = merge(a, b)` and someone demands one file: `m / "x.h"`.
-Today the engine treats reaching through the merge as needing the WHOLE
-merged tree's identity — so both a and b flush completely to serve one
-file. Correct, but wasteful. The refinement: let the single-path demand
-tunnel through the merge (right-wins: ask b for "x.h", fall back to a)
-so only the winning file's producer pays. Decision: do it only as an
-optimization carrying its own harness assertion (a corpus program where
-the refined engine provably flushes fewer runs than today's), and only
-when a real program pays the waste visibly. Until then today's behavior
-stands — it is conservative in the allowed direction.
+**5. Path-demand through merged trees — FOUNDATIONAL, RULED (Amos,
+2026-07-04).** Say a program builds `let m = merge(a, b)` and someone
+demands one file: `m / "x.h"`. Today the engine treats reaching through
+the merge as needing the WHOLE merged tree's identity — both a and b
+flush completely to serve one file. My original entry called tunneling
+the path demand through the merge (right-wins: ask b, fall back to a)
+an optimization to defer until a program visibly paid. Amos overruled,
+and the reasoning is structural: "we're going to pay for it 100% of the
+time, because the entry point is returning a tree" — every build's
+result IS a tree assembled by merges, and demand ENTERS as paths out of
+that tree. Without merge-tunneling, every selection at the edge forces
+the whole output tree — the whole build. "Tracking demand through merge
+is not just a nice optimization later on, it is the very foundation of
+demand-driven evaluation for builds." Dispatched, together with entry
+7's PathMissing/PathPending distinction (entangled: refining through a
+merge whose right side is a Producing tree requires missing-vs-pending
+to be answerable). The oracle stays eager (canonical); the harness
+gains per-program divergence assertions (engine Finished ⊊ oracle
+Finished on a merge-projection program, asserted, not tolerated).
 
 **6. Batching policy beyond memo boundaries.** CLOSED (Amos: "I don't
 think we're even going to revisit"). Batch = memo unit, period; the

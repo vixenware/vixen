@@ -168,12 +168,29 @@ chunk 2.
 **Parity note recorded**: unselected match arms are unevaluated in BOTH
 evaluators (oracle parity, not an engine-lazier divergence).
 
+**A4 — merge refinement is FOUNDATIONAL, not an optimization (Amos,
+2026-07-04).** §7's second bullet framed path-demand refinement through
+merges as deferrable. Overruled: a build's entry point returns a TREE,
+assembled by merges (collect-over-trees, outputs-as-mounts), and demand
+enters the system as paths out of that tree. Widening Path to Identity
+at merge nodes therefore forces the whole output tree on EVERY edge
+selection — the build always pays, 100% of the time. "Tracking demand
+through merge is not just a nice optimization later on, it is the very
+foundation of demand-driven evaluation for builds." The widening below
+stands only as a temporary implementation gap and must close. The
+refinement ships with: (a) the PathMissing/PathPending typed
+distinction (on a Resolved tree, missing is decidable immediately; on a
+Producing tree, only when the producer FINISHES — until then a
+demanded-but-unwritten path means wait), which right-wins merge lookup
+requires; (b) a per-program divergence assertion in the harness —
+engine Finished ⊊ oracle Finished on merge-projection programs,
+asserted, the oracle staying eager as the canonical reference.
+
 ## 7. What v1 defers (recorded so nobody "fixes" them silently)
 
 - Per-field struct laziness (v1: pick strict-except-trees, note in code).
-- Path-demand REFINEMENT through merges/subtree chains (v1 may widen to
-  Identity at merge nodes; the contract only requires never-eagerer than
-  oracle at the RUN level, and lua.vix's projections stay pending either
-  way; refinement is an optimization with its own harness assertion later).
+- Path-demand REFINEMENT through merges/subtree chains — RECLASSIFIED by
+  A4 above: not deferrable, foundational; the temporary widening remains
+  only until the A4 work lands.
 - Batching POLICY beyond memo boundaries (cost-model scheduling) — the
   policy socket exists (the joint-demand sets); tuning is post-keystone.
