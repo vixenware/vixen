@@ -331,11 +331,38 @@ were the fable agent's, adopted after dedupe — CHECK FOR CONCURRENT
 WEAVY EDITS BEFORE ADDING OPS, two collisions already). wasm caught
 a real 32-bit overflow (1usize<<32) — always RUN the wasm check and
 READ its output before pushing (missed once, recorded).
-NEXT SLICE: the value store + handles (composites across node
-boundaries — machine-lowering.md "Values across node boundaries";
-the fable agent's task-lifetime store design is the same shape) →
-then eval.vix (self-hosting: enums/strings/Map/match-on-variants) →
-exec seam → merge-demand.vix THE MILESTONE.
+STORE SLICE DONE (3e5fc0d5e + de16419cc — content-hash dedup,
+STORE_ALLOC/READ/TAG hosts, memo keys canonicalize handles, enums/
+strings on the machine; parked: inline-vs-handle policy, general
+field projection, checker-backed exhaustiveness).
+EVAL.VIX SLICE DONE, ACCEPTED (fb6014559 — demo()==42.0 bits-exact
+on the machine; canonical Maps = sorted (key_schema, key_hash) pair
+rows, insert copies + dedupes, LAST-Wins dedup over stable sort =
+Let shadowing correct AND history-independent hashes — verified
+personally; TotalF64 at boundaries, IEEE inside; Option builtin,
+unwrap(None) = machine Err not host panic; 166/166).
+IN FLIGHT NOW (2026-07-04 afternoon):
+- 95608c01 (same agent, continued): SLICE 4 = merge-demand.vix THE
+  MILESTONE. Pins sent: pending-is-an-invocation (memo key as tree
+  branch, collect never demands, `/` projection demands only the
+  walked branch), exec runs = driver primitives fed into await slots
+  (reuse frozen oracle's exec substrate), trees are store entries
+  (merge never copies), Cc::acquire = capability handle, Run* trace
+  events, lane-parameterized tests through the Advance seam (interp
+  asserted now, JIT lights up when stencils land, no test changes).
+- 36df6db1 (new): weavy branch stencils — comparisons + Jump/
+  JumpIfZero in the JIT task lane, kill op_needs_unimplemented_
+  stencil, differential-pinned incl. match-shaped chains and
+  Production-mode stripped-target resolution. UNBLOCKS both-lanes.
+- d92a7abb: fable unification still running (kill hosted dense path,
+  frames everywhere); fable/src/lowering.rs uncommitted foreign work
+  in the shared checkout — nobody touches it.
+PRIOR-ART ADJUDICATION BANKED (docs/design/prior-art-adjudication.md,
+vixen 2dafdb87): three scrubs synthesized; C1 + R2-widening + R1
+survived 3/3; C3's surviving core IS merge tunneling — THE MILESTONE
+is the novelty demonstration, not just the acceptance test. Second-
+pass reading list in the doc (Vesta book, gg memoization assertions,
+PIE/Pluto, Trustix, ClearCase winking, patents).
 
 **THE TEETH (ruled order)**: 1.5 EXECUTES FIRST — migrate fable off
 cstree onto snark (grammar => parser => codegen'd typed AST, the
