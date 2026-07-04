@@ -200,3 +200,32 @@ engine: pubgrub's positive-dependency model CANNOT express weak deps
 (dep?/feat) faithfully — deferred, surfaced structurally in
 SolveResult::deferred_weak_dependencies. The March engine must support
 guarded implications natively; that is now a requirement, not a nicety.
+
+
+## Patches/overrides — the three-layer model (PROPOSED 2026-07-04)
+
+Amos: cargo's [patch] "suuuuuuuucks" — changes patched identity, requires
+whack-a-mole sibling patching, semver theater. Root cause: ONE mechanism
+(source replacement) conflating THREE intents. Ours, layered on machinery
+that already exists (overrides are ordinary INPUTS to the pure resolution
+function, never mutations of the world):
+
+1. **Version steering (decrees)**: "resolve with P in X..Y" = one root
+   clause Ver(P, X..Y) injected into Rodin's clause store, derivation
+   Premise::Decree. The solver adjusts everything else — Amos's "trivial
+   query" IS this. Conflicts produce derivation-tree diagnostics naming
+   exactly which requirement blocks the decree; an explicit "force"
+   escalation amends the blocking requirement clauses (recorded as
+   decree-derived — explainable, no theater). BONUS: solve is pure+memoized
+   ⇒ version SWEEPS are a vix map over solves ("test against tokio
+   1.35..1.40" = matrix builds as an ordinary query).
+2. **Content overlay**: "use MY tree for P@V" = rebind pkg_src(P@V) to a
+   different tree hash. Downstream of resolution entirely; resolution
+   identity unchanged, BUILD identity changes honestly (different tree ⇒
+   different memo keys ⇒ correct rebuilds, not churn). No version lying.
+3. **Metadata overlay**: fork changed P's deps ⇒ deps_of amendment for
+   (P,V) — an input layer to the same pure function, journal-visible.
+
+Sibling whack-a-mole dies at the source level: one overlay decree names a
+TREE (a workspace fork); the registry closure enumerates its member
+packages (pure) — one line covers tokio + tokio-util + tokio-macros.
