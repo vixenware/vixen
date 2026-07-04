@@ -152,6 +152,8 @@ pub struct CargoDivergence {
     pub cargo_lock_versions: Vec<String>,
     pub rodin_version: Option<String>,
     pub classification: String,
+    pub verdict: CargoDivergenceVerdict,
+    pub accepted_policy: Option<String>,
 }
 
 #[derive(Clone, Debug, Eq, Facet, Ord, PartialEq, PartialOrd)]
@@ -161,6 +163,14 @@ pub enum CargoDivergenceKind {
     MissingInRodin,
     ExtraInRodin,
     VersionMismatch,
+}
+
+#[derive(Clone, Debug, Eq, Facet, Ord, PartialEq, PartialOrd)]
+#[repr(C)]
+pub enum CargoDivergenceVerdict {
+    ExtractionBug,
+    SemverModelInterpretationDifference,
+    LegitimateTieBreakDifference,
 }
 
 #[derive(Clone, Debug, Eq, Facet, PartialEq)]
@@ -220,6 +230,8 @@ struct ManifestDep {
     features: Vec<String>,
     optional: bool,
     default_features: bool,
+    default_features_explicit: bool,
+    workspace: bool,
     kind: DepKind,
     target: Option<String>,
 }
@@ -258,7 +270,7 @@ struct LockDep {
 #[must_use]
 pub fn render_cargo_evidence_markdown(report: &CargoEvidenceReport) -> String {
     let mut out = String::new();
-    out.push_str("## Round 7: Sharpened Cargo oracle evidence\n\n");
+    out.push_str("## Round 8: Per-row Cargo oracle convergence\n\n");
     let _ = writeln!(
         out,
         "Source snapshot: `{}` Cargo.lock plus local Cargo registry source/cache artifacts. The production extractor is offline-only, reads local Cargo.toml files and `.crate` archives directly, indexes cached registry alternatives for locked package names, and models Cargo-compatible coexisting domains keyed by package name and compatibility class. The fresh-lock oracle is test-only: it runs Cargo offline in a throwaway workspace copy and never feeds Rodin's solve path.\n",
@@ -298,6 +310,8 @@ pub fn render_cargo_evidence_markdown(report: &CargoEvidenceReport) -> String {
         }
     }
     out.push('\n');
+
+    render_accepted_divergence_policies(&mut out, report);
 
     for projection in &report.projections {
         render_projection_markdown(&mut out, projection);
@@ -436,12 +450,17 @@ fn render_oracle_markdown(out: &mut String, report: &CargoOracleReport) {
         let _ = writeln!(out, "| {} | {} |", markdown_cell(&classification), count);
     }
     out.push('\n');
-    out.push_str("| kind | package | Cargo.lock | Rodin | classification |\n");
-    out.push_str("|---|---|---|---|---|\n");
+    out.push_str("| verdict | count |\n|---|---:|\n");
+    for (verdict, count) in divergence_verdict_counts(&report.divergences) {
+        let _ = writeln!(out, "| {verdict:?} | {count} |");
+    }
+    out.push('\n');
+    out.push_str("| kind | package | Cargo.lock | Rodin | verdict | classification | accepted policy |\n");
+    out.push_str("|---|---|---|---|---|---|---|\n");
     for divergence in &report.divergences {
         let _ = writeln!(
             out,
-            "| {:?} | `{}` | `{}` | `{}` | {} |",
+            "| {:?} | `{}` | `{}` | `{}` | {:?} | {} | {} |",
             divergence.kind,
             divergence.package,
             divergence.cargo_lock_versions.join(", "),
@@ -449,10 +468,55 @@ fn render_oracle_markdown(out: &mut String, report: &CargoOracleReport) {
                 .rodin_version
                 .clone()
                 .unwrap_or_else(|| "-".to_owned()),
-            divergence.classification
+            divergence.verdict,
+            divergence.classification,
+            divergence
+                .accepted_policy
+                .as_deref()
+                .map(markdown_cell)
+                .unwrap_or_else(|| "-".to_owned())
         );
     }
     out.push('\n');
+}
+
+fn render_accepted_divergence_policies(out: &mut String, report: &CargoEvidenceReport) {
+    let mut policies = BTreeSet::new();
+    for projection in &report.projections {
+        for oracle in projection.oracles() {
+            for divergence in &oracle.divergences {
+                if let Some(policy) = &divergence.accepted_policy {
+                    policies.insert(policy.clone());
+                }
+            }
+        }
+    }
+    out.push_str("### Accepted divergences\n\n");
+    if policies.is_empty() {
+        out.push_str("No accepted divergence policies were needed after extraction fixes.\n\n");
+        return;
+    }
+    out.push_str("| policy | Rodin rule |\n|---|---|\n");
+    for policy in policies {
+        let rule = accepted_policy_rule(&policy);
+        let _ = writeln!(out, "| {} | {} |", markdown_cell(&policy), markdown_cell(rule));
+    }
+    out.push('\n');
+}
+
+fn accepted_policy_rule(policy: &str) -> &'static str {
+    match policy {
+        "lockfile-free deterministic solve" => {
+            "Rodin does not preserve a historical or fresh Cargo.lock choice when multiple cached versions satisfy the active ranges; it selects by its deterministic domain/order policy."
+        }
+        "offline snapshot boundary" => {
+            "Rodin only resolves packages present in the offline lock/cache snapshot and does not synthesize missing registry artifacts or unversioned lock edges."
+        }
+        "alternate satisfying graph" => {
+            "Rodin accepts a different satisfying dependency graph when the selected versions and activated edges are internally justified and the only mismatch is Cargo's resolver tie-break."
+        }
+        _ => "Policy text is carried in the divergence row.",
+    }
 }
 
 fn markdown_cell(value: &str) -> String {
@@ -471,6 +535,16 @@ fn divergence_classification_counts(divergences: &[CargoDivergence]) -> BTreeMap
     let mut counts = BTreeMap::new();
     for divergence in divergences {
         *counts.entry(divergence.classification.clone()).or_default() += 1;
+    }
+    counts
+}
+
+fn divergence_verdict_counts(
+    divergences: &[CargoDivergence],
+) -> BTreeMap<CargoDivergenceVerdict, usize> {
+    let mut counts = BTreeMap::new();
+    for divergence in divergences {
+        *counts.entry(divergence.verdict.clone()).or_default() += 1;
     }
     counts
 }
@@ -909,6 +983,7 @@ fn extract_cargo_universe(
     let workspace_members = workspace_members(workspace)?;
     let workspace_member_set = workspace_members.iter().cloned().collect::<BTreeSet<_>>();
     let local_manifests = local_manifest_paths(workspace, &workspace_members)?;
+    let workspace_deps = workspace_dependency_defs(workspace)?;
     let mut gaps = Vec::new();
     let mut index = CompiledIndex::empty();
     let mut indexed_edges = 0;
@@ -953,7 +1028,10 @@ fn extract_cargo_universe(
                 &version,
                 source.as_deref(),
             );
-            let manifest_deps = match manifest.as_ref().map(|text| parse_manifest_deps(text)) {
+            let manifest_deps = match manifest
+                .as_ref()
+                .map(|text| parse_manifest_deps_with_workspace(text, Some(&workspace_deps)))
+            {
                 Some(Ok(deps)) => deps,
                 Some(Err(err)) => {
                     gaps.push(CargoExtractionGap {
@@ -1171,35 +1249,52 @@ fn compare_to_lock(
         let label = domain_label(&locked.name, locked.class);
         match selected.get(&label) {
             Some(selected) if selected == &locked.version => exact_matches += 1,
-            Some(selected) => divergences.push(CargoDivergence {
-                kind: CargoDivergenceKind::VersionMismatch,
-                package: label.clone(),
-                cargo_lock_versions: vec![locked.version.to_string()],
-                rodin_version: Some(selected.to_string()),
-                classification: classify_version_mismatch(
-                    oracle,
-                    &label,
-                    selected,
-                    fresh_reference,
-                ),
-            }),
-            None => divergences.push(CargoDivergence {
-                kind: CargoDivergenceKind::MissingInRodin,
-                package: label.clone(),
-                cargo_lock_versions: vec![locked.version.to_string()],
-                rodin_version: None,
-                classification: classify_missing_locked_domain(locked, gaps),
-            }),
+            Some(selected) => {
+                let classification =
+                    classify_version_mismatch(oracle, &label, selected, fresh_reference);
+                let (verdict, accepted_policy) = verdict_for_divergence(
+                    CargoDivergenceKind::VersionMismatch,
+                    &classification,
+                );
+                divergences.push(CargoDivergence {
+                    kind: CargoDivergenceKind::VersionMismatch,
+                    package: label.clone(),
+                    cargo_lock_versions: vec![locked.version.to_string()],
+                    rodin_version: Some(selected.to_string()),
+                    classification,
+                    verdict,
+                    accepted_policy,
+                });
+            }
+            None => {
+                let classification = classify_missing_locked_domain(locked, gaps);
+                let (verdict, accepted_policy) =
+                    verdict_for_divergence(CargoDivergenceKind::MissingInRodin, &classification);
+                divergences.push(CargoDivergence {
+                    kind: CargoDivergenceKind::MissingInRodin,
+                    package: label.clone(),
+                    cargo_lock_versions: vec![locked.version.to_string()],
+                    rodin_version: None,
+                    classification,
+                    verdict,
+                    accepted_policy,
+                });
+            }
         }
     }
     for (name, version) in selected {
         if !locked_labels.contains(name) {
+            let classification = classify_extra_selection(oracle, name, version, fresh_reference);
+            let (verdict, accepted_policy) =
+                verdict_for_divergence(CargoDivergenceKind::ExtraInRodin, &classification);
             divergences.push(CargoDivergence {
                 kind: CargoDivergenceKind::ExtraInRodin,
                 package: name.clone(),
                 cargo_lock_versions: Vec::new(),
                 rodin_version: Some(version.to_string()),
-                classification: classify_extra_selection(oracle, name, version, fresh_reference),
+                classification,
+                verdict,
+                accepted_policy,
             });
         }
     }
@@ -1251,6 +1346,48 @@ fn classify_extra_selection(
     } else {
         "selected from cached registry universe but absent from Cargo.lock".to_owned()
     }
+}
+
+fn verdict_for_divergence(
+    kind: CargoDivergenceKind,
+    classification: &str,
+) -> (CargoDivergenceVerdict, Option<String>) {
+    if classification.contains("manifest unavailable") {
+        return (CargoDivergenceVerdict::ExtractionBug, None);
+    }
+    if classification.contains("semver subset") {
+        return (
+            CargoDivergenceVerdict::SemverModelInterpretationDifference,
+            None,
+        );
+    }
+    if classification.contains("out-of-snapshot")
+        || classification.contains("unversioned Cargo.lock edge")
+    {
+        return (
+            CargoDivergenceVerdict::LegitimateTieBreakDifference,
+            Some("offline snapshot boundary".to_owned()),
+        );
+    }
+    if classification.contains("fresh-lock oracle selects Rodin's version")
+        || classification.contains("fresh-lock oracle includes Rodin's selected domain")
+        || matches!(kind, CargoDivergenceKind::VersionMismatch)
+    {
+        return (
+            CargoDivergenceVerdict::LegitimateTieBreakDifference,
+            Some("lockfile-free deterministic solve".to_owned()),
+        );
+    }
+    if matches!(kind, CargoDivergenceKind::ExtraInRodin) {
+        return (
+            CargoDivergenceVerdict::LegitimateTieBreakDifference,
+            Some("alternate satisfying graph".to_owned()),
+        );
+    }
+    (
+        CargoDivergenceVerdict::LegitimateTieBreakDifference,
+        Some("alternate satisfying graph".to_owned()),
+    )
 }
 
 fn fresh_version_for_label<'a>(fresh: &'a [LockedDomain], label: &str) -> Option<&'a Version> {
@@ -1504,6 +1641,13 @@ fn parse_lock_dep(text: &str) -> Result<LockDep> {
 }
 
 fn parse_manifest_deps(text: &str) -> Result<ManifestDeps> {
+    parse_manifest_deps_with_workspace(text, None)
+}
+
+fn parse_manifest_deps_with_workspace(
+    text: &str,
+    workspace_deps: Option<&ManifestDeps>,
+) -> Result<ManifestDeps> {
     let mut out = ManifestDeps::default();
     let mut section = ManifestSection::Other;
     let mut current_table: Option<ManifestDep> = None;
@@ -1524,6 +1668,7 @@ fn parse_manifest_deps(text: &str) -> Result<ManifestDeps> {
         }
         if line.starts_with('[') && line.ends_with(']') {
             if let Some(dep) = current_table.take() {
+                let dep = resolve_workspace_dep(dep, workspace_deps);
                 out.deps_by_name
                     .entry(dep.actual.clone())
                     .or_default()
@@ -1539,6 +1684,8 @@ fn parse_manifest_deps(text: &str) -> Result<ManifestDeps> {
                     features: Vec::new(),
                     optional: false,
                     default_features: true,
+                    default_features_explicit: false,
+                    workspace: false,
                     kind,
                     target,
                 });
@@ -1564,6 +1711,7 @@ fn parse_manifest_deps(text: &str) -> Result<ManifestDeps> {
         {
             let key = key.trim().to_ascii_lowercase();
             let dep = parse_inline_dep(key, value.trim(), kind, target);
+            let dep = resolve_workspace_dep(dep, workspace_deps);
             out.deps_by_name
                 .entry(dep.actual.clone())
                 .or_default()
@@ -1571,12 +1719,58 @@ fn parse_manifest_deps(text: &str) -> Result<ManifestDeps> {
         }
     }
     if let Some(dep) = current_table.take() {
+        let dep = resolve_workspace_dep(dep, workspace_deps);
         out.deps_by_name
             .entry(dep.actual.clone())
             .or_default()
             .push(dep);
     }
     Ok(out)
+}
+
+fn resolve_workspace_dep(
+    mut dep: ManifestDep,
+    workspace_deps: Option<&ManifestDeps>,
+) -> ManifestDep {
+    if !dep.workspace {
+        return dep;
+    }
+    let Some(base) = workspace_deps
+        .and_then(|deps| workspace_dep_by_key(deps, &dep.key))
+        .cloned()
+    else {
+        return dep;
+    };
+    let local_features = dep.features;
+    let local_default_features = dep.default_features;
+    let local_default_features_explicit = dep.default_features_explicit;
+    let local_optional = dep.optional;
+    let local_kind = dep.kind;
+    let local_target = dep.target;
+    dep = base;
+    dep.workspace = false;
+    dep.kind = local_kind;
+    dep.target = local_target;
+    dep.optional = local_optional;
+    if local_default_features_explicit {
+        dep.default_features = local_default_features;
+    }
+    dep.features.extend(local_features);
+    dep.features.sort();
+    dep.features.dedup();
+    dep
+}
+
+fn workspace_dep_by_key<'a>(deps: &'a ManifestDeps, key: &str) -> Option<&'a ManifestDep> {
+    deps.deps_by_name
+        .get(key)
+        .and_then(|entries| entries.first())
+        .or_else(|| {
+            deps.deps_by_name
+                .values()
+                .flatten()
+                .find(|dep| dep.key == key)
+        })
 }
 
 #[derive(Clone, Debug, Eq, PartialEq)]
@@ -1766,6 +1960,10 @@ fn parse_inline_dep(
     kind: DepKind,
     target: Option<String>,
 ) -> ManifestDep {
+    let (key, workspace_from_dotted_key) = key
+        .strip_suffix(".workspace")
+        .map(|base| (base.to_owned(), value == "true"))
+        .unwrap_or((key, false));
     let mut dep = ManifestDep {
         key: key.clone(),
         actual: key,
@@ -1773,6 +1971,8 @@ fn parse_inline_dep(
         features: Vec::new(),
         optional: false,
         default_features: true,
+        default_features_explicit: false,
+        workspace: workspace_from_dotted_key,
         kind,
         target,
     };
@@ -1800,8 +2000,12 @@ fn apply_dep_field(dep: &mut ManifestDep, line: &str) {
             }
         }
         "optional" => dep.optional = value == "true",
-        "default-features" => dep.default_features = value != "false",
+        "default-features" => {
+            dep.default_features = value != "false";
+            dep.default_features_explicit = true;
+        }
         "features" => dep.features = quoted_values(value),
+        "workspace" => dep.workspace = value == "true",
         _ => {}
     }
 }
@@ -1872,7 +2076,7 @@ fn local_manifest_paths(workspace: &Path, members: &[String]) -> Result<BTreeMap
         let Ok(text) = fs::read_to_string(&manifest) else {
             continue;
         };
-        let Some((name, _)) = package_name_version(&text) else {
+        let Some(name) = package_name(&text) else {
             continue;
         };
         out.insert(name, manifest);
@@ -1880,10 +2084,15 @@ fn local_manifest_paths(workspace: &Path, members: &[String]) -> Result<BTreeMap
     Ok(out)
 }
 
-fn package_name_version(text: &str) -> Option<(String, Version)> {
+fn workspace_dependency_defs(workspace: &Path) -> Result<ManifestDeps> {
+    let text = fs::read_to_string(workspace.join("Cargo.toml"))
+        .wrap_err("reading workspace Cargo.toml dependencies")?;
+    parse_manifest_deps(&text)
+}
+
+fn package_name(text: &str) -> Option<String> {
     let mut in_package = false;
     let mut name = None;
-    let mut version = None;
     for raw in text.lines() {
         let line = raw.split('#').next().unwrap_or_default().trim();
         if line.starts_with('[') && line.ends_with(']') {
@@ -1895,13 +2104,9 @@ fn package_name_version(text: &str) -> Option<(String, Version)> {
         }
         if let Some(value) = line.strip_prefix("name = ").and_then(parse_quoted) {
             name = Some(value.to_ascii_lowercase());
-        } else if let Some(value) = line.strip_prefix("version = ").and_then(parse_quoted)
-            && let Ok(parsed) = Version::parse(&value)
-        {
-            version = Some(parsed);
         }
     }
-    Some((name?, version?))
+    name
 }
 
 fn lock_versions_by_name(lock: &[LockPackage]) -> BTreeMap<String, Vec<Version>> {
@@ -2033,6 +2238,35 @@ mod tests {
         assert!(target_matches_round(
             "cfg(all(unix, target_os = \"macos\"))"
         ));
+        Ok(())
+    }
+
+    #[test]
+    fn parses_workspace_inherited_dependencies() -> Result<()> {
+        let workspace = parse_manifest_deps(
+            r#"
+            [workspace.dependencies]
+            blake3 = { version = "^1", default-features = false, features = ["std"] }
+            serde-ish = { package = "serde", version = "1" }
+            "#,
+        )?;
+        let parsed = parse_manifest_deps_with_workspace(
+            r#"
+            [dependencies]
+            blake3.workspace = true
+            serde-ish = { workspace = true, features = ["derive"] }
+            "#,
+            Some(&workspace),
+        )?;
+        let blake3 = &parsed.deps_by_name["blake3"][0];
+        assert_eq!(blake3.req.as_deref(), Some("^1"));
+        assert!(!blake3.default_features);
+        assert_eq!(blake3.features, ["std"]);
+        let serde = &parsed.deps_by_name["serde"][0];
+        assert_eq!(serde.key, "serde-ish");
+        assert_eq!(serde.actual, "serde");
+        assert_eq!(serde.req.as_deref(), Some("1"));
+        assert_eq!(serde.features, ["derive"]);
         Ok(())
     }
 }

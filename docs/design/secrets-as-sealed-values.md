@@ -61,7 +61,7 @@ complete, one approval); secret-names-secret is a DECLARED
 MULTI-PHASE apply, approved per phase. Multiple Touch-IDs only when
 explicitly opted into multi-phase.
 
-Q4 SALTED IDENTITY: STILL OPEN. Rec = hybrid (c): public identity =
+Q4 SALTED IDENTITY: RULED (Amos) — HYBRID (c): public identity =
 hash(ciphertext) (per-seal, dictionary-proof, finer-is-safe) + an
 OPTIONAL recipient-sealed content tag for dedup/change-detection;
-rotation chooses bump-vs-preserve the tag. Awaiting Amos.
+rotation chooses bump-vs-preserve the tag. All four secrets laws now ruled.
