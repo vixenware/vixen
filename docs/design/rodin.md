@@ -72,15 +72,18 @@ B. **RULED (2026-07-04): lexicographic over (source, true name), versions
    req mentions one) — documented in from_req, release-equivalence tested;
    Rodin must model admission eventually (per-interval flag or ordering
    trick), ON THE RECORD as a v2 requirement.
-C. **PROPOSED + UNDER EMPIRICAL VALIDATION (2026-07-04).** V1: regions =
-   rodin-facts Region (version boxes + feature literals); splits ONLY at
-   metadata change-points (the widening scan defines them); the bet: the
-   effective space is metadata-distinct BLOCKS, few per package. Falsifier
-   instrumented from day one (region/exclusion counts, subtract blowups,
-   raw-versions:blocks ratio on real crates.io data). Survey dispatched:
-   crates/rodin-survey → docs/design/rodin-c-evidence.md (real index data,
-   ~400-crate closure, block ratios + region-algebra stress). Severability
-   (FIXED 7) is the safety net if the bet loses.
+C. **ROUND 1 VERDICT (2026-07-04): THE STRONG BET FAILED.** Real data
+   (400 crates, 15,309 non-yanked versions → 8,139 whole-manifest blocks):
+   ratio 1.88 overall, median 1.75, p90 5, max 26 — modest collapse, NOT
+   hundreds-to-few. Counterexamples: serde, clap, wasm-bindgen,
+   async-graphql… Region algebra itself held (max 11 fragments, tame).
+   Evidence: docs/design/rodin-c-evidence.md. STRUCTURE IN THE FAILURE →
+   two round-2 hypotheses under measurement, NOT declared true: (1) FAMILY
+   FUSION — lockstep =pins (serde↔serde_core) aren't search freedom;
+   families fuse into one search variable; (2) PER-EDGE granularity —
+   exclusions only need the RELEVANT EDGE stable, not the whole manifest.
+   If round 2 also fails, the volumes layer runs without widening leverage
+   and severability (FIXED 7) is the exit. Round 2 dispatched.
 D. **The worker model.** In-process parallelism first (workers claim
    regions, pool facts). Later: could workers be fleet executors? (The
    solver's facts-plus-regions shape looks suspiciously shippable.)
