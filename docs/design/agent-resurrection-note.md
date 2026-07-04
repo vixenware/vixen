@@ -341,22 +341,32 @@ rows, insert copies + dedupes, LAST-Wins dedup over stable sort =
 Let shadowing correct AND history-independent hashes — verified
 personally; TotalF64 at boundaries, IEEE inside; Option builtin,
 unwrap(None) = machine Err not host panic; 166/166).
-IN FLIGHT NOW (2026-07-04 afternoon):
-- 95608c01 (same agent, continued): SLICE 4 = merge-demand.vix THE
-  MILESTONE. Pins sent: pending-is-an-invocation (memo key as tree
-  branch, collect never demands, `/` projection demands only the
-  walked branch), exec runs = driver primitives fed into await slots
-  (reuse frozen oracle's exec substrate), trees are store entries
-  (merge never copies), Cc::acquire = capability handle, Run* trace
-  events, lane-parameterized tests through the Advance seam (interp
-  asserted now, JIT lights up when stencils land, no test changes).
-- 36df6db1 (new): weavy branch stencils — comparisons + Jump/
-  JumpIfZero in the JIT task lane, kill op_needs_unimplemented_
-  stencil, differential-pinned incl. match-shaped chains and
-  Production-mode stripped-target resolution. UNBLOCKS both-lanes.
-- d92a7abb: fable unification still running (kill hosted dense path,
-  frames everywhere); fable/src/lowering.rs uncommitted foreign work
-  in the shared checkout — nobody touches it.
+MILESTONE SLICE 4, INTERP HALF DONE + ACCEPTED (b7863f8d8 —
+merge-demand.vix ON THE MACHINE: pending trees carry invocation
+identity as content (hash_pending_list over closure-hash ×
+canonicalized args — PIN 1 honored), collect never demands, `/`
+walks only the demanded branch; Cc::acquire/p""/with_ext/map-
+partial-application/cc!/Run* trace events; selected: object spawns
+EXACTLY once for two units + run set exactly {wanted.o} + left.o
+RunRequested-absent + warm = 2-event trace; fallback: right runs to
+prove absence then falls left; subtree_chain clean. 169/169 verified
+personally. Parked: general closures — only the partial-application-
+of-named-fn shape).
+BRANCH STENCILS DONE + ACCEPTED (5387c9b95, agent 36df6db1 —
+comparisons + Jump + two-hole JumpIfZero (weavy_zero/weavy_nonzero,
+no trampoline round-trip), op_needs_unimplemented_stencil DELETED,
+differentials incl. match-shaped chain + Production stripped-target;
+116/116 with jit feature verified).
+IN FLIGHT NOW:
+- 95608c01: LANE 2 = the both-lanes half of THE MILESTONE. Pins:
+  one seam either lane (Advance shape, no if-jit in burst loop),
+  Machine lane parameter, hosts identical from both lanes (adapt
+  driver-side only), lane-parameterized corpus incl. milestone
+  trio + fib + untaken + eval bits-exact, DriveEvent equality
+  across lanes. When green THE MILESTONE IS COMPLETE.
+- d92a7abb: fable unification — committed d04968da6 + 2c657da88
+  (root programs through task hosts); 77/77 fable green verified;
+  full review when it reports.
 PRIOR-ART ADJUDICATION BANKED (docs/design/prior-art-adjudication.md,
 vixen 2dafdb87): three scrubs synthesized; C1 + R2-widening + R1
 survived 3/3; C3's surviving core IS merge tunneling — THE MILESTONE
