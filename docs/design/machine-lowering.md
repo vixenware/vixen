@@ -153,9 +153,29 @@ obligation (GHC boxed/unboxed with polarity flipped: flat by
 default, boxed only at promotion sites). COST PATH: the barrier is
 a GUARD — the gingembre-era guard/IC stencil machinery (speculate
 Ready, deopt to the demand path) is the designated optimization,
-already built, already DWARF'd. Devirtualizing never-pending
-containers back to raw representation is a later dial. No
-operation in the language is named or shaped like `force`.
+already built, already DWARF'd. No operation in the language is
+named or shaped like `force`.
+
+P3-DOCTRINE (Amos: "'raw bits where provable' only works in a
+universe where we don't have Eval — and we don't know that"; ruled
+2026-07-04): provability is a CLOSED-WORLD notion and vix's world
+is deliberately open three ways — warm reload (new code generations
+into a live memo store), closures shipping across the fleet, and
+the self-hosted direction (vix evaluating vix). "This container
+never receives a promoted insert" quantifies over future code;
+analysis can't have it. Therefore: (1) raw-bits representation is
+justified by RULES, not proofs — frame-local scalar dataflow
+(structural: nothing external reaches into a frame mid-execution)
+and ABI-scalar strictness at boundaries (a clause, not an
+inference). Rules survive open worlds. (2) Everything beyond the
+rules — containers, store values, anything crossing a boundary,
+reload, or wire — is Realized-capable BY DEFAULT. (3) SPECULATION
+IS THE COST MODEL, not a later dial: assume Ready, guard, deopt.
+Runtime facts ("Ready 10^4 times") are cheaply checkable forever
+though never provable — the V8/JSC lesson, and the moment the
+guard/IC/deopt investment becomes load-bearing rather than a lane.
+Devirtualization-by-analysis is demoted to opportunism where a
+world happens to be locally closed.
 
 P-HAZARD (flagged in review, must die before warm reload): the
 pending store encoding carries fn_ref — a program-table INDEX —
