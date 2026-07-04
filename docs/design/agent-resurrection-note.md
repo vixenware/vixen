@@ -281,6 +281,19 @@ afternoon" beating "right shape". When something feels like a tower of
 unknowns: smaller language, same shape — never same language, softer
 shape. Amos will patiently nudge; let him.
 
+**THE TEETH (ruled order)**: 1.5 EXECUTES FIRST — migrate fable off
+cstree onto snark (grammar => parser => codegen'd typed AST, the
+vix/gingembre pattern; "snark is MADE for this" — Amos) so tooth 1's
+syntax is written once. Then tooth 1: user-declared structs/enums in
+fable with recorded layouts (the two-authority model made real) +
+match. Then tooth 2: functions + the ABI/frame model — CO-DESIGN
+SESSION WITH AMOS before code. Then tooth 3: host async (suspension
+through typed frames). Then vix lowers onto the proven substrate.
+Fable today: ~7.9k lines, cstree, typed paths over facet shapes,
+plans lowered to weavy IR — the DNA is already right; teeth are
+semantic. Delegation to codex/gpt-5.5 auto-review agents is Amos-
+sanctioned for this arc ("organize yourself as you want").
+
 ## Queued for delegation (write prompts as needed)
 
 
