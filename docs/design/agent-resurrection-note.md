@@ -307,6 +307,23 @@ closure-hash lookup, machine driver = demand scheduler spawning only
 on demand.
 Tooth-1 agent (fable structs/enums/match, d92a7abb) in flight.
 
+**THE SELF-HOSTED OBSESSION (Amos, ruled direction)**: code
+intelligence queries WRITTEN IN VIX about vix — the synthesis's
+query-plane v2, prerequisite (user type surface) now built. Fable's
+remaining pre-vix jobs prove the mechanics small (agent d92a7abb
+dispatched): fn+recursion lowering onto weavy::task (fable execution
+MIGRATES to the task lane — one implementation applies to fable too);
+strings + recursive declared types via THE RULED NO-DROP-PLANS DESIGN
+(immutable values, task-lifetime value store/arena, handle copies —
+deliberately the vix model); bridge proof = "find declaration of X"
+written in fable over a snark parse of fable source. NO incrementality
+in fable ever — the incremental version of the same query IS the vix
+version; that contrast is the demo. Rust binder stays the differential
+oracle for self-hosted queries (no-two-novel-implementations).
+MY NEXT ARC: the vix driver per machine-lowering.md (same directory —
+READ IT; it is the arc's constitution). Slice 1: driver skeleton +
+cached lowerings, eval.vix arithmetic core on the machine.
+
 **THE TEETH (ruled order)**: 1.5 EXECUTES FIRST — migrate fable off
 cstree onto snark (grammar => parser => codegen'd typed AST, the
 vix/gingembre pattern; "snark is MADE for this" — Amos) so tooth 1's
