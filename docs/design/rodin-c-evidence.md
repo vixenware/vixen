@@ -1781,3 +1781,389 @@ Dropped root dependency `copypatch`. Warm/cold selected sets equal: `true`.
 | DependencyOutsideLockUniverse | `addr2line@0.26.0` | cpp_demangle |
 
 16680 additional extraction/modeling gaps omitted from this table; the JSON artifact carries the full set.
+
+## Round 6: Cargo feature activation evidence
+
+Source snapshot: `/Users/amos/oss/facet-cc` Cargo.lock plus local Cargo registry source/cache artifacts. The extractor is offline-only, reads local Cargo.toml files and `.crate` archives directly, indexes cached registry alternatives for locked package names, models Cargo-compatible coexisting domains keyed by package name and compatibility class, and evaluates target-conditionals against `aarch64-apple-darwin`.
+
+### Extraction
+
+Readable manifests contribute real requirement ranges and feature tables. Cargo.lock supplies the oracle snapshot and, where a dependency line names an exact locked version, a compatibility-class hint for rebinding that range into the right Rodin domain. Feature activation uses Rodin feature atoms with resolver-v2 scopes: normal features unify, build/dev scopes do not unify with normal, build dependencies are active for the host, dev dependencies are active only for workspace members, and target-conditional edges are filtered by the fixed round target.
+
+- lock package entries: 892
+- lock unique package names: 813
+- workspace roots: 139
+- indexed package names: 1247
+- indexed package versions: 2262
+- indexed dependency edges: 7887
+- extraction/modeling gaps: 9525
+
+### Solve numbers
+
+| solved | decisions | conflicts | learned facts | point versions | widened versions | widening factor | wall ms |
+|---|---:|---:|---:|---:|---:|---:|---:|
+| true | 227 | 2 | 2 | 2 | 2 | 1.000 | 30151 |
+
+
+Solve trace tail:
+
+- `expand zerocopy@0.8 0.8.52 (highest remaining of 12 candidates) - reads 1 manifest`
+- `domain zerocopy-derive@0.8 becomes active`
+- `zerocopy-derive@0.8: [0.8.27,0.8.28) U [0.8.31,0.8.32) U [0.8.33,0.8.34) U [0.8.38,0.8.41) U [0.8.42,0.8.43) U [0.8.48,0.8.51) U [0.8.52,0.8.53) ∩ [0.8.52,0.8.53) = [0.8.52,0.8.53)`
+- `force zerocopy-derive@0.8 0.8.52 (only candidate after propagation)`
+- `expand zerofrom@0.1 0.1.8 (highest remaining of 3 candidates) - reads 1 manifest`
+- `domain zerofrom-derive@0.1 becomes active`
+- `zerofrom-derive@0.1: [0.1.4,0.1.8) ∩ [0.1.6,0.2.0) = [0.1.6,0.1.8)`
+- `expand zerofrom-derive@0.1 0.1.7 (highest remaining of 2 candidates) - reads 1 manifest`
+- `expand zeroize@1 1.9.0 (highest remaining of 3 candidates) - reads 1 manifest`
+- `expand zmij@1 1.0.21 (highest remaining of 7 candidates) - reads 1 manifest`
+- `solution: addr2line@0.25 0.25.1, adler2@2 2.0.1, ahash@0.7 0.7.8, ahash@0.8 0.8.12, aho-corasick@1 1.1.4, aligned-vec@0.6 0.6.4, alloc-no-stdlib@2 2.0.4, alloc-stdlib@0.2 0.2.4, allocator-api2@0.2 0.2.21, anstream@0.6 0....`
+- `summary: manifests read 227, candidate observations 738, conflicts 2, widened versions killed 2 vs 2 point versions`
+
+### Cargo.lock oracle
+
+- exact locked-domain matches: 663/892 (74.33%)
+- divergences: 247
+
+| divergence kind | count |
+|---|---:|
+| MissingInRodin | 223 |
+| ExtraInRodin | 18 |
+| VersionMismatch | 6 |
+
+| kind | package | Cargo.lock | Rodin | classification |
+|---|---|---|---|---|
+| MissingInRodin | `android_system_properties@0.1` | `0.1.5` | `-` | target-conditional dependency projection is inactive in this round |
+| MissingInRodin | `anstyle-wincon@3` | `3.0.11` | `-` | target-conditional dependency projection is inactive in this round |
+| MissingInRodin | `approx@0.5` | `0.5.1` | `-` | dev-dependency projection is inactive in this round |
+| MissingInRodin | `arborium-sysroot@2` | `2.18.1` | `-` | target-conditional dependency projection is inactive in this round |
+| MissingInRodin | `arrayref@0.3` | `0.3.9` | `-` | dev-dependency projection is inactive in this round |
+| VersionMismatch | `arrayvec@0.7` | `0.7.7` | `0.7.8` | same package compatibility class selected a different version from Cargo.lock |
+| MissingInRodin | `atomic@0.6` | `0.6.1` | `-` | dev-dependency projection is inactive in this round |
+| MissingInRodin | `auto_impl@1` | `1.3.0` | `-` | dev-dependency projection is inactive in this round |
+| MissingInRodin | `aws-lc-rs@1` | `1.17.0` | `-` | dev-dependency projection is inactive in this round |
+| MissingInRodin | `aws-lc-sys@0.41` | `0.41.0` | `-` | manifest dependency references an out-of-snapshot crate or an unversioned Cargo.lock edge |
+| MissingInRodin | `bit-set@0.5` | `0.5.3` | `-` | dev-dependency projection is inactive in this round |
+| MissingInRodin | `bitmaps@2` | `2.1.0` | `-` | dev-dependency projection is inactive in this round |
+| MissingInRodin | `bitvec@1` | `1.1.1` | `-` | dev-dependency projection is inactive in this round |
+| MissingInRodin | `blake3@1` | `1.8.5` | `-` | target-conditional dependency projection is inactive in this round |
+| MissingInRodin | `bolero-afl@0.13` | `0.13.0` | `-` | target-conditional dependency projection is inactive in this round |
+| MissingInRodin | `bolero-honggfuzz@0.13` | `0.13.0` | `-` | target-conditional dependency projection is inactive in this round |
+| MissingInRodin | `bolero-kani@0.13` | `0.13.0` | `-` | target-conditional dependency projection is inactive in this round |
+| MissingInRodin | `bolero-libfuzzer@0.13` | `0.13.0` | `-` | target-conditional dependency projection is inactive in this round |
+| MissingInRodin | `bs58@0.5` | `0.5.1` | `-` | dev-dependency projection is inactive in this round |
+| MissingInRodin | `by_address@1` | `1.2.1` | `-` | locked package class was not reached under the extracted root/range/feature projection |
+| MissingInRodin | `cbindgen@0.28` | `0.28.0` | `-` | dev-dependency projection is inactive in this round |
+| MissingInRodin | `cmake@0.1` | `0.1.58` | `-` | locked package class was not reached under the extracted root/range/feature projection |
+| MissingInRodin | `codegen@0.3` | `0.3.0` | `-` | manifest dependency references an out-of-snapshot crate or an unversioned Cargo.lock edge |
+| MissingInRodin | `codspeed@4` | `4.7.0` | `-` | dev-dependency projection is inactive in this round |
+| MissingInRodin | `codspeed-divan-compat@4` | `4.7.0` | `-` | manifest dependency references an out-of-snapshot crate or an unversioned Cargo.lock edge |
+| MissingInRodin | `codspeed-divan-compat-macros@4` | `4.7.0` | `-` | locked package class was not reached under the extracted root/range/feature projection |
+| MissingInRodin | `codspeed-divan-compat-walltime@4` | `4.7.0` | `-` | dev-dependency projection is inactive in this round |
+| VersionMismatch | `color-backtrace@0.7` | `0.7.2` | `0.7.3` | same package compatibility class selected a different version from Cargo.lock |
+| MissingInRodin | `colored@2` | `2.2.0` | `-` | target-conditional dependency projection is inactive in this round |
+| MissingInRodin | `condtype@1` | `1.3.0` | `-` | dev-dependency projection is inactive in this round |
+| MissingInRodin | `confusables@0.1` | `0.1.0` | `-` | manifest dependency references an out-of-snapshot crate or an unversioned Cargo.lock edge |
+| MissingInRodin | `constant_time_eq@0.4` | `0.4.2` | `-` | dev-dependency projection is inactive in this round |
+| MissingInRodin | `countme@3` | `3.0.1` | `-` | locked package class was not reached under the extracted root/range/feature projection |
+| MissingInRodin | `crossterm_winapi@0.9` | `0.9.1` | `-` | target-conditional dependency projection is inactive in this round |
+| MissingInRodin | `csscolorparser@0.6` | `0.6.2` | `-` | dev-dependency projection is inactive in this round |
+| MissingInRodin | `dashmap@5` | `5.5.3` | `-` | manifest dependency references an out-of-snapshot crate or an unversioned Cargo.lock edge |
+| MissingInRodin | `deadpool@0.12` | `0.12.3` | `-` | dev-dependency projection is inactive in this round |
+| MissingInRodin | `deadpool-postgres@0.14` | `0.14.1` | `-` | target-conditional dependency projection is inactive in this round |
+| MissingInRodin | `deadpool-runtime@0.1` | `0.1.4` | `-` | manifest dependency references an out-of-snapshot crate or an unversioned Cargo.lock edge |
+| MissingInRodin | `deltae@0.3` | `0.3.2` | `-` | dev-dependency projection is inactive in this round |
+| MissingInRodin | `dirs@6` | `6.0.0` | `-` | manifest dependency references an out-of-snapshot crate or an unversioned Cargo.lock edge |
+| MissingInRodin | `dirs-sys@0.5` | `0.5.0` | `-` | target-conditional dependency projection is inactive in this round |
+| MissingInRodin | `divan-macros@0.1` | `0.1.17` | `-` | locked package class was not reached under the extracted root/range/feature projection |
+| MissingInRodin | `dlmalloc@0.2` | `0.2.14` | `-` | target-conditional dependency projection is inactive in this round |
+| MissingInRodin | `dotenvy@0.15` | `0.15.7` | `-` | dev-dependency projection is inactive in this round |
+| MissingInRodin | `dunce@1` | `1.0.5` | `-` | locked package class was not reached under the extracted root/range/feature projection |
+| MissingInRodin | `embedded-io@0.6` | `0.6.1` | `-` | locked package class was not reached under the extracted root/range/feature projection |
+| MissingInRodin | `encode_unicode@1` | `1.0.0` | `-` | target-conditional dependency projection is inactive in this round |
+| MissingInRodin | `env_filter@2` | `2.0.0` | `-` | dev-dependency projection is inactive in this round |
+| MissingInRodin | `env_home@0.1` | `0.1.0` | `-` | locked package class was not reached under the extracted root/range/feature projection |
+| MissingInRodin | `env_logger@0.11` | `0.11.11` | `-` | dev-dependency projection is inactive in this round |
+| MissingInRodin | `euclid@0.22` | `0.22.14` | `-` | dev-dependency projection is inactive in this round |
+| MissingInRodin | `fallible-iterator@0.3` | `0.3.0` | `-` | locked package class was not reached under the extracted root/range/feature projection |
+| MissingInRodin | `fallible-streaming-iterator@0.1` | `0.1.9` | `-` | locked package class was not reached under the extracted root/range/feature projection |
+| MissingInRodin | `fancy-regex@0.11` | `0.11.0` | `-` | dev-dependency projection is inactive in this round |
+| MissingInRodin | `fast-srgb8@1` | `1.0.0` | `-` | locked package class was not reached under the extracted root/range/feature projection |
+| MissingInRodin | `finl_unicode@1` | `1.4.0` | `-` | dev-dependency projection is inactive in this round |
+| MissingInRodin | `fixedbitset@0.4` | `0.4.2` | `-` | dev-dependency projection is inactive in this round |
+| MissingInRodin | `fs_extra@1` | `1.3.0` | `-` | dev-dependency projection is inactive in this round |
+| MissingInRodin | `fsevent-sys@4` | `4.1.0` | `-` | target-conditional dependency projection is inactive in this round |
+| MissingInRodin | `funty@2` | `2.0.0` | `-` | dev-dependency projection is inactive in this round |
+| MissingInRodin | `glob@0.3` | `0.3.3` | `-` | dev-dependency projection is inactive in this round |
+| MissingInRodin | `goblin@0.9` | `0.9.3` | `-` | dev-dependency projection is inactive in this round |
+| MissingInRodin | `hashlink@0.9` | `0.9.1` | `-` | dev-dependency projection is inactive in this round |
+| MissingInRodin | `heck@0.4` | `0.4.1` | `-` | locked package class was not reached under the extracted root/range/feature projection |
+| MissingInRodin | `hermit-abi@0.5` | `0.5.2` | `-` | target-conditional dependency projection is inactive in this round |
+| MissingInRodin | `hyper-named-pipe@0.1` | `0.1.0` | `-` | target-conditional dependency projection is inactive in this round |
+| MissingInRodin | `iana-time-zone-haiku@0.1` | `0.1.2` | `-` | target-conditional dependency projection is inactive in this round |
+| MissingInRodin | `icu_normalizer_data@2` | `2.0.0` | `-` | locked package class was not reached under the extracted root/range/feature projection |
+| MissingInRodin | `im@15` | `15.1.0` | `-` | dev-dependency projection is inactive in this round |
+| MissingInRodin | `indextree@4` | `4.8.1` | `-` | dev-dependency projection is inactive in this round |
+| MissingInRodin | `indextree-macros@0.1` | `0.1.3` | `-` | dev-dependency projection is inactive in this round |
+| MissingInRodin | `inotify@0.11` | `0.11.2` | `-` | target-conditional dependency projection is inactive in this round |
+| MissingInRodin | `inotify-sys@0.1` | `0.1.5` | `-` | locked package class was not reached under the extracted root/range/feature projection |
+| MissingInRodin | `instability@0.3` | `0.3.12` | `-` | dev-dependency projection is inactive in this round |
+| MissingInRodin | `inventory@0.3` | `0.3.24` | `-` | target-conditional dependency projection is inactive in this round |
+| VersionMismatch | `jiff@0.2` | `0.2.29` | `0.2.31` | same package compatibility class selected a different version from Cargo.lock |
+| MissingInRodin | `jiff-tzdb-platform@0.1` | `0.1.3` | `-` | target-conditional dependency projection is inactive in this round |
+| MissingInRodin | `jobserver@0.1` | `0.1.34` | `-` | target-conditional dependency projection is inactive in this round |
+| MissingInRodin | `js-sys@0.3` | `0.3.103` | `-` | target-conditional dependency projection is inactive in this round |
+| MissingInRodin | `kasuari@0.4` | `0.4.12` | `-` | dev-dependency projection is inactive in this round |
+| MissingInRodin | `lab@0.11` | `0.11.0` | `-` | dev-dependency projection is inactive in this round |
+| MissingInRodin | `libredox@0.1` | `0.1.17` | `-` | target-conditional dependency projection is inactive in this round |
+| MissingInRodin | `libsqlite3-sys@0.30` | `0.30.1` | `-` | manifest dependency references an out-of-snapshot crate or an unversioned Cargo.lock edge |
+| MissingInRodin | `line-clipping@0.3` | `0.3.7` | `-` | dev-dependency projection is inactive in this round |
+| MissingInRodin | `linux-raw-sys@0.4` | `0.4.15` | `-` | target-conditional dependency projection is inactive in this round |
+| MissingInRodin | `linux-raw-sys@0.12` | `0.12.1` | `-` | target-conditional dependency projection is inactive in this round |
+| MissingInRodin | `lru@0.18` | `0.18.0` | `-` | dev-dependency projection is inactive in this round |
+| MissingInRodin | `lsp-types@0.94` | `0.94.1` | `-` | locked package class was not reached under the extracted root/range/feature projection |
+| MissingInRodin | `mac_address@1` | `1.1.8` | `-` | target-conditional dependency projection is inactive in this round |
+| MissingInRodin | `margin@0.10` | `0.10.0-rc.1` | `-` | manifest dependency references an out-of-snapshot crate or an unversioned Cargo.lock edge |
+| MissingInRodin | `margin-term@0.10` | `0.10.0-rc.1` | `-` | manifest dependency references an out-of-snapshot crate or an unversioned Cargo.lock edge |
+| MissingInRodin | `memmem@0.1` | `0.1.1` | `-` | dev-dependency projection is inactive in this round |
+| MissingInRodin | `minimal-lexical@0.2` | `0.2.1` | `-` | locked package class was not reached under the extracted root/range/feature projection |
+| MissingInRodin | `nix@0.29` | `0.29.0` | `-` | target-conditional dependency projection is inactive in this round |
+| MissingInRodin | `nom@7` | `7.1.3` | `-` | dev-dependency projection is inactive in this round |
+| MissingInRodin | `notify@8` | `8.2.0` | `-` | target-conditional dependency projection is inactive in this round |
+| MissingInRodin | `num-derive@0.4` | `0.4.2` | `-` | dev-dependency projection is inactive in this round |
+| MissingInRodin | `num_cpus@1` | `1.17.0` | `-` | target-conditional dependency projection is inactive in this round |
+| MissingInRodin | `once_cell_polyfill@1` | `1.70.2` | `-` | target-conditional dependency projection is inactive in this round |
+| MissingInRodin | `openssl-probe@0.2` | `0.2.1` | `-` | target-conditional dependency projection is inactive in this round |
+| MissingInRodin | `option-ext@0.2` | `0.2.0` | `-` | locked package class was not reached under the extracted root/range/feature projection |
+| MissingInRodin | `ordered-float@4` | `4.6.0` | `-` | dev-dependency projection is inactive in this round |
+| MissingInRodin | `palette@0.7` | `0.7.6` | `-` | dev-dependency projection is inactive in this round |
+| MissingInRodin | `palette_derive@0.7` | `0.7.6` | `-` | manifest dependency references an out-of-snapshot crate or an unversioned Cargo.lock edge |
+| MissingInRodin | `passfd@0.1` | `0.1.6` | `-` | dev-dependency projection is inactive in this round |
+| MissingInRodin | `phf_codegen@0.11` | `0.11.3` | `-` | dev-dependency projection is inactive in this round |
+| MissingInRodin | `pkg-config@0.3` | `0.3.33` | `-` | dev-dependency projection is inactive in this round |
+| MissingInRodin | `plain@0.2` | `0.2.3` | `-` | locked package class was not reached under the extracted root/range/feature projection |
+| MissingInRodin | `prettyplease@0.2` | `0.2.37` | `-` | dev-dependency projection is inactive in this round |
+| MissingInRodin | `r-efi@5` | `5.3.0` | `-` | target-conditional dependency projection is inactive in this round |
+| MissingInRodin | `r-efi@6` | `6.0.0` | `-` | target-conditional dependency projection is inactive in this round |
+| MissingInRodin | `radium@0.7` | `0.7.0` | `-` | dev-dependency projection is inactive in this round |
+| MissingInRodin | `rand_xoshiro@0.6` | `0.6.0` | `-` | dev-dependency projection is inactive in this round |
+| MissingInRodin | `ratatui@0.30` | `0.30.2` | `-` | dev-dependency projection is inactive in this round |
+| MissingInRodin | `ratatui-core@0.1` | `0.1.2` | `-` | dev-dependency projection is inactive in this round |
+| MissingInRodin | `ratatui-crossterm@0.1` | `0.1.2` | `-` | dev-dependency projection is inactive in this round |
+| MissingInRodin | `ratatui-macros@0.7` | `0.7.2` | `-` | dev-dependency projection is inactive in this round |
+| MissingInRodin | `ratatui-termina@0.1` | `0.1.0` | `-` | dev-dependency projection is inactive in this round |
+| MissingInRodin | `ratatui-termwiz@0.1` | `0.1.2` | `-` | locked package class was not reached under the extracted root/range/feature projection |
+| MissingInRodin | `ratatui-widgets@0.3` | `0.3.2` | `-` | dev-dependency projection is inactive in this round |
+| MissingInRodin | `redox_syscall@0.5` | `0.5.18` | `-` | target-conditional dependency projection is inactive in this round |
+| MissingInRodin | `redox_users@0.5` | `0.5.2` | `-` | target-conditional dependency projection is inactive in this round |
+| MissingInRodin | `regex-lite@0.1` | `0.1.9` | `-` | dev-dependency projection is inactive in this round |
+| MissingInRodin | `ring@0.17` | `0.17.14` | `-` | target-conditional dependency projection is inactive in this round |
+| MissingInRodin | `rowan@0.16` | `0.16.1` | `-` | dev-dependency projection is inactive in this round |
+| MissingInRodin | `ruint@1` | `1.18.0` | `-` | dev-dependency projection is inactive in this round |
+| MissingInRodin | `ruint-macro@1` | `1.2.1` | `-` | locked package class was not reached under the extracted root/range/feature projection |
+| MissingInRodin | `rusqlite@0.32` | `0.32.1` | `-` | dev-dependency projection is inactive in this round |
+| MissingInRodin | `rust-examples@0.10` | `0.10.0-rc.1` | `-` | manifest unavailable for this locked package artifact |
+| MissingInRodin | `rustc-hash@1` | `1.1.0` | `-` | dev-dependency projection is inactive in this round |
+| VersionMismatch | `rustc-hash@2` | `2.1.2` | `2.1.3` | same package compatibility class selected a different version from Cargo.lock |
+| MissingInRodin | `rustls@0.23` | `0.23.41` | `-` | dev-dependency projection is inactive in this round |
+| MissingInRodin | `rustls-webpki@0.103` | `0.103.13` | `-` | dev-dependency projection is inactive in this round |
+| MissingInRodin | `schannel@0.1` | `0.1.29` | `-` | target-conditional dependency projection is inactive in this round |
+| MissingInRodin | `schemars@0.9` | `0.9.0` | `-` | dev-dependency projection is inactive in this round |
+| MissingInRodin | `schemars@1` | `1.2.1` | `-` | dev-dependency projection is inactive in this round |
+| MissingInRodin | `scroll@0.12` | `0.12.0` | `-` | dev-dependency projection is inactive in this round |
+| MissingInRodin | `scroll_derive@0.12` | `0.12.1` | `-` | dev-dependency projection is inactive in this round |
+| MissingInRodin | `serde-wasm-bindgen@0.6` | `0.6.5` | `-` | dev-dependency projection is inactive in this round |
+| MissingInRodin | `simd-adler32@0.3` | `0.3.9` | `-` | dev-dependency projection is inactive in this round |
+| MissingInRodin | `sized-chunks@0.6` | `0.6.5` | `-` | manifest dependency references an out-of-snapshot crate or an unversioned Cargo.lock edge |
+| MissingInRodin | `statrs@0.18` | `0.18.0` | `-` | dev-dependency projection is inactive in this round |
+| MissingInRodin | `structstruck@0.5` | `0.5.1` | `-` | dev-dependency projection is inactive in this round |
+| MissingInRodin | `strum@0.27` | `0.27.2` | `-` | dev-dependency projection is inactive in this round |
+| MissingInRodin | `strum@0.28` | `0.28.0` | `-` | dev-dependency projection is inactive in this round |
+| MissingInRodin | `strum_macros@0.27` | `0.27.2` | `-` | dev-dependency projection is inactive in this round |
+| MissingInRodin | `strum_macros@0.28` | `0.28.0` | `-` | dev-dependency projection is inactive in this round |
+| MissingInRodin | `supports-color@3` | `3.0.2` | `-` | locked package class was not reached under the extracted root/range/feature projection |
+| MissingInRodin | `target-triple@1` | `1.0.0` | `-` | locked package class was not reached under the extracted root/range/feature projection |
+| MissingInRodin | `termina@0.3` | `0.3.3` | `-` | target-conditional dependency projection is inactive in this round |
+| MissingInRodin | `terminal-colorsaurus@1` | `1.0.3` | `-` | target-conditional dependency projection is inactive in this round |
+| VersionMismatch | `terminal-light@1` | `1.8.0` | `1.9.0` | same package compatibility class selected a different version from Cargo.lock |
+| MissingInRodin | `terminal-trx@0.2` | `0.2.6` | `-` | target-conditional dependency projection is inactive in this round |
+| MissingInRodin | `terminfo@0.9` | `0.9.0` | `-` | locked package class was not reached under the extracted root/range/feature projection |
+| MissingInRodin | `termios@0.3` | `0.3.3` | `-` | locked package class was not reached under the extracted root/range/feature projection |
+| MissingInRodin | `termwiz@0.23` | `0.23.3` | `-` | target-conditional dependency projection is inactive in this round |
+| VersionMismatch | `time@0.3` | `0.3.51` | `0.3.53` | same package compatibility class selected a different version from Cargo.lock |
+| MissingInRodin | `time-macros@0.2` | `0.2.30` | `-` | dev-dependency projection is inactive in this round |
+| MissingInRodin | `tokio-test-lite@0.2` | `0.2.0` | `-` | dev-dependency projection is inactive in this round |
+| MissingInRodin | `tower-lsp@0.20` | `0.20.0` | `-` | dev-dependency projection is inactive in this round |
+| MissingInRodin | `tower-lsp-macros@0.9` | `0.9.0` | `-` | locked package class was not reached under the extracted root/range/feature projection |
+| MissingInRodin | `trybuild@1` | `1.0.117` | `-` | target-conditional dependency projection is inactive in this round |
+| MissingInRodin | `unicode-truncate@2` | `2.0.1` | `-` | dev-dependency projection is inactive in this round |
+| MissingInRodin | `untrusted@0.9` | `0.9.0` | `-` | dev-dependency projection is inactive in this round |
+| MissingInRodin | `utf16_iter@1` | `1.0.5` | `-` | locked package class was not reached under the extracted root/range/feature projection |
+| MissingInRodin | `valuable@0.1` | `0.1.1` | `-` | target-conditional dependency projection is inactive in this round |
+| MissingInRodin | `vcpkg@0.2` | `0.2.15` | `-` | dev-dependency projection is inactive in this round |
+| MissingInRodin | `venial@0.5` | `0.5.0` | `-` | dev-dependency projection is inactive in this round |
+| MissingInRodin | `vtparse@0.6` | `0.6.2` | `-` | dev-dependency projection is inactive in this round |
+| MissingInRodin | `wasi@0.11` | `0.11.1+wasi-snapshot-preview1` | `-` | target-conditional dependency projection is inactive in this round |
+| MissingInRodin | `wasi@0.14` | `0.14.7+wasi-0.2.4` | `-` | target-conditional dependency projection is inactive in this round |
+| MissingInRodin | `wasip2@1` | `1.0.4+wasi-0.2.12` | `-` | target-conditional dependency projection is inactive in this round |
+| MissingInRodin | `wasite@1` | `1.0.2` | `-` | target-conditional dependency projection is inactive in this round |
+| MissingInRodin | `wasm-bindgen@0.2` | `0.2.126` | `-` | target-conditional dependency projection is inactive in this round |
+| MissingInRodin | `wasm-bindgen-futures@0.4` | `0.4.76` | `-` | target-conditional dependency projection is inactive in this round |
+| MissingInRodin | `wasm-bindgen-macro@0.2` | `0.2.126` | `-` | target-conditional dependency projection is inactive in this round |
+| MissingInRodin | `wasm-bindgen-macro-support@0.2` | `0.2.126` | `-` | locked package class was not reached under the extracted root/range/feature projection |
+| MissingInRodin | `wasm-bindgen-shared@0.2` | `0.2.126` | `-` | locked package class was not reached under the extracted root/range/feature projection |
+| MissingInRodin | `wasm-browser-tests@0.10` | `0.10.0-rc.1` | `-` | manifest unavailable for this locked package artifact |
+| MissingInRodin | `wasm-inprocess-tests@0.10` | `0.10.0-rc.1` | `-` | manifest unavailable for this locked package artifact |
+| MissingInRodin | `wasmtimer@0.4` | `0.4.3` | `-` | dev-dependency projection is inactive in this round |
+| MissingInRodin | `web-sys@0.3` | `0.3.103` | `-` | target-conditional dependency projection is inactive in this round |
+| MissingInRodin | `wezterm-bidi@0.2` | `0.2.3` | `-` | dev-dependency projection is inactive in this round |
+| MissingInRodin | `wezterm-blob-leases@0.1` | `0.1.1` | `-` | locked package class was not reached under the extracted root/range/feature projection |
+| MissingInRodin | `wezterm-color-types@0.3` | `0.3.0` | `-` | locked package class was not reached under the extracted root/range/feature projection |
+| MissingInRodin | `wezterm-dynamic@0.2` | `0.2.1` | `-` | dev-dependency projection is inactive in this round |
+| MissingInRodin | `wezterm-dynamic-derive@0.1` | `0.1.1` | `-` | locked package class was not reached under the extracted root/range/feature projection |
+| MissingInRodin | `wezterm-input-types@0.1` | `0.1.0` | `-` | locked package class was not reached under the extracted root/range/feature projection |
+| MissingInRodin | `which@7` | `7.0.3` | `-` | target-conditional dependency projection is inactive in this round |
+| MissingInRodin | `winapi@0.3` | `0.3.9` | `-` | target-conditional dependency projection is inactive in this round |
+| MissingInRodin | `winapi-i686-pc-windows-gnu@0.4` | `0.4.0` | `-` | target-conditional dependency projection is inactive in this round |
+| MissingInRodin | `winapi-util@0.1` | `0.1.11` | `-` | target-conditional dependency projection is inactive in this round |
+| MissingInRodin | `winapi-x86_64-pc-windows-gnu@0.4` | `0.4.0` | `-` | target-conditional dependency projection is inactive in this round |
+| MissingInRodin | `windows-core@0.62` | `0.62.2` | `-` | target-conditional dependency projection is inactive in this round |
+| MissingInRodin | `windows-implement@0.60` | `0.60.2` | `-` | locked package class was not reached under the extracted root/range/feature projection |
+| MissingInRodin | `windows-interface@0.59` | `0.59.3` | `-` | locked package class was not reached under the extracted root/range/feature projection |
+| MissingInRodin | `windows-link@0.2` | `0.2.1` | `-` | target-conditional dependency projection is inactive in this round |
+| MissingInRodin | `windows-result@0.4` | `0.4.1` | `-` | locked package class was not reached under the extracted root/range/feature projection |
+| MissingInRodin | `windows-strings@0.5` | `0.5.1` | `-` | locked package class was not reached under the extracted root/range/feature projection |
+| MissingInRodin | `windows-sys@0.52` | `0.52.0` | `-` | target-conditional dependency projection is inactive in this round |
+| MissingInRodin | `windows-sys@0.59` | `0.59.0` | `-` | target-conditional dependency projection is inactive in this round |
+| MissingInRodin | `windows-sys@0.60` | `0.60.2` | `-` | target-conditional dependency projection is inactive in this round |
+| MissingInRodin | `windows-sys@0.61` | `0.61.2` | `-` | target-conditional dependency projection is inactive in this round |
+| MissingInRodin | `windows-targets@0.52` | `0.52.6` | `-` | target-conditional dependency projection is inactive in this round |
+| MissingInRodin | `windows-targets@0.53` | `0.53.5` | `-` | target-conditional dependency projection is inactive in this round |
+| MissingInRodin | `windows_aarch64_gnullvm@0.52` | `0.52.6` | `-` | target-conditional dependency projection is inactive in this round |
+| MissingInRodin | `windows_aarch64_gnullvm@0.53` | `0.53.1` | `-` | target-conditional dependency projection is inactive in this round |
+| MissingInRodin | `windows_aarch64_msvc@0.52` | `0.52.6` | `-` | target-conditional dependency projection is inactive in this round |
+| MissingInRodin | `windows_aarch64_msvc@0.53` | `0.53.1` | `-` | target-conditional dependency projection is inactive in this round |
+| MissingInRodin | `windows_i686_gnu@0.52` | `0.52.6` | `-` | target-conditional dependency projection is inactive in this round |
+| MissingInRodin | `windows_i686_gnu@0.53` | `0.53.1` | `-` | target-conditional dependency projection is inactive in this round |
+| MissingInRodin | `windows_i686_gnullvm@0.52` | `0.52.6` | `-` | target-conditional dependency projection is inactive in this round |
+| MissingInRodin | `windows_i686_gnullvm@0.53` | `0.53.1` | `-` | target-conditional dependency projection is inactive in this round |
+| MissingInRodin | `windows_i686_msvc@0.52` | `0.52.6` | `-` | target-conditional dependency projection is inactive in this round |
+| MissingInRodin | `windows_i686_msvc@0.53` | `0.53.1` | `-` | target-conditional dependency projection is inactive in this round |
+| MissingInRodin | `windows_x86_64_gnu@0.52` | `0.52.6` | `-` | target-conditional dependency projection is inactive in this round |
+| MissingInRodin | `windows_x86_64_gnu@0.53` | `0.53.1` | `-` | target-conditional dependency projection is inactive in this round |
+| MissingInRodin | `windows_x86_64_gnullvm@0.52` | `0.52.6` | `-` | target-conditional dependency projection is inactive in this round |
+| MissingInRodin | `windows_x86_64_gnullvm@0.53` | `0.53.1` | `-` | target-conditional dependency projection is inactive in this round |
+| MissingInRodin | `windows_x86_64_msvc@0.52` | `0.52.6` | `-` | target-conditional dependency projection is inactive in this round |
+| MissingInRodin | `windows_x86_64_msvc@0.53` | `0.53.1` | `-` | target-conditional dependency projection is inactive in this round |
+| MissingInRodin | `winsafe@0.0.19` | `0.0.19` | `-` | target-conditional dependency projection is inactive in this round |
+| MissingInRodin | `wit-bindgen@0.57` | `0.57.1` | `-` | manifest dependency references an out-of-snapshot crate or an unversioned Cargo.lock edge |
+| MissingInRodin | `wyz@0.5` | `0.5.1` | `-` | manifest dependency references an out-of-snapshot crate or an unversioned Cargo.lock edge |
+| MissingInRodin | `xshell@0.2` | `0.2.7` | `-` | dev-dependency projection is inactive in this round |
+| MissingInRodin | `xshell-macros@0.2` | `0.2.7` | `-` | locked package class was not reached under the extracted root/range/feature projection |
+| MissingInRodin | `xterm-color@1` | `1.0.2` | `-` | locked package class was not reached under the extracted root/range/feature projection |
+| MissingInRodin | `xterm-query@0.5` | `0.5.2` | `-` | dev-dependency projection is inactive in this round |
+| ExtraInRodin | `anstream@0.6` | `` | `0.6.21` | selected from cached registry universe but absent from Cargo.lock |
+| ExtraInRodin | `anstyle-parse@0.2` | `` | `0.2.7` | selected from cached registry universe but absent from Cargo.lock |
+| ExtraInRodin | `bit-vec@0.9` | `` | `0.9.1` | selected from cached registry universe but absent from Cargo.lock |
+| ExtraInRodin | `const-oid@0.9` | `` | `0.9.6` | selected from cached registry universe but absent from Cargo.lock |
+| ExtraInRodin | `futures@0.1` | `` | `0.1.31` | selected from cached registry universe but absent from Cargo.lock |
+| ExtraInRodin | `jiff@0.1` | `` | `0.1.29` | selected from cached registry universe but absent from Cargo.lock |
+| ExtraInRodin | `mio@0.8` | `` | `0.8.11` | selected from cached registry universe but absent from Cargo.lock |
+| ExtraInRodin | `notify@9` | `` | `9.0.0-rc.4` | selected from cached registry universe but absent from Cargo.lock |
+| ExtraInRodin | `rustls@0.24` | `` | `0.24.0-dev.0` | selected from cached registry universe but absent from Cargo.lock |
+| ExtraInRodin | `schemars@0.8` | `` | `0.8.22` | selected from cached registry universe but absent from Cargo.lock |
+| ExtraInRodin | `signal-hook@0.4` | `` | `0.4.4` | selected from cached registry universe but absent from Cargo.lock |
+| ExtraInRodin | `spin@0.10` | `` | `0.10.0` | selected from cached registry universe but absent from Cargo.lock |
+| ExtraInRodin | `tokio-tungstenite@0.28` | `` | `0.28.0` | selected from cached registry universe but absent from Cargo.lock |
+| ExtraInRodin | `tungstenite@0.28` | `` | `0.28.0` | selected from cached registry universe but absent from Cargo.lock |
+| ExtraInRodin | `unicode-width@0.1` | `` | `0.1.14` | selected from cached registry universe but absent from Cargo.lock |
+| ExtraInRodin | `uuid@0.8` | `` | `0.8.2` | selected from cached registry universe but absent from Cargo.lock |
+| ExtraInRodin | `webpki-roots@0.26` | `` | `0.26.11` | selected from cached registry universe but absent from Cargo.lock |
+| ExtraInRodin | `xterm-query@0.6` | `` | `0.6.0` | selected from cached registry universe but absent from Cargo.lock |
+
+### Warm counterfactual
+
+Dropped root dependency `copypatch`. Warm/cold selected sets equal: `true`.
+
+| warm decisions | cold decisions | decision delta | warm conflicts | cold conflicts | conflict delta | warm facts used | scoped out |
+|---:|---:|---:|---:|---:|---:|---:|---:|
+| 224 | 227 | 3 | 0 | 2 | 2 | 2 | 0 |
+
+| added | removed | changed |
+|---:|---:|---:|
+| 0 | 0 | 0 |
+
+
+### Extraction and modeling gap samples
+
+| gap kind | count |
+|---|---:|
+| ManifestMissing | 3 |
+| DependencyOutsideLockUniverse | 2766 |
+| TargetConditionalDependency | 1140 |
+| DevDependency | 5616 |
+
+| kind | package | detail |
+|---|---|---|
+| DevDependency | `addr2line@0.16.0` | backtrace |
+| DevDependency | `addr2line@0.16.0` | clap |
+| DependencyOutsideLockUniverse | `addr2line@0.16.0` | compiler_builtins |
+| DependencyOutsideLockUniverse | `addr2line@0.16.0` | cpp_demangle |
+| DevDependency | `addr2line@0.16.0` | findshlibs |
+| DevDependency | `addr2line@0.16.0` | memmap |
+| DependencyOutsideLockUniverse | `addr2line@0.16.0` | rustc-std-workspace-alloc |
+| DependencyOutsideLockUniverse | `addr2line@0.16.0` | rustc-std-workspace-core |
+| DevDependency | `addr2line@0.16.0` | rustc-test |
+| DevDependency | `addr2line@0.16.0` | typed-arena |
+| DevDependency | `addr2line@0.21.0` | backtrace |
+| DevDependency | `addr2line@0.21.0` | clap |
+| DependencyOutsideLockUniverse | `addr2line@0.21.0` | compiler_builtins |
+| DependencyOutsideLockUniverse | `addr2line@0.21.0` | cpp_demangle |
+| DevDependency | `addr2line@0.21.0` | findshlibs |
+| DevDependency | `addr2line@0.21.0` | libtest-mimic |
+| DependencyOutsideLockUniverse | `addr2line@0.21.0` | rustc-std-workspace-alloc |
+| DependencyOutsideLockUniverse | `addr2line@0.21.0` | rustc-std-workspace-core |
+| DevDependency | `addr2line@0.21.0` | typed-arena |
+| DevDependency | `addr2line@0.24.2` | backtrace |
+| DependencyOutsideLockUniverse | `addr2line@0.24.2` | compiler_builtins |
+| DependencyOutsideLockUniverse | `addr2line@0.24.2` | cpp_demangle |
+| DevDependency | `addr2line@0.24.2` | findshlibs |
+| DevDependency | `addr2line@0.24.2` | libtest-mimic |
+| DependencyOutsideLockUniverse | `addr2line@0.24.2` | rustc-std-workspace-alloc |
+| DependencyOutsideLockUniverse | `addr2line@0.24.2` | rustc-std-workspace-core |
+| DependencyOutsideLockUniverse | `addr2line@0.24.2` | typed-arena |
+| DevDependency | `addr2line@0.25.1` | backtrace |
+| DependencyOutsideLockUniverse | `addr2line@0.25.1` | cpp_demangle |
+| DevDependency | `addr2line@0.25.1` | criterion |
+| DevDependency | `addr2line@0.25.1` | findshlibs |
+| DevDependency | `addr2line@0.25.1` | libtest-mimic |
+| DependencyOutsideLockUniverse | `addr2line@0.25.1` | rustc-std-workspace-alloc |
+| DependencyOutsideLockUniverse | `addr2line@0.25.1` | rustc-std-workspace-core |
+| DependencyOutsideLockUniverse | `addr2line@0.25.1` | typed-arena |
+| DevDependency | `addr2line@0.26.0` | backtrace |
+| DependencyOutsideLockUniverse | `addr2line@0.26.0` | cpp_demangle |
+| DevDependency | `addr2line@0.26.0` | criterion |
+| DevDependency | `addr2line@0.26.0` | findshlibs |
+| DevDependency | `addr2line@0.26.0` | libtest-mimic |
+| DependencyOutsideLockUniverse | `addr2line@0.26.0` | rustc-std-workspace-alloc |
+| DependencyOutsideLockUniverse | `addr2line@0.26.0` | rustc-std-workspace-core |
+| DependencyOutsideLockUniverse | `addr2line@0.26.0` | typed-arena |
+| DevDependency | `addr2line@0.26.1` | backtrace |
+| DependencyOutsideLockUniverse | `addr2line@0.26.1` | cpp_demangle |
+| DevDependency | `addr2line@0.26.1` | criterion |
+| DevDependency | `addr2line@0.26.1` | findshlibs |
+| DevDependency | `addr2line@0.26.1` | libtest-mimic |
+| DependencyOutsideLockUniverse | `addr2line@0.26.1` | rustc-std-workspace-alloc |
+| DependencyOutsideLockUniverse | `addr2line@0.26.1` | rustc-std-workspace-core |
+| DependencyOutsideLockUniverse | `addr2line@0.26.1` | typed-arena |
+| DependencyOutsideLockUniverse | `adler2@2.0.0` | compiler_builtins |
+| DevDependency | `adler2@2.0.0` | criterion |
+| DependencyOutsideLockUniverse | `adler2@2.0.0` | rustc-std-workspace-core |
+| DependencyOutsideLockUniverse | `adler2@2.0.1` | rustc-std-workspace-core |
+| DependencyOutsideLockUniverse | `ahash@0.3.8` | const-random |
+| DevDependency | `ahash@0.3.8` | criterion |
+| DevDependency | `ahash@0.3.8` | fnv |
+| DevDependency | `ahash@0.3.8` | fxhash |
+| DevDependency | `ahash@0.3.8` | hex |
+
+9465 additional extraction/modeling gaps omitted from this table; the JSON artifact carries the full set.

@@ -23,6 +23,7 @@ const DEFAULT_REGISTRY_SRC: &str =
     "/Users/amos/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f";
 const DEFAULT_REGISTRY_CACHE: &str =
     "/Users/amos/.cargo/registry/cache/index.crates.io-1949cf8c6b5b557f";
+const ROUND_TARGET_TRIPLE: &str = "aarch64-apple-darwin";
 
 #[derive(Clone, Debug, Facet, PartialEq)]
 pub struct CargoEvidenceReport {
@@ -133,7 +134,7 @@ struct ExtractedCargoUniverse {
 
 struct ExtractionModel<'a> {
     target_names: &'a BTreeSet<String>,
-    locked_domains: &'a BTreeMap<(String, CompatClass), Version>,
+    workspace_members: &'a BTreeSet<String>,
 }
 
 #[derive(Clone, Debug, Eq, PartialEq)]
@@ -146,6 +147,7 @@ struct LockedDomain {
 #[derive(Clone, Debug, Default)]
 struct ManifestDeps {
     deps_by_name: BTreeMap<String, Vec<ManifestDep>>,
+    features: BTreeMap<String, Vec<String>>,
 }
 
 #[derive(Clone, Debug, Eq, PartialEq)]
@@ -157,7 +159,7 @@ struct ManifestDep {
     optional: bool,
     default_features: bool,
     kind: DepKind,
-    target: bool,
+    target: Option<String>,
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -165,6 +167,16 @@ enum DepKind {
     Normal,
     Build,
     Dev,
+}
+
+impl DepKind {
+    fn as_str(self) -> &'static str {
+        match self {
+            Self::Normal => "normal",
+            Self::Build => "build",
+            Self::Dev => "dev",
+        }
+    }
 }
 
 #[derive(Clone, Debug, Eq, PartialEq)]
@@ -184,15 +196,15 @@ struct LockDep {
 #[must_use]
 pub fn render_cargo_evidence_markdown(report: &CargoEvidenceReport) -> String {
     let mut out = String::new();
-    out.push_str("## Round 5: per-major Cargo range evidence\n\n");
+    out.push_str("## Round 6: Cargo feature activation evidence\n\n");
     let _ = writeln!(
         out,
-        "Source snapshot: `{}` Cargo.lock plus local Cargo registry source/cache artifacts. The extractor is offline-only, reads local Cargo.toml files and `.crate` archives directly, indexes cached registry alternatives for locked package names, and models Cargo-compatible coexisting domains keyed by package name and compatibility class.\n",
+        "Source snapshot: `{}` Cargo.lock plus local Cargo registry source/cache artifacts. The extractor is offline-only, reads local Cargo.toml files and `.crate` archives directly, indexes cached registry alternatives for locked package names, models Cargo-compatible coexisting domains keyed by package name and compatibility class, and evaluates target-conditionals against `{ROUND_TARGET_TRIPLE}`.\n",
         report.workspace
     );
     out.push_str("### Extraction\n\n");
     out.push_str(
-        "Readable manifests contribute real requirement ranges. Cargo.lock supplies the oracle snapshot and, where a dependency line names an exact locked version, a compatibility-class hint for rebinding that range into the right Rodin domain. Dev, optional, and target-conditional manifest dependencies are classified as modeling gaps and left inactive in this round.\n\n",
+        "Readable manifests contribute real requirement ranges and feature tables. Cargo.lock supplies the oracle snapshot and, where a dependency line names an exact locked version, a compatibility-class hint for rebinding that range into the right Rodin domain. Feature activation uses Rodin feature atoms with resolver-v2 scopes: normal features unify, build/dev scopes do not unify with normal, build dependencies are active for the host, dev dependencies are active only for workspace members, and target-conditional edges are filtered by the fixed round target.\n\n",
     );
     let _ = writeln!(
         out,
@@ -353,7 +365,14 @@ pub fn run_facet_cc_evidence() -> Result<CargoEvidenceReport> {
 
 pub fn run_cargo_evidence(workspace: &Path, registry_src: &Path) -> Result<CargoEvidenceReport> {
     let registry_cache = default_registry_cache_for_src(registry_src);
+    let extract_start = Instant::now();
     let extracted = extract_cargo_universe(workspace, registry_src, &registry_cache)?;
+    tracing::info!(
+        elapsed_ms = extract_start.elapsed().as_millis(),
+        indexed_edges = extracted.indexed_edges,
+        gaps = extracted.gaps.len(),
+        "rodin cargo evidence extraction complete"
+    );
     let roots = extracted.problem.roots.len();
     let lock_packages = extracted.lock_versions.len();
     let lock_unique_names = extracted
@@ -366,8 +385,10 @@ pub fn run_cargo_evidence(workspace: &Path, registry_src: &Path) -> Result<Cargo
     let indexed_versions = extracted.index.version_count();
 
     let start = Instant::now();
+    tracing::info!("rodin cargo evidence solve starting");
     let solved = solve(&extracted.index, extracted.problem.clone());
     let wall_ms = start.elapsed().as_millis().try_into().unwrap_or(u64::MAX);
+    tracing::info!(wall_ms, "rodin cargo evidence solve finished");
     let (selected, solve_stats, learned, derivations) = match solved {
         Ok(result) => {
             let stats = solve_stats(
@@ -552,9 +573,9 @@ fn extract_cargo_universe(
     let lock = parse_lock(&fs::read_to_string(&lock_path).wrap_err("reading Cargo.lock")?)?;
     let lock_by_name = lock_versions_by_name(&lock);
     let locked_domains = locked_domains(&lock);
-    let locked_domain_versions = locked_domain_versions(&locked_domains);
     let registry_sources = registry_sources_by_name(&lock);
     let workspace_members = workspace_members(workspace)?;
+    let workspace_member_set = workspace_members.iter().cloned().collect::<BTreeSet<_>>();
     let local_manifests = local_manifest_paths(workspace, &workspace_members)?;
     let mut gaps = Vec::new();
     let mut index = CompiledIndex::empty();
@@ -562,7 +583,7 @@ fn extract_cargo_universe(
     let target_names: BTreeSet<_> = lock_by_name.keys().cloned().collect();
     let model = ExtractionModel {
         target_names: &target_names,
-        locked_domains: &locked_domain_versions,
+        workspace_members: &workspace_member_set,
     };
 
     for package_name in &target_names {
@@ -613,10 +634,22 @@ fn extract_cargo_universe(
                 &mut gaps,
             );
             indexed_edges += deps.len();
-            index.add_package_version(package_name, version, deps, BTreeMap::new());
+            index.add_package_version(package_name, version, deps, manifest_deps.features);
         }
     }
+    tracing::info!(
+        packages = index.package_count(),
+        versions = index.version_count(),
+        indexed_edges,
+        gaps = gaps.len(),
+        "rodin cargo evidence index compile starting"
+    );
     index.finish_synthetic()?;
+    tracing::info!(
+        packages = index.package_count(),
+        versions = index.version_count(),
+        "rodin cargo evidence index compile finished"
+    );
 
     let roots = local_manifests
         .keys()
@@ -666,39 +699,15 @@ fn deps_for_version(
         }
     }
     if let Some(locked) = locked_package {
-        seen.clear();
-        for dep in &locked.dependencies {
-            if seen.contains(&dep.name) {
-                continue;
-            }
-            let Some(dep_version) = dep.version.as_ref() else {
-                gaps.push(CargoExtractionGap {
-                    kind: CargoExtractionGapKind::DependencyOutsideLockUniverse,
-                    package: format!("{package_name}@{version}"),
-                    detail: format!("{} has no version in Cargo.lock edge", dep.name),
-                });
-                continue;
-            };
-            let class = CompatClass::from_version(dep_version);
-            if !model
-                .locked_domains
-                .contains_key(&(dep.name.clone(), class))
-            {
-                gaps.push(CargoExtractionGap {
-                    kind: CargoExtractionGapKind::DependencyOutsideLockUniverse,
-                    package: format!("{package_name}@{version}"),
-                    detail: format!("{}@{} missing locked domain", dep.name, dep_version),
-                });
-                continue;
-            }
-            out.push(
-                SyntheticDep::normal(dep.name.clone(), format!("={dep_version}")).class_hint(class),
-            );
-            seen.insert(dep.name.clone());
+        for dep in locked
+            .dependencies
+            .iter()
+            .filter(|dep| dep.version.is_none() && !seen.contains(&dep.name))
+        {
             gaps.push(CargoExtractionGap {
-                kind: CargoExtractionGapKind::LockExactFallback,
+                kind: CargoExtractionGapKind::DependencyOutsideLockUniverse,
                 package: format!("{package_name}@{version}"),
-                detail: format!("{} -> {} ={}", package_name, dep.name, dep_version),
+                detail: format!("{} has no version in Cargo.lock edge", dep.name),
             });
         }
     }
@@ -717,6 +726,24 @@ struct ManifestDepBuilder<'a, 'b> {
 
 impl ManifestDepBuilder<'_, '_> {
     fn push(&mut self, dep: &ManifestDep) {
+        if let Some(target) = &dep.target
+            && !target_matches_round(target)
+        {
+            self.gaps.push(CargoExtractionGap {
+                kind: CargoExtractionGapKind::TargetConditionalDependency,
+                package: self.package_version(),
+                detail: format!("{} gated by {target}", dep.actual),
+            });
+            return;
+        }
+        if dep.kind == DepKind::Dev && !self.model.workspace_members.contains(self.package_name) {
+            self.gaps.push(CargoExtractionGap {
+                kind: CargoExtractionGapKind::DevDependency,
+                package: self.package_version(),
+                detail: dep.actual.clone(),
+            });
+            return;
+        }
         if !self.model.target_names.contains(&dep.actual) {
             self.gaps.push(CargoExtractionGap {
                 kind: CargoExtractionGapKind::DependencyOutsideLockUniverse,
@@ -734,41 +761,13 @@ impl ManifestDepBuilder<'_, '_> {
             });
             return;
         }
-        if dep.target {
-            self.gaps.push(CargoExtractionGap {
-                kind: CargoExtractionGapKind::TargetConditionalDependency,
-                package: self.package_version(),
-                detail: dep.actual.clone(),
-            });
-        }
-        match dep.kind {
-            DepKind::Build => self.gaps.push(CargoExtractionGap {
-                kind: CargoExtractionGapKind::BuildDependency,
-                package: self.package_version(),
-                detail: dep.actual.clone(),
-            }),
-            DepKind::Dev => self.gaps.push(CargoExtractionGap {
-                kind: CargoExtractionGapKind::DevDependency,
-                package: self.package_version(),
-                detail: dep.actual.clone(),
-            }),
-            DepKind::Normal => {}
-        }
-        if dep.optional {
-            self.gaps.push(CargoExtractionGap {
-                kind: CargoExtractionGapKind::OptionalDependency,
-                package: self.package_version(),
-                detail: dep.actual.clone(),
-            });
-        }
-        if dep.kind == DepKind::Dev || dep.target || dep.optional {
-            return;
-        }
         let mut synthetic = SyntheticDep::normal(dep.key.clone(), req);
         synthetic.package = (dep.actual != dep.key).then(|| dep.actual.clone());
         synthetic.features = dep.features.clone();
         synthetic.default_features = dep.default_features;
         synthetic.optional = dep.optional;
+        synthetic.kind = dep.kind.as_str().to_owned();
+        synthetic.target = dep.target.clone();
         if let Some(class) = self.locked_class_hint(dep) {
             synthetic = synthetic.class_hint(class);
         }
@@ -855,7 +854,10 @@ fn classify_missing_locked_domain(locked: &LockedDomain, gaps: &[CargoExtraction
     for gap in gaps.iter().filter(|gap| gap.package == package_version) {
         kinds.insert(gap.kind.clone());
     }
-    for gap in gaps.iter().filter(|gap| gap.detail == locked.name) {
+    for gap in gaps
+        .iter()
+        .filter(|gap| gap_detail_mentions_package(&gap.detail, &locked.name))
+    {
         kinds.insert(gap.kind.clone());
     }
     if kinds.contains(&CargoExtractionGapKind::ManifestMissing) {
@@ -880,6 +882,13 @@ fn classify_missing_locked_domain(locked: &LockedDomain, gaps: &[CargoExtraction
         "locked package class was not reached under the extracted root/range/feature projection"
             .to_owned()
     }
+}
+
+fn gap_detail_mentions_package(detail: &str, name: &str) -> bool {
+    detail == name
+        || detail
+            .strip_prefix(name)
+            .is_some_and(|rest| matches!(rest.as_bytes().first(), Some(b' ' | b'@' | b':')))
 }
 
 fn candidate_versions(
@@ -1065,9 +1074,19 @@ fn parse_manifest_deps(text: &str) -> Result<ManifestDeps> {
     let mut out = ManifestDeps::default();
     let mut section = ManifestSection::Other;
     let mut current_table: Option<ManifestDep> = None;
+    let mut current_feature: Option<(String, String)> = None;
     for raw in text.lines() {
         let line = raw.split('#').next().unwrap_or_default().trim();
         if line.is_empty() {
+            continue;
+        }
+        if let Some((feature, value)) = current_feature.as_mut() {
+            value.push(' ');
+            value.push_str(line);
+            if line.contains(']') {
+                out.features.insert(feature.clone(), quoted_values(value));
+                current_feature = None;
+            }
             continue;
         }
         if line.starts_with('[') && line.ends_with(']') {
@@ -1097,7 +1116,17 @@ fn parse_manifest_deps(text: &str) -> Result<ManifestDeps> {
         }
         if let Some(dep) = current_table.as_mut() {
             apply_dep_field(dep, line);
-        } else if let ManifestSection::Dependencies { kind, target } = section
+        } else if section == ManifestSection::Features {
+            if let Some((feature, value)) = line.split_once('=') {
+                let feature = feature.trim().to_owned();
+                let value = value.trim().to_owned();
+                if value.contains(']') {
+                    out.features.insert(feature, quoted_values(&value));
+                } else {
+                    current_feature = Some((feature, value));
+                }
+            }
+        } else if let ManifestSection::Dependencies { kind, target } = section.clone()
             && let Some((key, value)) = line.split_once('=')
         {
             let key = key.trim().to_ascii_lowercase();
@@ -1117,50 +1146,162 @@ fn parse_manifest_deps(text: &str) -> Result<ManifestDeps> {
     Ok(out)
 }
 
-#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+#[derive(Clone, Debug, Eq, PartialEq)]
 enum ManifestSection {
     Other,
-    Dependencies { kind: DepKind, target: bool },
+    Features,
+    Dependencies {
+        kind: DepKind,
+        target: Option<String>,
+    },
     DependencyTable,
+}
+
+fn target_expr_from_header(header: &str) -> Option<String> {
+    let target = header.strip_prefix("target.")?;
+    let expr = target
+        .split_once(".dependencies")
+        .or_else(|| target.split_once(".build-dependencies"))
+        .or_else(|| target.split_once(".dev-dependencies"))
+        .map(|(expr, _)| expr)
+        .unwrap_or(target)
+        .trim()
+        .trim_matches('"')
+        .trim_matches('\'')
+        .to_owned();
+    (!expr.is_empty()).then_some(expr)
+}
+
+fn target_matches_round(expr: &str) -> bool {
+    let expr = expr.trim().trim_matches('"').trim_matches('\'');
+    if expr == ROUND_TARGET_TRIPLE {
+        return true;
+    }
+    if let Some(cfg) = expr
+        .strip_prefix("cfg(")
+        .and_then(|text| text.strip_suffix(')'))
+    {
+        return eval_cfg_expr(cfg);
+    }
+    false
+}
+
+fn eval_cfg_expr(expr: &str) -> bool {
+    let expr = expr.trim();
+    if let Some(inner) = expr
+        .strip_prefix("all(")
+        .and_then(|text| text.strip_suffix(')'))
+    {
+        return split_cfg_args(inner).iter().all(|arg| eval_cfg_expr(arg));
+    }
+    if let Some(inner) = expr
+        .strip_prefix("any(")
+        .and_then(|text| text.strip_suffix(')'))
+    {
+        return split_cfg_args(inner).iter().any(|arg| eval_cfg_expr(arg));
+    }
+    if let Some(inner) = expr
+        .strip_prefix("not(")
+        .and_then(|text| text.strip_suffix(')'))
+    {
+        return !eval_cfg_expr(inner);
+    }
+    if expr == "unix" {
+        return true;
+    }
+    if expr == "windows" {
+        return false;
+    }
+    if let Some((key, value)) = expr.split_once('=') {
+        let key = key.trim();
+        let value = value.trim().trim_matches('"').trim_matches('\'');
+        return match key {
+            "target_arch" => value == "aarch64",
+            "target_endian" => value == "little",
+            "target_env" => value.is_empty(),
+            "target_family" => value == "unix",
+            "target_os" => value == "macos",
+            "target_pointer_width" => value == "64",
+            "target_vendor" => value == "apple",
+            _ => false,
+        };
+    }
+    false
+}
+
+fn split_cfg_args(inner: &str) -> Vec<String> {
+    let mut args = Vec::new();
+    let mut current = String::new();
+    let mut depth = 0usize;
+    let mut in_string = false;
+    for ch in inner.chars() {
+        match ch {
+            '"' | '\'' => {
+                in_string = !in_string;
+                current.push(ch);
+            }
+            '(' if !in_string => {
+                depth += 1;
+                current.push(ch);
+            }
+            ')' if !in_string => {
+                depth = depth.saturating_sub(1);
+                current.push(ch);
+            }
+            ',' if !in_string && depth == 0 => {
+                if !current.trim().is_empty() {
+                    args.push(current.trim().to_owned());
+                }
+                current.clear();
+            }
+            _ => current.push(ch),
+        }
+    }
+    if !current.trim().is_empty() {
+        args.push(current.trim().to_owned());
+    }
+    args
 }
 
 fn dependency_section(header: &str) -> Option<ManifestSection> {
     if header == "dependencies" {
         Some(ManifestSection::Dependencies {
             kind: DepKind::Normal,
-            target: false,
+            target: None,
         })
     } else if header == "build-dependencies" {
         Some(ManifestSection::Dependencies {
             kind: DepKind::Build,
-            target: false,
+            target: None,
         })
     } else if header == "dev-dependencies" {
         Some(ManifestSection::Dependencies {
             kind: DepKind::Dev,
-            target: false,
+            target: None,
         })
+    } else if header == "features" {
+        Some(ManifestSection::Features)
     } else if header.contains(".dependencies") {
         Some(ManifestSection::Dependencies {
             kind: DepKind::Normal,
-            target: header.starts_with("target."),
+            target: target_expr_from_header(header),
         })
     } else if header.contains(".build-dependencies") {
         Some(ManifestSection::Dependencies {
             kind: DepKind::Build,
-            target: header.starts_with("target."),
+            target: target_expr_from_header(header),
         })
     } else if header.contains(".dev-dependencies") {
         Some(ManifestSection::Dependencies {
             kind: DepKind::Dev,
-            target: header.starts_with("target."),
+            target: target_expr_from_header(header),
         })
     } else {
         None
     }
 }
 
-fn dependency_table_header(header: &str) -> Option<(DepKind, bool, String)> {
+fn dependency_table_header(header: &str) -> Option<(DepKind, Option<String>, String)> {
     for marker in [
         (".dependencies.", DepKind::Normal),
         (".build-dependencies.", DepKind::Build),
@@ -1169,7 +1310,7 @@ fn dependency_table_header(header: &str) -> Option<(DepKind, bool, String)> {
         if let Some((prefix, dep)) = header.rsplit_once(marker.0) {
             return Some((
                 marker.1,
-                prefix.starts_with("target"),
+                target_expr_from_header(prefix),
                 dep.to_ascii_lowercase(),
             ));
         }
@@ -1180,13 +1321,18 @@ fn dependency_table_header(header: &str) -> Option<(DepKind, bool, String)> {
         ("dev-dependencies.", DepKind::Dev),
     ] {
         if let Some(dep) = header.strip_prefix(marker.0) {
-            return Some((marker.1, false, dep.to_ascii_lowercase()));
+            return Some((marker.1, None, dep.to_ascii_lowercase()));
         }
     }
     None
 }
 
-fn parse_inline_dep(key: String, value: &str, kind: DepKind, target: bool) -> ManifestDep {
+fn parse_inline_dep(
+    key: String,
+    value: &str,
+    kind: DepKind,
+    target: Option<String>,
+) -> ManifestDep {
     let mut dep = ManifestDep {
         key: key.clone(),
         actual: key,
@@ -1358,13 +1504,6 @@ fn locked_domains(lock: &[LockPackage]) -> Vec<LockedDomain> {
     out
 }
 
-fn locked_domain_versions(domains: &[LockedDomain]) -> BTreeMap<(String, CompatClass), Version> {
-    domains
-        .iter()
-        .map(|domain| ((domain.name.clone(), domain.class), domain.version.clone()))
-        .collect()
-}
-
 fn registry_sources_by_name(lock: &[LockPackage]) -> BTreeMap<String, String> {
     lock.iter()
         .filter_map(|pkg| {
@@ -1433,15 +1572,34 @@ mod tests {
             optional = true
             package = "windows-sys"
             features = ["Win32_Foundation"]
+
+            [features]
+            default = ["hashbrown/raw", "dep:windows-sys"]
+            cli = [
+              "windows-sys/Win32_System",
+              "hashbrown?/serde",
+            ]
             "#,
         )?;
         let hashbrown = &parsed.deps_by_name["hashbrown"][0];
         assert_eq!(hashbrown.req.as_deref(), Some("0.17"));
-        assert!(!hashbrown.target);
+        assert_eq!(hashbrown.target, None);
         let windows = &parsed.deps_by_name["windows-sys"][0];
-        assert!(windows.target);
+        assert_eq!(windows.target.as_deref(), Some("cfg(windows)"));
         assert!(windows.optional);
         assert_eq!(windows.features, ["Win32_Foundation"]);
+        assert_eq!(
+            parsed.features["default"],
+            ["hashbrown/raw", "dep:windows-sys"]
+        );
+        assert_eq!(
+            parsed.features["cli"],
+            ["windows-sys/Win32_System", "hashbrown?/serde"]
+        );
+        assert!(!target_matches_round("cfg(windows)"));
+        assert!(target_matches_round(
+            "cfg(all(unix, target_os = \"macos\"))"
+        ));
         Ok(())
     }
 }

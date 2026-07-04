@@ -23,11 +23,30 @@ pub use cargo_evidence::{
 };
 
 const CRATES_IO: &str = "crates.io";
+const FEATURE_SCOPES: &[&str] = &["normal", "build", "dev"];
 
 #[derive(Clone, Debug, Eq, Ord, PartialEq, PartialOrd)]
 pub struct EdgeKey {
     pub parent: String,
     pub dep: String,
+}
+
+fn scoped_feature_name(scope: &str, feature: &str) -> String {
+    if scope == "normal" {
+        feature.to_owned()
+    } else {
+        format!("{scope}:{feature}")
+    }
+}
+
+fn explicit_optional_dep_features(manifest: &Manifest) -> BTreeSet<String> {
+    manifest
+        .features
+        .values()
+        .flat_map(|enables| enables.iter())
+        .filter_map(|enable| enable.strip_prefix("dep:"))
+        .map(str::to_owned)
+        .collect()
 }
 
 #[derive(Clone, Debug, Eq, Ord, PartialEq, PartialOrd)]
@@ -884,8 +903,8 @@ impl CompiledIndex {
                 features,
                 optional: dep.optional,
                 default_features: dep.default_features,
-                target: None,
-                kind: "normal".to_owned(),
+                target: dep.target,
+                kind: dep.kind,
                 class_hint: dep.class_hint,
             });
         }
@@ -946,6 +965,7 @@ impl CompiledIndex {
             .map(|((pkg, version), manifest)| (*pkg, version.clone(), manifest.clone()))
             .collect();
         for (pkg, version, manifest) in manifests {
+            let explicit_optional_dep_features = explicit_optional_dep_features(&manifest);
             for dep in &manifest.deps {
                 let req = parse_req(&dep.req)?;
                 let Some(dep_pkg) = self.package_for_set(&dep.actual, &req, dep.class_hint) else {
@@ -968,17 +988,35 @@ impl CompiledIndex {
                     );
                     self.push_dependency_feature_clauses(pkg, &version, dep, dep_pkg, &support);
                 }
+                if dep.optional && !explicit_optional_dep_features.contains(&dep.key) {
+                    self.push_feature_enable_clause(
+                        pkg,
+                        &version,
+                        &dep.kind,
+                        &dep.key,
+                        &format!("dep:{}", dep.key),
+                    )
+                    .wrap_err_with(|| {
+                        format!(
+                            "compiling implicit optional feature {} {version} {} -> dep:{}",
+                            self.name(pkg).unwrap_or_default(),
+                            dep.key,
+                            dep.key
+                        )
+                    })?;
+                }
             }
             for (feature, enables) in &manifest.features {
-                let feat = self.intern_feature(feature);
-                for enable in enables {
-                    self.push_feature_enable_clause(pkg, &version, feat, enable)
-                        .wrap_err_with(|| {
-                            format!(
-                                "compiling feature enable {} {version} {feature} -> {enable}",
-                                self.name(pkg).unwrap_or_default()
-                            )
-                        })?;
+                for scope in FEATURE_SCOPES {
+                    for enable in enables {
+                        self.push_feature_enable_clause(pkg, &version, scope, feature, enable)
+                            .wrap_err_with(|| {
+                                format!(
+                                    "compiling feature enable {} {version} {scope}:{feature} -> {enable}",
+                                    self.name(pkg).unwrap_or_default()
+                                )
+                            })?;
+                    }
                 }
             }
         }
@@ -993,8 +1031,9 @@ impl CompiledIndex {
         dep_pkg: PkgIx,
         support: &EdgeKey,
     ) {
+        let scope = dep.kind.as_str();
         if dep.default_features {
-            let default = self.intern_feature("default");
+            let default = self.intern_feature(&scoped_feature_name(scope, "default"));
             self.push_clause(
                 vec![Guard::InGraph(pkg), Guard::Selected(pkg, version.clone())],
                 Consequent::Feature(dep_pkg, default),
@@ -1002,7 +1041,7 @@ impl CompiledIndex {
             );
         }
         for feature in &dep.features {
-            let feat = self.intern_feature(feature);
+            let feat = self.intern_feature(&scoped_feature_name(scope, feature));
             self.push_clause(
                 vec![Guard::InGraph(pkg), Guard::Selected(pkg, version.clone())],
                 Consequent::Feature(dep_pkg, feat),
@@ -1015,11 +1054,13 @@ impl CompiledIndex {
         &mut self,
         pkg: PkgIx,
         version: &Version,
-        feat: FeatIx,
+        scope: &str,
+        feature: &str,
         enable: &str,
     ) -> Result<()> {
+        let feat = self.intern_feature(&scoped_feature_name(scope, feature));
         if let Some(dep_name) = enable.strip_prefix("dep:") {
-            let Some(dep) = self.dependency_line(pkg, version, dep_name) else {
+            let Some(dep) = self.dependency_line(pkg, version, scope, dep_name) else {
                 return Ok(());
             };
             let req = parse_req(&dep.req)?;
@@ -1048,14 +1089,14 @@ impl CompiledIndex {
             );
             self.push_dependency_feature_clauses(pkg, version, &dep, dep_pkg, &support);
         } else if let Some((dep_name, dep_feature)) = enable.split_once("?/") {
-            let Some(dep) = self.dependency_line(pkg, version, dep_name) else {
+            let Some(dep) = self.dependency_line(pkg, version, scope, dep_name) else {
                 return Ok(());
             };
             let req = parse_req(&dep.req)?;
             let Some(dep_pkg) = self.package_for_set(&dep.actual, &req, dep.class_hint) else {
                 return Ok(());
             };
-            let dep_feat = self.intern_feature(dep_feature);
+            let dep_feat = self.intern_feature(&scoped_feature_name(scope, dep_feature));
             let support = EdgeKey {
                 parent: self.name(pkg).unwrap_or_default().to_owned(),
                 dep: self.name(dep_pkg).unwrap_or_default().to_owned(),
@@ -1070,14 +1111,14 @@ impl CompiledIndex {
                 Some(support),
             );
         } else if let Some((dep_name, dep_feature)) = enable.split_once('/') {
-            let Some(dep) = self.dependency_line(pkg, version, dep_name) else {
+            let Some(dep) = self.dependency_line(pkg, version, scope, dep_name) else {
                 return Ok(());
             };
             let req = parse_req(&dep.req)?;
             let Some(dep_pkg) = self.package_for_set(&dep.actual, &req, dep.class_hint) else {
                 return Ok(());
             };
-            let dep_feat = self.intern_feature(dep_feature);
+            let dep_feat = self.intern_feature(&scoped_feature_name(scope, dep_feature));
             let support = EdgeKey {
                 parent: self.name(pkg).unwrap_or_default().to_owned(),
                 dep: self.name(dep_pkg).unwrap_or_default().to_owned(),
@@ -1107,7 +1148,7 @@ impl CompiledIndex {
                 Some(support),
             );
         } else {
-            let local_feat = self.intern_feature(enable);
+            let local_feat = self.intern_feature(&scoped_feature_name(scope, enable));
             self.push_clause(
                 vec![
                     Guard::Feature(pkg, feat),
@@ -1120,10 +1161,22 @@ impl CompiledIndex {
         Ok(())
     }
 
-    fn dependency_line(&self, pkg: PkgIx, version: &Version, key: &str) -> Option<DepLine> {
+    fn dependency_line(
+        &self,
+        pkg: PkgIx,
+        version: &Version,
+        scope: &str,
+        key: &str,
+    ) -> Option<DepLine> {
         self.manifests
             .get(&(pkg, version.clone()))
-            .and_then(|manifest| manifest.deps.iter().find(|dep| dep.key == key).cloned())
+            .and_then(|manifest| {
+                manifest
+                    .deps
+                    .iter()
+                    .find(|dep| dep.key == key && dep.kind == scope)
+                    .cloned()
+            })
     }
 
     fn push_clause(
@@ -1329,6 +1382,8 @@ pub struct SyntheticDep {
     pub optional: bool,
     pub default_features: bool,
     pub package: Option<String>,
+    pub kind: String,
+    pub target: Option<String>,
     pub class_hint: Option<CompatClass>,
 }
 
@@ -1342,6 +1397,8 @@ impl SyntheticDep {
             optional: false,
             default_features: true,
             package: None,
+            kind: "normal".to_owned(),
+            target: None,
             class_hint: None,
         }
     }
@@ -1361,6 +1418,18 @@ impl SyntheticDep {
     #[must_use]
     pub fn class_hint(mut self, class: CompatClass) -> Self {
         self.class_hint = Some(class);
+        self
+    }
+
+    #[must_use]
+    pub fn kind(mut self, kind: impl Into<String>) -> Self {
+        self.kind = kind.into();
+        self
+    }
+
+    #[must_use]
+    pub fn target(mut self, target: impl Into<String>) -> Self {
+        self.target = Some(target.into());
         self
     }
 }
@@ -1574,6 +1643,17 @@ impl<'a> Solver<'a> {
             self.next_hypothesis += 1;
             self.decisions += 1;
             self.manifests_read += 1;
+            if self.decisions.is_multiple_of(1000) {
+                tracing::info!(
+                    decisions = self.decisions,
+                    conflicts = self.conflicts,
+                    active_domains = branch.domains.len(),
+                    enabled_features = branch.features.len(),
+                    package = self.index.name(pkg).unwrap_or_default(),
+                    %version,
+                    "rodin solve progress"
+                );
+            }
             self.trace.push(format!(
                 "expand {} {} (highest remaining of {candidate_count} candidates) - reads 1 manifest",
                 self.index.name(pkg).unwrap_or_default(),
@@ -1612,6 +1692,9 @@ impl<'a> Solver<'a> {
             self.apply_exclusions(state)?;
             self.force_singletons(state)?;
             for clause in &self.index.compiled {
+                if state.applied_clauses.contains(&clause.id) {
+                    continue;
+                }
                 if clause
                     .antecedents
                     .iter()
@@ -2907,8 +2990,14 @@ fn build_widen_witness(
     }
 }
 
-fn state_fingerprint(state: &State) -> String {
-    let domains: Vec<_> = state
+#[derive(Eq, PartialEq)]
+struct StateFingerprint {
+    domains: Vec<(PkgIx, bool, Vec<rodin_facts::Interval>, Option<Version>)>,
+    features: BTreeSet<(PkgIx, FeatIx)>,
+}
+
+fn state_fingerprint(state: &State) -> StateFingerprint {
+    let domains = state
         .domains
         .iter()
         .map(|(pkg, domain)| {
@@ -2920,7 +3009,10 @@ fn state_fingerprint(state: &State) -> String {
             )
         })
         .collect();
-    format!("{domains:?}:{:?}", state.features)
+    StateFingerprint {
+        domains,
+        features: state.features.clone(),
+    }
 }
 
 fn selected_versions(state: &State) -> BTreeMap<PkgIx, Version> {
