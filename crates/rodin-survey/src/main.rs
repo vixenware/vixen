@@ -167,10 +167,18 @@ fn fetch_closure(cache: &Path) -> Result<BTreeMap<String, CrateData>> {
         let content = fetch_index_file(cache, &canonical)
             .wrap_err_with(|| format!("fetching sparse index file for {canonical}"))?;
         let entries = parse_entries(&content, &canonical)?;
-        tracing::info!(crate_name = canonical, versions = entries.len(), "fetched crate index");
+        tracing::info!(
+            crate_name = canonical,
+            versions = entries.len(),
+            "fetched crate index"
+        );
 
         for dep in entries.iter().flat_map(|entry| &entry.deps) {
-            let dep_name = dep.package.as_ref().unwrap_or(&dep.name).to_ascii_lowercase();
+            let dep_name = dep
+                .package
+                .as_ref()
+                .unwrap_or(&dep.name)
+                .to_ascii_lowercase();
             if crates.len() + queue.len() >= CLOSURE_CAP {
                 continue;
             }
@@ -391,7 +399,11 @@ fn reqs_by_package(crates: &BTreeMap<String, CrateData>) -> BTreeMap<String, BTr
     let mut out: BTreeMap<String, BTreeSet<String>> = BTreeMap::new();
     for entry in crates.values().flat_map(|crate_data| &crate_data.entries) {
         for dep in &entry.deps {
-            let name = dep.package.as_ref().unwrap_or(&dep.name).to_ascii_lowercase();
+            let name = dep
+                .package
+                .as_ref()
+                .unwrap_or(&dep.name)
+                .to_ascii_lowercase();
             out.entry(name).or_default().insert(dep.req.clone());
         }
     }
@@ -415,8 +427,18 @@ fn stress_one(
     let lower = versions.first().cloned();
     let upper = versions.last().map(next_patch);
     let full_set = VersionSet::from_interval(lower, upper);
+    let partial_sets: Vec<_> = req_sets
+        .iter()
+        .map(|set| set.intersect(&full_set))
+        .filter(|set| !set.is_empty() && !full_set.is_subset_of(set))
+        .collect();
+    let exclusion_sets = if partial_sets.is_empty() {
+        req_sets.to_vec()
+    } else {
+        partial_sets
+    };
     let full = Region::new().with_versions(pkg, full_set);
-    let exclusions: Vec<_> = req_sets
+    let exclusions: Vec<_> = exclusion_sets
         .iter()
         .cycle()
         .take(100)
@@ -555,6 +577,11 @@ fn render_report(
     push_row(&mut report, "metadata blocks", aggregate.blocks);
     push_row(
         &mut report,
+        "overall versions/block",
+        decimal(aggregate.versions as f64 / aggregate.blocks as f64),
+    );
+    push_row(
+        &mut report,
         "median versions/block",
         decimal(aggregate.median_versions_per_block),
     );
@@ -685,8 +712,10 @@ fn verdict(aggregate: &Aggregate, worst: &[CrateBlocks], stress: &[StressResult]
         .map(|entry| entry.max_fragments)
         .max()
         .unwrap_or(0);
+    let overall = aggregate.versions as f64 / aggregate.blocks as f64;
     format!(
-        "The agenda C bet is empirically supported for this closure, but not in the literal \"hundreds-to-few for almost all packages\" shape. The median crate has {} versions/block, p90 is {}, and {}% of crates have <=5 blocks; that is a real collapse from {} non-yanked versions to {} metadata blocks. The counterexamples are also real: {}. Region subtract stress did not explode on these real-shaped one-dimensional exclusions; the worst chained subtract frontier reached {} fragments.",
+        "The data does not support the strong agenda C falsifier target, \"block-ratio brutal, hundreds-to-few, for almost all packages.\" The measured collapse is only {} versions/block overall: median {}, p90 {}, and just {}% of crates have <=5 blocks, with {} non-yanked versions becoming {} metadata blocks. The counterexamples are not edge noise: {}. What does survive is the narrower claim that metadata blocks remove some raw-version churn, and the Region subtract stress did not explode on these real-shaped one-dimensional exclusions; the worst chained subtract frontier reached {} fragments.",
+        decimal(overall),
         decimal(aggregate.median_versions_per_block),
         decimal(aggregate.p90_versions_per_block),
         decimal(aggregate.share_at_most_five_blocks * 100.0),

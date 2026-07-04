@@ -485,8 +485,7 @@ impl RustVolume {
                 cookie.saturating_sub(1) as usize
             };
             let total = entries.len();
-            for index in start..total {
-                let item = &entries[index];
+            for (index, item) in entries.iter().enumerate().skip(start) {
                 let attrs = item.attributes_for_request(attributes);
                 let next_cookie = if index + 1 == total {
                     0
