@@ -1,0 +1,20 @@
+[package]
+name = "rodin-core"
+publish = false
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+
+[dependencies]
+eyre.workspace = true
+rodin-facts = { path = "../rodin-facts" }
+rodin-survey = { path = "../rodin-survey" }
+semver.workspace = true
+tracing.workspace = true
+
+[dev-dependencies]
+pretty_assertions = "1.4.1"
+
+[lints]
+workspace = true

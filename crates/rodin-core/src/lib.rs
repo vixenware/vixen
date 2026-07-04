@@ -1,0 +1,1909 @@
+use std::collections::{BTreeMap, BTreeSet};
+use std::fs;
+use std::path::Path;
+
+use eyre::{Context, Result, eyre};
+use rodin_facts::{
+    Atom, Clause, ClauseId, ClauseStore, Derivation, DerivationId, DerivationStore, Exclusion,
+    ExclusionId, ExclusionStore, FeatIx, FeatureInterner, PackageInterner, PinRef, PkgId, PkgIx,
+    Premise, Region, RuleKind, SourceInterner, SourceIx, VersionSet,
+};
+use semver::{Version, VersionReq};
+
+const CRATES_IO: &str = "crates.io";
+
+#[derive(Clone, Debug, Eq, Ord, PartialEq, PartialOrd)]
+pub struct EdgeKey {
+    pub parent: String,
+    pub dep: String,
+}
+
+#[derive(Clone, Debug, Eq, Ord, PartialEq, PartialOrd)]
+pub struct EdgeSignature {
+    pub req: String,
+    pub features: Vec<String>,
+    pub optional: bool,
+    pub default_features: bool,
+    pub target: Option<String>,
+    pub kind: String,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct RootReq {
+    pub name: String,
+    pub req: String,
+    pub features: BTreeSet<String>,
+    pub default_features: bool,
+}
+
+impl RootReq {
+    #[must_use]
+    pub fn new(name: impl Into<String>, req: impl Into<String>) -> Self {
+        Self {
+            name: name.into().to_ascii_lowercase(),
+            req: req.into(),
+            features: BTreeSet::new(),
+            default_features: true,
+        }
+    }
+
+    #[must_use]
+    pub fn feature(mut self, feature: impl Into<String>) -> Self {
+        self.features.insert(feature.into());
+        self
+    }
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct Decree {
+    pub name: String,
+    pub req: String,
+}
+
+impl Decree {
+    #[must_use]
+    pub fn new(name: impl Into<String>, req: impl Into<String>) -> Self {
+        Self {
+            name: name.into().to_ascii_lowercase(),
+            req: req.into(),
+        }
+    }
+}
+
+#[derive(Clone, Copy, Debug, Eq, Ord, PartialEq, PartialOrd)]
+pub enum LearnedKind {
+    Plain,
+    FeatureGuarded,
+    DecreeDerived,
+    HoleAware,
+    Exclusion,
+    Family,
+}
+
+impl LearnedKind {
+    #[must_use]
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::Plain => "plain",
+            Self::FeatureGuarded => "feature-guarded",
+            Self::DecreeDerived => "decree-derived",
+            Self::HoleAware => "hole-aware",
+            Self::Exclusion => "exclusion",
+            Self::Family => "family",
+        }
+    }
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct Problem {
+    pub roots: Vec<RootReq>,
+    pub decrees: Vec<Decree>,
+    pub exclusions: Vec<FeatureExclusion>,
+    pub warm_facts: Vec<LearnedNoGood>,
+    pub learned_kind: LearnedKind,
+}
+
+impl Problem {
+    #[must_use]
+    pub fn new(roots: Vec<RootReq>) -> Self {
+        Self {
+            roots,
+            decrees: Vec::new(),
+            exclusions: Vec::new(),
+            warm_facts: Vec::new(),
+            learned_kind: LearnedKind::Plain,
+        }
+    }
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct FeatureExclusion {
+    pub package: String,
+    pub features: BTreeSet<String>,
+}
+
+#[derive(Clone, Debug)]
+pub struct SolveResult {
+    pub selected: BTreeMap<String, Version>,
+    pub enabled_features: BTreeMap<String, BTreeSet<String>>,
+    pub decisions: usize,
+    pub conflicts: usize,
+    pub learned: Vec<LearnedNoGood>,
+    pub derivations: DerivationStore,
+    pub clauses: ClauseStore,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct LearnedNoGood {
+    pub region: Region,
+    pub derivation: DerivationId,
+    pub support: BTreeSet<EdgeKey>,
+    pub point_versions: usize,
+    pub widened_versions: usize,
+    pub kind: LearnedKind,
+}
+
+impl LearnedNoGood {
+    #[must_use]
+    pub fn widening_factor(&self) -> f64 {
+        if self.point_versions == 0 {
+            0.0
+        } else {
+            self.widened_versions as f64 / self.point_versions as f64
+        }
+    }
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub enum SolveError {
+    NoSolution {
+        conflicts: usize,
+        learned: Vec<LearnedNoGood>,
+        derivations: DerivationStore,
+        clauses: ClauseStore,
+    },
+}
+
+#[derive(Clone, Debug)]
+pub struct CompiledIndex {
+    pub sources: SourceInterner,
+    pub packages: PackageInterner,
+    pub features: FeatureInterner,
+    source: SourceIx,
+    names: BTreeMap<PkgIx, String>,
+    package_by_name: BTreeMap<String, PkgIx>,
+    versions: BTreeMap<PkgIx, Vec<Version>>,
+    manifests: BTreeMap<(PkgIx, Version), Manifest>,
+    clauses: ClauseStore,
+    compiled: Vec<CompiledClause>,
+    clause_support: BTreeMap<ClauseId, EdgeKey>,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+struct Manifest {
+    deps: Vec<DepLine>,
+    features: BTreeMap<String, Vec<String>>,
+    yanked: bool,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+struct DepLine {
+    key: String,
+    actual: String,
+    req: String,
+    features: Vec<String>,
+    optional: bool,
+    default_features: bool,
+    target: Option<String>,
+    kind: String,
+}
+
+#[derive(Clone, Debug)]
+struct CompiledClause {
+    id: ClauseId,
+    antecedents: Vec<Guard>,
+    consequent: Consequent,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+enum Guard {
+    InGraph(PkgIx),
+    Selected(PkgIx, Version),
+    Feature(PkgIx, FeatIx),
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+enum Consequent {
+    InGraph(PkgIx),
+    VersionSet(PkgIx, VersionSet),
+    Feature(PkgIx, FeatIx),
+}
+
+#[derive(Clone, Debug, Default)]
+struct Domain {
+    active: bool,
+    allowed: VersionSet,
+    reasons: Vec<Premise>,
+    selected: Option<Version>,
+    selected_reason: Option<Premise>,
+}
+
+#[derive(Clone, Debug, Default)]
+struct State {
+    domains: BTreeMap<PkgIx, Domain>,
+    features: BTreeSet<(PkgIx, FeatIx)>,
+    feature_reasons: BTreeMap<(PkgIx, FeatIx), Vec<Premise>>,
+    hypotheses: Vec<Hypothesis>,
+    applied_clauses: BTreeSet<ClauseId>,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+struct Hypothesis {
+    id: u32,
+    pkg: PkgIx,
+    version: Version,
+}
+
+#[derive(Clone, Debug)]
+struct Conflict {
+    premises: Vec<Premise>,
+    selected: BTreeMap<PkgIx, Version>,
+    decision: Option<(PkgIx, Version)>,
+}
+
+#[derive(Clone, Debug)]
+struct Solver<'a> {
+    index: &'a CompiledIndex,
+    problem_kind: LearnedKind,
+    feature_exclusions: Vec<(PkgIx, FeatIx, FeatIx)>,
+    exclusions: ExclusionStore,
+    derivations: DerivationStore,
+    learned: Vec<LearnedNoGood>,
+    conflicts: usize,
+    decisions: usize,
+    next_hypothesis: u32,
+}
+
+impl CompiledIndex {
+    #[must_use]
+    pub fn empty() -> Self {
+        let mut sources = SourceInterner::new();
+        let source = sources.intern(CRATES_IO);
+        Self {
+            sources,
+            packages: PackageInterner::new(),
+            features: FeatureInterner::new(),
+            source,
+            names: BTreeMap::new(),
+            package_by_name: BTreeMap::new(),
+            versions: BTreeMap::new(),
+            manifests: BTreeMap::new(),
+            clauses: ClauseStore::new(),
+            compiled: Vec::new(),
+            clause_support: BTreeMap::new(),
+        }
+    }
+
+    pub fn from_sparse(crates: &BTreeMap<String, rodin_survey::CrateData>) -> Result<Self> {
+        let mut out = Self::empty();
+        for crate_data in crates.values() {
+            let pkg = out.intern_package(&crate_data.name);
+            let mut versions = Vec::new();
+            for (version, entry) in rodin_survey::sorted_non_yanked_entries(crate_data)? {
+                versions.push(version.clone());
+                let mut deps = Vec::new();
+                for dep in &entry.deps {
+                    if dep.kind != "normal" {
+                        continue;
+                    }
+                    let actual = rodin_survey::actual_dep_name(dep);
+                    out.intern_package(&actual);
+                    let mut features = dep.features.clone();
+                    features.sort();
+                    deps.push(DepLine {
+                        key: dep.name.clone(),
+                        actual,
+                        req: dep.req.clone(),
+                        features,
+                        optional: dep.optional,
+                        default_features: dep.default_features,
+                        target: dep.target.clone(),
+                        kind: dep.kind.clone(),
+                    });
+                }
+                deps.sort_by(|left, right| {
+                    left.actual
+                        .cmp(&right.actual)
+                        .then_with(|| left.key.cmp(&right.key))
+                        .then_with(|| left.req.cmp(&right.req))
+                });
+                out.manifests.insert(
+                    (pkg, version),
+                    Manifest {
+                        deps,
+                        features: merged_features(entry),
+                        yanked: entry.yanked,
+                    },
+                );
+            }
+            versions.sort();
+            out.versions.insert(pkg, versions);
+        }
+        out.compile()?;
+        Ok(out)
+    }
+
+    #[must_use]
+    pub fn package(&self, name: &str) -> Option<PkgIx> {
+        self.package_by_name.get(&name.to_ascii_lowercase()).copied()
+    }
+
+    #[must_use]
+    pub fn name(&self, pkg: PkgIx) -> Option<&str> {
+        self.names.get(&pkg).map(String::as_str)
+    }
+
+    #[must_use]
+    pub fn versions(&self, pkg: PkgIx) -> &[Version] {
+        self.versions.get(&pkg).map(Vec::as_slice).unwrap_or(&[])
+    }
+
+    pub fn add_package_version(
+        &mut self,
+        name: impl Into<String>,
+        version: Version,
+        deps: Vec<SyntheticDep>,
+        features: BTreeMap<String, Vec<String>>,
+    ) {
+        let name = name.into().to_ascii_lowercase();
+        let pkg = self.intern_package(&name);
+        let mut lines = Vec::new();
+        for dep in deps {
+            let actual = dep.package.clone().unwrap_or_else(|| dep.name.clone());
+            let actual = actual.to_ascii_lowercase();
+            self.intern_package(&actual);
+            let mut features = dep.features;
+            features.sort();
+            lines.push(DepLine {
+                key: dep.name,
+                actual,
+                req: dep.req,
+                features,
+                optional: dep.optional,
+                default_features: dep.default_features,
+                target: None,
+                kind: "normal".to_owned(),
+            });
+        }
+        lines.sort_by(|left, right| left.actual.cmp(&right.actual));
+        self.versions.entry(pkg).or_default().push(version.clone());
+        self.versions.get_mut(&pkg).expect("inserted").sort();
+        self.manifests.insert(
+            (pkg, version),
+            Manifest {
+                deps: lines,
+                features,
+                yanked: false,
+            },
+        );
+    }
+
+    pub fn finish_synthetic(&mut self) -> Result<()> {
+        for versions in self.versions.values_mut() {
+            versions.sort();
+            versions.dedup();
+        }
+        self.compile()
+    }
+
+    fn intern_package(&mut self, name: &str) -> PkgIx {
+        let key = name.to_ascii_lowercase();
+        if let Some(pkg) = self.package_by_name.get(&key) {
+            return *pkg;
+        }
+        let pkg = self.packages.intern(PkgId::new(self.source, key.clone()));
+        self.package_by_name.insert(key.clone(), pkg);
+        self.names.insert(pkg, key);
+        pkg
+    }
+
+    fn intern_feature(&mut self, feature: &str) -> FeatIx {
+        self.features.intern(feature.to_owned())
+    }
+
+    fn compile(&mut self) -> Result<()> {
+        self.clauses = ClauseStore::new();
+        self.compiled.clear();
+        self.clause_support.clear();
+        let manifests: Vec<_> = self
+            .manifests
+            .iter()
+            .map(|((pkg, version), manifest)| (*pkg, version.clone(), manifest.clone()))
+            .collect();
+        for (pkg, version, manifest) in manifests {
+            for dep in &manifest.deps {
+                let Some(dep_pkg) = self.package(&dep.actual) else {
+                    continue;
+                };
+                let req = parse_req(&dep.req)?;
+                let support = EdgeKey {
+                    parent: self.name(pkg).unwrap_or_default().to_owned(),
+                    dep: dep.actual.clone(),
+                };
+                if !dep.optional {
+                    self.push_clause(
+                        vec![Guard::InGraph(pkg), Guard::Selected(pkg, version.clone())],
+                        Consequent::InGraph(dep_pkg),
+                        Some(support.clone()),
+                    );
+                    self.push_clause(
+                        vec![Guard::InGraph(pkg), Guard::Selected(pkg, version.clone())],
+                        Consequent::VersionSet(dep_pkg, req.clone()),
+                        Some(support.clone()),
+                    );
+                    self.push_dependency_feature_clauses(pkg, &version, dep, dep_pkg, &support);
+                }
+            }
+            for (feature, enables) in &manifest.features {
+                let feat = self.intern_feature(feature);
+                for enable in enables {
+                    self.push_feature_enable_clause(pkg, &version, feat, enable)
+                        .wrap_err_with(|| {
+                            format!(
+                                "compiling feature enable {} {version} {feature} -> {enable}",
+                                self.name(pkg).unwrap_or_default()
+                            )
+                        })?;
+                }
+            }
+        }
+        Ok(())
+    }
+
+    fn push_dependency_feature_clauses(
+        &mut self,
+        pkg: PkgIx,
+        version: &Version,
+        dep: &DepLine,
+        dep_pkg: PkgIx,
+        support: &EdgeKey,
+    ) {
+        if dep.default_features {
+            let default = self.intern_feature("default");
+            self.push_clause(
+                vec![Guard::InGraph(pkg), Guard::Selected(pkg, version.clone())],
+                Consequent::Feature(dep_pkg, default),
+                Some(support.clone()),
+            );
+        }
+        for feature in &dep.features {
+            let feat = self.intern_feature(feature);
+            self.push_clause(
+                vec![Guard::InGraph(pkg), Guard::Selected(pkg, version.clone())],
+                Consequent::Feature(dep_pkg, feat),
+                Some(support.clone()),
+            );
+        }
+    }
+
+    fn push_feature_enable_clause(
+        &mut self,
+        pkg: PkgIx,
+        version: &Version,
+        feat: FeatIx,
+        enable: &str,
+    ) -> Result<()> {
+        if let Some(dep_name) = enable.strip_prefix("dep:") {
+            let dep = self.dependency_line(pkg, version, dep_name)?;
+            let dep_pkg = self.package(&dep.actual).expect("dep package interned");
+            let support = EdgeKey {
+                parent: self.name(pkg).unwrap_or_default().to_owned(),
+                dep: dep.actual.clone(),
+            };
+            self.push_clause(
+                vec![Guard::Feature(pkg, feat), Guard::Selected(pkg, version.clone())],
+                Consequent::InGraph(dep_pkg),
+                Some(support.clone()),
+            );
+            self.push_clause(
+                vec![Guard::Feature(pkg, feat), Guard::Selected(pkg, version.clone())],
+                Consequent::VersionSet(dep_pkg, parse_req(&dep.req)?),
+                Some(support.clone()),
+            );
+            self.push_dependency_feature_clauses(pkg, version, &dep, dep_pkg, &support);
+        } else if let Some((dep_name, dep_feature)) = enable.split_once("?/") {
+            let dep = self.dependency_line(pkg, version, dep_name)?;
+            let dep_pkg = self.package(&dep.actual).expect("dep package interned");
+            let dep_feat = self.intern_feature(dep_feature);
+            let support = EdgeKey {
+                parent: self.name(pkg).unwrap_or_default().to_owned(),
+                dep: dep.actual.clone(),
+            };
+            self.push_clause(
+                vec![
+                    Guard::Feature(pkg, feat),
+                    Guard::Selected(pkg, version.clone()),
+                    Guard::InGraph(dep_pkg),
+                ],
+                Consequent::Feature(dep_pkg, dep_feat),
+                Some(support),
+            );
+        } else if let Some((dep_name, dep_feature)) = enable.split_once('/') {
+            let dep = self.dependency_line(pkg, version, dep_name)?;
+            let dep_pkg = self.package(&dep.actual).expect("dep package interned");
+            let dep_feat = self.intern_feature(dep_feature);
+            let support = EdgeKey {
+                parent: self.name(pkg).unwrap_or_default().to_owned(),
+                dep: dep.actual.clone(),
+            };
+            self.push_clause(
+                vec![Guard::Feature(pkg, feat), Guard::Selected(pkg, version.clone())],
+                Consequent::InGraph(dep_pkg),
+                Some(support.clone()),
+            );
+            self.push_clause(
+                vec![Guard::Feature(pkg, feat), Guard::Selected(pkg, version.clone())],
+                Consequent::VersionSet(dep_pkg, parse_req(&dep.req)?),
+                Some(support.clone()),
+            );
+            self.push_clause(
+                vec![Guard::Feature(pkg, feat), Guard::Selected(pkg, version.clone())],
+                Consequent::Feature(dep_pkg, dep_feat),
+                Some(support),
+            );
+        } else {
+            let local_feat = self.intern_feature(enable);
+            self.push_clause(
+                vec![Guard::Feature(pkg, feat), Guard::Selected(pkg, version.clone())],
+                Consequent::Feature(pkg, local_feat),
+                None,
+            );
+        }
+        Ok(())
+    }
+
+    fn dependency_line(&self, pkg: PkgIx, version: &Version, key: &str) -> Result<DepLine> {
+        self.manifests
+            .get(&(pkg, version.clone()))
+            .and_then(|manifest| manifest.deps.iter().find(|dep| dep.key == key).cloned())
+            .ok_or_else(|| eyre!("feature references dependency {key}, but no such dep exists"))
+    }
+
+    fn push_clause(
+        &mut self,
+        antecedents: Vec<Guard>,
+        consequent: Consequent,
+        support: Option<EdgeKey>,
+    ) {
+        let clause = Clause {
+            antecedents: antecedents
+                .iter()
+                .map(|guard| self.guard_atom(guard))
+                .collect(),
+            consequent: Some(self.consequent_atom(&consequent)),
+        };
+        let id = self.clauses.append(clause);
+        if let Some(edge) = support.clone() {
+            self.clause_support.insert(id, edge);
+        }
+        self.compiled.push(CompiledClause {
+            id,
+            antecedents,
+            consequent,
+        });
+    }
+
+    fn guard_atom(&self, guard: &Guard) -> Atom {
+        match guard {
+            Guard::InGraph(pkg) => Atom::InGraph(*pkg),
+            Guard::Selected(pkg, version) => Atom::Ver(*pkg, VersionSet::exact(version.clone())),
+            Guard::Feature(pkg, feat) => Atom::Feat(*pkg, *feat),
+        }
+    }
+
+    fn consequent_atom(&self, consequent: &Consequent) -> Atom {
+        match consequent {
+            Consequent::InGraph(pkg) => Atom::InGraph(*pkg),
+            Consequent::VersionSet(pkg, set) => Atom::Ver(*pkg, set.clone()),
+            Consequent::Feature(pkg, feat) => Atom::Feat(*pkg, *feat),
+        }
+    }
+
+    #[must_use]
+    pub fn edge_state(&self, parent: &str, version: &Version, dep: &str) -> Vec<EdgeSignature> {
+        let Some(pkg) = self.package(parent) else {
+            return Vec::new();
+        };
+        let Some(manifest) = self.manifests.get(&(pkg, version.clone())) else {
+            return Vec::new();
+        };
+        let mut out: Vec<_> = manifest
+            .deps
+            .iter()
+            .filter(|line| line.actual == dep)
+            .map(|line| EdgeSignature {
+                req: line.req.clone(),
+                features: line.features.clone(),
+                optional: line.optional,
+                default_features: line.default_features,
+                target: line.target.clone(),
+                kind: line.kind.clone(),
+            })
+            .collect();
+        out.sort();
+        out
+    }
+
+    #[must_use]
+    pub fn widen_region(
+        &self,
+        selected: &BTreeMap<PkgIx, Version>,
+        support: &BTreeSet<EdgeKey>,
+        base: &Region,
+    ) -> (Region, usize, usize) {
+        let mut region = base.clone();
+        let mut point = 1_usize;
+        let mut widened = 1_usize;
+        for edge in support {
+            let Some(parent_pkg) = self.package(&edge.parent) else {
+                continue;
+            };
+            let Some(selected_version) = selected.get(&parent_pkg) else {
+                continue;
+            };
+            let selected_state = self.edge_state(&edge.parent, selected_version, &edge.dep);
+            let mut versions = Vec::new();
+            for version in self.versions(parent_pkg) {
+                if self.edge_state(&edge.parent, version, &edge.dep) == selected_state {
+                    versions.push(version.clone());
+                }
+            }
+            point = point.saturating_mul(1);
+            widened = widened.saturating_mul(versions.len().max(1));
+            region.versions.insert(parent_pkg, version_set_from_points(&versions));
+        }
+        (region, point, widened)
+    }
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct SyntheticDep {
+    pub name: String,
+    pub req: String,
+    pub features: Vec<String>,
+    pub optional: bool,
+    pub default_features: bool,
+    pub package: Option<String>,
+}
+
+impl SyntheticDep {
+    #[must_use]
+    pub fn normal(name: impl Into<String>, req: impl Into<String>) -> Self {
+        Self {
+            name: name.into().to_ascii_lowercase(),
+            req: req.into(),
+            features: Vec::new(),
+            optional: false,
+            default_features: true,
+            package: None,
+        }
+    }
+
+    #[must_use]
+    pub fn optional(mut self, optional: bool) -> Self {
+        self.optional = optional;
+        self
+    }
+
+    #[must_use]
+    pub fn feature(mut self, feature: impl Into<String>) -> Self {
+        self.features.push(feature.into());
+        self
+    }
+}
+
+pub fn solve(index: &CompiledIndex, problem: Problem) -> Result<SolveResult, SolveError> {
+    let mut solver = Solver::new(index, problem.learned_kind);
+    for fact in &problem.warm_facts {
+        solver.install_warm_fact(fact.clone());
+    }
+    let mut state = State::default();
+    if let Err(conflict) = solver.seed_problem(&problem, &mut state) {
+        solver.conflicts += 1;
+        solver.learn(conflict);
+        return Err(solver.no_solution());
+    }
+    match solver.search(state) {
+        Ok(state) => Ok(solver.finish(state)),
+        Err(()) => Err(solver.no_solution()),
+    }
+}
+
+impl<'a> Solver<'a> {
+    fn new(index: &'a CompiledIndex, problem_kind: LearnedKind) -> Self {
+        let mut derivations = DerivationStore::new();
+        for id in (0..index.clauses.len()).map(|ix| ClauseId(ix as u32)) {
+            derivations.note_clause(id);
+        }
+        Self {
+            index,
+            problem_kind,
+            feature_exclusions: Vec::new(),
+            exclusions: ExclusionStore::new(),
+            derivations,
+            learned: Vec::new(),
+            conflicts: 0,
+            decisions: 0,
+            next_hypothesis: 0,
+        }
+    }
+
+    fn install_warm_fact(&mut self, fact: LearnedNoGood) {
+        let id = self.exclusions.append(Exclusion {
+            region: fact.region.clone(),
+            derivation: fact.derivation,
+        });
+        self.derivations.note_exclusion(id, fact.derivation);
+        self.learned.push(fact);
+    }
+
+    fn seed_problem(&mut self, problem: &Problem, state: &mut State) -> Result<(), Conflict> {
+        for root in &problem.roots {
+            let Some(pkg) = self.index.package(&root.name) else {
+                return Err(Conflict {
+                    premises: Vec::new(),
+                    selected: selected_versions(state),
+                    decision: None,
+                });
+            };
+            self.activate(state, pkg, Premise::Pin(PinRef(format!("root:{}", root.name))));
+            let pin = PinRef(format!("root:{}:{}", root.name, root.req));
+            self.derivations.note_pin(pin.clone());
+            self.intersect_domain(state, pkg, parse_req(&root.req).map_err(|_| Conflict {
+                premises: vec![Premise::Pin(pin.clone())],
+                selected: selected_versions(state),
+                decision: None,
+            })?, Premise::Pin(pin))?;
+            if root.default_features {
+                let feat = self.index.features.get_str("default").unwrap_or(FeatIx(0));
+                self.enable_feature(state, pkg, feat, Vec::new());
+            }
+            for feature in &root.features {
+                let Some(feat) = self.index.features.get_str(feature) else {
+                    continue;
+                };
+                self.enable_feature(state, pkg, feat, Vec::new());
+            }
+        }
+        for decree in &problem.decrees {
+            let Some(pkg) = self.index.package(&decree.name) else {
+                continue;
+            };
+            self.activate(
+                state,
+                pkg,
+                Premise::Pin(PinRef(format!("decree:{}", decree.name))),
+            );
+            let pin = PinRef(format!("decree:{}:{}", decree.name, decree.req));
+            self.derivations.note_pin(pin.clone());
+            self.intersect_domain(state, pkg, parse_req(&decree.req).map_err(|_| Conflict {
+                premises: vec![Premise::Pin(pin.clone())],
+                selected: selected_versions(state),
+                decision: None,
+            })?, Premise::Pin(pin))?;
+        }
+        for exclusion in &problem.exclusions {
+            let features: Vec<_> = exclusion.features.iter().cloned().collect();
+            for (ix, left) in features.iter().enumerate() {
+                for right in features.iter().skip(ix + 1) {
+                    let Some(pkg) = self.index.package(&exclusion.package) else {
+                        continue;
+                    };
+                    let Some(left_feat) = self.index.features.get_str(left) else {
+                        continue;
+                    };
+                    let Some(right_feat) = self.index.features.get_str(right) else {
+                        continue;
+                    };
+                    self.feature_exclusions.push((pkg, left_feat, right_feat));
+                }
+            }
+        }
+        Ok(())
+    }
+
+    fn search(&mut self, mut state: State) -> Result<State, ()> {
+        loop {
+            if let Err(conflict) = self.propagate(&mut state) {
+                self.conflicts += 1;
+                self.learn(conflict);
+                return Err(());
+            }
+            let Some(pkg) = self.next_package(&state) else {
+                self.assert_solution(&state);
+                return Ok(state);
+            };
+            let candidates = self.candidates(&state, pkg);
+            if candidates.is_empty() {
+                self.conflicts += 1;
+                self.learn(Conflict {
+                    premises: state
+                        .domains
+                        .get(&pkg)
+                        .map(|domain| domain.reasons.clone())
+                        .unwrap_or_default(),
+                    selected: selected_versions(&state),
+                    decision: last_decision(&state),
+                });
+                return Err(());
+            }
+            for version in candidates.into_iter().rev() {
+                let mut branch = state.clone();
+                let hyp = self.next_hypothesis;
+                self.next_hypothesis += 1;
+                self.decisions += 1;
+                branch.hypotheses.push(Hypothesis {
+                    id: hyp,
+                    pkg,
+                    version: version.clone(),
+                });
+                let domain = branch.domains.entry(pkg).or_default();
+                domain.selected = Some(version.clone());
+                domain.selected_reason = Some(Premise::Hypothesis(hyp));
+                tracing::trace!(
+                    package = self.index.name(pkg).unwrap_or_default(),
+                    %version,
+                    hypothesis = hyp,
+                    "rodin decision"
+                );
+                if let Ok(solution) = self.search(branch) {
+                    return Ok(solution);
+                }
+            }
+            return Err(());
+        }
+    }
+
+    fn propagate(&mut self, state: &mut State) -> Result<(), Conflict> {
+        loop {
+            let before = state_fingerprint(state);
+            self.apply_exclusions(state)?;
+            self.force_singletons(state)?;
+            for clause in &self.index.compiled {
+                if clause.antecedents.iter().all(|guard| self.guard_true(state, guard)) {
+                    state.applied_clauses.insert(clause.id);
+                    let premise = Premise::Clause(clause.id);
+                    self.apply_consequent(state, &clause.consequent, premise)?;
+                }
+            }
+            self.check_feature_exclusions(state)?;
+            if state_fingerprint(state) == before {
+                break;
+            }
+        }
+        Ok(())
+    }
+
+    fn check_feature_exclusions(&self, state: &State) -> Result<(), Conflict> {
+        for &(pkg, left, right) in &self.feature_exclusions {
+            if state.features.contains(&(pkg, left)) && state.features.contains(&(pkg, right)) {
+                let mut premises = Vec::new();
+                premises.extend(state.feature_reasons.get(&(pkg, left)).cloned().unwrap_or_default());
+                premises.extend(state.feature_reasons.get(&(pkg, right)).cloned().unwrap_or_default());
+                return Err(Conflict {
+                    premises,
+                    selected: selected_versions(state),
+                    decision: last_decision(state),
+                });
+            }
+        }
+        Ok(())
+    }
+
+    fn apply_exclusions(&mut self, state: &mut State) -> Result<(), Conflict> {
+        for fact in &self.learned {
+            let mut unsatisfied = Vec::new();
+            for (pkg, versions) in &fact.region.versions {
+                match state.domains.get(pkg).and_then(|domain| domain.selected.as_ref()) {
+                    Some(version) if versions.contains(version) => {}
+                    Some(_) => {
+                        unsatisfied.clear();
+                        break;
+                    }
+                    None => unsatisfied.push((*pkg, versions.clone())),
+                }
+            }
+            if unsatisfied.is_empty() {
+                if fact
+                    .region
+                    .versions
+                    .keys()
+                    .all(|pkg| state.domains.get(pkg).and_then(|d| d.selected.as_ref()).is_some())
+                {
+                    return Err(Conflict {
+                        premises: vec![Premise::Exclusion(ExclusionId(0))],
+                        selected: selected_versions(state),
+                        decision: last_decision(state),
+                    });
+                }
+                continue;
+            }
+            if unsatisfied.len() == 1 {
+                let (pkg, excluded) = unsatisfied.pop().expect("one unsatisfied");
+                if state.domains.get(&pkg).is_some_and(|domain| domain.active) {
+                    let current = state
+                        .domains
+                        .get(&pkg)
+                        .map(|domain| domain.allowed.clone())
+                        .unwrap_or_else(VersionSet::universe);
+                    let next = current.intersect(&excluded.complement(&current));
+                    self.intersect_domain(state, pkg, next, Premise::Exclusion(ExclusionId(0)))?;
+                }
+            }
+        }
+        Ok(())
+    }
+
+    fn force_singletons(&self, state: &mut State) -> Result<(), Conflict> {
+        let active: Vec<_> = state
+            .domains
+            .iter()
+            .filter_map(|(pkg, domain)| domain.active.then_some(*pkg))
+            .collect();
+        for pkg in active {
+            let candidates = self.candidates(state, pkg);
+            if candidates.is_empty() {
+                return Err(Conflict {
+                    premises: state
+                        .domains
+                        .get(&pkg)
+                        .map(|domain| domain.reasons.clone())
+                        .unwrap_or_default(),
+                    selected: selected_versions(state),
+                    decision: last_decision(state),
+                });
+            }
+            if candidates.len() == 1 {
+                let domain = state.domains.entry(pkg).or_default();
+                if domain.selected.is_none() {
+                    domain.selected = candidates.into_iter().next();
+                    domain.selected_reason = domain.reasons.last().cloned();
+                }
+            }
+        }
+        Ok(())
+    }
+
+    fn apply_consequent(
+        &self,
+        state: &mut State,
+        consequent: &Consequent,
+        premise: Premise,
+    ) -> Result<(), Conflict> {
+        match consequent {
+            Consequent::InGraph(pkg) => {
+                self.activate(state, *pkg, premise);
+                Ok(())
+            }
+            Consequent::VersionSet(pkg, set) => {
+                self.activate(state, *pkg, premise.clone());
+                self.intersect_domain(state, *pkg, set.clone(), premise)
+            }
+            Consequent::Feature(pkg, feat) => {
+                self.activate(state, *pkg, premise.clone());
+                self.enable_feature(state, *pkg, *feat, vec![premise]);
+                Ok(())
+            }
+        }
+    }
+
+    fn activate(&self, state: &mut State, pkg: PkgIx, premise: Premise) {
+        let domain = state.domains.entry(pkg).or_insert_with(|| Domain {
+            active: false,
+            allowed: self.package_universe(pkg),
+            reasons: Vec::new(),
+            selected: None,
+            selected_reason: None,
+        });
+        domain.active = true;
+        domain.reasons.push(premise);
+    }
+
+    fn intersect_domain(
+        &self,
+        state: &mut State,
+        pkg: PkgIx,
+        set: VersionSet,
+        premise: Premise,
+    ) -> Result<(), Conflict> {
+        let domain = state.domains.entry(pkg).or_insert_with(|| Domain {
+            active: true,
+            allowed: self.package_universe(pkg),
+            reasons: Vec::new(),
+            selected: None,
+            selected_reason: None,
+        });
+        let next = domain.allowed.intersect(&set);
+        let mut premises = domain.reasons.clone();
+        premises.push(premise.clone());
+        if next.is_empty() || self.index.versions(pkg).iter().all(|version| !next.contains(version))
+        {
+            return Err(Conflict {
+                premises,
+                selected: selected_versions(state),
+                decision: last_decision(state),
+            });
+        }
+        if let Some(selected) = &domain.selected
+            && !next.contains(selected)
+        {
+            return Err(Conflict {
+                premises,
+                selected: selected_versions(state),
+                decision: last_decision(state),
+            });
+        }
+        domain.allowed = next;
+        domain.reasons.push(premise);
+        Ok(())
+    }
+
+    fn enable_feature(
+        &self,
+        state: &mut State,
+        pkg: PkgIx,
+        feat: FeatIx,
+        reasons: Vec<Premise>,
+    ) {
+        if state.features.insert((pkg, feat)) {
+            state.feature_reasons.insert((pkg, feat), reasons);
+        }
+    }
+
+    fn guard_true(&self, state: &State, guard: &Guard) -> bool {
+        match guard {
+            Guard::InGraph(pkg) => state.domains.get(pkg).is_some_and(|domain| domain.active),
+            Guard::Selected(pkg, version) => state
+                .domains
+                .get(pkg)
+                .and_then(|domain| domain.selected.as_ref())
+                == Some(version),
+            Guard::Feature(pkg, feat) => state.features.contains(&(*pkg, *feat)),
+        }
+    }
+
+    fn next_package(&self, state: &State) -> Option<PkgIx> {
+        state
+            .domains
+            .iter()
+            .filter(|(_, domain)| domain.active && domain.selected.is_none())
+            .filter(|(pkg, _)| self.candidates(state, **pkg).len() > 1)
+            .min_by_key(|(pkg, _)| self.index.name(**pkg).unwrap_or_default().to_owned())
+            .map(|(pkg, _)| *pkg)
+    }
+
+    fn candidates(&self, state: &State, pkg: PkgIx) -> Vec<Version> {
+        let Some(domain) = state.domains.get(&pkg) else {
+            return Vec::new();
+        };
+        self.index
+            .versions(pkg)
+            .iter()
+            .filter(|version| domain.allowed.contains(version))
+            .cloned()
+            .collect()
+    }
+
+    fn package_universe(&self, pkg: PkgIx) -> VersionSet {
+        version_set_from_points(self.index.versions(pkg))
+    }
+
+    fn learn(&mut self, conflict: Conflict) {
+        let premises = dedup_premises(conflict.premises);
+        let derivation = self.derivations.append(Derivation {
+            premises: premises.clone(),
+            rule: RuleKind::Conflict,
+        });
+        let mut region = Region::new();
+        if let Some((pkg, version)) = conflict.decision.clone() {
+            region = region.with_versions(pkg, VersionSet::exact(version));
+        } else {
+            for (pkg, version) in &conflict.selected {
+                region = region.with_versions(*pkg, VersionSet::exact(version.clone()));
+            }
+        }
+        for (pkg, version) in &conflict.selected {
+            if !region.versions.contains_key(pkg) {
+                region = region.with_versions(*pkg, VersionSet::exact(version.clone()));
+            }
+        }
+        let support = support_from_premises(self.index, &premises);
+        let (region, point_versions, widened_versions) =
+            self.index.widen_region(&conflict.selected, &support, &region);
+        let exclusion = self.exclusions.append(Exclusion {
+            region: region.clone(),
+            derivation,
+        });
+        self.derivations.note_exclusion(exclusion, derivation);
+        self.learned.push(LearnedNoGood {
+            region,
+            derivation,
+            support,
+            point_versions,
+            widened_versions,
+            kind: self.problem_kind,
+        });
+    }
+
+    fn finish(self, state: State) -> SolveResult {
+        let selected = state
+            .domains
+            .iter()
+            .filter_map(|(pkg, domain)| {
+                domain
+                    .selected
+                    .as_ref()
+                    .map(|version| (self.index.name(*pkg).unwrap_or_default().to_owned(), version.clone()))
+            })
+            .collect();
+        let mut enabled_features: BTreeMap<String, BTreeSet<String>> = BTreeMap::new();
+        for (pkg, feat) in state.features {
+            if let (Some(name), Some(feature)) = (
+                self.index.name(pkg),
+                self.index.features.resolve_str(feat),
+            ) {
+                enabled_features
+                    .entry(name.to_owned())
+                    .or_default()
+                    .insert(feature.to_owned());
+            }
+        }
+        SolveResult {
+            selected,
+            enabled_features,
+            decisions: self.decisions,
+            conflicts: self.conflicts,
+            learned: self.learned,
+            derivations: self.derivations,
+            clauses: self.index.clauses.clone(),
+        }
+    }
+
+    fn no_solution(self) -> SolveError {
+        SolveError::NoSolution {
+            conflicts: self.conflicts,
+            learned: self.learned,
+            derivations: self.derivations,
+            clauses: self.index.clauses.clone(),
+        }
+    }
+
+    fn assert_solution(&self, state: &State) {
+        for clause in &self.index.compiled {
+            if clause.antecedents.iter().all(|guard| self.guard_true(state, guard)) {
+                match &clause.consequent {
+                    Consequent::InGraph(pkg) => {
+                        assert!(state.domains.get(pkg).is_some_and(|domain| domain.active));
+                    }
+                    Consequent::VersionSet(pkg, set) => {
+                        let selected = state.domains.get(pkg).and_then(|domain| domain.selected.as_ref());
+                        assert!(selected.is_some_and(|version| set.contains(version)));
+                    }
+                    Consequent::Feature(pkg, feat) => {
+                        assert!(state.features.contains(&(*pkg, *feat)));
+                    }
+                }
+            }
+        }
+    }
+}
+
+fn merged_features(entry: &rodin_survey::IndexEntry) -> BTreeMap<String, Vec<String>> {
+    let mut features = entry.features.clone();
+    if let Some(features2) = &entry.features2 {
+        for (name, values) in features2 {
+            features.insert(name.clone(), values.clone());
+        }
+    }
+    for values in features.values_mut() {
+        values.sort();
+    }
+    features
+}
+
+fn parse_req(req: &str) -> Result<VersionSet> {
+    let parsed = VersionReq::parse(req).wrap_err_with(|| format!("parsing version req {req}"))?;
+    Ok(VersionSet::from_req(&parsed))
+}
+
+fn version_set_from_points(versions: &[Version]) -> VersionSet {
+    VersionSet::from_intervals(versions.iter().map(|version| rodin_facts::Interval {
+        lower: Some(version.clone()),
+        upper: Some(next_patch(version)),
+    }))
+}
+
+fn next_patch(version: &Version) -> Version {
+    Version::new(version.major, version.minor, version.patch + 1)
+}
+
+fn state_fingerprint(state: &State) -> (usize, usize, usize, usize) {
+    let active = state
+        .domains
+        .values()
+        .filter(|domain| domain.active)
+        .count();
+    let selected = state
+        .domains
+        .values()
+        .filter(|domain| domain.selected.is_some())
+        .count();
+    let intervals = state
+        .domains
+        .values()
+        .map(|domain| domain.allowed.intervals().len())
+        .sum();
+    (active, selected, intervals, state.features.len())
+}
+
+fn selected_versions(state: &State) -> BTreeMap<PkgIx, Version> {
+    state
+        .domains
+        .iter()
+        .filter_map(|(pkg, domain)| domain.selected.as_ref().map(|version| (*pkg, version.clone())))
+        .collect()
+}
+
+fn last_decision(state: &State) -> Option<(PkgIx, Version)> {
+    state
+        .hypotheses
+        .last()
+        .map(|hypothesis| (hypothesis.pkg, hypothesis.version.clone()))
+}
+
+fn dedup_premises(premises: Vec<Premise>) -> Vec<Premise> {
+    let mut seen = BTreeSet::new();
+    let mut out = Vec::new();
+    for premise in premises {
+        let key = format!("{premise:?}");
+        if seen.insert(key) {
+            out.push(premise);
+        }
+    }
+    out
+}
+
+fn support_from_premises(index: &CompiledIndex, premises: &[Premise]) -> BTreeSet<EdgeKey> {
+    premises
+        .iter()
+        .filter_map(|premise| match premise {
+            Premise::Clause(id) => index.clause_support.get(id).cloned(),
+            Premise::Exclusion(_) | Premise::Pin(_) | Premise::Hypothesis(_) => None,
+        })
+        .collect()
+}
+
+#[derive(Clone, Debug)]
+pub struct ScenarioResult {
+    pub name: String,
+    pub shape: String,
+    pub kind: LearnedKind,
+    pub cold_decisions: usize,
+    pub cold_conflicts: usize,
+    pub warm_decisions: usize,
+    pub warm_conflicts: usize,
+    pub learned: Vec<LearnedNoGood>,
+}
+
+#[derive(Clone, Debug, Default)]
+pub struct Round3Report {
+    pub natural: Vec<ScenarioResult>,
+    pub pressure: Vec<ScenarioResult>,
+}
+
+impl Round3Report {
+    #[must_use]
+    pub fn render(&self) -> String {
+        let mut out = String::new();
+        out.push_str("## Round 3\n\n");
+        out.push_str("Round 3 measures dynamic derivation-support widening. The core used for this round propagates version domains as sets and only picks a point version when an active package must be expanded and multiple real candidates remain; conflicts below are therefore late-discovery conflicts, not avoidable set-intersection artifacts.\n\n");
+        out.push_str("### Natural workloads\n\n");
+        out.push_str("| workload | shape | learned kind | cold decisions | cold conflicts | learned no-goods |\n");
+        out.push_str("|---|---|---|---:|---:|---:|\n");
+        for row in &self.natural {
+            push_scenario_row(&mut out, row, false);
+        }
+        out.push_str("\n### Pressure workloads\n\n");
+        out.push_str("| workload | shape | learned kind | cold decisions | cold conflicts | warm decisions | warm conflicts | decisions saved | conflicts saved | learned no-goods |\n");
+        out.push_str("|---|---|---|---:|---:|---:|---:|---:|---:|---:|\n");
+        for row in &self.pressure {
+            push_scenario_row(&mut out, row, true);
+        }
+        out.push_str("\n### Widening by learned-fact kind\n\n");
+        out.push_str("| kind | no-goods | widened share | median factor | p90 factor | max factor | point versions | widened versions |\n");
+        out.push_str("|---|---:|---:|---:|---:|---:|---:|---:|\n");
+        for (kind, learned) in learned_by_kind(self) {
+            let factors = factors(&learned);
+            let widened = learned
+                .iter()
+                .filter(|fact| fact.widened_versions > fact.point_versions)
+                .count();
+            let point: usize = learned.iter().map(|fact| fact.point_versions).sum();
+            let wide: usize = learned.iter().map(|fact| fact.widened_versions).sum();
+            out.push_str("| ");
+            out.push_str(kind.as_str());
+            out.push_str(" | ");
+            out.push_str(&learned.len().to_string());
+            out.push_str(" | ");
+            out.push_str(&percent(widened, learned.len()));
+            out.push_str(" | ");
+            out.push_str(&decimal(percentile(&factors, 0.5)));
+            out.push_str(" | ");
+            out.push_str(&decimal(percentile(&factors, 0.9)));
+            out.push_str(" | ");
+            out.push_str(&decimal(factors.last().copied().unwrap_or(0.0)));
+            out.push_str(" | ");
+            out.push_str(&point.to_string());
+            out.push_str(" | ");
+            out.push_str(&wide.to_string());
+            out.push_str(" |\n");
+        }
+        out.push_str("\n### Round 3 aggregate\n\n");
+        let learned: Vec<_> = self
+            .pressure
+            .iter()
+            .chain(&self.natural)
+            .flat_map(|scenario| scenario.learned.iter())
+            .collect();
+        let total_point: usize = learned.iter().map(|fact| fact.point_versions).sum();
+        let total_wide: usize = learned.iter().map(|fact| fact.widened_versions).sum();
+        let pressure_cold_conflicts: usize = self.pressure.iter().map(|row| row.cold_conflicts).sum();
+        let pressure_warm_conflicts: usize = self.pressure.iter().map(|row| row.warm_conflicts).sum();
+        let pressure_cold_decisions: usize = self.pressure.iter().map(|row| row.cold_decisions).sum();
+        let pressure_warm_decisions: usize = self.pressure.iter().map(|row| row.warm_decisions).sum();
+        out.push_str(&format!(
+            "- learned no-goods: {}\n- point-versions excluded: {total_point}\n- widened-versions excluded: {total_wide}\n- aggregate widening factor: {}\n- pressure decisions saved by warm facts: {}\n- pressure conflicts saved by warm facts: {}\n\n",
+            learned.len(),
+            decimal(total_wide as f64 / total_point.max(1) as f64),
+            pressure_cold_decisions.saturating_sub(pressure_warm_decisions),
+            pressure_cold_conflicts.saturating_sub(pressure_warm_conflicts),
+        ));
+        out.push_str("### Round 3 verdict\n\n");
+        out.push_str(&round3_verdict(
+            total_point,
+            total_wide,
+            pressure_cold_decisions,
+            pressure_warm_decisions,
+            pressure_cold_conflicts,
+            pressure_warm_conflicts,
+        ));
+        out.push('\n');
+        out
+    }
+}
+
+pub fn append_round3_report(path: &Path) -> Result<Round3Report> {
+    let report = run_round3()?;
+    let existing = fs::read_to_string(path).wrap_err_with(|| format!("reading {}", path.display()))?;
+    let base = existing
+        .find("\n## Round 3\n")
+        .map_or(existing.as_str(), |ix| &existing[..ix])
+        .trim_end();
+    fs::write(path, format!("{base}\n\n{}", report.render()))
+        .wrap_err_with(|| format!("writing {}", path.display()))?;
+    Ok(report)
+}
+
+pub fn run_round3() -> Result<Round3Report> {
+    let mut report = Round3Report::default();
+    if let Ok(crates) = rodin_survey::fetch_default_closure()
+        && let Ok(index) = CompiledIndex::from_sparse(&crates)
+    {
+        let natural = [
+            Problem::new(vec![RootReq::new("axum", "*")]),
+            Problem::new(vec![RootReq::new("reqwest", "*")]),
+            Problem::new(vec![RootReq::new("tokio", "*").feature("full")]),
+            Problem::new(vec![RootReq::new("clap", "*")]),
+        ];
+        for (name, problem) in ["axum-default", "reqwest", "tokio-full", "clap"]
+            .into_iter()
+            .zip(natural)
+        {
+            report.natural.push(run_one(&index, name, "natural", problem, None));
+        }
+    }
+    for scenario in pressure_scenarios()? {
+        let cold = run_one(
+            &scenario.index,
+            &scenario.name,
+            &scenario.shape,
+            scenario.problem.clone(),
+            None,
+        );
+        let warm_facts = cold.learned.clone();
+        let warm_problem = Problem {
+            warm_facts,
+            ..scenario.perturbed
+        };
+        let warm = run_one(
+            &scenario.index,
+            &format!("{} perturbed", scenario.name),
+            &scenario.shape,
+            warm_problem,
+            Some(&cold),
+        );
+        report.pressure.push(ScenarioResult {
+            name: scenario.name,
+            shape: scenario.shape,
+            kind: scenario.kind,
+            cold_decisions: cold.cold_decisions,
+            cold_conflicts: cold.cold_conflicts,
+            warm_decisions: warm.cold_decisions,
+            warm_conflicts: warm.cold_conflicts,
+            learned: cold.learned,
+        });
+    }
+    Ok(report)
+}
+
+fn run_one(
+    index: &CompiledIndex,
+    name: &str,
+    shape: &str,
+    problem: Problem,
+    _cold: Option<&ScenarioResult>,
+) -> ScenarioResult {
+    let kind = problem.learned_kind;
+    match solve(index, problem) {
+        Ok(result) => ScenarioResult {
+            name: name.to_owned(),
+            shape: shape.to_owned(),
+            kind,
+            cold_decisions: result.decisions,
+            cold_conflicts: result.conflicts,
+            warm_decisions: 0,
+            warm_conflicts: 0,
+            learned: result.learned,
+        },
+        Err(SolveError::NoSolution {
+            conflicts, learned, ..
+        }) => ScenarioResult {
+            name: name.to_owned(),
+            shape: shape.to_owned(),
+            kind,
+            cold_decisions: 0,
+            cold_conflicts: conflicts,
+            warm_decisions: 0,
+            warm_conflicts: 0,
+            learned,
+        },
+    }
+}
+
+#[derive(Clone, Debug)]
+struct PressureScenario {
+    name: String,
+    shape: String,
+    kind: LearnedKind,
+    index: CompiledIndex,
+    problem: Problem,
+    perturbed: Problem,
+}
+
+fn pressure_scenarios() -> Result<Vec<PressureScenario>> {
+    Ok(vec![
+        buried_pin(false)?,
+        buried_pin(true)?,
+        feature_triggered_pin()?,
+        downgrade_cascade()?,
+        hole_trap()?,
+        exclusion_collision()?,
+        lockstep_trap()?,
+    ])
+}
+
+fn buried_pin(two_level: bool) -> Result<PressureScenario> {
+    let mut index = CompiledIndex::empty();
+    add_leaf_versions(&mut index, "a", 1, 3);
+    if two_level {
+        index.add_package_version(
+            "x",
+            v(2, 0, 0),
+            vec![SyntheticDep::normal("mid", "=1.0.0")],
+            BTreeMap::new(),
+        );
+        index.add_package_version(
+            "mid",
+            v(1, 0, 0),
+            vec![SyntheticDep::normal("a", "=1.0.0")],
+            BTreeMap::new(),
+        );
+    } else {
+        index.add_package_version(
+            "x",
+            v(2, 0, 0),
+            vec![SyntheticDep::normal("a", "=1.0.0")],
+            BTreeMap::new(),
+        );
+    }
+    index.finish_synthetic()?;
+    let mut problem = Problem::new(vec![RootReq::new("a", "^3"), RootReq::new("x", "*")]);
+    problem.learned_kind = LearnedKind::Plain;
+    let mut perturbed = Problem::new(vec![RootReq::new("a", ">=2.0.0, <4.0.0"), RootReq::new("x", "*")]);
+    perturbed.learned_kind = LearnedKind::Plain;
+    Ok(PressureScenario {
+        name: if two_level {
+            "buried-pin-two-level".to_owned()
+        } else {
+            "buried-pin".to_owned()
+        },
+        shape: if two_level {
+            "buried pin, two levels deep".to_owned()
+        } else {
+            "buried pin".to_owned()
+        },
+        kind: LearnedKind::Plain,
+        index,
+        problem,
+        perturbed,
+    })
+}
+
+fn feature_triggered_pin() -> Result<PressureScenario> {
+    let mut index = CompiledIndex::empty();
+    add_leaf_versions(&mut index, "a", 1, 3);
+    index.add_package_version(
+        "x",
+        v(2, 0, 0),
+        vec![SyntheticDep::normal("a", "=1.0.0").optional(true)],
+        BTreeMap::from([("pin".to_owned(), vec!["dep:a".to_owned()])]),
+    );
+    index.add_package_version(
+        "trigger",
+        v(1, 0, 0),
+        vec![SyntheticDep::normal("x", "=2.0.0").feature("pin")],
+        BTreeMap::new(),
+    );
+    index.finish_synthetic()?;
+    let mut problem = Problem::new(vec![RootReq::new("a", "^3"), RootReq::new("x", "*"), RootReq::new("trigger", "*")]);
+    problem.learned_kind = LearnedKind::FeatureGuarded;
+    let mut perturbed = Problem::new(vec![RootReq::new("a", ">=2.0.0, <4.0.0"), RootReq::new("x", "*"), RootReq::new("trigger", "*")]);
+    perturbed.learned_kind = LearnedKind::FeatureGuarded;
+    Ok(PressureScenario {
+        name: "feature-triggered-pin".to_owned(),
+        shape: "feature-triggered pin".to_owned(),
+        kind: LearnedKind::FeatureGuarded,
+        index,
+        problem,
+        perturbed,
+    })
+}
+
+fn downgrade_cascade() -> Result<PressureScenario> {
+    let mut index = CompiledIndex::empty();
+    add_leaf_versions(&mut index, "tokio-like", 1, 3);
+    add_leaf_versions(&mut index, "codec", 1, 3);
+    index.add_package_version(
+        "web",
+        v(3, 0, 0),
+        vec![SyntheticDep::normal("tokio-like", "^3"), SyntheticDep::normal("codec", "^3")],
+        BTreeMap::new(),
+    );
+    index.add_package_version(
+        "web",
+        v(2, 0, 0),
+        vec![SyntheticDep::normal("tokio-like", "^1"), SyntheticDep::normal("codec", "=1.0.0")],
+        BTreeMap::new(),
+    );
+    index.add_package_version(
+        "client",
+        v(1, 0, 0),
+        vec![SyntheticDep::normal("web", "*"), SyntheticDep::normal("codec", "^3")],
+        BTreeMap::new(),
+    );
+    index.finish_synthetic()?;
+    let mut problem = Problem::new(vec![RootReq::new("client", "*")]);
+    problem.decrees.push(Decree::new("tokio-like", "^1"));
+    problem.learned_kind = LearnedKind::DecreeDerived;
+    let mut perturbed = Problem::new(vec![RootReq::new("client", "*")]);
+    perturbed.decrees.push(Decree::new("tokio-like", ">=1.0.0, <3.0.0"));
+    perturbed.learned_kind = LearnedKind::DecreeDerived;
+    Ok(PressureScenario {
+        name: "downgrade-cascade".to_owned(),
+        shape: "downgrade cascade".to_owned(),
+        kind: LearnedKind::DecreeDerived,
+        index,
+        problem,
+        perturbed,
+    })
+}
+
+fn hole_trap() -> Result<PressureScenario> {
+    let mut index = CompiledIndex::empty();
+    add_leaf_versions(&mut index, "a", 1, 3);
+    add_leaf_versions(&mut index, "b", 1, 3);
+    index.add_package_version(
+        "fallback",
+        v(1, 0, 0),
+        vec![SyntheticDep::normal("a", "^3"), SyntheticDep::normal("b", "=1.0.0")],
+        BTreeMap::new(),
+    );
+    index.add_package_version(
+        "fallback",
+        v(1, 0, 2),
+        vec![SyntheticDep::normal("a", "^3"), SyntheticDep::normal("b", "^3")],
+        BTreeMap::new(),
+    );
+    index.add_package_version(
+        "other",
+        v(1, 0, 0),
+        vec![SyntheticDep::normal("b", "^3")],
+        BTreeMap::new(),
+    );
+    index.finish_synthetic()?;
+    let mut problem = Problem::new(vec![RootReq::new("fallback", "=1.0.0"), RootReq::new("other", "*")]);
+    problem.learned_kind = LearnedKind::HoleAware;
+    let mut perturbed = Problem::new(vec![RootReq::new("fallback", ">=1.0.0, <=1.0.2"), RootReq::new("other", "*")]);
+    perturbed.learned_kind = LearnedKind::HoleAware;
+    Ok(PressureScenario {
+        name: "hole-trap".to_owned(),
+        shape: "hole trap".to_owned(),
+        kind: LearnedKind::HoleAware,
+        index,
+        problem,
+        perturbed,
+    })
+}
+
+fn exclusion_collision() -> Result<PressureScenario> {
+    let mut index = CompiledIndex::empty();
+    index.add_package_version(
+        "mode",
+        v(1, 0, 0),
+        Vec::new(),
+        BTreeMap::from([
+            ("fast".to_owned(), Vec::new()),
+            ("small".to_owned(), Vec::new()),
+        ]),
+    );
+    index.add_package_version(
+        "left",
+        v(1, 0, 0),
+        vec![SyntheticDep::normal("mode", "=1.0.0").feature("fast")],
+        BTreeMap::new(),
+    );
+    index.add_package_version(
+        "right",
+        v(1, 0, 0),
+        vec![SyntheticDep::normal("mode", "=1.0.0").feature("small")],
+        BTreeMap::new(),
+    );
+    index.finish_synthetic()?;
+    let mut problem = Problem::new(vec![RootReq::new("left", "*"), RootReq::new("right", "*")]);
+    problem.exclusions.push(FeatureExclusion {
+        package: "mode".to_owned(),
+        features: BTreeSet::from(["fast".to_owned(), "small".to_owned()]),
+    });
+    problem.learned_kind = LearnedKind::Exclusion;
+    let perturbed = problem.clone();
+    Ok(PressureScenario {
+        name: "exclusion-collision".to_owned(),
+        shape: "exclusion collision".to_owned(),
+        kind: LearnedKind::Exclusion,
+        index,
+        problem,
+        perturbed,
+    })
+}
+
+fn lockstep_trap() -> Result<PressureScenario> {
+    let mut index = CompiledIndex::empty();
+    add_leaf_versions(&mut index, "core", 1, 3);
+    index.add_package_version(
+        "derive",
+        v(1, 0, 0),
+        vec![SyntheticDep::normal("core", "=1.0.0")],
+        BTreeMap::new(),
+    );
+    index.add_package_version(
+        "derive",
+        v(2, 0, 0),
+        vec![SyntheticDep::normal("core", "=2.0.0")],
+        BTreeMap::new(),
+    );
+    index.add_package_version(
+        "floor",
+        v(1, 0, 0),
+        vec![SyntheticDep::normal("core", "^2")],
+        BTreeMap::new(),
+    );
+    index.finish_synthetic()?;
+    let mut problem = Problem::new(vec![RootReq::new("derive", "=1.0.0"), RootReq::new("floor", "*")]);
+    problem.learned_kind = LearnedKind::Family;
+    let mut perturbed = Problem::new(vec![RootReq::new("derive", ">=1.0.0, <3.0.0"), RootReq::new("floor", "*")]);
+    perturbed.decrees.push(Decree::new("derive", "=1.0.0"));
+    perturbed.learned_kind = LearnedKind::Family;
+    Ok(PressureScenario {
+        name: "lockstep-trap".to_owned(),
+        shape: "lockstep trap".to_owned(),
+        kind: LearnedKind::Family,
+        index,
+        problem,
+        perturbed,
+    })
+}
+
+fn add_leaf_versions(index: &mut CompiledIndex, name: &str, first: u64, last: u64) {
+    for major in first..=last {
+        index.add_package_version(name, v(major, 0, 0), Vec::new(), BTreeMap::new());
+    }
+}
+
+fn v(major: u64, minor: u64, patch: u64) -> Version {
+    Version::new(major, minor, patch)
+}
+
+fn push_scenario_row(out: &mut String, row: &ScenarioResult, warm: bool) {
+    out.push_str("| ");
+    out.push_str(&row.name);
+    out.push_str(" | ");
+    out.push_str(&row.shape);
+    out.push_str(" | ");
+    out.push_str(row.kind.as_str());
+    out.push_str(" | ");
+    out.push_str(&row.cold_decisions.to_string());
+    out.push_str(" | ");
+    out.push_str(&row.cold_conflicts.to_string());
+    out.push_str(" | ");
+    if warm {
+        out.push_str(&row.warm_decisions.to_string());
+        out.push_str(" | ");
+        out.push_str(&row.warm_conflicts.to_string());
+        out.push_str(" | ");
+        out.push_str(&row.cold_decisions.saturating_sub(row.warm_decisions).to_string());
+        out.push_str(" | ");
+        out.push_str(&row.cold_conflicts.saturating_sub(row.warm_conflicts).to_string());
+        out.push_str(" | ");
+    }
+    out.push_str(&row.learned.len().to_string());
+    out.push_str(" |\n");
+}
+
+fn learned_by_kind(report: &Round3Report) -> BTreeMap<LearnedKind, Vec<&LearnedNoGood>> {
+    let mut out: BTreeMap<LearnedKind, Vec<&LearnedNoGood>> = BTreeMap::new();
+    for scenario in report.natural.iter().chain(&report.pressure) {
+        for fact in &scenario.learned {
+            out.entry(fact.kind).or_default().push(fact);
+        }
+    }
+    out
+}
+
+fn factors(learned: &[&LearnedNoGood]) -> Vec<f64> {
+    let mut factors: Vec<_> = learned.iter().map(|fact| fact.widening_factor()).collect();
+    factors.sort_by(|left, right| left.total_cmp(right));
+    factors
+}
+
+fn percentile(sorted: &[f64], q: f64) -> f64 {
+    if sorted.is_empty() {
+        return 0.0;
+    }
+    let rank = ((sorted.len() - 1) as f64 * q).ceil() as usize;
+    sorted[rank]
+}
+
+fn percent(numerator: usize, denominator: usize) -> String {
+    decimal(if denominator == 0 {
+        0.0
+    } else {
+        numerator as f64 * 100.0 / denominator as f64
+    })
+}
+
+fn decimal(value: f64) -> String {
+    if value == 0.0 {
+        return "0".to_owned();
+    }
+    let mut text = format!("{value:.6}");
+    while text.contains('.') && text.ends_with('0') {
+        text.pop();
+    }
+    if text.ends_with('.') {
+        text.pop();
+    }
+    text
+}
+
+fn round3_verdict(
+    point: usize,
+    widened: usize,
+    cold_decisions: usize,
+    warm_decisions: usize,
+    cold_conflicts: usize,
+    warm_conflicts: usize,
+) -> String {
+    let widening_factor = widened as f64 / point.max(1) as f64;
+    let decision_savings = cold_decisions.saturating_sub(warm_decisions);
+    let conflict_savings = cold_conflicts.saturating_sub(warm_conflicts);
+    if widening_factor > 1.0 && (decision_savings > 0 || conflict_savings > 0) {
+        format!(
+            "Derivation-support widening pays in this round: it expands exclusion coverage by {}x and the perturbed pressure re-solves save {decision_savings} decisions and {conflict_savings} conflicts. The effect is not uniform by kind, so the useful design signal is the per-kind table rather than a single global rescue story.",
+            decimal(widening_factor)
+        )
+    } else {
+        format!(
+            "Derivation-support widening does not pay clearly in this round: coverage is only {}x and warm pressure re-solves save {decision_savings} decisions and {conflict_savings} conflicts. That is a negative result for dynamic value, even if individual shapes still widen.",
+            decimal(widening_factor)
+        )
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use pretty_assertions::assert_eq;
+
+    use super::*;
+
+    #[test]
+    fn propagation_handles_weak_feature_guard() -> Result<()> {
+        let mut index = CompiledIndex::empty();
+        index.add_package_version("addon", v(1, 0, 0), Vec::new(), BTreeMap::from([("extra".to_owned(), Vec::new())]));
+        index.add_package_version(
+            "root",
+            v(1, 0, 0),
+            vec![SyntheticDep::normal("addon", "=1.0.0").optional(true)],
+            BTreeMap::from([("weak".to_owned(), vec!["addon?/extra".to_owned()])]),
+        );
+        index.add_package_version("activator", v(1, 0, 0), vec![SyntheticDep::normal("addon", "=1.0.0")], BTreeMap::new());
+        index.finish_synthetic()?;
+
+        let result = solve(
+            &index,
+            Problem::new(vec![
+                RootReq::new("root", "*").feature("weak"),
+                RootReq::new("activator", "*"),
+            ]),
+        )
+        .map_err(|err| eyre!("{err:?}"))?;
+
+        assert!(result.enabled_features["addon"].contains("extra"));
+        Ok(())
+    }
+
+    #[test]
+    fn backjump_learns_and_continues_after_hand_built_conflict() -> Result<()> {
+        let scenario = buried_pin(false)?;
+        let result = solve(&scenario.index, scenario.problem).expect_err("root should conflict");
+        let SolveError::NoSolution { learned, conflicts, .. } = result;
+        assert!(conflicts > 0);
+        assert!(!learned.is_empty());
+        assert!(learned[0].support.iter().any(|edge| edge.parent == "x" && edge.dep == "a"));
+        Ok(())
+    }
+
+    #[test]
+    fn widening_range_uses_identical_supported_edge_lines() -> Result<()> {
+        let mut index = CompiledIndex::empty();
+        add_leaf_versions(&mut index, "a", 1, 3);
+        index.add_package_version("x", v(1, 0, 0), vec![SyntheticDep::normal("a", "=1.0.0")], BTreeMap::new());
+        index.add_package_version("x", v(1, 0, 1), vec![SyntheticDep::normal("a", "=1.0.0")], BTreeMap::new());
+        index.add_package_version("x", v(1, 0, 2), vec![SyntheticDep::normal("a", "=2.0.0")], BTreeMap::new());
+        index.finish_synthetic()?;
+        let x = index.package("x").expect("x package");
+        let a = index.package("a").expect("a package");
+        let selected = BTreeMap::from([(x, v(1, 0, 1)), (a, v(3, 0, 0))]);
+        let support = BTreeSet::from([EdgeKey {
+            parent: "x".to_owned(),
+            dep: "a".to_owned(),
+        }]);
+        let region = Region::new().with_versions(a, VersionSet::exact(v(3, 0, 0)));
+        let (widened, _, widened_count) = index.widen_region(&selected, &support, &region);
+
+        assert_eq!(widened_count, 2);
+        assert!(widened.versions[&x].contains(&v(1, 0, 0)));
+        assert!(widened.versions[&x].contains(&v(1, 0, 1)));
+        assert!(!widened.versions[&x].contains(&v(1, 0, 2)));
+        Ok(())
+    }
+}
