@@ -364,9 +364,19 @@ IN FLIGHT NOW:
   driver-side only), lane-parameterized corpus incl. milestone
   trio + fib + untaken + eval bits-exact, DriveEvent equality
   across lanes. When green THE MILESTONE IS COMPLETE.
-- d92a7abb: fable unification — committed d04968da6 + 2c657da88
-  (root programs through task hosts); 77/77 fable green verified;
-  full review when it reports.
+FABLE UNIFICATION DONE + ACCEPTED (d04968da6 + 2c657da88 +
+4767bdeaa, agent d92a7abb): the dense path is DELETED — rg for
+dense/FableInterp/run_dense in fable/src returns nothing (verified
+personally); one execution shape: FableTaskPlan roots + frame-aware
+sync host ops (InternString/ReadPath/ReadPathLen/ReadFacetTag/
+BindFacet — typed op enum lowered to frame closures, vix's INVOKE
+pattern shape); facet-enum match = ReadFacetTag reads explicit-repr
+discriminant (opaque Rust/NPO reprs rejected LOUDLY), BindFacet
+projects taken-arm payloads; 151/151 fable+snark-dsl+weavy verified
+(vix excluded — lane-2 agent mid-edit). d92a7abb's arc (tooth 1.5 →
+tooth 1 → unification) is COMPLETE; no parked questions. Fable is
+now: snark-parsed, codegen'd AST, task-frame-executed, dense-free —
+the substrate vix's lowering already rides.
 PRIOR-ART ADJUDICATION BANKED (docs/design/prior-art-adjudication.md,
 vixen 2dafdb87): three scrubs synthesized; C1 + R2-widening + R1
 survived 3/3; C3's surviving core IS merge tunneling — THE MILESTONE
