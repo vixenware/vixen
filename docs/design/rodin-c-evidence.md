@@ -800,8 +800,8 @@ Natural workloads use cached crates.io sparse-index rows with each requested roo
 |---|---|---|---:|---:|---:|---:|---:|---:|---:|
 | buried-pin | buried pin | plain | 3 | 1 | 1 | 0 | 2 | 1 | 1 |
 | buried-pin-two-level | buried pin, two levels deep | plain | 3 | 1 | 3 | 1 | 0 | 0 | 1 |
-| feature-triggered-pin | feature-triggered pin | feature-guarded | 4 | 1 | 4 | 1 | 0 | 0 | 1 |
-| downgrade-cascade | downgrade cascade | decree-derived | 3 | 2 | 5 | 3 | 0 | 0 | 2 |
+| feature-triggered-pin | feature-triggered pin | feature-guarded | 3 | 1 | 3 | 1 | 0 | 0 | 1 |
+| downgrade-cascade | downgrade cascade | decree-derived | 3 | 2 | 4 | 2 | 0 | 0 | 2 |
 | hole-trap | hole trap | hole-aware | 3 | 1 | 1 | 0 | 2 | 1 | 1 |
 | exclusion-collision | exclusion collision | exclusion | 2 | 2 | 0 | 1 | 2 | 1 | 2 |
 | lockstep-trap | lockstep trap | family | 0 | 1 | 0 | 1 | 0 | 0 | 1 |
@@ -823,12 +823,12 @@ Natural workloads use cached crates.io sparse-index rows with each requested roo
 - point-versions excluded: 13
 - widened-versions excluded: 98
 - aggregate widening factor: 7.538462
-- pressure decisions saved by warm facts: 4
-- pressure conflicts saved by warm facts: 2
+- pressure decisions saved by warm facts: 5
+- pressure conflicts saved by warm facts: 3
 
 ### Round 3 verdict
 
-Derivation-support widening pays in this round: it expands exclusion coverage by 7.538462x and the perturbed pressure re-solves save 4 decisions and 2 conflicts. The effect is not uniform by kind, so the useful design signal is the per-kind table rather than a single global rescue story.
+Derivation-support widening pays in this round: it expands exclusion coverage by 7.538462x and the perturbed pressure re-solves save 5 decisions and 3 conflicts. The effect is not uniform by kind, so the useful design signal is the per-kind table rather than a single global rescue story.
 
 ### Appendix: downgrade-cascade full trace
 
@@ -847,10 +847,10 @@ This trace is emitted by the round-3 solver run for the pressure scenario, not r
 11. force codec 3.0.0 (only candidate after propagation)
 12. expand web 3.0.0 (highest remaining of 3 candidates) - reads 1 manifest
 13. tokio-like: [1.0.0,1.0.1) ∩ [3.0.0,4.0.0) = empty -> conflict
-14. learn: tokio-like [1.0.0,1.0.1); codec [3.0.0,3.0.1); web [3.0.0,3.0.1); client [1.0.0,1.0.1) dead; support: web->tokio-like edge; widened 1->1 versions
+14. learn: tokio-like [1.0.0,1.0.1); web [3.0.0,3.0.1) dead; support: web->tokio-like edge; widened 1->1 versions
 15. expand web 2.0.0 (highest remaining of 3 candidates) - reads 1 manifest
 16. codec: [3.0.0,3.0.1) ∩ [1.0.0,1.0.1) = empty -> conflict
-17. learn: tokio-like [1.0.0,1.0.1); codec [3.0.0,3.0.1); web [2.0.0,2.0.1); client [1.0.0,1.0.1) dead; support: client->codec edge, web->codec edge; widened 1->1 versions
+17. learn: codec [3.0.0,3.0.1); web [2.0.0,2.0.1); client [1.0.0,1.0.1) dead; support: client->codec edge, web->codec edge; widened 1->1 versions
 18. expand web 1.0.0 (highest remaining of 3 candidates) - reads 1 manifest
 19. solution: client 1.0.0, codec 3.0.0, tokio-like 1.0.0, web 1.0.0
 20. summary: manifests read 3, candidate observations 3, conflicts 2, widened versions killed 2 vs 2 point versions

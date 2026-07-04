@@ -848,6 +848,14 @@ impl CompiledIndex {
         }
         (region, point, widened)
     }
+
+    fn support_packages(&self, support: &BTreeSet<EdgeKey>) -> BTreeSet<PkgIx> {
+        support
+            .iter()
+            .flat_map(|edge| [self.package(&edge.parent), self.package(&edge.dep)])
+            .flatten()
+            .collect()
+    }
 }
 
 #[derive(Clone, Debug, Eq, PartialEq)]
@@ -929,12 +937,17 @@ impl<'a> Solver<'a> {
         }
     }
 
-    fn install_warm_fact(&mut self, fact: LearnedNoGood) {
+    fn install_warm_fact(&mut self, mut fact: LearnedNoGood) {
+        let derivation = self.derivations.append(Derivation {
+            premises: Vec::new(),
+            rule: RuleKind::Resolve,
+        });
+        fact.derivation = derivation;
         let id = self.exclusions.append(Exclusion {
             region: fact.region.clone(),
-            derivation: fact.derivation,
+            derivation,
         });
-        self.derivations.note_exclusion(id, fact.derivation);
+        self.derivations.note_exclusion(id, derivation);
         self.learned.push(fact);
     }
 
@@ -954,11 +967,9 @@ impl<'a> Solver<'a> {
                 pkg: root.name.clone(),
                 requirement: requirement.clone(),
             });
-            self.activate(
-                state,
-                pkg,
-                Premise::Pin(PinRef(format!("root:{}", root.name))),
-            );
+            let activation_pin = PinRef(format!("root:{}", root.name));
+            self.derivations.note_pin(activation_pin.clone());
+            self.activate(state, pkg, Premise::Pin(activation_pin));
             self.steps.push(SolveStep::Decree {
                 origin: DecreeOrigin::Root,
                 pkg: root.name.clone(),
@@ -999,11 +1010,9 @@ impl<'a> Solver<'a> {
                 pkg: decree.name.clone(),
                 requirement,
             });
-            self.activate(
-                state,
-                pkg,
-                Premise::Pin(PinRef(format!("decree:{}", decree.name))),
-            );
+            let activation_pin = PinRef(format!("decree:{}", decree.name));
+            self.derivations.note_pin(activation_pin.clone());
+            self.activate(state, pkg, Premise::Pin(activation_pin));
             let pin = PinRef(format!("decree:{}:{}", decree.name, decree.req));
             self.derivations.note_pin(pin.clone());
             self.intersect_domain(
@@ -1163,7 +1172,8 @@ impl<'a> Solver<'a> {
 
     fn apply_exclusions(&mut self, state: &mut State) -> Result<(), Conflict> {
         let learned = self.learned.clone();
-        for fact in &learned {
+        for (ix, fact) in learned.iter().enumerate() {
+            let premise = Premise::Exclusion(ExclusionId(ix as u32));
             let mut unsatisfied = Vec::new();
             let mut disjoint = false;
             for (pkg, versions) in &fact.region.versions {
@@ -1192,7 +1202,7 @@ impl<'a> Solver<'a> {
                         .is_some()
                 }) {
                     return Err(Conflict {
-                        premises: vec![Premise::Exclusion(ExclusionId(0))],
+                        premises: vec![premise],
                         selected: selected_versions(state),
                         decision: last_hypothesis(state),
                     });
@@ -1208,7 +1218,7 @@ impl<'a> Solver<'a> {
                         .map(|domain| domain.allowed.clone())
                         .unwrap_or_else(VersionSet::universe);
                     let next = current.intersect(&excluded.complement(&current));
-                    self.intersect_domain(state, pkg, next, Premise::Exclusion(ExclusionId(0)))?;
+                    self.intersect_domain(state, pkg, next, premise)?;
                 }
             }
         }
@@ -1458,20 +1468,25 @@ impl<'a> Solver<'a> {
             premises: premises.clone(),
             rule: RuleKind::Conflict,
         });
-        let mut region = Region::new();
-        if let Some(hypothesis) = conflict.decision.clone() {
-            region = region.with_versions(hypothesis.pkg, VersionSet::exact(hypothesis.version));
-        } else {
-            for (pkg, version) in &conflict.selected {
-                region = region.with_versions(*pkg, VersionSet::exact(version.clone()));
-            }
-        }
-        for (pkg, version) in &conflict.selected {
-            if !region.versions.contains_key(pkg) {
-                region = region.with_versions(*pkg, VersionSet::exact(version.clone()));
-            }
+        if let Err(err) = self.derivations.replay(derivation) {
+            debug_assert!(
+                false,
+                "learned conflict derivation {derivation:?} must replay: {err:?}"
+            );
         }
         let support = support_from_premises(self.index, &premises);
+        let mut region = Region::new();
+        let supported_packages = self.index.support_packages(&support);
+        for pkg in supported_packages {
+            if let Some(version) = conflict.selected.get(&pkg) {
+                region = region.with_versions(pkg, VersionSet::exact(version.clone()));
+            }
+        }
+        if region.versions.is_empty()
+            && let Some(hypothesis) = conflict.decision.clone()
+        {
+            region = region.with_versions(hypothesis.pkg, VersionSet::exact(hypothesis.version));
+        }
         let (region, point_versions, widened_versions) =
             self.index
                 .widen_region(&conflict.selected, &support, &region);
@@ -2243,11 +2258,16 @@ fn record_ladder(
             RungVerdict::ExcludedByRequirement { edges }
         } else {
             let assignment = assignment_with_rebound(index, result, pkg, version);
+            let direct_assignment =
+                assignment_with_direct_deps_from_rebound(index, result, pkg, version);
             result
                 .learned
                 .iter()
                 .enumerate()
-                .find(|(_, fact)| fact.region.contains_assignment(&assignment))
+                .find(|(_, fact)| {
+                    fact.region.contains_assignment(&assignment)
+                        || fact.region.contains_assignment(&direct_assignment)
+                })
                 .map_or(RungVerdict::Unexplained, |(ix, _)| {
                     RungVerdict::KilledByFact {
                         fact_id: format!("fact-{ix}"),
@@ -2297,6 +2317,22 @@ fn assignment_with_rebound(
     Assignment { versions, features }
 }
 
+fn assignment_with_direct_deps_from_rebound(
+    index: &CompiledIndex,
+    result: &SolveResult,
+    rebound_pkg: PkgIx,
+    rebound_version: &Version,
+) -> Assignment {
+    let mut assignment = assignment_with_rebound(index, result, rebound_pkg, rebound_version);
+    apply_direct_dependency_versions(
+        index,
+        rebound_pkg,
+        rebound_version,
+        &mut assignment.versions,
+    );
+    assignment
+}
+
 fn add_forced_dependency_closure(index: &CompiledIndex, versions: &mut BTreeMap<PkgIx, Version>) {
     loop {
         let mut changed = false;
@@ -2335,6 +2371,37 @@ fn add_forced_dependency_closure(index: &CompiledIndex, versions: &mut BTreeMap<
         }
         if !changed {
             break;
+        }
+    }
+}
+
+fn apply_direct_dependency_versions(
+    index: &CompiledIndex,
+    pkg: PkgIx,
+    version: &Version,
+    versions: &mut BTreeMap<PkgIx, Version>,
+) {
+    let Some(manifest) = index.manifests.get(&(pkg, version.clone())) else {
+        return;
+    };
+    for dep in &manifest.deps {
+        if dep.optional {
+            continue;
+        }
+        let Some(dep_pkg) = index.package(&dep.actual) else {
+            continue;
+        };
+        let Ok(req) = parse_req(&dep.req) else {
+            continue;
+        };
+        let candidates: Vec<_> = index
+            .versions(dep_pkg)
+            .iter()
+            .filter(|version| req.contains(version))
+            .cloned()
+            .collect();
+        if let [candidate] = candidates.as_slice() {
+            versions.insert(dep_pkg, candidate.clone());
         }
     }
 }
@@ -2875,6 +2942,64 @@ mod tests {
                 .iter()
                 .any(|edge| edge.parent == "web" && edge.dep == "tokio-like")
         );
+        Ok(())
+    }
+
+    #[test]
+    fn learned_region_mentions_only_refuting_support_packages() -> Result<()> {
+        let scenario = downgrade_cascade()?;
+        let result =
+            solve(&scenario.index, scenario.problem).map_err(|err| eyre::eyre!("{err:?}"))?;
+        let fact = result.learned.first().expect("first learned fact");
+        let support_packages = scenario.index.support_packages(&fact.support);
+
+        assert_eq!(
+            fact.support,
+            BTreeSet::from([EdgeKey {
+                parent: "web".to_owned(),
+                dep: "tokio-like".to_owned(),
+            }])
+        );
+        assert_eq!(
+            fact.region
+                .versions
+                .keys()
+                .copied()
+                .collect::<BTreeSet<_>>(),
+            support_packages
+        );
+        assert_eq!(
+            fact.region
+                .versions
+                .keys()
+                .filter_map(|pkg| scenario.index.name(*pkg))
+                .collect::<BTreeSet<_>>(),
+            BTreeSet::from(["tokio-like", "web"])
+        );
+
+        result
+            .derivations
+            .replay(fact.derivation)
+            .map_err(|err| eyre::eyre!("learned derivation did not replay: {err:?}"))?;
+        Ok(())
+    }
+
+    #[test]
+    fn every_learned_no_good_derivation_replays() -> Result<()> {
+        for scenario in pressure_scenarios()? {
+            let Ok(result) = solve(&scenario.index, scenario.problem) else {
+                continue;
+            };
+            for fact in &result.learned {
+                result.derivations.replay(fact.derivation).map_err(|err| {
+                    eyre::eyre!(
+                        "{} learned derivation {:?} did not replay: {err:?}",
+                        scenario.name,
+                        fact.derivation
+                    )
+                })?;
+            }
+        }
         Ok(())
     }
 
