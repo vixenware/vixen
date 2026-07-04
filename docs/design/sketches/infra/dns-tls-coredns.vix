@@ -1,0 +1,107 @@
+// dns-tls-coredns.vix -- DESIGN SKETCH, not parser input.
+//
+// Representative unit: DNS, cert-manager, Traefik TLS, CoreDNS field custody.
+//
+// Existing machinery:
+// - DNS A/AAAA records live outside this repo in cove/infra OpenTofu.
+// - cert-manager ClusterIssuers use HTTP-01 via Traefik.
+// - ccc-vixen has an explicit Certificate and Traefik IngressRouteTCP.
+// - CoreDNS is Server-Side Applied for data.Corefile only; k3s owns NodeHosts.
+//
+// Hits:
+// - field-level custody: Corefile vs NodeHosts and cert-manager-owned Secrets.
+// - push inlet: off-repo DNS changes and ACME/Kubernetes watch events.
+// - temporal policy: ACME renewal windows and DNS propagation checks.
+// - NEW off-repo authority custody: Cloudflare DNS is a different repo/account.
+
+use infra::{Address, Custody, Probe, Reconcile, StandingDemand, TemporalPolicy};
+use caps::{Cloudflare, Cluster, Acme, Traefik};
+
+struct PublicEndpoint {
+    host: String,
+    service: String,
+    port: Int,
+    dns: DnsTarget,
+}
+
+fn ccc_endpoint() -> PublicEndpoint {
+    PublicEndpoint {
+        host: "ccc.vixen.rs",
+        service: "ccc-backend",
+        port: 4000,
+        dns: DnsTarget {
+            zone: "vixen.rs",
+            a: "157.180.101.55",
+            aaaa: "2a01:4f9:3090:31a2::2",
+            authority: external_repo("cove/infra"),
+        },
+    }
+}
+
+fn dns_tls_coredns(cluster: Cluster, cf: Cloudflare, acme: Acme, traefik: Traefik) -> NetworkClaim {
+    let ep = ccc_endpoint();
+    let addr = Address::dns("vixen.rs/ccc");
+
+    // Off-repo import/adoption: the record may already be managed by cove/infra.
+    let dns_observed = Probe::dns(ep.host)
+        .authoritative()
+        .public_resolvers(["1.1.1.1", "9.9.9.9"]);
+
+    let dns = Reconcile::addressed(addr / "cloudflare-records", ep.dns, dns_observed)
+        .provider(cf)
+        .adopt_if_present()
+        .custody(Custody::external("cove/infra", paths: [
+            "vixen_rs_jamie_subdomains",
+        ]));
+
+    let issuers = Reconcile::addressed(Address::k8s("cert-manager/clusterissuers"),
+                                       lets_encrypt_http01("traefik"),
+                                       Probe::cluster(cluster).cluster_issuers())
+        .custody(Custody::resources([
+            ("cert-manager.io/v1/ClusterIssuer", "", "letsencrypt-staging"),
+            ("cert-manager.io/v1/ClusterIssuer", "", "letsencrypt-prod"),
+        ]))
+        .apply_with(cluster);
+
+    let cert = Reconcile::addressed(addr / "certificate", ep.host, Probe::cluster(cluster).secrets())
+        .requires(dns)
+        .requires(issuers)
+        .provider(acme)
+        .custody(Custody::resource("cert-manager.io/v1/Certificate", "ccc-vixen", "ccc-vixen-tls"))
+        // Secret exists, but cert-manager owns the generated keypair material.
+        .subcustody("Secret/ccc-vixen-tls", owner: "cert-manager")
+        .apply_with(cluster);
+
+    let route = Reconcile::addressed(addr / "traefik-tcp-route", ep, Probe::cluster(cluster).routes())
+        .requires(cert)
+        .custody(Custody::resource("traefik.io/v1alpha1/IngressRouteTCP", "ccc-vixen", "ccc-backend"))
+        .apply_with(cluster);
+
+    // CoreDNS split ownership: Vixen owns only data.Corefile.
+    let coredns = Reconcile::addressed(Address::k8s("kube-system/coredns/Corefile"),
+                                       public_forwarders(["1.1.1.1", "1.0.0.1", "9.9.9.9", "149.112.112.112"]),
+                                       Probe::cluster(cluster).config_map("kube-system", "coredns"))
+        .custody(Custody::field("v1/ConfigMap", "kube-system", "coredns", "data.Corefile"))
+        .not_custody("data.NodeHosts") // k3s owns the node map.
+        .apply_with(cluster.server_side_apply());
+
+    let renewal = TemporalPolicy::window(addr / "acme-renewal")
+        .before_expiry(days: 30)
+        .redemand(cert)
+        .requires(Probe::http01(ep.host).passes_through(traefik));
+
+    let standing = StandingDemand::root(addr)
+        .redemand_on_push("cove/infra")
+        .redemand_on_push("github.com/vixenware/vixen-infra")
+        .redemand_on_observation_stale(cluster.watch(["Certificate", "Secret", "IngressRouteTCP"]));
+
+    NetworkClaim {
+        address: addr,
+        dns,
+        cert,
+        route,
+        coredns,
+        renewal,
+        standing,
+    }
+}

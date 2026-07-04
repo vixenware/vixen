@@ -1,0 +1,150 @@
+// runner-autoscaler.vix -- DESIGN SKETCH, not parser input.
+//
+// Representative unit: GitHub OSS runners and Hetzner Cloud burst nodes.
+//
+// Existing machinery:
+// - ARC controller is a Helm Application in arc-system.
+// - Bear Cove and facet-rs scale sets are Argo Applications.
+// - hcloud-ci-node-autoscaler is checked in at replicas: 0 and has RBAC for
+//   Kubernetes nodes, pods, storage, and coordination.k8s.io Leases.
+// - notes/18 records the node labels, taints, Tailscale flannel requirements,
+//   cost caps, cloud-init shape, and verification commands.
+//
+// Hits:
+// - Rodin-as-scheduler: placement is constraint solving over probed node facts.
+// - leases/linearization: exactly one autoscaler owns scale decisions.
+// - standing runs: runner pods and cloud nodes must stay alive only while
+//   demanded by pending CI work.
+// - temporal policy: scale-down delay, unneeded time, max provision time.
+// - NEW secret custody: GitHub App private keys, hcloud token, Tailscale auth
+//   key, and k3s node token are sealed/revealed to different executors.
+
+use infra::{Address, Custody, Lease, Probe, Reconcile, StandingRun, TemporalPolicy};
+use rodin::{solve, Constraint, Fact};
+use caps::{Cluster, GitHub, HetznerCloud, Tailscale};
+
+struct RunnerPool {
+    name: String,
+    github_org: String,
+    labels: [String],
+    min: Int,
+    max: Int,
+    placement: [Constraint],
+    secrets: [SealedSecretRef],
+}
+
+fn hcloud_us_pool() -> RunnerPool {
+    RunnerPool {
+        name: "hcloud-us-ubuntu-24.04",
+        github_org: "bearcove",
+        labels: ["hcloud", "us", "ash", "ubuntu-24.04", "x64", "rust", "internal-oss"],
+        min: 0,
+        max: 16,
+        placement: [
+            Constraint::node_label("vixen.rs/ci-pool", "bearcove-hcloud-us"),
+            Constraint::tolerates("vixen.rs/node", "hcloud-ci", "NoSchedule"),
+            Constraint::one_pod_per("kubernetes.io/hostname"),
+            Constraint::resources(cpu: 16, memory: "32Gi"),
+        ],
+        secrets: [
+            sealed("github-actions-runner-app.sops.yaml"),
+            sealed("forgejo-registry.sops.yaml"),
+            sealed("hcloud-ci-node-autoscaler.sops.yaml"),
+        ],
+    }
+}
+
+fn runner_capacity(cluster: Cluster, github: GitHub, hcloud: HetznerCloud, ts: Tailscale) -> RunnerClaim {
+    let pool = hcloud_us_pool();
+    let addr = Address::ci_pool("github/bearcove/hcloud-us");
+
+    let github_queue = Probe::github(github)
+        .pending_workflow_jobs(org: pool.github_org, labels: pool.labels)
+        .registration_capacity(pool.name);
+
+    let cluster_facts = Probe::cluster(cluster)
+        .nodes()
+        .taints()
+        .pending_pods()
+        .storage_pressure()
+        .leases();
+
+    let cloud_facts = Probe::hcloud(hcloud)
+        .servers(label: "bearcove-ci-ash-ccx43")
+        .locations()
+        .prices();
+
+    // Rodin learns placement facts: which nodes can satisfy the runner pod,
+    // which pending pods justify a node, and which node groups are equivalent.
+    let placement = solve([
+        Fact::observed(cluster_facts.nodes),
+        Fact::observed(cluster_facts.pending_pods),
+        Fact::observed(cloud_facts.servers),
+        Fact::constraints(pool.placement),
+        Fact::cost_cap(max_nodes: pool.max, idle_nodes: 0),
+    ]);
+
+    let arc_controller = Reconcile::addressed(Address::k8s("arc-system/controller"),
+                                             helm("gha-runner-scale-set-controller", "0.14.2"),
+                                             cluster_facts)
+        .custody(Custody::resources([
+            ("apps/v1/Deployment", "arc-system", "arc-controller"),
+            ("apiextensions.k8s.io/v1/CustomResourceDefinition", "", "autoscalingrunnersets.actions.github.com"),
+        ]))
+        .apply_with(cluster);
+
+    let scale_set = Reconcile::addressed(addr / "arc-scale-set", pool, cluster_facts)
+        .requires(arc_controller)
+        .requires(placement)
+        .reveal(sealed("github-actions-runner-app.sops.yaml"), only_to: addr / "arc-controller")
+        .custody(Custody::resource("actions.github.com/AutoscalingRunnerSet",
+                                   "arc-runners-bearcove",
+                                   pool.name))
+        .apply_with(cluster);
+
+    let autoscaler_lease = Lease::linearized(addr / "cluster-autoscaler")
+        .resource("coordination.k8s.io/Lease", "hcloud-ci-node-autoscaler", "cluster-autoscaler")
+        .holder_identity("hcloud-ci-node-autoscaler");
+
+    let cloud_nodes = Reconcile::addressed(addr / "hcloud-nodes", placement, cloud_facts)
+        .requires(scale_set)
+        .requires(autoscaler_lease)
+        .provider(hcloud)
+        .reveal(sealed("hcloud-token"), only_to: addr / "autoscaler")
+        .reveal(sealed("tailscale-auth-key"), only_to: addr / "cloud-init")
+        .reveal(sealed("k3s-node-token"), only_to: addr / "cloud-init")
+        .custody(Custody::external("hetzner-cloud", labels: ["bearcove-ci-ash-ccx43"]))
+        .apply_with(hcloud);
+
+    let cloud_init = Reconcile::addressed(addr / "node-join", placement, cluster_facts)
+        .requires(cloud_nodes)
+        .provider(ts)
+        .custody(Custody::fields([
+            ("Node", "*.hcloud", "metadata.labels[vixen.rs/ci-pool]"),
+            ("Node", "*.hcloud", "spec.taints[vixen.rs/node]"),
+            ("Node", "*.hcloud", "status.addresses[InternalIP]"),
+        ]))
+        .apply_with(cluster);
+
+    let live_runners = StandingRun::k8s_pods(addr / "runner-pods")
+        .requires(scale_set)
+        .demanded_by(github_queue.pending_jobs)
+        .liveness_probe("runner registered with GitHub")
+        .terminate_when_undemanded();
+
+    let scale_down = TemporalPolicy::delay(addr / "scale-down")
+        .after_unneeded("5m")
+        .after_delete("1m")
+        .max_provision_time("10m")
+        .redemand(cloud_nodes);
+
+    RunnerClaim {
+        address: addr,
+        placement,
+        scale_set,
+        cloud_nodes,
+        cloud_init,
+        live_runners,
+        scale_down,
+    }
+}

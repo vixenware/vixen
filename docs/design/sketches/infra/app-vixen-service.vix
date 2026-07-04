@@ -1,0 +1,119 @@
+// app-vixen-service.vix -- DESIGN SKETCH, not parser input.
+//
+// Representative unit: app.vixen.rs plus admin.vixen.rs.
+//
+// Existing machinery:
+// - clusters/prod-internal/apps/app-vixen.yaml is an Argo Application.
+// - manifests/app-vixen/kustomization.yaml pins the OCI image tag bumped by CI.
+// - manifests/app-vixen/deployment.yaml consumes CNPG and SOPS/KSOPS secrets.
+// - manifests/app-vixen/ingress.yaml requests Let's Encrypt via cert-manager.
+//
+// Hits:
+// - standing demand: Argo self-heal becomes a registered standing root.
+// - standing runs: Deployment success includes readiness/liveness remaining OK.
+// - artifact intelligence: the image tag is a probed OCI merged tree.
+// - NEW secret custody: GitHub App, Stripe, registry, session, and allowlist
+//   secrets need sealed identity, reveal points, and rotation policy.
+
+use infra::{Address, Custody, Probe, Reconcile, StandingDemand, StandingRun};
+use caps::{Cluster, Registry, Kustomize, Ksops};
+
+struct WebService {
+    name: String,
+    namespace: String,
+    image: OciImage,
+    db: PostgresCluster,
+    secrets: [SealedSecretRef],
+    public_hosts: [String],
+    admin_hosts: [String],
+}
+
+fn app_vixen_service(reg: Registry) -> WebService {
+    WebService {
+        name: "app-vixen",
+        namespace: "app-vixen",
+        image: reg.oci("code.vixen.rs/vixen/app-vixen-web",
+                       "34c345e44df4f6a6c95b39f99124e2e5a564652d"),
+        db: PostgresCluster {
+            name: "app-vixen-db",
+            instances: 2,
+            database: "app_vixen",
+            backup: barman("s3://vixen-backups/cnpg"),
+        },
+        secrets: [
+            sealed("app-vixen/github-oauth.sops.yaml"),
+            sealed("app-vixen/registry.sops.yaml"),
+            sealed("app-vixen/admin-vixen-allowlist.sops.yaml"),
+            sealed("app-vixen/stripe.sops.yaml"),
+        ],
+        public_hosts: ["app.vixen.rs"],
+        admin_hosts: ["admin.vixen.rs"],
+    }
+}
+
+fn deploy_app_vixen(cluster: Cluster, reg: Registry, ksops: Ksops, kustomize: Kustomize) -> ServiceClaim {
+    let svc = app_vixen_service(reg);
+    let addr = Address::k8s("prod-internal/app-vixen");
+
+    // Artifact intelligence can reject unbakeable deploys before any pod starts.
+    let image_facts = Probe::oci(svc.image)
+        .merged_tree()
+        .executables()
+        .glibc_floor()
+        .exposed_ports();
+
+    let cluster_facts = Probe::cluster(cluster)
+        .namespace(svc.namespace)
+        .node_artifacts()
+        .storage_classes()
+        .ingress_classes()
+        .secret_names();
+
+    let db = Reconcile::addressed(addr / "postgres", svc.db, cluster_facts)
+        .custody(Custody::resource("postgresql.cnpg.io/Cluster", svc.namespace, "app-vixen-db"))
+        .apply_with(cluster);
+
+    let secrets = svc.secrets.map(|s|
+        Reconcile::addressed(addr / ("secret/" + s.name), s, cluster_facts)
+            .decrypt_with(ksops)
+            .reveal(only_to: [
+                addr / "deployment/app-vixen-web",
+                addr / "deployment/admin-vixen-web",
+            ])
+            .custody(Custody::resource("v1/Secret", svc.namespace, s.k8s_name))
+            .apply_with(cluster)
+    );
+
+    let rendered = kustomize.build(p"clusters/prod-internal/manifests/app-vixen")
+        .with_image(svc.image)
+        .with_generated(secrets);
+
+    let workload = Reconcile::addressed(addr / "workload", rendered, cluster_facts)
+        .requires(db)
+        .requires(secrets)
+        .requires(assert(image_facts.glibc_floor <= cluster_facts.min_glibc_floor))
+        .custody(Custody::resources([
+            ("apps/v1/Deployment", svc.namespace, "app-vixen-web"),
+            ("apps/v1/Deployment", svc.namespace, "admin-vixen-web"),
+            ("networking.k8s.io/v1/Ingress", svc.namespace, "app-vixen-web"),
+        ]))
+        .apply_with(cluster);
+
+    let standing_root = StandingDemand::root(addr)
+        .redemand_on_push("github.com/vixenware/vixen-infra")
+        .redemand_on_observation_stale(cluster.watch(addr));
+
+    let live = StandingRun::k8s_deployment(addr / "app-vixen-web")
+        .requires(workload)
+        .readiness_http("/", host: "app.vixen.rs")
+        .liveness_http("/", host: "app.vixen.rs")
+        .restart_on_liveness_probe_failure();
+
+    ServiceClaim {
+        address: addr,
+        rendered,
+        reconciled: workload,
+        standing_root,
+        live,
+    }
+}

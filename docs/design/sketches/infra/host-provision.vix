@@ -1,0 +1,118 @@
+// host-provision.vix -- DESIGN SKETCH, not parser input.
+//
+// Representative unit: jamie base host provisioning.
+//
+// Existing machinery:
+// - ansible/inventory.yaml names jamie/hazel/ash/ahri and host-specific policy.
+// - ansible/site.yaml applies base-os, docker, forgejo-runner, monitoring-agent,
+//   and sudo-ssh-agent-auth to Debian hosts.
+// - STATE.md and RUNBOOK.md record the as-built host and disaster path.
+//
+// Hits:
+// - standing runs: sshd, nftables, docker, forgejo-runner, Alloy must remain
+//   alive, not merely converge once.
+// - temporal policy: unattended upgrades, ZFS scrub, Docker prune timers.
+// - NEW secret custody: runner registration token and registry auth reveal
+//   points are not just file reconciliation.
+
+use infra::{Address, Custody, Probe, Reconcile, StandingRun, TemporalPolicy};
+use caps::{Hetzner, Tailscale, Ssh, Systemd, Zfs};
+
+struct HostSpec {
+    name: String,
+    public_ipv4: String,
+    public_ipv6: String,
+    tailnet_name: String,
+    ssh_port: Int,
+    public_tcp: [Int],
+    zfs: [DatasetSpec],
+    runner: Option<ForgejoRunnerSpec>,
+}
+
+struct DatasetSpec {
+    name: String,
+    mountpoint: Path,
+    quota: Option<String>,
+}
+
+struct ForgejoRunnerSpec {
+    capacity: Int,
+    labels: [String],
+    cache_quota: String,
+    registry_auth: SealedSecretRef,
+}
+
+fn jamie_spec() -> HostSpec {
+    HostSpec {
+        name: "jamie",
+        public_ipv4: "157.180.101.55",
+        public_ipv6: "2a01:4f9:3090:31a2::2",
+        tailnet_name: "jamie.dropbear-piranha.ts.net",
+        ssh_port: 2222,
+        public_tcp: [22, 80, 443],
+        zfs: [
+            DatasetSpec { name: "tank/k3s", mountpoint: p"/var/lib/rancher/k3s", quota: None },
+            DatasetSpec { name: "tank/ci-cache", mountpoint: p"/srv/ci", quota: Some("300G") },
+        ],
+        runner: Some(ForgejoRunnerSpec {
+            capacity: 4,
+            labels: ["linux-x86_64-trusted"],
+            cache_quota: "300G",
+            registry_auth: sealed("ansible/forgejo_runner_docker_auth_config"),
+        }),
+    }
+}
+
+fn host_probe(ssh: Ssh, host: HostSpec) -> HostReality {
+    Probe::host(ssh, host.tailnet_name)
+        .read("/etc/ssh/sshd_config.d/99-hardening.conf")
+        .read("/etc/nftables.conf")
+        .read("/etc/docker/daemon.json")
+        .service("sshd")
+        .service("nftables")
+        .service("docker")
+        .service("forgejo-runner")
+        .zfs("tank")
+        .docker_bridge_dns("busybox:latest", ["1.1.1.1", "9.9.9.9"], "github.com")
+}
+
+fn provision_jamie(hcloud: Hetzner, tailnet: Tailscale, ssh: Ssh, systemd: Systemd, zfs: Zfs) -> HostClaim {
+    let desired = jamie_spec();
+    let addr = Address::host("prod-internal/jamie");
+    let observed = host_probe(ssh, desired);
+
+    // Addressed effect: host identity is durable even as the invocation changes.
+    let base = Reconcile::addressed(addr / "base-os", desired, observed)
+        .custody(Custody::paths([
+            p"/etc/ssh/sshd_config.d/99-hardening.conf",
+            p"/etc/nftables.conf",
+            p"/etc/sysctl.d/99-inotify.conf",
+        ]))
+        .apply_with(ssh);
+
+    let docker = Reconcile::addressed(addr / "docker", desired, observed)
+        .requires(base)
+        .custody(Custody::paths([p"/etc/docker/daemon.json", p"/var/lib/docker"]))
+        .apply_with(ssh);
+
+    let runner = Reconcile::addressed(addr / "forgejo-runner", desired.runner, observed)
+        .requires(docker)
+        .reveal(desired.runner.unwrap().registry_auth, only_to: addr / "systemd-unit")
+        .custody(Custody::paths([p"/srv/ci/forgejo-runner", p"/etc/systemd/system/forgejo-runner.service"]))
+        .apply_with(ssh);
+
+    let standing = StandingRun::systemd(addr / "forgejo-runner", "forgejo-runner.service")
+        .requires(runner)
+        .restart_on_liveness_probe_failure()
+        .lease("host-process-custody/forgejo-runner");
+
+    let prune = TemporalPolicy::timer(addr / "docker-prune", "weekly")
+        .demands(Reconcile::addressed(addr / "docker-cache-hygiene", desired.runner, observed));
+
+    HostClaim {
+        address: addr,
+        applied: [base, docker, runner],
+        standing: [standing],
+        temporal: [prune],
+    }
+}
