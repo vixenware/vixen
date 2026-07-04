@@ -229,3 +229,28 @@ function, never mutations of the world):
 Sibling whack-a-mole dies at the source level: one overlay decree names a
 TREE (a workspace fork); the registry closure enumerates its member
 packages (pure) — one line covers tokio + tokio-util + tokio-macros.
+
+
+## The boundary (RULED with Amos in the walkthrough, banked late)
+
+- **Ecosystems are closures.** The solver's native vocabulary is neutral
+  atoms (names, version sets, requirements, feature demands, exclusion
+  clauses). Everything cargo-specific — manifest interpretation, cfg
+  filtering, renames (edge labels, resolved inside deps_of), our
+  metadata.vixen exclusion tables — lives in ordinary vix closures shipped
+  by the registry capability: versions_of (wraps the pinned observation;
+  ONE observation per crate: its index file — both lookup levels arrive in
+  one fetch, resolution never touches tarballs, cksum is the build-time
+  handoff) and deps_of (pure parse of pinned content). Rejected: a
+  declarative clause-schema (cfg evaluation kills it; closures are
+  memoized pure vix calls, cacheable across solves).
+- **solve IS A RUN.** Registers in the runs registry; its execution is the
+  search; every fact it needs is a demand issued back into the engine
+  (deps_of = Call node, versions_of = observation node). Consequences:
+  resolution is observable in trace/lanes with the existing three-moment
+  events; resolution gets tier-2-style reuse (its read-set = pins +
+  deps_of keys consulted); suspension story already solved (blocked
+  fact-requests are frontier entries).
+- **The primitive reentrancy rule**: a primitive may only communicate
+  with the engine via issued demands, never shared state (exec already
+  obeys it unknowingly). Goes into vix-spec as a named rule.

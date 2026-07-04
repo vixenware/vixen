@@ -157,7 +157,63 @@ ARE snark grammars — five products, NUL-join). Servers: vixd release bin +
 vite :4180 in background tasks (restart as needed: ./target/release/vixd in
 facet-cc; pnpm dev --port 4180 in apps/playground).
 
+## HOW TO TALK TO AMOS (learned the hard way, twice — top priority)
+
+PLAIN LANGUAGE. No decision-numbers (D3/D4), no section letters (agenda C),
+no dense jargon-chains — he called both out. Quote documents BY NAME AND
+PATH; he cannot see your docs while chatting, often reads ON MOBILE. Ease
+him in with background before questions. ONE question at a time. Decisions
+are made WITH him — propose with options + a recommendation, wait. Digests
+quote verbatim (scissors, not pen). When he muses, that's design signal —
+bank it. When evidence contradicts him, say so plainly; he rewards it.
+
+## STATE (2026-07-04, Rodin day — supersedes older state sections)
+
+**Rodin (the carving resolver) is co-designed and evidence-backed.**
+- Spec: docs/design/rodin.md — 12 FIXED items (11: proven-optimality is
+  the ONLY mode, no early stop EVER; 12: result = queryable artifact,
+  provenance + counterfactual-as-re-solve, amendments via registry
+  bidirectionality, UNSAT answers carry derivations).
+- Closed with evidence (docs/design/rodin-c-evidence.md, 3 rounds):
+  whole-manifest widening FALSIFIED (1.88x); per-edge stability real
+  (13.4x); dynamic widening pays (7.5x, warm re-solves save work).
+  Widening rule (ruled in plain terms): "cross off neighbors identical in
+  the ways that mattered" — a fact's validity range is its read-set's
+  stability range.
+- Crates (all in vixenware/vixen, solver = proprietary side): rodin-facts
+  (two stores + derivations, (source,name) interning), rodin-core v0
+  (sequential set-domain solver, guarded clauses = weak deps native,
+  emits a generated trace), rodin-survey (evidence), vix-solve (pubgrub
+  placeholder + virtual packages), reg-mock (mock sparse registry, REAL
+  cargo as oracle — NO homemade reference solvers, Amos's antipattern
+  rule). Known gap for v0.1: minimize learned regions to their support
+  (fat facts widen worse — trace step 14).
+- Cargo-cycle ledger: sketches/cargo/decisions.md — solver seam, lockfile
+  (result pin is authority, recompute is audit; import Cargo.lock don't
+  imitate), contexts separate, exclusions-beyond-cargo (metadata.vixen
+  hook), patches = three layers (decrees/content/metadata overlays;
+  version sweeps fall out), THE BOUNDARY (solve is a run; ecosystems are
+  closures; primitive reentrancy rule) — banked at the end of the file.
+- Order-dependence of cargo: hypothesis came back NEGATIVE on a simple
+  fixture (reg-mock keeps it #[ignore] with verdict) — open hunt.
+
+**IN FLIGHT: agent 76bda682** — SolveRecord (typed, facet-json) in
+rodin-core + playground "resolve" view (DAG with requirement-labeled
+edges, tap-node version ladder, fact→support highlighting, plain-language
+steps with decree ORIGINS labeled, mobile-first). Review on landing; the
+record format becomes the contract for live solve-as-run wiring, the
+query box, counterfactual ghost-diffs.
+
+**Remaining queue**: Rodin consequences (fact minimization, parallel
+workers over region queue, solver events → lanes); solve-as-run engine
+integration (the reentrancy seam — keep for the design line);
+THE CAPSTONE (vix-spec v1 + per-workstream briefs + TASTE RECORD) —
+still the paramount remaining me-work before July 7; command-grammar
+spec; weavy suspend ABI; type-closure identity brief; top-down DAG for
+builds (task 44).
+
 ## Queued for delegation (write prompts as needed)
+
 
 warm-oracle actor thread (daemon statefulness; the anti-Nix whitespace-edit
 demo), executor-side step gating, top-down DAG view + lanes/rails view
