@@ -87,3 +87,105 @@ archaeology. IBM/Rational ClearCase's derived-object winking
 (VFS-based build audit + cache substitution!) was not examined by any
 scrubber — closest commercial ancestor to the VFS soundness posture;
 add to the second pass.
+
+---
+
+# ROUND 2 (2026-07-04, same day): pinned-question pass, adjudicated
+
+*Gemini got patents/commercial archaeology (artifact-only, behaved
+this time — real patent numbers, NOT FOUND answers); Claude got the
+primary-source deep reads. GPT (kill vectors: unsat-core/MUS for R1,
+observation-justified widening for R2, dune/memo + build-system tail)
+STILL PENDING — final novelty scoring waits for it, since its
+assignment holds the two vectors rated most dangerous.*
+
+## Corrections to Round 1 (do not repeat these errors)
+
+1. **Vesta owns negative-lookup and directory-enumeration
+   dependencies (2000), not BuildXL.** PLDI 2000 §4.6.1: a failed
+   file lookup during a tool run records a dependency on the object's
+   NONEXISTENCE (X-type); a directory listing records a domain
+   (D-type) dependency. C4's ancestry chain is Vesta → BuildXL.
+   (This also supersedes Gemini's R2 conclusion that "the soundness
+   posture belongs to BuildXL" — BuildXL industrialized the two-tier
+   mechanism; Vesta had the observation classes first.)
+2. **Unison's runtime Value.memo is NOT durable as shipped.** Round 1
+   said "cached durably at a location incl. Unison Cloud." Primary
+   docs: memo is keyed by computation hash but the shipped cache
+   ability (Scratch) is EPHEMERAL and per-Location ("Scratch values
+   do not persist after the Cloud job"). Unison's durable hash-keyed
+   caches are codebase-level (compile/test). The Unison delta is now
+   THREE separate cited deltas: every-call (vs opt-in), durable (vs
+   ephemeral), journaled cross-machine (vs location-scoped).
+
+## Q-by-Q outcomes
+
+**Vesta key composition (Claude, primary text + US 6,145,056):**
+primary key = IMMEDIATE function body + scalar-arg fingerprints;
+callee bodies covered DYNAMICALLY as secondary deps (E-type recorded
+at application); NO types in any key (SDL dynamically typed).
+CONSEQUENCE: our claim survives as "STATIC transitive closure-hash
+identity with exact blast radius computable before execution" —
+credit Vesta for achieving equivalent SOUNDNESS dynamically; never
+imply Vesta lacked code-identity in keys. Call-by-value confirmed
+flatly for the core (§4); model-imports corner UNVERIFIED (hedge:
+"modulo import loading" until RR-177/SDL-spec imports section read).
+
+**gg (Claude):** cache = thunk hash → output hash ONLY; no external
+observations anywhere; "memoization assertions" (signed third-party
+claims, per-entity trust, dishonesty detectable post-hoc) exist in
+the 2017 DRAFT only and were DROPPED from the ATC'19 paper.
+CONSEQUENCE: C5 is publishable as exactly two deltas on top of
+gg+Trustix: (a) external observations (registry listings, toolchain
+fingerprints, negative lookups) as first-class journal entries;
+(b) lockfile = journal slice / recompute-from-pins = audit. Cite
+gg's draft prominently or a reviewer does it for us.
+
+**PIE/Pluto (Claude):** task keys = invocation identity + STAMPS
+(timestamps/content hashes of files/outputs), never task code —
+benchmark J (semantically-equivalent spec refactor is INVISIBLE to
+change detection) proves it. Demand-driven top-down mode exists;
+persistence local-only. Related-work paragraph, not a C1 threat.
+Konat thesis still unread (could contain a code-hashing extension).
+
+**Skyframe (Claude, primary docs):** all three verified with
+citations — restart-not-suspend (SkyKeyComputeState/StateMachines
+exist as Google's own workaround for restart cost), SkyKey identity
+never code content, cross-machine sharing only at the action layer.
+Safe to cite as the published contrast to suspension-only-for-
+started-and-blocked, WITH the footnote that StateMachines show they
+know the cost — present ours as a design position they approximate.
+
+**Patents (Gemini):** US 11,687,362 B2 (Microsoft, filed 2022) —
+syscall-interception (code injection) to discover task inputs for
+output reuse; the BuildXL-lineage mechanism patent. FLAG FOR
+AWARENESS (vix's VFS-mediation is a different mechanism than
+injected interception, but adjacent; not legal advice). NOT FOUND:
+any patent on formal-grammar CLI parsing for cache keys or sandbox
+derivation; no Google patents from goma/reclient lineage on it.
+
+**ClearCase (Gemini):** winkin reuses via config records of files
+successfully opened/read; NO evidence MVFS tracked failed lookups or
+enumerations → false winkins possible. ClearCase is the VFS-build
+grandfather but NOT the soundness ancestor.
+
+**ElectricAccelerator (Gemini):** EFS tracks accesses for conflict
+detection + JobCache (with C/C++-aware source hashing); no evidence
+of absent-path or enumeration tracking.
+
+**C6 upgraded (Gemini, corroborated by IRHash/cHash literature):**
+ccache = ad-hoc flag lists; compiler-cache research normalizes the
+SOURCE (CPP/AST/IR level), never the command line; Bazel/Buck2 hash
+typed actions they GENERATED. "Raw CLI → formal per-tool grammar →
+typed invocation AST → commuting-flag-normalized cache key + sandbox
+ceilings from grammar roles" stands unclaimed in both patent and
+practice corpora. C6 core: SURVIVED, now with the patent search done.
+
+## Still open after Round 2
+
+GPT's report (R1 unsat-core/MUS + counterfactual manifest diffs; R2
+observation-justified widening; dune/memo — the nearest-miss suspect
+for demand-driven incremental engines; Tvix/Fac/OMake/Jenga/redo
+tail). Reading debt: Vesta RR-177 imports/evaluation section (the
+one Q2 hedge), Konat thesis, Atria-era MVFS whitepapers (dead links;
+physical copies only).
