@@ -59,10 +59,19 @@ A. **RULED (2026-07-04): TWO STORES, married by derivation.** Clauses
    derivation — proof (replay/scoping by pins), explanation (4-layer),
    and widening certificate in one object. Prototyped standalone as
    crates/rodin-facts (type design normative in the brief/dispatch).
-B. **The canonical order, precisely.** OURS (import-don't-imitate). Needs
-   a total order over complete solutions, pure of search. Candidate:
-   lexicographic over packages sorted by name, comparing versions
-   highest-first — simple, defensible, explainable. Decide + write down.
+B. **RULED (2026-07-04): lexicographic over (source, true name), versions
+   highest-first, absent beats present.** Package identity = (source, name)
+   — third-party registries and git/path sources are distinct nodes even
+   under one name (also the March PackageInstanceKey dragon, honored).
+   Renames NEVER reach the resolver: edge labels, resolved inside deps_of
+   (fancy/derive → Feat(true-id, derive)); Rodin never learns aliases
+   exist. Total, pure of search, one sentence to explain.
+   PROTOTYPE FINDINGS (rodin-facts, 0416fd46): PkgIx must intern the
+   (source, name) PAIR — follow-up sent. Prerelease admission holes cannot
+   be encoded in plain intervals (cargo admits prereleases only when the
+   req mentions one) — documented in from_req, release-equivalence tested;
+   Rodin must model admission eventually (per-interval flag or ordering
+   trick), ON THE RECORD as a v2 requirement.
 C. **The frontier representation** — the realism question. Regions as
    per-package interval boxes (orthotopes) were March's sketch and its
    critique's biggest doubt (unions, feature-conditional shapes).
