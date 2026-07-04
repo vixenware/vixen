@@ -292,8 +292,19 @@ to driver trampoline; direct threading later), sync HostCall (cannot
 park structurally), F64 (bitwise-pinned), Op::Trace instrumentation
 stripped by TraceMode (Production = not compiled at all). Registers:
 confirmed-deferred (everything spilled; offsets are the contract;
-await-spill rule permits registers between awaits later). Tooth 3 =
-async host futures feeding readiness slots + real executor driver.
+await-spill rule permits registers between awaits later). Tooth 3 COMPLETE (9626f09a4): TaskExec drives a
+task as a real Future (async host call = an Await fed by the host's
+future; Advance trait holds either lane — the seam vix's driver plugs
+into). AMOS'S LINE, DO NOT RE-BLUR: fable is IMPERATIVE — calling
+runs; demand exists only in vix. Never-started is the vix demand
+graph's property (undemanded node = pure data, no task, no frame);
+started-but-blocked is weavy::task's. THE MILESTONE DEMO IS A VIX
+PROGRAM: merge-demand.vix on the machine, left.o absent from the
+trace, both lanes — its pinned corpus contract is the acceptance.
+NEXT ARC (design line): the vix lowering — vix fn bodies → task
+programs, demand edge → await input, memo boundary → spawn +
+closure-hash lookup, machine driver = demand scheduler spawning only
+on demand.
 Tooth-1 agent (fable structs/enums/match, d92a7abb) in flight.
 
 **THE TEETH (ruled order)**: 1.5 EXECUTES FIRST — migrate fable off
