@@ -2199,6 +2199,19 @@ dependencies = [
 ]
 
 [[package]]
+name = "rodin-survey"
+version = "0.1.0"
+dependencies = [
+ "eyre",
+ "facet 0.50.0-rc.4",
+ "facet-json 0.50.0-rc.4",
+ "rodin-facts",
+ "semver",
+ "tracing",
+ "tracing-subscriber",
+]
+
+[[package]]
 name = "rustc-hash"
 version = "2.1.2"
 source = "registry+https://github.com/rust-lang/crates.io-index"

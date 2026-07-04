@@ -1,0 +1,19 @@
+[package]
+name = "rodin-survey"
+publish = false
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+
+[dependencies]
+eyre.workspace = true
+facet.workspace = true
+facet-json.workspace = true
+rodin-facts = { path = "../rodin-facts" }
+semver.workspace = true
+tracing.workspace = true
+tracing-subscriber.workspace = true
+
+[lints]
+workspace = true
