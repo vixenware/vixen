@@ -8,6 +8,8 @@ type RungVerdict =
   | { ExcludedByRequirement: { edges: string[] } }
   | { KilledByFact: { fact_id: string } };
 
+type VerificationStatus = "LocallyLearned" | "VerifiedImported" | "ShrunkInvalidWiden";
+
 interface RecordRung {
   version: string;
   verdict: RungVerdict;
@@ -38,6 +40,8 @@ interface RecordEdge {
 interface RecordFact {
   id: string;
   kind: string;
+  proof_digest: string;
+  verification_status: VerificationStatus;
   region: Array<{ pkg: string; versions: string }>;
   support_edges: string[];
   widened_from: number;

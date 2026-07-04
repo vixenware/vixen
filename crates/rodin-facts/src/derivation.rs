@@ -21,6 +21,7 @@ pub enum Premise {
     Exclusion(ExclusionId),
     Pin(PinRef),
     Hypothesis(u32),
+    Derived(DerivationId),
 }
 
 #[derive(Clone, Debug, Eq, PartialEq)]
@@ -78,6 +79,11 @@ impl DerivationStore {
 
     pub fn note_exclusion(&mut self, id: ExclusionId, derivation: DerivationId) {
         self.exclusions.insert(id, derivation);
+    }
+
+    #[must_use]
+    pub fn exclusion_derivation(&self, id: ExclusionId) -> Option<DerivationId> {
+        self.exclusions.get(&id).copied()
     }
 
     pub fn note_pin(&mut self, pin: PinRef) {
@@ -173,6 +179,7 @@ impl DerivationStore {
                     Err(ReplayError::HypothesisOutsideConflict(*id))
                 }
             }
+            Premise::Derived(id) => self.replay_from(*id, hypothesis_allowed, stack, report),
         }
     }
 }

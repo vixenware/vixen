@@ -1,6 +1,8 @@
 use std::collections::{BTreeMap, BTreeSet};
+use std::fmt::Write as _;
 use std::fs;
 use std::path::Path;
+use std::sync::Arc;
 
 use eyre::{Context, Result};
 use facet::Facet;
@@ -95,12 +97,189 @@ impl LearnedKind {
     }
 }
 
+#[derive(Clone, Debug, Eq, Facet, PartialEq)]
+#[repr(C)]
+pub enum VerificationStatus {
+    LocallyLearned,
+    VerifiedImported,
+    ShrunkInvalidWiden,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct FactScope {
+    pub index_digest: String,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct ProofDigest(pub String);
+
+#[derive(Clone, Debug, Eq, Ord, PartialEq, PartialOrd)]
+pub struct ProofNodeId(pub String);
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct WarmFactBundle {
+    pub scope: FactScope,
+    pub facts: Vec<WarmLearnedNoGood>,
+    pub proofs: WarmProofSource,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct WarmLearnedNoGood {
+    pub fact: LearnedNoGood,
+    pub proof_root: ProofNodeId,
+    pub proof_digest: ProofDigest,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub enum WarmProofSource {
+    Inline(Arc<ProofGraph>),
+    Lazy(ProofFetchRef),
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct ProofFetchRef {
+    pub digest: ProofDigest,
+}
+
+#[derive(Clone, Debug, Default, Eq, PartialEq)]
+pub struct VerifiedWarmFacts {
+    pub facts: Vec<VerifiedWarmFact>,
+    pub rejected: Vec<WarmFactRejection>,
+}
+
+impl VerifiedWarmFacts {
+    #[must_use]
+    pub fn new() -> Self {
+        Self::default()
+    }
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct VerifiedWarmFact {
+    pub fact: LearnedNoGood,
+    pub proof_root: ProofNodeId,
+    pub proofs: Arc<ProofGraph>,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct WarmFactRejection {
+    pub proof_digest: Option<ProofDigest>,
+    pub reason: WarmFactRejectionReason,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub enum WarmFactRejectionReason {
+    ScopeMismatch,
+    LazyProofUnavailable,
+    MissingProofNode,
+    DigestMismatch,
+    RebindFailed,
+    ReplayFailed,
+    InvalidWidenWithoutConflict,
+}
+
+#[derive(Clone, Debug, Default, Eq, PartialEq)]
+pub struct ProofGraph {
+    pub nodes: BTreeMap<ProofNodeId, ProofNode>,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct ProofNode {
+    pub premises: Vec<ProofPremise>,
+    pub rule: ProofRule,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub enum ProofRule {
+    Conflict,
+    Resolve,
+    Widen { witness: WidenWitness },
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub enum ProofPremise {
+    Clause(ClauseWitness),
+    Pin(PinWitness),
+    Exclusion(ExclusionWitness),
+    Hypothesis(HypothesisWitness),
+    Derived(DerivedWitness),
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct ClauseWitness {
+    pub antecedents: Vec<AtomWitness>,
+    pub consequent: Option<AtomWitness>,
+    pub support: Option<EdgeKey>,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub enum AtomWitness {
+    InGraph { package: String },
+    Ver { package: String, versions: String },
+    Feat { package: String, feature: String },
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct PinWitness {
+    pub pin: String,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct ExclusionWitness {
+    pub proof_root: ProofNodeId,
+    pub proof_digest: ProofDigest,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct HypothesisWitness {
+    pub id: u32,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct DerivedWitness {
+    pub proof_root: ProofNodeId,
+    pub proof_digest: ProofDigest,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct WidenWitness {
+    pub support_edges: Vec<EdgeKey>,
+    pub point_terms: Vec<PointTermWitness>,
+    pub widened_terms: Vec<WidenedTermWitness>,
+    pub edge_stability: Vec<EdgeStabilityWitness>,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct PointTermWitness {
+    pub package: String,
+    pub version: Version,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct WidenedTermWitness {
+    pub package: String,
+    pub versions: Vec<Version>,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct EdgeStabilityWitness {
+    pub parent: String,
+    pub dep: String,
+    pub selected_version: Version,
+    pub stable_versions: Vec<Version>,
+    pub selected_state: Vec<EdgeSignature>,
+}
+
+pub struct WarmFactVerifier {
+    scope: FactScope,
+}
+
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct Problem {
     pub roots: Vec<RootReq>,
     pub decrees: Vec<Decree>,
     pub exclusions: Vec<FeatureExclusion>,
-    pub warm_facts: Vec<LearnedNoGood>,
+    pub warm_facts: VerifiedWarmFacts,
     pub learned_kind: LearnedKind,
 }
 
@@ -111,7 +290,7 @@ impl Problem {
             roots,
             decrees: Vec::new(),
             exclusions: Vec::new(),
-            warm_facts: Vec::new(),
+            warm_facts: VerifiedWarmFacts::new(),
             learned_kind: LearnedKind::Plain,
         }
     }
@@ -206,6 +385,8 @@ pub enum RungVerdict {
 pub struct RecordFact {
     pub id: String,
     pub kind: String,
+    pub proof_digest: String,
+    pub verification_status: VerificationStatus,
     pub region: Vec<RecordRegionTerm>,
     pub support_edges: Vec<String>,
     pub widened_from: usize,
@@ -284,6 +465,10 @@ pub struct LearnedNoGood {
     pub point_versions: usize,
     pub widened_versions: usize,
     pub kind: LearnedKind,
+    pub proof_root: ProofNodeId,
+    pub proof_digest: ProofDigest,
+    pub verification_status: VerificationStatus,
+    pub widen_witness: Option<WidenWitness>,
 }
 
 impl LearnedNoGood {
@@ -856,6 +1041,87 @@ impl CompiledIndex {
             .flatten()
             .collect()
     }
+
+    #[must_use]
+    pub fn fact_scope(&self) -> FactScope {
+        let mut canonical = String::new();
+        for (pkg, versions) in &self.versions {
+            let _ = write!(canonical, "pkg:{}:", self.name(*pkg).unwrap_or("<unknown>"));
+            for version in versions {
+                let _ = write!(canonical, "{version},");
+            }
+            canonical.push('\n');
+        }
+        for ((pkg, version), manifest) in &self.manifests {
+            let _ = write!(
+                canonical,
+                "manifest:{}@{}:yanked={}:",
+                self.name(*pkg).unwrap_or("<unknown>"),
+                version,
+                manifest.yanked
+            );
+            for dep in &manifest.deps {
+                let _ = write!(
+                    canonical,
+                    "{}|{}|{}|{:?}|{}|{}|{:?}|{};",
+                    dep.key,
+                    dep.actual,
+                    dep.req,
+                    dep.features,
+                    dep.optional,
+                    dep.default_features,
+                    dep.target,
+                    dep.kind
+                );
+            }
+            for (feature, enables) in &manifest.features {
+                let _ = write!(canonical, "feature:{feature}={enables:?};");
+            }
+            canonical.push('\n');
+        }
+        FactScope {
+            index_digest: digest_str(&canonical),
+        }
+    }
+
+    fn clause_witness(&self, id: ClauseId) -> Option<ClauseWitness> {
+        let clause = self.clauses.get(id)?;
+        let consequent = match &clause.consequent {
+            Some(atom) => Some(self.atom_witness(atom)?),
+            None => None,
+        };
+        Some(ClauseWitness {
+            antecedents: clause
+                .antecedents
+                .iter()
+                .map(|atom| self.atom_witness(atom))
+                .collect::<Option<Vec<_>>>()?,
+            consequent,
+            support: self.clause_support.get(&id).cloned(),
+        })
+    }
+
+    fn rebind_clause(&self, witness: &ClauseWitness) -> Option<ClauseId> {
+        (0..self.clauses.len())
+            .map(|ix| ClauseId(ix as u32))
+            .find(|id| self.clause_witness(*id).as_ref() == Some(witness))
+    }
+
+    fn atom_witness(&self, atom: &Atom) -> Option<AtomWitness> {
+        match atom {
+            Atom::InGraph(pkg) => Some(AtomWitness::InGraph {
+                package: self.name(*pkg)?.to_owned(),
+            }),
+            Atom::Ver(pkg, versions) => Some(AtomWitness::Ver {
+                package: self.name(*pkg)?.to_owned(),
+                versions: display_version_set(versions),
+            }),
+            Atom::Feat(pkg, feat) => Some(AtomWitness::Feat {
+                package: self.name(*pkg)?.to_owned(),
+                feature: self.features.resolve_str(*feat)?.to_owned(),
+            }),
+        }
+    }
 }
 
 #[derive(Clone, Debug, Eq, PartialEq)]
@@ -899,7 +1165,7 @@ pub fn solve(
     problem: Problem,
 ) -> std::result::Result<SolveResult, Box<SolveError>> {
     let mut solver = Solver::new(index, problem.learned_kind);
-    for fact in &problem.warm_facts {
+    for fact in &problem.warm_facts.facts {
         solver.install_warm_fact(fact.clone());
     }
     let mut state = State::default();
@@ -937,11 +1203,20 @@ impl<'a> Solver<'a> {
         }
     }
 
-    fn install_warm_fact(&mut self, mut fact: LearnedNoGood) {
-        let derivation = self.derivations.append(Derivation {
-            premises: Vec::new(),
-            rule: RuleKind::Resolve,
-        });
+    fn install_warm_fact(&mut self, verified: VerifiedWarmFact) {
+        let mut lowered = BTreeMap::new();
+        let mut next_internal_exclusion = 1_000_000_u32;
+        let Ok(derivation) = lower_proof_node(
+            self.index,
+            &verified.proofs,
+            &verified.proof_root,
+            &mut self.derivations,
+            &mut lowered,
+            &mut next_internal_exclusion,
+        ) else {
+            return;
+        };
+        let mut fact = verified.fact;
         fact.derivation = derivation;
         let id = self.exclusions.append(Exclusion {
             region: fact.region.clone(),
@@ -1464,14 +1739,14 @@ impl<'a> Solver<'a> {
             premises.push(Premise::Hypothesis(hypothesis.id));
         }
         let premises = dedup_premises(premises);
-        let derivation = self.derivations.append(Derivation {
+        let conflict_derivation = self.derivations.append(Derivation {
             premises: premises.clone(),
             rule: RuleKind::Conflict,
         });
-        if let Err(err) = self.derivations.replay(derivation) {
+        if let Err(err) = self.derivations.replay(conflict_derivation) {
             debug_assert!(
                 false,
-                "learned conflict derivation {derivation:?} must replay: {err:?}"
+                "learned conflict derivation {conflict_derivation:?} must replay: {err:?}"
             );
         }
         let support = support_from_premises(self.index, &premises);
@@ -1487,9 +1762,34 @@ impl<'a> Solver<'a> {
         {
             region = region.with_versions(hypothesis.pkg, VersionSet::exact(hypothesis.version));
         }
+        let point_region = region.clone();
         let (region, point_versions, widened_versions) =
             self.index
                 .widen_region(&conflict.selected, &support, &region);
+        let mut derivation = conflict_derivation;
+        let mut widen_witness = None;
+        if widened_versions > point_versions {
+            let witness = build_widen_witness(
+                self.index,
+                &conflict.selected,
+                &support,
+                &point_region,
+                &region,
+            );
+            derivation = self.derivations.append(Derivation {
+                premises: vec![Premise::Derived(conflict_derivation)],
+                rule: RuleKind::Widen {
+                    certificate: widen_cert_from_witness(self.index, &witness),
+                },
+            });
+            if let Err(err) = self.derivations.replay(derivation) {
+                debug_assert!(
+                    false,
+                    "learned widen derivation {derivation:?} must replay: {err:?}"
+                );
+            }
+            widen_witness = Some(witness);
+        }
         self.trace.push(format!(
             "learn: {} dead; support: {}; widened {}->{} versions",
             display_region(self.index, &region),
@@ -1508,14 +1808,42 @@ impl<'a> Solver<'a> {
             derivation,
         });
         self.derivations.note_exclusion(exclusion, derivation);
-        self.learned.push(LearnedNoGood {
+        let mut fact = LearnedNoGood {
             region,
             derivation,
             support,
             point_versions,
             widened_versions,
             kind: self.problem_kind,
-        });
+            proof_root: ProofNodeId(String::new()),
+            proof_digest: ProofDigest(String::new()),
+            verification_status: VerificationStatus::LocallyLearned,
+            widen_witness,
+        };
+        let mut learned = self.learned.clone();
+        learned.push(fact.clone());
+        let widen_witnesses: BTreeMap<_, _> = learned
+            .iter()
+            .filter_map(|fact| {
+                fact.widen_witness
+                    .clone()
+                    .map(|witness| (fact.derivation, witness))
+            })
+            .collect();
+        let mut graph = ProofGraph::default();
+        if let Some(root) = build_proof_node(
+            self.index,
+            &self.derivations,
+            &widen_witnesses,
+            fact.derivation,
+            &mut graph,
+            &mut BTreeMap::new(),
+            &mut Vec::new(),
+        ) {
+            fact.proof_root = root.clone();
+            fact.proof_digest = ProofDigest(root.0);
+        }
+        self.learned.push(fact);
     }
 
     fn finish(mut self, state: State) -> SolveResult {
@@ -1770,6 +2098,596 @@ fn next_patch(version: &Version) -> Version {
     Version::new(version.major, version.minor, version.patch + 1)
 }
 
+fn digest_str(input: &str) -> String {
+    blake3::hash(input.as_bytes()).to_hex().to_string()
+}
+
+fn proof_node_id(node: &ProofNode) -> ProofNodeId {
+    ProofNodeId(digest_str(&canonical_proof_node(node)))
+}
+
+fn canonical_proof_node(node: &ProofNode) -> String {
+    let mut out = String::new();
+    match &node.rule {
+        ProofRule::Conflict => out.push_str("rule:conflict\n"),
+        ProofRule::Resolve => out.push_str("rule:resolve\n"),
+        ProofRule::Widen { witness } => {
+            out.push_str("rule:widen\n");
+            out.push_str(&canonical_widen_witness(witness));
+        }
+    }
+    for premise in &node.premises {
+        out.push_str("premise:");
+        out.push_str(&canonical_premise(premise));
+        out.push('\n');
+    }
+    out
+}
+
+fn canonical_premise(premise: &ProofPremise) -> String {
+    match premise {
+        ProofPremise::Clause(witness) => canonical_clause_witness(witness),
+        ProofPremise::Pin(witness) => format!("pin:{}", witness.pin),
+        ProofPremise::Exclusion(witness) => {
+            format!(
+                "exclusion:{}:{}",
+                witness.proof_root.0, witness.proof_digest.0
+            )
+        }
+        ProofPremise::Hypothesis(witness) => format!("hypothesis:{}", witness.id),
+        ProofPremise::Derived(witness) => {
+            format!(
+                "derived:{}:{}",
+                witness.proof_root.0, witness.proof_digest.0
+            )
+        }
+    }
+}
+
+fn canonical_clause_witness(witness: &ClauseWitness) -> String {
+    let mut out = String::from("clause:");
+    for atom in &witness.antecedents {
+        out.push_str(&canonical_atom(atom));
+        out.push(',');
+    }
+    out.push_str("=>");
+    if let Some(atom) = &witness.consequent {
+        out.push_str(&canonical_atom(atom));
+    } else {
+        out.push_str("false");
+    }
+    if let Some(edge) = &witness.support {
+        let _ = write!(out, ":support:{}->{}", edge.parent, edge.dep);
+    }
+    out
+}
+
+fn canonical_atom(atom: &AtomWitness) -> String {
+    match atom {
+        AtomWitness::InGraph { package } => format!("in:{package}"),
+        AtomWitness::Ver { package, versions } => format!("ver:{package}:{versions}"),
+        AtomWitness::Feat { package, feature } => format!("feat:{package}:{feature}"),
+    }
+}
+
+fn canonical_widen_witness(witness: &WidenWitness) -> String {
+    let mut out = String::new();
+    for edge in &witness.support_edges {
+        let _ = writeln!(out, "support:{}->{}", edge.parent, edge.dep);
+    }
+    for term in &witness.point_terms {
+        let _ = writeln!(out, "point:{}@{}", term.package, term.version);
+    }
+    for term in &witness.widened_terms {
+        let _ = write!(out, "widened:{}:", term.package);
+        for version in &term.versions {
+            let _ = write!(out, "{version},");
+        }
+        out.push('\n');
+    }
+    for edge in &witness.edge_stability {
+        let _ = write!(
+            out,
+            "stable:{}->{}@{}:",
+            edge.parent, edge.dep, edge.selected_version
+        );
+        for version in &edge.stable_versions {
+            let _ = write!(out, "{version},");
+        }
+        out.push(':');
+        for state in &edge.selected_state {
+            let _ = write!(
+                out,
+                "{}|{:?}|{}|{}|{:?}|{};",
+                state.req,
+                state.features,
+                state.optional,
+                state.default_features,
+                state.target,
+                state.kind
+            );
+        }
+        out.push('\n');
+    }
+    out
+}
+
+fn graph_from_learned(
+    index: &CompiledIndex,
+    learned: &[LearnedNoGood],
+    derivations: &DerivationStore,
+) -> Option<ProofGraph> {
+    let widen_witnesses: BTreeMap<_, _> = learned
+        .iter()
+        .filter_map(|fact| {
+            fact.widen_witness
+                .clone()
+                .map(|witness| (fact.derivation, witness))
+        })
+        .collect();
+    let mut graph = ProofGraph::default();
+    let mut memo = BTreeMap::new();
+    for fact in learned {
+        build_proof_node(
+            index,
+            derivations,
+            &widen_witnesses,
+            fact.derivation,
+            &mut graph,
+            &mut memo,
+            &mut Vec::new(),
+        )?;
+    }
+    Some(graph)
+}
+
+fn build_proof_node(
+    index: &CompiledIndex,
+    derivations: &DerivationStore,
+    widen_witnesses: &BTreeMap<DerivationId, WidenWitness>,
+    id: DerivationId,
+    graph: &mut ProofGraph,
+    memo: &mut BTreeMap<DerivationId, ProofNodeId>,
+    stack: &mut Vec<DerivationId>,
+) -> Option<ProofNodeId> {
+    if let Some(node) = memo.get(&id) {
+        return Some(node.clone());
+    }
+    if stack.contains(&id) {
+        return None;
+    }
+    let derivation = derivations.get(id)?;
+    stack.push(id);
+    let mut premises = Vec::new();
+    for premise in &derivation.premises {
+        let proof_premise = match premise {
+            Premise::Clause(id) => ProofPremise::Clause(index.clause_witness(*id)?),
+            Premise::Pin(pin) => ProofPremise::Pin(PinWitness { pin: pin.0.clone() }),
+            Premise::Hypothesis(id) => ProofPremise::Hypothesis(HypothesisWitness { id: *id }),
+            Premise::Exclusion(id) => {
+                let child = derivations.exclusion_derivation(*id)?;
+                let proof_root = build_proof_node(
+                    index,
+                    derivations,
+                    widen_witnesses,
+                    child,
+                    graph,
+                    memo,
+                    stack,
+                )?;
+                ProofPremise::Exclusion(ExclusionWitness {
+                    proof_digest: ProofDigest(proof_root.0.clone()),
+                    proof_root,
+                })
+            }
+            Premise::Derived(id) => {
+                let proof_root =
+                    build_proof_node(index, derivations, widen_witnesses, *id, graph, memo, stack)?;
+                ProofPremise::Derived(DerivedWitness {
+                    proof_digest: ProofDigest(proof_root.0.clone()),
+                    proof_root,
+                })
+            }
+        };
+        premises.push(proof_premise);
+    }
+    stack.pop();
+
+    let rule = match &derivation.rule {
+        RuleKind::Conflict => ProofRule::Conflict,
+        RuleKind::Resolve => ProofRule::Resolve,
+        RuleKind::Widen { .. } => ProofRule::Widen {
+            witness: widen_witnesses.get(&id).cloned()?,
+        },
+    };
+    let node = ProofNode { premises, rule };
+    let proof_id = proof_node_id(&node);
+    graph.nodes.insert(proof_id.clone(), node);
+    memo.insert(id, proof_id.clone());
+    Some(proof_id)
+}
+
+fn verify_graph_node_ids(graph: &ProofGraph) -> bool {
+    graph
+        .nodes
+        .iter()
+        .all(|(id, node)| proof_node_id(node) == *id)
+}
+
+impl WarmFactVerifier {
+    #[must_use]
+    pub fn new(scope: FactScope) -> Self {
+        Self { scope }
+    }
+
+    #[must_use]
+    pub fn for_index(index: &CompiledIndex) -> Self {
+        Self::new(index.fact_scope())
+    }
+
+    #[must_use]
+    pub fn verify(&self, index: &CompiledIndex, bundle: &WarmFactBundle) -> VerifiedWarmFacts {
+        let mut out = VerifiedWarmFacts::new();
+        if bundle.scope != self.scope {
+            out.rejected
+                .extend(bundle.facts.iter().map(|fact| WarmFactRejection {
+                    proof_digest: Some(fact.proof_digest.clone()),
+                    reason: WarmFactRejectionReason::ScopeMismatch,
+                }));
+            return out;
+        }
+        let WarmProofSource::Inline(graph) = &bundle.proofs else {
+            out.rejected
+                .extend(bundle.facts.iter().map(|fact| WarmFactRejection {
+                    proof_digest: Some(fact.proof_digest.clone()),
+                    reason: WarmFactRejectionReason::LazyProofUnavailable,
+                }));
+            return out;
+        };
+        if !verify_graph_node_ids(graph) {
+            out.rejected
+                .extend(bundle.facts.iter().map(|fact| WarmFactRejection {
+                    proof_digest: Some(fact.proof_digest.clone()),
+                    reason: WarmFactRejectionReason::DigestMismatch,
+                }));
+            return out;
+        }
+
+        for warm in &bundle.facts {
+            match verify_one_warm_fact(index, graph.clone(), warm) {
+                Ok(fact) => out.facts.push(fact),
+                Err(reason) => out.rejected.push(WarmFactRejection {
+                    proof_digest: Some(warm.proof_digest.clone()),
+                    reason,
+                }),
+            }
+        }
+        out
+    }
+}
+
+fn verify_one_warm_fact(
+    index: &CompiledIndex,
+    graph: Arc<ProofGraph>,
+    warm: &WarmLearnedNoGood,
+) -> Result<VerifiedWarmFact, WarmFactRejectionReason> {
+    if warm.proof_digest.0 != warm.proof_root.0 || warm.fact.proof_digest != warm.proof_digest {
+        return Err(WarmFactRejectionReason::DigestMismatch);
+    }
+    let node = graph
+        .nodes
+        .get(&warm.proof_root)
+        .ok_or(WarmFactRejectionReason::MissingProofNode)?;
+    replay_proof_root(index, &graph, &warm.proof_root)?;
+    if let ProofRule::Widen { witness } = &node.rule
+        && !verify_widen_witness(index, witness, &warm.fact)
+    {
+        let Some(conflict_root) = derived_conflict_root(node) else {
+            return Err(WarmFactRejectionReason::InvalidWidenWithoutConflict);
+        };
+        replay_proof_root(index, &graph, &conflict_root)?;
+        let mut shrunk = warm.fact.clone();
+        shrunk.region = point_region_from_witness(index, witness)
+            .ok_or(WarmFactRejectionReason::RebindFailed)?;
+        shrunk.point_versions = 1;
+        shrunk.widened_versions = shrunk.point_versions;
+        shrunk.proof_root = conflict_root.clone();
+        shrunk.proof_digest = ProofDigest(conflict_root.0.clone());
+        shrunk.verification_status = VerificationStatus::ShrunkInvalidWiden;
+        shrunk.widen_witness = None;
+        return Ok(VerifiedWarmFact {
+            fact: shrunk,
+            proof_root: conflict_root,
+            proofs: graph,
+        });
+    }
+
+    let mut fact = warm.fact.clone();
+    fact.verification_status = VerificationStatus::VerifiedImported;
+    Ok(VerifiedWarmFact {
+        fact,
+        proof_root: warm.proof_root.clone(),
+        proofs: graph,
+    })
+}
+
+fn derived_conflict_root(node: &ProofNode) -> Option<ProofNodeId> {
+    node.premises.iter().find_map(|premise| {
+        if let ProofPremise::Derived(witness) = premise {
+            Some(witness.proof_root.clone())
+        } else {
+            None
+        }
+    })
+}
+
+fn replay_proof_root(
+    index: &CompiledIndex,
+    graph: &ProofGraph,
+    root: &ProofNodeId,
+) -> Result<(), WarmFactRejectionReason> {
+    let mut derivations = DerivationStore::new();
+    for id in (0..index.clauses.len()).map(|ix| ClauseId(ix as u32)) {
+        derivations.note_clause(id);
+    }
+    let mut lowered = BTreeMap::new();
+    let mut next_internal_exclusion = 1_000_000_u32;
+    let id = lower_proof_node(
+        index,
+        graph,
+        root,
+        &mut derivations,
+        &mut lowered,
+        &mut next_internal_exclusion,
+    )?;
+    derivations
+        .replay(id)
+        .map(|_| ())
+        .map_err(|_| WarmFactRejectionReason::ReplayFailed)
+}
+
+fn lower_proof_node(
+    index: &CompiledIndex,
+    graph: &ProofGraph,
+    root: &ProofNodeId,
+    derivations: &mut DerivationStore,
+    lowered: &mut BTreeMap<ProofNodeId, DerivationId>,
+    next_internal_exclusion: &mut u32,
+) -> Result<DerivationId, WarmFactRejectionReason> {
+    if let Some(id) = lowered.get(root) {
+        return Ok(*id);
+    }
+    let node = graph
+        .nodes
+        .get(root)
+        .ok_or(WarmFactRejectionReason::MissingProofNode)?;
+    let mut premises = Vec::new();
+    for premise in &node.premises {
+        premises.push(lower_premise(
+            index,
+            graph,
+            premise,
+            derivations,
+            lowered,
+            next_internal_exclusion,
+        )?);
+    }
+    let rule = match &node.rule {
+        ProofRule::Conflict => RuleKind::Conflict,
+        ProofRule::Resolve => RuleKind::Resolve,
+        ProofRule::Widen { witness } => RuleKind::Widen {
+            certificate: widen_cert_from_witness(index, witness),
+        },
+    };
+    let id = derivations.append(Derivation { premises, rule });
+    lowered.insert(root.clone(), id);
+    Ok(id)
+}
+
+fn lower_premise(
+    index: &CompiledIndex,
+    graph: &ProofGraph,
+    premise: &ProofPremise,
+    derivations: &mut DerivationStore,
+    lowered: &mut BTreeMap<ProofNodeId, DerivationId>,
+    next_internal_exclusion: &mut u32,
+) -> Result<Premise, WarmFactRejectionReason> {
+    match premise {
+        ProofPremise::Clause(witness) => index
+            .rebind_clause(witness)
+            .map(Premise::Clause)
+            .ok_or(WarmFactRejectionReason::RebindFailed),
+        ProofPremise::Pin(witness) => {
+            let pin = PinRef(witness.pin.clone());
+            derivations.note_pin(pin.clone());
+            Ok(Premise::Pin(pin))
+        }
+        ProofPremise::Hypothesis(witness) => Ok(Premise::Hypothesis(witness.id)),
+        ProofPremise::Derived(witness) => {
+            if witness.proof_digest.0 != witness.proof_root.0 {
+                return Err(WarmFactRejectionReason::DigestMismatch);
+            }
+            lower_proof_node(
+                index,
+                graph,
+                &witness.proof_root,
+                derivations,
+                lowered,
+                next_internal_exclusion,
+            )
+            .map(Premise::Derived)
+        }
+        ProofPremise::Exclusion(witness) => {
+            if witness.proof_digest.0 != witness.proof_root.0 {
+                return Err(WarmFactRejectionReason::DigestMismatch);
+            }
+            let child = lower_proof_node(
+                index,
+                graph,
+                &witness.proof_root,
+                derivations,
+                lowered,
+                next_internal_exclusion,
+            )?;
+            let exclusion = ExclusionId(*next_internal_exclusion);
+            *next_internal_exclusion += 1;
+            derivations.note_exclusion(exclusion, child);
+            Ok(Premise::Exclusion(exclusion))
+        }
+    }
+}
+
+fn widen_cert_from_witness(
+    index: &CompiledIndex,
+    witness: &WidenWitness,
+) -> rodin_facts::WidenCert {
+    let package = witness
+        .edge_stability
+        .first()
+        .and_then(|edge| index.package(&edge.parent))
+        .or_else(|| {
+            witness
+                .point_terms
+                .first()
+                .and_then(|term| index.package(&term.package))
+        })
+        .unwrap_or(PkgIx(0));
+    let checked = witness
+        .edge_stability
+        .first()
+        .map(|edge| version_set_from_points(&edge.stable_versions))
+        .unwrap_or_else(VersionSet::empty);
+    rodin_facts::WidenCert {
+        package,
+        checked,
+        manifest_hash: digest_str(&canonical_widen_witness(witness)),
+    }
+}
+
+fn verify_widen_witness(
+    index: &CompiledIndex,
+    witness: &WidenWitness,
+    fact: &LearnedNoGood,
+) -> bool {
+    if witness.support_edges.iter().collect::<BTreeSet<_>>()
+        != fact.support.iter().collect::<BTreeSet<_>>()
+    {
+        return false;
+    }
+    let Some(expected) = widened_region_from_witness(index, witness) else {
+        return false;
+    };
+    if expected != fact.region {
+        return false;
+    }
+    for edge in &witness.edge_stability {
+        if index.edge_state(&edge.parent, &edge.selected_version, &edge.dep) != edge.selected_state
+        {
+            return false;
+        }
+        let Some(parent) = index.package(&edge.parent) else {
+            return false;
+        };
+        let actual: Vec<_> = index
+            .versions(parent)
+            .iter()
+            .filter(|version| {
+                index.edge_state(&edge.parent, version, &edge.dep) == edge.selected_state
+            })
+            .cloned()
+            .collect();
+        if actual != edge.stable_versions {
+            return false;
+        }
+    }
+    true
+}
+
+fn point_region_from_witness(index: &CompiledIndex, witness: &WidenWitness) -> Option<Region> {
+    let mut region = Region::new();
+    for term in &witness.point_terms {
+        region = region.with_versions(
+            index.package(&term.package)?,
+            VersionSet::exact(term.version.clone()),
+        );
+    }
+    Some(region)
+}
+
+fn widened_region_from_witness(index: &CompiledIndex, witness: &WidenWitness) -> Option<Region> {
+    let mut region = point_region_from_witness(index, witness)?;
+    for term in &witness.widened_terms {
+        region = region.with_versions(
+            index.package(&term.package)?,
+            version_set_from_points(&term.versions),
+        );
+    }
+    Some(region)
+}
+
+fn build_widen_witness(
+    index: &CompiledIndex,
+    selected: &BTreeMap<PkgIx, Version>,
+    support: &BTreeSet<EdgeKey>,
+    point_region: &Region,
+    widened_region: &Region,
+) -> WidenWitness {
+    let point_terms = point_region
+        .versions
+        .iter()
+        .filter_map(|(pkg, versions)| {
+            selected.get(pkg).and_then(|version| {
+                versions.contains(version).then(|| PointTermWitness {
+                    package: index.name(*pkg).unwrap_or("<unknown>").to_owned(),
+                    version: version.clone(),
+                })
+            })
+        })
+        .collect();
+    let widened_terms = widened_region
+        .versions
+        .iter()
+        .map(|(pkg, versions)| WidenedTermWitness {
+            package: index.name(*pkg).unwrap_or("<unknown>").to_owned(),
+            versions: index
+                .versions(*pkg)
+                .iter()
+                .filter(|version| versions.contains(version))
+                .cloned()
+                .collect(),
+        })
+        .collect();
+    let edge_stability = support
+        .iter()
+        .filter_map(|edge| {
+            let parent = index.package(&edge.parent)?;
+            let selected_version = selected.get(&parent)?.clone();
+            let selected_state = index.edge_state(&edge.parent, &selected_version, &edge.dep);
+            let stable_versions = index
+                .versions(parent)
+                .iter()
+                .filter(|version| {
+                    index.edge_state(&edge.parent, version, &edge.dep) == selected_state
+                })
+                .cloned()
+                .collect();
+            Some(EdgeStabilityWitness {
+                parent: edge.parent.clone(),
+                dep: edge.dep.clone(),
+                selected_version,
+                stable_versions,
+                selected_state,
+            })
+        })
+        .collect();
+    WidenWitness {
+        support_edges: support.iter().cloned().collect(),
+        point_terms,
+        widened_terms,
+        edge_stability,
+    }
+}
+
 fn state_fingerprint(state: &State) -> String {
     let domains: Vec<_> = state
         .domains
@@ -1820,7 +2738,10 @@ fn support_from_premises(index: &CompiledIndex, premises: &[Premise]) -> BTreeSe
         .iter()
         .filter_map(|premise| match premise {
             Premise::Clause(id) => index.clause_support.get(id).cloned(),
-            Premise::Exclusion(_) | Premise::Pin(_) | Premise::Hypothesis(_) => None,
+            Premise::Exclusion(_)
+            | Premise::Pin(_)
+            | Premise::Hypothesis(_)
+            | Premise::Derived(_) => None,
         })
         .collect()
 }
@@ -1837,6 +2758,7 @@ pub struct ScenarioResult {
     pub warm_decisions: usize,
     pub warm_conflicts: usize,
     pub learned: Vec<LearnedNoGood>,
+    pub derivations: DerivationStore,
     pub trace: Vec<String>,
 }
 
@@ -1996,7 +2918,10 @@ pub fn run_round3() -> Result<Round3Report> {
             scenario.problem.clone(),
             None,
         );
-        let warm_facts = cold.learned.clone();
+        let bundle = warm_bundle_from_learned(&scenario.index, &cold.learned, &cold.derivations)
+            .wrap_err_with(|| format!("building warm proof bundle for {}", scenario.name))?;
+        let warm_facts =
+            WarmFactVerifier::for_index(&scenario.index).verify(&scenario.index, &bundle);
         let warm_problem = Problem {
             warm_facts,
             ..scenario.perturbed
@@ -2019,6 +2944,7 @@ pub fn run_round3() -> Result<Round3Report> {
             warm_decisions: warm.cold_decisions,
             warm_conflicts: warm.cold_conflicts,
             learned: cold.learned,
+            derivations: cold.derivations,
             trace: cold.trace,
         });
     }
@@ -2046,6 +2972,7 @@ fn run_one(
             warm_conflicts: 0,
             trace: result.trace,
             learned: result.learned,
+            derivations: result.derivations,
         },
         Err(err) => match *err {
             SolveError::NoSolution {
@@ -2055,6 +2982,7 @@ fn run_one(
                 candidates_existing,
                 trace,
                 learned,
+                derivations,
                 ..
             } => ScenarioResult {
                 name: name.to_owned(),
@@ -2068,9 +2996,33 @@ fn run_one(
                 warm_conflicts: 0,
                 trace,
                 learned,
+                derivations,
             },
         },
     }
+}
+
+pub fn warm_bundle_from_learned(
+    index: &CompiledIndex,
+    learned: &[LearnedNoGood],
+    derivations: &DerivationStore,
+) -> Result<WarmFactBundle> {
+    let graph = graph_from_learned(index, learned, derivations)
+        .ok_or_else(|| eyre::eyre!("building proof graph from learned facts"))?;
+    let graph = Arc::new(graph);
+    let facts = learned
+        .iter()
+        .map(|fact| WarmLearnedNoGood {
+            fact: fact.clone(),
+            proof_root: fact.proof_root.clone(),
+            proof_digest: fact.proof_digest.clone(),
+        })
+        .collect();
+    Ok(WarmFactBundle {
+        scope: index.fact_scope(),
+        facts,
+        proofs: WarmProofSource::Inline(graph),
+    })
 }
 
 pub fn solve_record(
@@ -2420,6 +3372,8 @@ fn record_facts(index: &CompiledIndex, learned: &[LearnedNoGood]) -> Vec<RecordF
             RecordFact {
                 id: format!("fact-{ix}"),
                 kind: fact.kind.as_str().to_owned(),
+                proof_digest: fact.proof_digest.0.clone(),
+                verification_status: fact.verification_status.clone(),
                 support_edges: support_edge_ids(index, &fact.support),
                 widened_from: fact.point_versions,
                 widened_to: fact.widened_versions,
@@ -3001,6 +3955,248 @@ mod tests {
             }
         }
         Ok(())
+    }
+
+    #[test]
+    fn warm_counterfactuals_verify_inline_proofs() -> Result<()> {
+        let mut cold_decisions = 0;
+        let mut warm_decisions = 0;
+        let mut cold_conflicts = 0;
+        let mut warm_conflicts = 0;
+        for scenario in pressure_scenarios()? {
+            let cold = run_one(
+                &scenario.index,
+                &scenario.name,
+                &scenario.shape,
+                scenario.problem.clone(),
+                None,
+            );
+            let bundle =
+                warm_bundle_from_learned(&scenario.index, &cold.learned, &cold.derivations)?;
+            let verified =
+                WarmFactVerifier::for_index(&scenario.index).verify(&scenario.index, &bundle);
+            assert!(
+                verified.rejected.is_empty(),
+                "{} rejected verified warm facts: {:?}",
+                scenario.name,
+                verified.rejected
+            );
+            let warm = run_one(
+                &scenario.index,
+                &format!("{} perturbed", scenario.name),
+                &scenario.shape,
+                Problem {
+                    warm_facts: verified,
+                    ..scenario.perturbed
+                },
+                Some(&cold),
+            );
+            cold_decisions += cold.cold_decisions;
+            warm_decisions += warm.cold_decisions;
+            cold_conflicts += cold.cold_conflicts;
+            warm_conflicts += warm.cold_conflicts;
+        }
+
+        assert_eq!(cold_decisions.saturating_sub(warm_decisions), 5);
+        assert_eq!(cold_conflicts.saturating_sub(warm_conflicts), 3);
+        Ok(())
+    }
+
+    #[test]
+    fn tampered_proof_bundle_is_rejected_and_solve_continues_cold() -> Result<()> {
+        let scenario = downgrade_cascade()?;
+        let cold = run_one(
+            &scenario.index,
+            &scenario.name,
+            &scenario.shape,
+            scenario.problem,
+            None,
+        );
+        let mut bundle =
+            warm_bundle_from_learned(&scenario.index, &cold.learned, &cold.derivations)?;
+        tamper_first_clause_witness(&mut bundle);
+
+        let verified =
+            WarmFactVerifier::for_index(&scenario.index).verify(&scenario.index, &bundle);
+        assert!(verified.facts.is_empty());
+        assert!(!verified.rejected.is_empty());
+
+        let warm = solve(
+            &scenario.index,
+            Problem {
+                warm_facts: verified,
+                ..scenario.perturbed.clone()
+            },
+        )
+        .map_err(|err| eyre::eyre!("{err:?}"))?;
+        let cold_perturbed =
+            solve(&scenario.index, scenario.perturbed).map_err(|err| eyre::eyre!("{err:?}"))?;
+        assert_eq!(warm.decisions, cold_perturbed.decisions);
+        assert_eq!(warm.conflicts, cold_perturbed.conflicts);
+        Ok(())
+    }
+
+    #[test]
+    fn invalid_widen_bundle_shrinks_to_point_fact() -> Result<()> {
+        let mut selected = None;
+        for scenario in pressure_scenarios()? {
+            let cold = run_one(
+                &scenario.index,
+                &scenario.name,
+                &scenario.shape,
+                scenario.problem.clone(),
+                None,
+            );
+            let bundle =
+                warm_bundle_from_learned(&scenario.index, &cold.learned, &cold.derivations)?;
+            if bundle_has_widen_root(&bundle) {
+                selected = Some((scenario, cold, bundle));
+                break;
+            }
+        }
+        let Some((scenario, cold, mut bundle)) = selected else {
+            return Err(eyre::eyre!(
+                "no pressure scenario produced a widened proof root"
+            ));
+        };
+        let tampered_ix = mutate_first_widen_witness_with_fresh_digest(&mut bundle)?;
+        let original_digest = cold.learned[tampered_ix].proof_digest.clone();
+
+        let verified =
+            WarmFactVerifier::for_index(&scenario.index).verify(&scenario.index, &bundle);
+        let shrunk = &verified
+            .facts
+            .iter()
+            .find(|fact| fact.fact.verification_status == VerificationStatus::ShrunkInvalidWiden)
+            .expect("shrunk fact")
+            .fact;
+        assert_eq!(
+            shrunk.verification_status,
+            VerificationStatus::ShrunkInvalidWiden
+        );
+        assert_eq!(shrunk.point_versions, 1);
+        assert_eq!(shrunk.widened_versions, 1);
+        assert_ne!(shrunk.proof_digest, original_digest);
+        let shrunk_digest = shrunk.proof_digest.0.clone();
+        let shrunk_status = shrunk.verification_status.clone();
+
+        let learned = match solve(
+            &scenario.index,
+            Problem {
+                warm_facts: verified,
+                ..scenario.perturbed
+            },
+        ) {
+            Ok(result) => result.learned,
+            Err(err) => match *err {
+                SolveError::NoSolution { learned, .. } => learned,
+            },
+        };
+        let records = record_facts(&scenario.index, &learned);
+        assert!(records.iter().any(|fact| {
+            fact.proof_digest == shrunk_digest && fact.verification_status == shrunk_status
+        }));
+        Ok(())
+    }
+
+    #[test]
+    fn lazy_no_proof_bundle_is_rejected() -> Result<()> {
+        let scenario = downgrade_cascade()?;
+        let cold = run_one(
+            &scenario.index,
+            &scenario.name,
+            &scenario.shape,
+            scenario.problem,
+            None,
+        );
+        let mut bundle =
+            warm_bundle_from_learned(&scenario.index, &cold.learned, &cold.derivations)?;
+        bundle.proofs = WarmProofSource::Lazy(ProofFetchRef {
+            digest: ProofDigest("lazy-unimplemented".to_owned()),
+        });
+
+        let verified =
+            WarmFactVerifier::for_index(&scenario.index).verify(&scenario.index, &bundle);
+        assert!(verified.facts.is_empty());
+        assert_eq!(verified.rejected.len(), bundle.facts.len());
+        assert!(
+            verified
+                .rejected
+                .iter()
+                .all(|rejection| rejection.reason == WarmFactRejectionReason::LazyProofUnavailable)
+        );
+        Ok(())
+    }
+
+    fn tamper_first_clause_witness(bundle: &mut WarmFactBundle) {
+        let WarmProofSource::Inline(graph) = &mut bundle.proofs else {
+            return;
+        };
+        let graph = Arc::make_mut(graph);
+        for node in graph.nodes.values_mut() {
+            for premise in &mut node.premises {
+                if let ProofPremise::Clause(witness) = premise {
+                    if let Some(AtomWitness::InGraph { package }) = witness.antecedents.first_mut()
+                    {
+                        package.push_str("-tampered");
+                        return;
+                    }
+                    if let Some(AtomWitness::Ver { package, .. }) = witness.antecedents.first_mut()
+                    {
+                        package.push_str("-tampered");
+                        return;
+                    }
+                }
+            }
+        }
+    }
+
+    fn mutate_first_widen_witness_with_fresh_digest(bundle: &mut WarmFactBundle) -> Result<usize> {
+        let WarmProofSource::Inline(graph) = &mut bundle.proofs else {
+            return Err(eyre::eyre!("bundle is not inline"));
+        };
+        let graph = Arc::make_mut(graph);
+        let (fact_ix, old_root) = bundle
+            .facts
+            .iter()
+            .enumerate()
+            .find_map(|(ix, fact)| {
+                graph.nodes.get(&fact.proof_root).and_then(|node| {
+                    matches!(node.rule, ProofRule::Widen { .. })
+                        .then(|| (ix, fact.proof_root.clone()))
+                })
+            })
+            .ok_or_else(|| eyre::eyre!("bundle has no widened proof root"))?;
+        let mut node = graph
+            .nodes
+            .remove(&old_root)
+            .ok_or_else(|| eyre::eyre!("missing root node"))?;
+        let ProofRule::Widen { witness } = &mut node.rule else {
+            return Err(eyre::eyre!("first proof root is not a widen node"));
+        };
+        let Some(edge) = witness.edge_stability.first_mut() else {
+            return Err(eyre::eyre!("widen witness has no edge stability"));
+        };
+        edge.stable_versions.clear();
+        let new_root = proof_node_id(&node);
+        graph.nodes.insert(new_root.clone(), node);
+        bundle.facts[fact_ix].proof_root = new_root.clone();
+        bundle.facts[fact_ix].proof_digest = ProofDigest(new_root.0.clone());
+        bundle.facts[fact_ix].fact.proof_root = new_root.clone();
+        bundle.facts[fact_ix].fact.proof_digest = ProofDigest(new_root.0);
+        Ok(fact_ix)
+    }
+
+    fn bundle_has_widen_root(bundle: &WarmFactBundle) -> bool {
+        let WarmProofSource::Inline(graph) = &bundle.proofs else {
+            return false;
+        };
+        bundle.facts.iter().any(|fact| {
+            graph
+                .nodes
+                .get(&fact.proof_root)
+                .is_some_and(|node| matches!(node.rule, ProofRule::Widen { .. }))
+        })
     }
 
     #[test]
