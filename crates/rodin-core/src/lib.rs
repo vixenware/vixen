@@ -13,6 +13,14 @@ use rodin_facts::{
 };
 use semver::{Version, VersionReq};
 
+pub mod cargo_evidence;
+
+pub use cargo_evidence::{
+    CargoDivergence, CargoDivergenceKind, CargoEvidenceReport, CargoExtractionGap,
+    CargoWarmCounterfactual, append_cargo_evidence_round, render_cargo_evidence_markdown,
+    run_cargo_evidence, run_facet_cc_evidence,
+};
+
 const CRATES_IO: &str = "crates.io";
 
 #[derive(Clone, Debug, Eq, Ord, PartialEq, PartialOrd)]
@@ -777,6 +785,16 @@ impl CompiledIndex {
     #[must_use]
     pub fn versions(&self, pkg: PkgIx) -> &[Version] {
         self.versions.get(&pkg).map(Vec::as_slice).unwrap_or(&[])
+    }
+
+    #[must_use]
+    pub fn package_count(&self) -> usize {
+        self.names.len()
+    }
+
+    #[must_use]
+    pub fn version_count(&self) -> usize {
+        self.versions.values().map(Vec::len).sum()
     }
 
     pub fn add_package_version(

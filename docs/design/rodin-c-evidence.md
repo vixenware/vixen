@@ -855,3 +855,213 @@ This trace is emitted by the round-3 solver run for the pressure scenario, not r
 19. solution: client 1.0.0, codec 3.0.0, tokio-like 1.0.0, web 1.0.0
 20. summary: manifests read 3, candidate observations 3, conflicts 2, widened versions killed 2 vs 2 point versions
 
+
+## Round 4: real-world Cargo.lock evidence
+
+Source snapshot: `/Users/amos/oss/facet-cc` Cargo.lock plus local Cargo registry cache. The extractor is offline-only, indexes cached registry alternatives for locked package names, and encodes the Cargo.lock snapshot as decrees to the representative locked version for each package name. Rodin models one selected version per package name; Cargo.lock entries with multiple coexisting versions are classified rather than hidden.
+
+### Extraction
+
+Locked versions use Cargo.lock's concrete dependency list as active edges. Cached alternative versions use parseable manifest dependencies, while dev, optional, and target-conditional manifest dependencies are classified as modeling gaps and left inactive in this round.
+
+- lock package entries: 892
+- lock unique package names: 813
+- workspace roots: 139
+- indexed package names: 813
+- indexed package versions: 1490
+- indexed dependency edges: 2663
+- extraction/modeling gaps: 7662
+
+### Solve numbers
+
+| solved | decisions | conflicts | learned facts | point versions | widened versions | widening factor | wall ms |
+|---|---:|---:|---:|---:|---:|---:|---:|
+| true | 0 | 0 | 0 | 0 | 0 | 0.000 | 121 |
+
+
+Solve trace tail:
+
+- `force windows_i686_msvc 0.53.1 (only candidate after propagation)`
+- `force windows_x86_64_gnu 0.53.1 (only candidate after propagation)`
+- `force windows_x86_64_gnullvm 0.53.1 (only candidate after propagation)`
+- `force windows_x86_64_msvc 0.53.1 (only candidate after propagation)`
+- `force xshell-macros 0.2.7 (only candidate after propagation)`
+- `force xtask 5.0.0-rc.0 (only candidate after propagation)`
+- `force yoke-derive 0.8.2 (only candidate after propagation)`
+- `force zerocopy-derive 0.8.52 (only candidate after propagation)`
+- `force zerofrom-derive 0.1.7 (only candidate after propagation)`
+- `force zerovec-derive 0.11.3 (only candidate after propagation)`
+- `solution: addr2line 0.25.1, adler2 2.0.1, ahash 0.8.12, aho-corasick 1.1.4, aligned-vec 0.6.4, alloc-no-stdlib 2.0.4, alloc-stdlib 0.2.4, allocator-api2 0.2.21, android_system_properties 0.1.5, anstream 1.0.0, anstyle 1....`
+- `summary: manifests read 0, candidate observations 0, conflicts 0, widened versions killed 0 vs 0 point versions`
+
+### Cargo.lock oracle
+
+- exact package-name matches: 745/813 (91.64%)
+- divergences: 68
+
+| divergence kind | count |
+|---|---:|
+| MultipleLockedVersionsUnsupported | 68 |
+
+| kind | package | Cargo.lock | Rodin | classification |
+|---|---|---|---|---|
+| MultipleLockedVersionsUnsupported | `ahash` | `0.7.8, 0.8.12` | `0.8.12` | Cargo selected multiple versions of one package name; Rodin currently has one global domain per package name |
+| MultipleLockedVersionsUnsupported | `base64` | `0.21.7, 0.22.1` | `0.22.1` | Cargo selected multiple versions of one package name; Rodin currently has one global domain per package name |
+| MultipleLockedVersionsUnsupported | `bit-set` | `0.5.3, 0.8.0` | `0.8.0` | Cargo selected multiple versions of one package name; Rodin currently has one global domain per package name |
+| MultipleLockedVersionsUnsupported | `bit-vec` | `0.6.3, 0.8.0` | `0.8.0` | Cargo selected multiple versions of one package name; Rodin currently has one global domain per package name |
+| MultipleLockedVersionsUnsupported | `bitflags` | `1.3.2, 2.13.0` | `2.13.0` | Cargo selected multiple versions of one package name; Rodin currently has one global domain per package name |
+| MultipleLockedVersionsUnsupported | `block-buffer` | `0.10.4, 0.12.1` | `0.12.1` | Cargo selected multiple versions of one package name; Rodin currently has one global domain per package name |
+| MultipleLockedVersionsUnsupported | `cpufeatures` | `0.2.17, 0.3.0` | `0.3.0` | Cargo selected multiple versions of one package name; Rodin currently has one global domain per package name |
+| MultipleLockedVersionsUnsupported | `crypto-common` | `0.1.7, 0.2.2` | `0.2.2` | Cargo selected multiple versions of one package name; Rodin currently has one global domain per package name |
+| MultipleLockedVersionsUnsupported | `darling` | `0.21.3, 0.23.0` | `0.23.0` | Cargo selected multiple versions of one package name; Rodin currently has one global domain per package name |
+| MultipleLockedVersionsUnsupported | `darling_core` | `0.21.3, 0.23.0` | `0.23.0` | Cargo selected multiple versions of one package name; Rodin currently has one global domain per package name |
+| MultipleLockedVersionsUnsupported | `darling_macro` | `0.21.3, 0.23.0` | `0.23.0` | Cargo selected multiple versions of one package name; Rodin currently has one global domain per package name |
+| MultipleLockedVersionsUnsupported | `dashmap` | `5.5.3, 6.2.1` | `6.2.1` | Cargo selected multiple versions of one package name; Rodin currently has one global domain per package name |
+| MultipleLockedVersionsUnsupported | `digest` | `0.10.7, 0.11.3` | `0.11.3` | Cargo selected multiple versions of one package name; Rodin currently has one global domain per package name |
+| MultipleLockedVersionsUnsupported | `embedded-io` | `0.4.0, 0.6.1` | `0.6.1` | Cargo selected multiple versions of one package name; Rodin currently has one global domain per package name |
+| MultipleLockedVersionsUnsupported | `fallible-iterator` | `0.2.0, 0.3.0` | `0.3.0` | Cargo selected multiple versions of one package name; Rodin currently has one global domain per package name |
+| MultipleLockedVersionsUnsupported | `fancy-regex` | `0.11.0, 0.14.0` | `0.14.0` | Cargo selected multiple versions of one package name; Rodin currently has one global domain per package name |
+| MultipleLockedVersionsUnsupported | `fixedbitset` | `0.4.2, 0.5.7` | `0.5.7` | Cargo selected multiple versions of one package name; Rodin currently has one global domain per package name |
+| MultipleLockedVersionsUnsupported | `foldhash` | `0.1.5, 0.2.0` | `0.2.0` | Cargo selected multiple versions of one package name; Rodin currently has one global domain per package name |
+| MultipleLockedVersionsUnsupported | `getrandom` | `0.2.17, 0.3.4, 0.4.3` | `0.4.3` | Cargo selected multiple versions of one package name; Rodin currently has one global domain per package name |
+| MultipleLockedVersionsUnsupported | `hashbrown` | `0.12.3, 0.13.2, 0.14.5, 0.15.5, 0.16.1, 0.17.1` | `0.17.1` | Cargo selected multiple versions of one package name; Rodin currently has one global domain per package name |
+| MultipleLockedVersionsUnsupported | `hashlink` | `0.9.1, 0.10.0` | `0.10.0` | Cargo selected multiple versions of one package name; Rodin currently has one global domain per package name |
+| MultipleLockedVersionsUnsupported | `heck` | `0.4.1, 0.5.0` | `0.5.0` | Cargo selected multiple versions of one package name; Rodin currently has one global domain per package name |
+| MultipleLockedVersionsUnsupported | `indexmap` | `1.9.3, 2.14.0` | `2.14.0` | Cargo selected multiple versions of one package name; Rodin currently has one global domain per package name |
+| MultipleLockedVersionsUnsupported | `linux-raw-sys` | `0.4.15, 0.12.1` | `0.12.1` | Cargo selected multiple versions of one package name; Rodin currently has one global domain per package name |
+| MultipleLockedVersionsUnsupported | `lsp-types` | `0.94.1, 0.97.0` | `0.97.0` | Cargo selected multiple versions of one package name; Rodin currently has one global domain per package name |
+| MultipleLockedVersionsUnsupported | `nix` | `0.29.0, 0.31.3` | `0.31.3` | Cargo selected multiple versions of one package name; Rodin currently has one global domain per package name |
+| MultipleLockedVersionsUnsupported | `object` | `0.37.3, 0.39.1` | `0.39.1` | Cargo selected multiple versions of one package name; Rodin currently has one global domain per package name |
+| MultipleLockedVersionsUnsupported | `ordered-float` | `4.6.0, 5.3.0` | `5.3.0` | Cargo selected multiple versions of one package name; Rodin currently has one global domain per package name |
+| MultipleLockedVersionsUnsupported | `phf` | `0.11.3, 0.13.1` | `0.13.1` | Cargo selected multiple versions of one package name; Rodin currently has one global domain per package name |
+| MultipleLockedVersionsUnsupported | `phf_generator` | `0.11.3, 0.13.1` | `0.13.1` | Cargo selected multiple versions of one package name; Rodin currently has one global domain per package name |
+| MultipleLockedVersionsUnsupported | `phf_macros` | `0.11.3, 0.13.1` | `0.13.1` | Cargo selected multiple versions of one package name; Rodin currently has one global domain per package name |
+| MultipleLockedVersionsUnsupported | `phf_shared` | `0.11.3, 0.13.1` | `0.13.1` | Cargo selected multiple versions of one package name; Rodin currently has one global domain per package name |
+| MultipleLockedVersionsUnsupported | `proc-macro-crate` | `2.0.0, 3.5.0` | `3.5.0` | Cargo selected multiple versions of one package name; Rodin currently has one global domain per package name |
+| MultipleLockedVersionsUnsupported | `r-efi` | `5.3.0, 6.0.0` | `6.0.0` | Cargo selected multiple versions of one package name; Rodin currently has one global domain per package name |
+| MultipleLockedVersionsUnsupported | `rand` | `0.8.6, 0.9.4, 0.10.1` | `0.10.1` | Cargo selected multiple versions of one package name; Rodin currently has one global domain per package name |
+| MultipleLockedVersionsUnsupported | `rand_chacha` | `0.3.1, 0.9.0` | `0.9.0` | Cargo selected multiple versions of one package name; Rodin currently has one global domain per package name |
+| MultipleLockedVersionsUnsupported | `rand_core` | `0.6.4, 0.9.5, 0.10.1` | `0.10.1` | Cargo selected multiple versions of one package name; Rodin currently has one global domain per package name |
+| MultipleLockedVersionsUnsupported | `rand_xoshiro` | `0.6.0, 0.7.0` | `0.7.0` | Cargo selected multiple versions of one package name; Rodin currently has one global domain per package name |
+| MultipleLockedVersionsUnsupported | `rustc-hash` | `1.1.0, 2.1.2` | `2.1.2` | Cargo selected multiple versions of one package name; Rodin currently has one global domain per package name |
+| MultipleLockedVersionsUnsupported | `rustc_version` | `0.2.3, 0.4.1` | `0.4.1` | Cargo selected multiple versions of one package name; Rodin currently has one global domain per package name |
+| MultipleLockedVersionsUnsupported | `rustix` | `0.38.44, 1.1.4` | `1.1.4` | Cargo selected multiple versions of one package name; Rodin currently has one global domain per package name |
+| MultipleLockedVersionsUnsupported | `schemars` | `0.9.0, 1.2.1` | `1.2.1` | Cargo selected multiple versions of one package name; Rodin currently has one global domain per package name |
+| MultipleLockedVersionsUnsupported | `semver` | `0.9.0, 1.0.28` | `1.0.28` | Cargo selected multiple versions of one package name; Rodin currently has one global domain per package name |
+| MultipleLockedVersionsUnsupported | `serde_spanned` | `0.6.9, 1.1.1` | `1.1.1` | Cargo selected multiple versions of one package name; Rodin currently has one global domain per package name |
+| MultipleLockedVersionsUnsupported | `sha2` | `0.10.9, 0.11.0` | `0.11.0` | Cargo selected multiple versions of one package name; Rodin currently has one global domain per package name |
+| MultipleLockedVersionsUnsupported | `smallvec` | `1.15.2, 2.0.0-alpha.12` | `2.0.0-alpha.12` | Cargo selected multiple versions of one package name; Rodin currently has one global domain per package name |
+| MultipleLockedVersionsUnsupported | `strum` | `0.27.2, 0.28.0` | `0.28.0` | Cargo selected multiple versions of one package name; Rodin currently has one global domain per package name |
+| MultipleLockedVersionsUnsupported | `strum_macros` | `0.27.2, 0.28.0` | `0.28.0` | Cargo selected multiple versions of one package name; Rodin currently has one global domain per package name |
+| MultipleLockedVersionsUnsupported | `supports-color` | `2.1.0, 3.0.2` | `3.0.2` | Cargo selected multiple versions of one package name; Rodin currently has one global domain per package name |
+| MultipleLockedVersionsUnsupported | `syn` | `1.0.109, 2.0.118` | `2.0.118` | Cargo selected multiple versions of one package name; Rodin currently has one global domain per package name |
+| MultipleLockedVersionsUnsupported | `thiserror` | `1.0.69, 2.0.18` | `2.0.18` | Cargo selected multiple versions of one package name; Rodin currently has one global domain per package name |
+| MultipleLockedVersionsUnsupported | `thiserror-impl` | `1.0.69, 2.0.18` | `2.0.18` | Cargo selected multiple versions of one package name; Rodin currently has one global domain per package name |
+| MultipleLockedVersionsUnsupported | `toml` | `0.8.23, 1.1.2+spec-1.1.0` | `1.1.2+spec-1.1.0` | Cargo selected multiple versions of one package name; Rodin currently has one global domain per package name |
+| MultipleLockedVersionsUnsupported | `toml_datetime` | `0.6.11, 1.1.1+spec-1.1.0` | `1.1.1+spec-1.1.0` | Cargo selected multiple versions of one package name; Rodin currently has one global domain per package name |
+| MultipleLockedVersionsUnsupported | `toml_edit` | `0.20.7, 0.22.27, 0.25.12+spec-1.1.0` | `0.25.12+spec-1.1.0` | Cargo selected multiple versions of one package name; Rodin currently has one global domain per package name |
+| MultipleLockedVersionsUnsupported | `tower` | `0.4.13, 0.5.3` | `0.5.3` | Cargo selected multiple versions of one package name; Rodin currently has one global domain per package name |
+| MultipleLockedVersionsUnsupported | `wasi` | `0.11.1+wasi-snapshot-preview1, 0.14.7+wasi-0.2.4` | `0.14.7+wasi-0.2.4` | Cargo selected multiple versions of one package name; Rodin currently has one global domain per package name |
+| MultipleLockedVersionsUnsupported | `windows-sys` | `0.52.0, 0.59.0, 0.60.2, 0.61.2` | `0.61.2` | Cargo selected multiple versions of one package name; Rodin currently has one global domain per package name |
+| MultipleLockedVersionsUnsupported | `windows-targets` | `0.52.6, 0.53.5` | `0.53.5` | Cargo selected multiple versions of one package name; Rodin currently has one global domain per package name |
+| MultipleLockedVersionsUnsupported | `windows_aarch64_gnullvm` | `0.52.6, 0.53.1` | `0.53.1` | Cargo selected multiple versions of one package name; Rodin currently has one global domain per package name |
+| MultipleLockedVersionsUnsupported | `windows_aarch64_msvc` | `0.52.6, 0.53.1` | `0.53.1` | Cargo selected multiple versions of one package name; Rodin currently has one global domain per package name |
+| MultipleLockedVersionsUnsupported | `windows_i686_gnu` | `0.52.6, 0.53.1` | `0.53.1` | Cargo selected multiple versions of one package name; Rodin currently has one global domain per package name |
+| MultipleLockedVersionsUnsupported | `windows_i686_gnullvm` | `0.52.6, 0.53.1` | `0.53.1` | Cargo selected multiple versions of one package name; Rodin currently has one global domain per package name |
+| MultipleLockedVersionsUnsupported | `windows_i686_msvc` | `0.52.6, 0.53.1` | `0.53.1` | Cargo selected multiple versions of one package name; Rodin currently has one global domain per package name |
+| MultipleLockedVersionsUnsupported | `windows_x86_64_gnu` | `0.52.6, 0.53.1` | `0.53.1` | Cargo selected multiple versions of one package name; Rodin currently has one global domain per package name |
+| MultipleLockedVersionsUnsupported | `windows_x86_64_gnullvm` | `0.52.6, 0.53.1` | `0.53.1` | Cargo selected multiple versions of one package name; Rodin currently has one global domain per package name |
+| MultipleLockedVersionsUnsupported | `windows_x86_64_msvc` | `0.52.6, 0.53.1` | `0.53.1` | Cargo selected multiple versions of one package name; Rodin currently has one global domain per package name |
+| MultipleLockedVersionsUnsupported | `winnow` | `0.5.40, 0.7.15, 1.0.3` | `1.0.3` | Cargo selected multiple versions of one package name; Rodin currently has one global domain per package name |
+
+### Warm counterfactual
+
+Dropped root dependency `copypatch`. Warm/cold selected sets equal: `true`.
+
+| warm decisions | cold decisions | decision delta | warm conflicts | cold conflicts | conflict delta | warm facts used | scoped out |
+|---:|---:|---:|---:|---:|---:|---:|---:|
+| 0 | 0 | 0 | 0 | 0 | 0 | 0 | 0 |
+
+| added | removed | changed |
+|---:|---:|---:|
+| 0 | 0 | 0 |
+
+
+### Extraction and modeling gap samples
+
+| gap kind | count |
+|---|---:|
+| MultipleLockedVersionsUnsupported | 68 |
+| ManifestMissing | 680 |
+| DependencyOutsideLockUniverse | 1358 |
+| DroppedDuplicateVersionEdge | 682 |
+| LockExactFallback | 2663 |
+| TargetConditionalDependency | 241 |
+| BuildDependency | 54 |
+| DevDependency | 1020 |
+| OptionalDependency | 896 |
+
+| kind | package | detail |
+|---|---|---|
+| MultipleLockedVersionsUnsupported | `ahash` | Cargo.lock contains 0.7.8, 0.8.12; Rodin currently has one global version domain per package name |
+| MultipleLockedVersionsUnsupported | `base64` | Cargo.lock contains 0.21.7, 0.22.1; Rodin currently has one global version domain per package name |
+| MultipleLockedVersionsUnsupported | `bit-set` | Cargo.lock contains 0.5.3, 0.8.0; Rodin currently has one global version domain per package name |
+| MultipleLockedVersionsUnsupported | `bit-vec` | Cargo.lock contains 0.6.3, 0.8.0; Rodin currently has one global version domain per package name |
+| MultipleLockedVersionsUnsupported | `bitflags` | Cargo.lock contains 1.3.2, 2.13.0; Rodin currently has one global version domain per package name |
+| MultipleLockedVersionsUnsupported | `block-buffer` | Cargo.lock contains 0.10.4, 0.12.1; Rodin currently has one global version domain per package name |
+| MultipleLockedVersionsUnsupported | `cpufeatures` | Cargo.lock contains 0.2.17, 0.3.0; Rodin currently has one global version domain per package name |
+| MultipleLockedVersionsUnsupported | `crypto-common` | Cargo.lock contains 0.1.7, 0.2.2; Rodin currently has one global version domain per package name |
+| MultipleLockedVersionsUnsupported | `darling` | Cargo.lock contains 0.21.3, 0.23.0; Rodin currently has one global version domain per package name |
+| MultipleLockedVersionsUnsupported | `darling_core` | Cargo.lock contains 0.21.3, 0.23.0; Rodin currently has one global version domain per package name |
+| MultipleLockedVersionsUnsupported | `darling_macro` | Cargo.lock contains 0.21.3, 0.23.0; Rodin currently has one global version domain per package name |
+| MultipleLockedVersionsUnsupported | `dashmap` | Cargo.lock contains 5.5.3, 6.2.1; Rodin currently has one global version domain per package name |
+| MultipleLockedVersionsUnsupported | `digest` | Cargo.lock contains 0.10.7, 0.11.3; Rodin currently has one global version domain per package name |
+| MultipleLockedVersionsUnsupported | `embedded-io` | Cargo.lock contains 0.4.0, 0.6.1; Rodin currently has one global version domain per package name |
+| MultipleLockedVersionsUnsupported | `fallible-iterator` | Cargo.lock contains 0.2.0, 0.3.0; Rodin currently has one global version domain per package name |
+| MultipleLockedVersionsUnsupported | `fancy-regex` | Cargo.lock contains 0.11.0, 0.14.0; Rodin currently has one global version domain per package name |
+| MultipleLockedVersionsUnsupported | `fixedbitset` | Cargo.lock contains 0.4.2, 0.5.7; Rodin currently has one global version domain per package name |
+| MultipleLockedVersionsUnsupported | `foldhash` | Cargo.lock contains 0.1.5, 0.2.0; Rodin currently has one global version domain per package name |
+| MultipleLockedVersionsUnsupported | `getrandom` | Cargo.lock contains 0.2.17, 0.3.4, 0.4.3; Rodin currently has one global version domain per package name |
+| MultipleLockedVersionsUnsupported | `hashbrown` | Cargo.lock contains 0.12.3, 0.13.2, 0.14.5, 0.15.5, 0.16.1, 0.17.1; Rodin currently has one global version domain per package name |
+| MultipleLockedVersionsUnsupported | `hashlink` | Cargo.lock contains 0.9.1, 0.10.0; Rodin currently has one global version domain per package name |
+| MultipleLockedVersionsUnsupported | `heck` | Cargo.lock contains 0.4.1, 0.5.0; Rodin currently has one global version domain per package name |
+| MultipleLockedVersionsUnsupported | `indexmap` | Cargo.lock contains 1.9.3, 2.14.0; Rodin currently has one global version domain per package name |
+| MultipleLockedVersionsUnsupported | `linux-raw-sys` | Cargo.lock contains 0.4.15, 0.12.1; Rodin currently has one global version domain per package name |
+| MultipleLockedVersionsUnsupported | `lsp-types` | Cargo.lock contains 0.94.1, 0.97.0; Rodin currently has one global version domain per package name |
+| MultipleLockedVersionsUnsupported | `nix` | Cargo.lock contains 0.29.0, 0.31.3; Rodin currently has one global version domain per package name |
+| MultipleLockedVersionsUnsupported | `object` | Cargo.lock contains 0.37.3, 0.39.1; Rodin currently has one global version domain per package name |
+| MultipleLockedVersionsUnsupported | `ordered-float` | Cargo.lock contains 4.6.0, 5.3.0; Rodin currently has one global version domain per package name |
+| MultipleLockedVersionsUnsupported | `phf` | Cargo.lock contains 0.11.3, 0.13.1; Rodin currently has one global version domain per package name |
+| MultipleLockedVersionsUnsupported | `phf_generator` | Cargo.lock contains 0.11.3, 0.13.1; Rodin currently has one global version domain per package name |
+| MultipleLockedVersionsUnsupported | `phf_macros` | Cargo.lock contains 0.11.3, 0.13.1; Rodin currently has one global version domain per package name |
+| MultipleLockedVersionsUnsupported | `phf_shared` | Cargo.lock contains 0.11.3, 0.13.1; Rodin currently has one global version domain per package name |
+| MultipleLockedVersionsUnsupported | `proc-macro-crate` | Cargo.lock contains 2.0.0, 3.5.0; Rodin currently has one global version domain per package name |
+| MultipleLockedVersionsUnsupported | `r-efi` | Cargo.lock contains 5.3.0, 6.0.0; Rodin currently has one global version domain per package name |
+| MultipleLockedVersionsUnsupported | `rand` | Cargo.lock contains 0.8.6, 0.9.4, 0.10.1; Rodin currently has one global version domain per package name |
+| MultipleLockedVersionsUnsupported | `rand_chacha` | Cargo.lock contains 0.3.1, 0.9.0; Rodin currently has one global version domain per package name |
+| MultipleLockedVersionsUnsupported | `rand_core` | Cargo.lock contains 0.6.4, 0.9.5, 0.10.1; Rodin currently has one global version domain per package name |
+| MultipleLockedVersionsUnsupported | `rand_xoshiro` | Cargo.lock contains 0.6.0, 0.7.0; Rodin currently has one global version domain per package name |
+| MultipleLockedVersionsUnsupported | `rustc-hash` | Cargo.lock contains 1.1.0, 2.1.2; Rodin currently has one global version domain per package name |
+| MultipleLockedVersionsUnsupported | `rustc_version` | Cargo.lock contains 0.2.3, 0.4.1; Rodin currently has one global version domain per package name |
+| MultipleLockedVersionsUnsupported | `rustix` | Cargo.lock contains 0.38.44, 1.1.4; Rodin currently has one global version domain per package name |
+| MultipleLockedVersionsUnsupported | `schemars` | Cargo.lock contains 0.9.0, 1.2.1; Rodin currently has one global version domain per package name |
+| MultipleLockedVersionsUnsupported | `semver` | Cargo.lock contains 0.9.0, 1.0.28; Rodin currently has one global version domain per package name |
+| MultipleLockedVersionsUnsupported | `serde_spanned` | Cargo.lock contains 0.6.9, 1.1.1; Rodin currently has one global version domain per package name |
+| MultipleLockedVersionsUnsupported | `sha2` | Cargo.lock contains 0.10.9, 0.11.0; Rodin currently has one global version domain per package name |
+| MultipleLockedVersionsUnsupported | `smallvec` | Cargo.lock contains 1.15.2, 2.0.0-alpha.12; Rodin currently has one global version domain per package name |
+| MultipleLockedVersionsUnsupported | `strum` | Cargo.lock contains 0.27.2, 0.28.0; Rodin currently has one global version domain per package name |
+| MultipleLockedVersionsUnsupported | `strum_macros` | Cargo.lock contains 0.27.2, 0.28.0; Rodin currently has one global version domain per package name |
+| MultipleLockedVersionsUnsupported | `supports-color` | Cargo.lock contains 2.1.0, 3.0.2; Rodin currently has one global version domain per package name |
+| MultipleLockedVersionsUnsupported | `syn` | Cargo.lock contains 1.0.109, 2.0.118; Rodin currently has one global version domain per package name |
+| MultipleLockedVersionsUnsupported | `thiserror` | Cargo.lock contains 1.0.69, 2.0.18; Rodin currently has one global version domain per package name |
+| MultipleLockedVersionsUnsupported | `thiserror-impl` | Cargo.lock contains 1.0.69, 2.0.18; Rodin currently has one global version domain per package name |
+| MultipleLockedVersionsUnsupported | `toml` | Cargo.lock contains 0.8.23, 1.1.2+spec-1.1.0; Rodin currently has one global version domain per package name |
+| MultipleLockedVersionsUnsupported | `toml_datetime` | Cargo.lock contains 0.6.11, 1.1.1+spec-1.1.0; Rodin currently has one global version domain per package name |
+| MultipleLockedVersionsUnsupported | `toml_edit` | Cargo.lock contains 0.20.7, 0.22.27, 0.25.12+spec-1.1.0; Rodin currently has one global version domain per package name |
+| MultipleLockedVersionsUnsupported | `tower` | Cargo.lock contains 0.4.13, 0.5.3; Rodin currently has one global version domain per package name |
+| MultipleLockedVersionsUnsupported | `wasi` | Cargo.lock contains 0.11.1+wasi-snapshot-preview1, 0.14.7+wasi-0.2.4; Rodin currently has one global version domain per package name |
+| MultipleLockedVersionsUnsupported | `windows-sys` | Cargo.lock contains 0.52.0, 0.59.0, 0.60.2, 0.61.2; Rodin currently has one global version domain per package name |
+| MultipleLockedVersionsUnsupported | `windows-targets` | Cargo.lock contains 0.52.6, 0.53.5; Rodin currently has one global version domain per package name |
+| MultipleLockedVersionsUnsupported | `windows_aarch64_gnullvm` | Cargo.lock contains 0.52.6, 0.53.1; Rodin currently has one global version domain per package name |
+
+7602 additional extraction/modeling gaps omitted from this table; the JSON artifact carries the full set.
