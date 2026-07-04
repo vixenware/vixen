@@ -424,3 +424,14 @@ medium confidence" to "primary-source verified, high confidence":
 call-by-value hedge closed), **C2** (related-work precision — Mandala's
 exact mechanism now quotable instead of paraphrased from GPT).
 Outstanding: Konat thesis, Atria-era MVFS whitepapers — still unread.
+
+## PUBLISHING POSTURE (Amos ruling, 2026-07-04)
+
+No academic paper for vix/vixen — Amos publishes via blog/video,
+explaining WHY IT'S GOOD, not claiming novelty (papers are reserved
+for the speech-LLM streaming work). This record's purpose is now:
+(1) honesty in public content — know the lineage, credit Vesta/gg/
+Unison/BuildXL correctly, never overclaim; (2) the positioning
+narrative (three-lineages intersection) as blog material. Remaining
+reading debts (Konat, Atria) downgraded to optional-forever. No
+further scrub rounds.
