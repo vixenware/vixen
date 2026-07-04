@@ -189,3 +189,17 @@ are the alternative if maintainership legibility wins.
   vix-daemon, output path passed as an argument) and the open vox TS runtime
   from the facet checkout (sibling-path file: deps for now; publish rc
   packages when that gets annoying).
+
+## Amendment (Amos, 2026-07-04 night)
+
+1. OPEN vix gains a minimal REAL-PROCESS exec lane (feature-gated,
+   unsandboxed, trusts-the-host stated plainly). The line: open runs
+   processes naively; vixen runs them SOUNDLY (VFS mediation,
+   sandbox, fleet stay proprietary).
+2. RE-LITIGATED AND CONFIRMED: Vixen's App/Support/Runtime/Agent —
+   the kernel-ish, host-installed components we ask people to put on
+   their computers — are OPEN SOURCE. Trust-critical endpoint code
+   is open; the cloud/fleet/solver product is the business.
+3. PR #2431 merges when CI is quiet (delegated); subsequent work on
+   a new branch. The evaluator funeral ships as its OWN pure-deletion
+   PR after the merge.
