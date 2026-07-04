@@ -7,9 +7,10 @@ use std::sync::Arc;
 use eyre::{Context, Result};
 use facet::Facet;
 use rodin_facts::{
-    Assignment, Atom, Clause, ClauseId, ClauseStore, Derivation, DerivationId, DerivationStore,
-    Exclusion, ExclusionId, ExclusionStore, FeatIx, FeatureInterner, PackageInterner, PinRef,
-    PkgId, PkgIx, Premise, Region, RuleKind, SourceInterner, SourceIx, VersionSet,
+    Assignment, Atom, Clause, ClauseId, ClauseStore, CompatClass, Derivation, DerivationId,
+    DerivationStore, Exclusion, ExclusionId, ExclusionStore, FeatIx, FeatureInterner,
+    PackageInterner, PinRef, PkgId, PkgIx, Premise, Region, RuleKind, SourceInterner, SourceIx,
+    VersionSet,
 };
 use semver::{Version, VersionReq};
 
@@ -603,8 +604,12 @@ pub struct CompiledIndex {
     pub packages: PackageInterner,
     pub features: FeatureInterner,
     source: SourceIx,
-    names: BTreeMap<PkgIx, String>,
-    package_by_name: BTreeMap<String, PkgIx>,
+    labels: BTreeMap<PkgIx, String>,
+    base_names: BTreeMap<PkgIx, String>,
+    compat_classes: BTreeMap<PkgIx, CompatClass>,
+    package_by_label: BTreeMap<String, PkgIx>,
+    package_by_domain: BTreeMap<(String, CompatClass), PkgIx>,
+    domains_by_name: BTreeMap<String, BTreeSet<PkgIx>>,
     versions: BTreeMap<PkgIx, Vec<Version>>,
     manifests: BTreeMap<(PkgIx, Version), Manifest>,
     clauses: ClauseStore,
@@ -629,6 +634,7 @@ struct DepLine {
     default_features: bool,
     target: Option<String>,
     kind: String,
+    class_hint: Option<CompatClass>,
 }
 
 #[derive(Clone, Debug)]
@@ -711,8 +717,12 @@ impl CompiledIndex {
             packages: PackageInterner::new(),
             features: FeatureInterner::new(),
             source,
-            names: BTreeMap::new(),
-            package_by_name: BTreeMap::new(),
+            labels: BTreeMap::new(),
+            base_names: BTreeMap::new(),
+            compat_classes: BTreeMap::new(),
+            package_by_label: BTreeMap::new(),
+            package_by_domain: BTreeMap::new(),
+            domains_by_name: BTreeMap::new(),
             versions: BTreeMap::new(),
             manifests: BTreeMap::new(),
             clauses: ClauseStore::new(),
@@ -724,17 +734,14 @@ impl CompiledIndex {
     pub fn from_sparse(crates: &BTreeMap<String, rodin_survey::CrateData>) -> Result<Self> {
         let mut out = Self::empty();
         for crate_data in crates.values() {
-            let pkg = out.intern_package(&crate_data.name);
-            let mut versions = Vec::new();
             for (version, entry) in rodin_survey::sorted_non_yanked_entries(crate_data)? {
-                versions.push(version.clone());
+                let pkg = out.intern_package_version(&crate_data.name, &version);
                 let mut deps = Vec::new();
                 for dep in &entry.deps {
                     if dep.kind != "normal" {
                         continue;
                     }
                     let actual = rodin_survey::actual_dep_name(dep);
-                    out.intern_package(&actual);
                     let mut features = dep.features.clone();
                     features.sort();
                     deps.push(DepLine {
@@ -746,6 +753,7 @@ impl CompiledIndex {
                         default_features: dep.default_features,
                         target: dep.target.clone(),
                         kind: dep.kind.clone(),
+                        class_hint: None,
                     });
                 }
                 deps.sort_by(|left, right| {
@@ -755,16 +763,19 @@ impl CompiledIndex {
                         .then_with(|| left.req.cmp(&right.req))
                 });
                 out.manifests.insert(
-                    (pkg, version),
+                    (pkg, version.clone()),
                     Manifest {
                         deps,
                         features: merged_features(entry),
                         yanked: entry.yanked,
                     },
                 );
+                out.versions.entry(pkg).or_default().push(version.clone());
             }
+        }
+        for versions in out.versions.values_mut() {
             versions.sort();
-            out.versions.insert(pkg, versions);
+            versions.dedup();
         }
         out.compile()?;
         Ok(out)
@@ -772,14 +783,68 @@ impl CompiledIndex {
 
     #[must_use]
     pub fn package(&self, name: &str) -> Option<PkgIx> {
-        self.package_by_name
-            .get(&name.to_ascii_lowercase())
+        let key = name.to_ascii_lowercase();
+        if let Some(pkg) = self.package_by_label.get(&key) {
+            return Some(*pkg);
+        }
+        let domains = self.domains_by_name.get(&key)?;
+        (domains.len() == 1)
+            .then(|| domains.iter().next().copied())
+            .flatten()
+    }
+
+    #[must_use]
+    pub fn package_for_req(&self, name: &str, req: &str) -> Option<PkgIx> {
+        let set = parse_req(req).ok()?;
+        self.package_for_set(name, &set, None)
+    }
+
+    fn package_for_set(
+        &self,
+        name: &str,
+        set: &VersionSet,
+        class_hint: Option<CompatClass>,
+    ) -> Option<PkgIx> {
+        let key = name.to_ascii_lowercase();
+        if let Some(class) = class_hint {
+            let pkg = self.package_by_domain.get(&(key, class)).copied()?;
+            return self
+                .versions(pkg)
+                .iter()
+                .any(|version| set.contains(version))
+                .then_some(pkg);
+        }
+        self.domains_by_name
+            .get(&key)?
+            .iter()
             .copied()
+            .filter(|pkg| {
+                self.versions(*pkg)
+                    .iter()
+                    .any(|version| set.contains(version))
+            })
+            .max_by_key(|pkg| {
+                self.versions(*pkg)
+                    .iter()
+                    .filter(|version| set.contains(version))
+                    .max()
+                    .cloned()
+            })
     }
 
     #[must_use]
     pub fn name(&self, pkg: PkgIx) -> Option<&str> {
-        self.names.get(&pkg).map(String::as_str)
+        self.labels.get(&pkg).map(String::as_str)
+    }
+
+    #[must_use]
+    pub fn base_name(&self, pkg: PkgIx) -> Option<&str> {
+        self.base_names.get(&pkg).map(String::as_str)
+    }
+
+    #[must_use]
+    pub fn compat_class(&self, pkg: PkgIx) -> Option<CompatClass> {
+        self.compat_classes.get(&pkg).copied()
     }
 
     #[must_use]
@@ -789,7 +854,7 @@ impl CompiledIndex {
 
     #[must_use]
     pub fn package_count(&self) -> usize {
-        self.names.len()
+        self.labels.len()
     }
 
     #[must_use]
@@ -805,12 +870,11 @@ impl CompiledIndex {
         features: BTreeMap<String, Vec<String>>,
     ) {
         let name = name.into().to_ascii_lowercase();
-        let pkg = self.intern_package(&name);
+        let pkg = self.intern_package_version(&name, &version);
         let mut lines = Vec::new();
         for dep in deps {
             let actual = dep.package.clone().unwrap_or_else(|| dep.name.clone());
             let actual = actual.to_ascii_lowercase();
-            self.intern_package(&actual);
             let mut features = dep.features;
             features.sort();
             lines.push(DepLine {
@@ -822,6 +886,7 @@ impl CompiledIndex {
                 default_features: dep.default_features,
                 target: None,
                 kind: "normal".to_owned(),
+                class_hint: dep.class_hint,
             });
         }
         lines.sort_by(|left, right| left.actual.cmp(&right.actual));
@@ -845,14 +910,25 @@ impl CompiledIndex {
         self.compile()
     }
 
-    fn intern_package(&mut self, name: &str) -> PkgIx {
+    fn intern_package_version(&mut self, name: &str, version: &Version) -> PkgIx {
         let key = name.to_ascii_lowercase();
-        if let Some(pkg) = self.package_by_name.get(&key) {
+        let compat = CompatClass::from_version(version);
+        if let Some(pkg) = self.package_by_domain.get(&(key.clone(), compat)) {
             return *pkg;
         }
-        let pkg = self.packages.intern(PkgId::new(self.source, key.clone()));
-        self.package_by_name.insert(key.clone(), pkg);
-        self.names.insert(pkg, key);
+        let label = domain_label(&key, compat);
+        let pkg = self
+            .packages
+            .intern(PkgId::domain(self.source, key.clone(), compat));
+        self.package_by_label.insert(label.clone(), pkg);
+        self.package_by_domain.insert((key.clone(), compat), pkg);
+        self.domains_by_name
+            .entry(key.clone())
+            .or_default()
+            .insert(pkg);
+        self.labels.insert(pkg, label);
+        self.base_names.insert(pkg, key);
+        self.compat_classes.insert(pkg, compat);
         pkg
     }
 
@@ -871,13 +947,13 @@ impl CompiledIndex {
             .collect();
         for (pkg, version, manifest) in manifests {
             for dep in &manifest.deps {
-                let Some(dep_pkg) = self.package(&dep.actual) else {
+                let req = parse_req(&dep.req)?;
+                let Some(dep_pkg) = self.package_for_set(&dep.actual, &req, dep.class_hint) else {
                     continue;
                 };
-                let req = parse_req(&dep.req)?;
                 let support = EdgeKey {
                     parent: self.name(pkg).unwrap_or_default().to_owned(),
-                    dep: dep.actual.clone(),
+                    dep: self.name(dep_pkg).unwrap_or_default().to_owned(),
                 };
                 if !dep.optional {
                     self.push_clause(
@@ -946,12 +1022,13 @@ impl CompiledIndex {
             let Some(dep) = self.dependency_line(pkg, version, dep_name) else {
                 return Ok(());
             };
-            let Some(dep_pkg) = self.package(&dep.actual) else {
+            let req = parse_req(&dep.req)?;
+            let Some(dep_pkg) = self.package_for_set(&dep.actual, &req, dep.class_hint) else {
                 return Ok(());
             };
             let support = EdgeKey {
                 parent: self.name(pkg).unwrap_or_default().to_owned(),
-                dep: dep.actual.clone(),
+                dep: self.name(dep_pkg).unwrap_or_default().to_owned(),
             };
             self.push_clause(
                 vec![
@@ -966,7 +1043,7 @@ impl CompiledIndex {
                     Guard::Feature(pkg, feat),
                     Guard::Selected(pkg, version.clone()),
                 ],
-                Consequent::VersionSet(dep_pkg, parse_req(&dep.req)?),
+                Consequent::VersionSet(dep_pkg, req),
                 Some(support.clone()),
             );
             self.push_dependency_feature_clauses(pkg, version, &dep, dep_pkg, &support);
@@ -974,13 +1051,14 @@ impl CompiledIndex {
             let Some(dep) = self.dependency_line(pkg, version, dep_name) else {
                 return Ok(());
             };
-            let Some(dep_pkg) = self.package(&dep.actual) else {
+            let req = parse_req(&dep.req)?;
+            let Some(dep_pkg) = self.package_for_set(&dep.actual, &req, dep.class_hint) else {
                 return Ok(());
             };
             let dep_feat = self.intern_feature(dep_feature);
             let support = EdgeKey {
                 parent: self.name(pkg).unwrap_or_default().to_owned(),
-                dep: dep.actual.clone(),
+                dep: self.name(dep_pkg).unwrap_or_default().to_owned(),
             };
             self.push_clause(
                 vec![
@@ -995,13 +1073,14 @@ impl CompiledIndex {
             let Some(dep) = self.dependency_line(pkg, version, dep_name) else {
                 return Ok(());
             };
-            let Some(dep_pkg) = self.package(&dep.actual) else {
+            let req = parse_req(&dep.req)?;
+            let Some(dep_pkg) = self.package_for_set(&dep.actual, &req, dep.class_hint) else {
                 return Ok(());
             };
             let dep_feat = self.intern_feature(dep_feature);
             let support = EdgeKey {
                 parent: self.name(pkg).unwrap_or_default().to_owned(),
-                dep: dep.actual.clone(),
+                dep: self.name(dep_pkg).unwrap_or_default().to_owned(),
             };
             self.push_clause(
                 vec![
@@ -1016,7 +1095,7 @@ impl CompiledIndex {
                     Guard::Feature(pkg, feat),
                     Guard::Selected(pkg, version.clone()),
                 ],
-                Consequent::VersionSet(dep_pkg, parse_req(&dep.req)?),
+                Consequent::VersionSet(dep_pkg, req),
                 Some(support.clone()),
             );
             self.push_clause(
@@ -1095,10 +1174,14 @@ impl CompiledIndex {
         let Some(manifest) = self.manifests.get(&(pkg, version.clone())) else {
             return Vec::new();
         };
+        let dep_actual = self
+            .package(dep)
+            .and_then(|pkg| self.base_name(pkg))
+            .unwrap_or(dep);
         let mut out: Vec<_> = manifest
             .deps
             .iter()
-            .filter(|line| line.actual == dep)
+            .filter(|line| line.actual == dep_actual)
             .map(|line| EdgeSignature {
                 req: line.req.clone(),
                 features: line.features.clone(),
@@ -1184,6 +1267,9 @@ impl CompiledIndex {
                     dep.target,
                     dep.kind
                 );
+                if let Some(class) = dep.class_hint {
+                    let _ = write!(canonical, "class:{class};");
+                }
             }
             for (feature, enables) in &manifest.features {
                 let _ = write!(canonical, "feature:{feature}={enables:?};");
@@ -1243,6 +1329,7 @@ pub struct SyntheticDep {
     pub optional: bool,
     pub default_features: bool,
     pub package: Option<String>,
+    pub class_hint: Option<CompatClass>,
 }
 
 impl SyntheticDep {
@@ -1255,6 +1342,7 @@ impl SyntheticDep {
             optional: false,
             default_features: true,
             package: None,
+            class_hint: None,
         }
     }
 
@@ -1267,6 +1355,12 @@ impl SyntheticDep {
     #[must_use]
     pub fn feature(mut self, feature: impl Into<String>) -> Self {
         self.features.push(feature.into());
+        self
+    }
+
+    #[must_use]
+    pub fn class_hint(mut self, class: CompatClass) -> Self {
+        self.class_hint = Some(class);
         self
     }
 }
@@ -1339,7 +1433,7 @@ impl<'a> Solver<'a> {
 
     fn seed_problem(&mut self, problem: &Problem, state: &mut State) -> Result<(), Conflict> {
         for root in &problem.roots {
-            let Some(pkg) = self.index.package(&root.name) else {
+            let Some(pkg) = self.index.package_for_req(&root.name, &root.req) else {
                 return Err(Conflict {
                     premises: Vec::new(),
                     selected: selected_versions(state),
@@ -1358,7 +1452,11 @@ impl<'a> Solver<'a> {
             self.activate(state, pkg, Premise::Pin(activation_pin));
             self.steps.push(SolveStep::Decree {
                 origin: DecreeOrigin::Root,
-                pkg: root.name.clone(),
+                pkg: self
+                    .index
+                    .name(pkg)
+                    .unwrap_or(root.name.as_str())
+                    .to_owned(),
                 requirement,
             });
             let pin = PinRef(format!("root:{}:{}", root.name, root.req));
@@ -1385,7 +1483,7 @@ impl<'a> Solver<'a> {
             }
         }
         for decree in &problem.decrees {
-            let Some(pkg) = self.index.package(&decree.name) else {
+            let Some(pkg) = self.index.package_for_req(&decree.name, &decree.req) else {
                 continue;
             };
             let requirement = display_req(&decree.req);
@@ -1393,7 +1491,11 @@ impl<'a> Solver<'a> {
                 .push(format!("decree {} {requirement}", decree.name));
             self.steps.push(SolveStep::Decree {
                 origin: DecreeOrigin::User,
-                pkg: decree.name.clone(),
+                pkg: self
+                    .index
+                    .name(pkg)
+                    .unwrap_or(decree.name.as_str())
+                    .to_owned(),
                 requirement,
             });
             let activation_pin = PinRef(format!("decree:{}", decree.name));
@@ -2102,6 +2204,10 @@ fn merged_features(entry: &rodin_survey::IndexEntry) -> BTreeMap<String, Vec<Str
 fn parse_req(req: &str) -> Result<VersionSet> {
     let parsed = VersionReq::parse(req).wrap_err_with(|| format!("parsing version req {req}"))?;
     Ok(VersionSet::from_req(&parsed))
+}
+
+fn domain_label(name: &str, compat: CompatClass) -> String {
+    format!("{}@{}", name.to_ascii_lowercase(), compat)
 }
 
 fn display_req(req: &str) -> String {
@@ -3477,16 +3583,22 @@ fn warm_fact_touches(
     fact: &VerifiedWarmFact,
     touched: &BTreeSet<String>,
 ) -> bool {
-    fact.fact
-        .support
-        .iter()
-        .any(|edge| touched.contains(&edge.parent) || touched.contains(&edge.dep))
-        || fact
-            .fact
-            .region
-            .versions
-            .keys()
-            .any(|pkg| index.name(*pkg).is_some_and(|name| touched.contains(name)))
+    fact.fact.support.iter().any(|edge| {
+        label_or_base_touched(index, &edge.parent, touched)
+            || label_or_base_touched(index, &edge.dep, touched)
+    }) || fact.fact.region.versions.keys().any(|pkg| {
+        index
+            .name(*pkg)
+            .is_some_and(|name| label_or_base_touched(index, name, touched))
+    })
+}
+
+fn label_or_base_touched(index: &CompiledIndex, label: &str, touched: &BTreeSet<String>) -> bool {
+    touched.contains(label)
+        || index
+            .package(label)
+            .and_then(|pkg| index.base_name(pkg))
+            .is_some_and(|base| touched.contains(base))
 }
 
 fn selection_diff(
@@ -3542,19 +3654,20 @@ pub fn write_round3_record(name: &str, path: &Path) -> Result<SolveRecord> {
 
 fn record_packages(index: &CompiledIndex) -> Vec<RecordPackage> {
     index
-        .names
+        .labels
         .iter()
-        .map(|(pkg, name)| {
+        .map(|(pkg, label)| {
             let source = index
                 .packages
                 .resolve(*pkg)
                 .and_then(|pkg_id| index.sources.resolve_str(pkg_id.source))
                 .unwrap_or(CRATES_IO)
                 .to_owned();
+            let name = index.base_name(*pkg).unwrap_or(label);
             RecordPackage {
-                id: package_id(&source, name),
+                id: package_id(&source, label),
                 source: source.clone(),
-                name: name.clone(),
+                name: name.to_owned(),
                 versions: index
                     .versions(*pkg)
                     .iter()
@@ -3579,14 +3692,23 @@ fn record_graph(index: &CompiledIndex, _problem: &Problem, result: &SolveResult)
             if dep.optional {
                 continue;
             }
-            if !result.selected.contains_key(&dep.actual) {
+            let Ok(req) = parse_req(&dep.req) else {
+                continue;
+            };
+            let Some(dep_pkg) = index.package_for_set(&dep.actual, &req, dep.class_hint) else {
+                continue;
+            };
+            let Some(dep_label) = index.name(dep_pkg) else {
+                continue;
+            };
+            if !result.selected.contains_key(dep_label) {
                 continue;
             }
-            let id = edge_id(index, parent, &dep.actual);
+            let id = edge_id(index, parent, dep_label);
             edges.entry(id.clone()).or_insert_with(|| RecordEdge {
                 id,
                 from: package_id_for_name(index, parent),
-                to: package_id_for_name(index, &dep.actual),
+                to: package_id_for_name(index, dep_label),
                 requirement: dep.req.clone(),
             });
         }
@@ -3694,15 +3816,15 @@ fn add_forced_dependency_closure(index: &CompiledIndex, versions: &mut BTreeMap<
                 if dep.optional {
                     continue;
                 }
-                let Some(dep_pkg) = index.package(&dep.actual) else {
+                let Ok(req) = parse_req(&dep.req) else {
+                    continue;
+                };
+                let Some(dep_pkg) = index.package_for_set(&dep.actual, &req, dep.class_hint) else {
                     continue;
                 };
                 if versions.contains_key(&dep_pkg) {
                     continue;
                 }
-                let Ok(req) = parse_req(&dep.req) else {
-                    continue;
-                };
                 let candidates: Vec<_> = index
                     .versions(dep_pkg)
                     .iter()
@@ -3734,10 +3856,10 @@ fn apply_direct_dependency_versions(
         if dep.optional {
             continue;
         }
-        let Some(dep_pkg) = index.package(&dep.actual) else {
+        let Ok(req) = parse_req(&dep.req) else {
             continue;
         };
-        let Ok(req) = parse_req(&dep.req) else {
+        let Some(dep_pkg) = index.package_for_set(&dep.actual, &req, dep.class_hint) else {
             continue;
         };
         let candidates: Vec<_> = index
@@ -3806,25 +3928,25 @@ fn buried_pin(two_level: bool) -> Result<PressureScenario> {
     let mut index = CompiledIndex::empty();
     add_leaf_versions(&mut index, "a", 1, 3);
     if two_level {
-        index.add_package_version("x", v(1, 0, 0), Vec::new(), BTreeMap::new());
+        index.add_package_version("x", rung(1), Vec::new(), BTreeMap::new());
         index.add_package_version(
             "x",
-            v(2, 0, 0),
-            vec![SyntheticDep::normal("mid", "=1.0.0")],
+            rung(2),
+            vec![SyntheticDep::normal("mid", exact_rung(1))],
             BTreeMap::new(),
         );
         index.add_package_version(
             "mid",
-            v(1, 0, 0),
-            vec![SyntheticDep::normal("a", "=1.0.0")],
+            rung(1),
+            vec![SyntheticDep::normal("a", exact_rung(1))],
             BTreeMap::new(),
         );
     } else {
-        index.add_package_version("x", v(1, 0, 0), Vec::new(), BTreeMap::new());
+        index.add_package_version("x", rung(1), Vec::new(), BTreeMap::new());
         index.add_package_version(
             "x",
-            v(2, 0, 0),
-            vec![SyntheticDep::normal("a", "=1.0.0")],
+            rung(2),
+            vec![SyntheticDep::normal("a", exact_rung(1))],
             BTreeMap::new(),
         );
     }
@@ -3832,7 +3954,7 @@ fn buried_pin(two_level: bool) -> Result<PressureScenario> {
     let mut problem = Problem::new(vec![RootReq::new("a", "*"), RootReq::new("x", "*")]);
     problem.learned_kind = LearnedKind::Plain;
     let mut perturbed = Problem::new(vec![
-        RootReq::new("a", ">=1.0.0, <4.0.0"),
+        RootReq::new("a", ">=1.0.0, <1.0.3"),
         RootReq::new("x", "*"),
     ]);
     perturbed.learned_kind = LearnedKind::Plain;
@@ -3857,18 +3979,18 @@ fn buried_pin(two_level: bool) -> Result<PressureScenario> {
 fn feature_triggered_pin() -> Result<PressureScenario> {
     let mut index = CompiledIndex::empty();
     add_leaf_versions(&mut index, "a", 1, 3);
-    index.add_package_version("x", v(1, 0, 0), Vec::new(), BTreeMap::new());
+    index.add_package_version("x", rung(1), Vec::new(), BTreeMap::new());
     index.add_package_version(
         "x",
-        v(2, 0, 0),
-        vec![SyntheticDep::normal("a", "=1.0.0").optional(true)],
+        rung(2),
+        vec![SyntheticDep::normal("a", exact_rung(1)).optional(true)],
         BTreeMap::from([("pin".to_owned(), vec!["dep:a".to_owned()])]),
     );
-    index.add_package_version("trigger", v(0, 1, 0), Vec::new(), BTreeMap::new());
+    index.add_package_version("trigger", rung(1), Vec::new(), BTreeMap::new());
     index.add_package_version(
         "trigger",
-        v(1, 0, 0),
-        vec![SyntheticDep::normal("x", "=2.0.0").feature("pin")],
+        rung(2),
+        vec![SyntheticDep::normal("x", exact_rung(2)).feature("pin")],
         BTreeMap::new(),
     );
     index.finish_synthetic()?;
@@ -3879,7 +4001,7 @@ fn feature_triggered_pin() -> Result<PressureScenario> {
     ]);
     problem.learned_kind = LearnedKind::FeatureGuarded;
     let mut perturbed = Problem::new(vec![
-        RootReq::new("a", ">=1.0.0, <4.0.0"),
+        RootReq::new("a", ">=1.0.0, <1.0.3"),
         RootReq::new("x", "*"),
         RootReq::new("trigger", "*"),
     ]);
@@ -3900,48 +4022,50 @@ fn downgrade_cascade() -> Result<PressureScenario> {
     add_leaf_versions(&mut index, "codec", 1, 3);
     index.add_package_version(
         "web",
-        v(3, 0, 0),
+        rung(3),
         vec![
-            SyntheticDep::normal("tokio-like", "^3"),
-            SyntheticDep::normal("codec", "^3"),
+            SyntheticDep::normal("tokio-like", exact_rung(3)),
+            SyntheticDep::normal("codec", exact_rung(3)),
         ],
         BTreeMap::new(),
     );
     index.add_package_version(
         "web",
-        v(2, 0, 0),
+        rung(2),
         vec![
-            SyntheticDep::normal("tokio-like", "^1"),
-            SyntheticDep::normal("codec", "=1.0.0"),
+            SyntheticDep::normal("tokio-like", exact_rung(1)),
+            SyntheticDep::normal("codec", exact_rung(1)),
         ],
         BTreeMap::new(),
     );
     index.add_package_version(
         "web",
-        v(1, 0, 0),
+        rung(1),
         vec![
-            SyntheticDep::normal("tokio-like", "^1"),
-            SyntheticDep::normal("codec", "^3"),
+            SyntheticDep::normal("tokio-like", exact_rung(1)),
+            SyntheticDep::normal("codec", exact_rung(3)),
         ],
         BTreeMap::new(),
     );
     index.add_package_version(
         "client",
-        v(1, 0, 0),
+        rung(1),
         vec![
             SyntheticDep::normal("web", "*"),
-            SyntheticDep::normal("codec", "^3"),
+            SyntheticDep::normal("codec", exact_rung(3)),
         ],
         BTreeMap::new(),
     );
     index.finish_synthetic()?;
     let mut problem = Problem::new(vec![RootReq::new("client", "*")]);
-    problem.decrees.push(Decree::new("tokio-like", "^1"));
+    problem
+        .decrees
+        .push(Decree::new("tokio-like", exact_rung(1)));
     problem.learned_kind = LearnedKind::DecreeDerived;
     let mut perturbed = Problem::new(vec![RootReq::new("client", "*")]);
     perturbed
         .decrees
-        .push(Decree::new("tokio-like", ">=1.0.0, <3.0.0"));
+        .push(Decree::new("tokio-like", ">=1.0.0, <1.0.3"));
     perturbed.learned_kind = LearnedKind::DecreeDerived;
     Ok(PressureScenario {
         name: "downgrade-cascade".to_owned(),
@@ -3959,35 +4083,35 @@ fn hole_trap() -> Result<PressureScenario> {
     add_leaf_versions(&mut index, "b", 1, 3);
     index.add_package_version(
         "fallback",
-        v(1, 0, 0),
+        rung(1),
         vec![
-            SyntheticDep::normal("a", "^3"),
-            SyntheticDep::normal("b", "^3"),
+            SyntheticDep::normal("a", exact_rung(3)),
+            SyntheticDep::normal("b", exact_rung(3)),
         ],
         BTreeMap::new(),
     );
     index.add_package_version(
         "fallback",
-        v(1, 0, 1),
+        rung(2),
         vec![
-            SyntheticDep::normal("a", "^3"),
-            SyntheticDep::normal("b", "=1.0.0"),
+            SyntheticDep::normal("a", exact_rung(3)),
+            SyntheticDep::normal("b", exact_rung(1)),
         ],
         BTreeMap::new(),
     );
     index.add_package_version(
         "fallback",
-        v(1, 0, 2),
+        rung(3),
         vec![
-            SyntheticDep::normal("a", "^3"),
-            SyntheticDep::normal("b", "^3"),
+            SyntheticDep::normal("a", exact_rung(3)),
+            SyntheticDep::normal("b", exact_rung(3)),
         ],
         BTreeMap::new(),
     );
     index.add_package_version(
         "other",
-        v(1, 0, 0),
-        vec![SyntheticDep::normal("b", "^3")],
+        rung(1),
+        vec![SyntheticDep::normal("b", exact_rung(3))],
         BTreeMap::new(),
     );
     index.finish_synthetic()?;
@@ -3997,7 +4121,7 @@ fn hole_trap() -> Result<PressureScenario> {
     ]);
     problem.learned_kind = LearnedKind::HoleAware;
     let mut perturbed = Problem::new(vec![
-        RootReq::new("b", ">=1.0.0, <4.0.0"),
+        RootReq::new("b", ">=1.0.0, <1.0.3"),
         RootReq::new("fallback", "<1.0.2"),
     ]);
     perturbed.learned_kind = LearnedKind::HoleAware;
@@ -4024,20 +4148,20 @@ fn exclusion_collision() -> Result<PressureScenario> {
     );
     index.add_package_version(
         "left",
-        v(1, 0, 0),
-        vec![SyntheticDep::normal("mode", "=1.0.0").feature("fast")],
+        rung(1),
+        vec![SyntheticDep::normal("mode", exact_rung(1)).feature("fast")],
         BTreeMap::new(),
     );
     index.add_package_version(
         "left",
-        v(2, 0, 0),
-        vec![SyntheticDep::normal("mode", "=1.0.0").feature("fast")],
+        rung(2),
+        vec![SyntheticDep::normal("mode", exact_rung(1)).feature("fast")],
         BTreeMap::new(),
     );
     index.add_package_version(
         "right",
-        v(1, 0, 0),
-        vec![SyntheticDep::normal("mode", "=1.0.0").feature("small")],
+        rung(1),
+        vec![SyntheticDep::normal("mode", exact_rung(1)).feature("small")],
         BTreeMap::new(),
     );
     index.finish_synthetic()?;
@@ -4063,35 +4187,35 @@ fn lockstep_trap() -> Result<PressureScenario> {
     add_leaf_versions(&mut index, "core", 1, 3);
     index.add_package_version(
         "derive",
-        v(1, 0, 0),
-        vec![SyntheticDep::normal("core", "=1.0.0")],
+        rung(1),
+        vec![SyntheticDep::normal("core", exact_rung(1))],
         BTreeMap::new(),
     );
     index.add_package_version(
         "derive",
-        v(2, 0, 0),
-        vec![SyntheticDep::normal("core", "=2.0.0")],
+        rung(2),
+        vec![SyntheticDep::normal("core", exact_rung(2))],
         BTreeMap::new(),
     );
     index.add_package_version(
         "floor",
-        v(1, 0, 0),
-        vec![SyntheticDep::normal("core", "^2")],
+        rung(1),
+        vec![SyntheticDep::normal("core", exact_rung(2))],
         BTreeMap::new(),
     );
     index.finish_synthetic()?;
     let mut problem = Problem::new(vec![
         RootReq::new("core", "*"),
-        RootReq::new("derive", "=1.0.0"),
+        RootReq::new("derive", exact_rung(1)),
         RootReq::new("floor", "*"),
     ]);
     problem.learned_kind = LearnedKind::Family;
     let mut perturbed = Problem::new(vec![
-        RootReq::new("core", ">=1.0.0, <4.0.0"),
-        RootReq::new("derive", ">=1.0.0, <3.0.0"),
+        RootReq::new("core", ">=1.0.0, <1.0.3"),
+        RootReq::new("derive", ">=1.0.0, <1.0.2"),
         RootReq::new("floor", "*"),
     ]);
-    perturbed.decrees.push(Decree::new("derive", "=1.0.0"));
+    perturbed.decrees.push(Decree::new("derive", exact_rung(1)));
     perturbed.learned_kind = LearnedKind::Family;
     Ok(PressureScenario {
         name: "lockstep-trap".to_owned(),
@@ -4104,9 +4228,21 @@ fn lockstep_trap() -> Result<PressureScenario> {
 }
 
 fn add_leaf_versions(index: &mut CompiledIndex, name: &str, first: u64, last: u64) {
-    for major in first..=last {
-        index.add_package_version(name, v(major, 0, 0), Vec::new(), BTreeMap::new());
+    for rung in first..=last {
+        index.add_package_version(name, rung_version(rung), Vec::new(), BTreeMap::new());
     }
+}
+
+fn rung(rung: u64) -> Version {
+    rung_version(rung)
+}
+
+fn rung_version(rung: u64) -> Version {
+    Version::new(1, 0, rung.saturating_sub(1))
+}
+
+fn exact_rung(rung: u64) -> String {
+    format!("={}", rung_version(rung))
 }
 
 fn v(major: u64, minor: u64, patch: u64) -> Version {
@@ -4265,7 +4401,7 @@ mod tests {
         )
         .map_err(|err| eyre::eyre!("{err:?}"))?;
 
-        assert!(result.enabled_features["addon"].contains("extra"));
+        assert!(result.enabled_features["addon@1"].contains("extra"));
         Ok(())
     }
 
@@ -4282,7 +4418,7 @@ mod tests {
             learned[0]
                 .support
                 .iter()
-                .any(|edge| edge.parent == "web" && edge.dep == "tokio-like")
+                .any(|edge| edge.parent == "web@1" && edge.dep == "tokio-like@1")
         );
         Ok(())
     }
@@ -4298,8 +4434,8 @@ mod tests {
         assert_eq!(
             fact.support,
             BTreeSet::from([EdgeKey {
-                parent: "web".to_owned(),
-                dep: "tokio-like".to_owned(),
+                parent: "web@1".to_owned(),
+                dep: "tokio-like@1".to_owned(),
             }])
         );
         assert_eq!(
@@ -4316,7 +4452,7 @@ mod tests {
                 .keys()
                 .filter_map(|pkg| scenario.index.name(*pkg))
                 .collect::<BTreeSet<_>>(),
-            BTreeSet::from(["tokio-like", "web"])
+            BTreeSet::from(["tokio-like@1", "web@1"])
         );
 
         result
@@ -4385,8 +4521,8 @@ mod tests {
             warm_conflicts += warm.cold_conflicts;
         }
 
-        assert_eq!(cold_decisions.saturating_sub(warm_decisions), 5);
-        assert_eq!(cold_conflicts.saturating_sub(warm_conflicts), 3);
+        assert_eq!(cold_decisions.saturating_sub(warm_decisions), 7);
+        assert_eq!(cold_conflicts.saturating_sub(warm_conflicts), 5);
         Ok(())
     }
 
@@ -4524,7 +4660,7 @@ mod tests {
         let web = result
             .selected_derivations
             .iter()
-            .find(|derivation| derivation.pkg == "web")
+            .find(|derivation| derivation.pkg == "web@1")
             .expect("web selected derivation");
 
         assert_eq!(web.version, "1.0.0");
@@ -4566,7 +4702,7 @@ mod tests {
         assert_eq!(
             counterfactual.selected_diff.removed,
             vec![RecordSelection {
-                pkg: "noise".to_owned(),
+                pkg: "noise@1".to_owned(),
                 version: "1.0.0".to_owned()
             }]
         );
@@ -4628,7 +4764,7 @@ mod tests {
         let verified = verified_warm_facts(&index, &completed)?;
 
         let counterfactual =
-            counterfactual_decree_version(&index, &problem, &completed, &verified, "a", "3.0.0")?;
+            counterfactual_decree_version(&index, &problem, &completed, &verified, "a", "1.0.2")?;
 
         assert!(counterfactual.oracle_selected_equal);
         assert!(counterfactual.warm_facts_scoped_out > 0);
@@ -4724,12 +4860,12 @@ mod tests {
     fn counterfactual_surface_fixture() -> Result<(CompiledIndex, Problem)> {
         let mut index = CompiledIndex::empty();
         add_leaf_versions(&mut index, "a", 1, 3);
-        index.add_package_version("noise", v(1, 0, 0), Vec::new(), BTreeMap::new());
-        index.add_package_version("x", v(1, 0, 0), Vec::new(), BTreeMap::new());
+        index.add_package_version("noise", rung(1), Vec::new(), BTreeMap::new());
+        index.add_package_version("x", rung(1), Vec::new(), BTreeMap::new());
         index.add_package_version(
             "x",
-            v(2, 0, 0),
-            vec![SyntheticDep::normal("a", "=1.0.0")],
+            rung(2),
+            vec![SyntheticDep::normal("a", exact_rung(1))],
             BTreeMap::new(),
         );
         index.finish_synthetic()?;
@@ -4748,37 +4884,37 @@ mod tests {
         add_leaf_versions(&mut index, "a", 1, 3);
         index.add_package_version(
             "x",
-            v(1, 0, 0),
-            vec![SyntheticDep::normal("a", "=1.0.0")],
+            rung(1),
+            vec![SyntheticDep::normal("a", exact_rung(1))],
             BTreeMap::new(),
         );
         index.add_package_version(
             "x",
-            v(1, 0, 1),
-            vec![SyntheticDep::normal("a", "=1.0.0")],
+            rung(2),
+            vec![SyntheticDep::normal("a", exact_rung(1))],
             BTreeMap::new(),
         );
         index.add_package_version(
             "x",
-            v(1, 0, 2),
-            vec![SyntheticDep::normal("a", "=2.0.0")],
+            rung(3),
+            vec![SyntheticDep::normal("a", exact_rung(2))],
             BTreeMap::new(),
         );
         index.finish_synthetic()?;
         let x = index.package("x").expect("x package");
         let a = index.package("a").expect("a package");
-        let selected = BTreeMap::from([(x, v(1, 0, 1)), (a, v(3, 0, 0))]);
+        let selected = BTreeMap::from([(x, rung(2)), (a, rung(3))]);
         let support = BTreeSet::from([EdgeKey {
-            parent: "x".to_owned(),
-            dep: "a".to_owned(),
+            parent: "x@1".to_owned(),
+            dep: "a@1".to_owned(),
         }]);
-        let region = Region::new().with_versions(a, VersionSet::exact(v(3, 0, 0)));
+        let region = Region::new().with_versions(a, VersionSet::exact(rung(3)));
         let (widened, _, widened_count) = index.widen_region(&selected, &support, &region);
 
         assert_eq!(widened_count, 2);
-        assert!(widened.versions[&x].contains(&v(1, 0, 0)));
-        assert!(widened.versions[&x].contains(&v(1, 0, 1)));
-        assert!(!widened.versions[&x].contains(&v(1, 0, 2)));
+        assert!(widened.versions[&x].contains(&rung(1)));
+        assert!(widened.versions[&x].contains(&rung(2)));
+        assert!(!widened.versions[&x].contains(&rung(3)));
         Ok(())
     }
 
@@ -4794,7 +4930,7 @@ mod tests {
                 .graph
                 .edges
                 .iter()
-                .any(|edge| edge.id == "edge:crates.io:web->crates.io:codec")
+                .any(|edge| edge.id == "edge:crates.io:web@1->crates.io:codec@1")
         );
         assert!(
             record
@@ -4809,7 +4945,7 @@ mod tests {
                     origin: DecreeOrigin::User,
                     pkg,
                     ..
-                } if pkg == "tokio-like"
+                } if pkg == "tokio-like@1"
             )
         }));
         Ok(())

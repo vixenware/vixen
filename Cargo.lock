@@ -2198,10 +2198,12 @@ dependencies = [
  "eyre",
  "facet 0.50.0-rc.4",
  "facet-json 0.50.0-rc.4",
+ "flate2",
  "pretty_assertions",
  "rodin-facts",
  "rodin-survey",
  "semver",
+ "tar",
  "tracing",
  "tracing-subscriber",
 ]

@@ -11,9 +11,11 @@ blake3.workspace = true
 eyre.workspace = true
 facet.workspace = true
 facet-json.workspace = true
+flate2 = "1.1.9"
 rodin-facts = { path = "../rodin-facts" }
 rodin-survey = { path = "../rodin-survey" }
 semver.workspace = true
+tar = { version = "0.4.46", default-features = false }
 tracing.workspace = true
 tracing-subscriber.workspace = true
 

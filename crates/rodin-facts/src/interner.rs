@@ -1,4 +1,6 @@
-use std::{borrow::Borrow, collections::BTreeMap};
+use std::{borrow::Borrow, collections::BTreeMap, fmt};
+
+use semver::Version;
 
 #[derive(Clone, Copy, Debug, Eq, Hash, Ord, PartialEq, PartialOrd)]
 pub struct PkgIx(pub u32);
@@ -13,6 +15,14 @@ pub struct FeatIx(pub u32);
 pub struct PkgId {
     pub source: SourceIx,
     pub name: String,
+    pub compat: Option<CompatClass>,
+}
+
+#[derive(Clone, Copy, Debug, Eq, Hash, Ord, PartialEq, PartialOrd)]
+pub struct CompatClass {
+    pub major: u64,
+    pub minor: Option<u64>,
+    pub patch: Option<u64>,
 }
 
 pub type SourceInterner = Interner<SourceIx>;
@@ -29,12 +39,58 @@ impl PkgId {
         Self {
             source,
             name: name.into(),
+            compat: None,
         }
     }
 
     #[must_use]
     pub fn default_source(name: impl Into<String>) -> Self {
         Self::new(SourceIx::DEFAULT, name)
+    }
+
+    #[must_use]
+    pub fn domain(source: SourceIx, name: impl Into<String>, compat: CompatClass) -> Self {
+        Self {
+            source,
+            name: name.into(),
+            compat: Some(compat),
+        }
+    }
+}
+
+impl CompatClass {
+    #[must_use]
+    pub fn from_version(version: &Version) -> Self {
+        if version.major != 0 {
+            Self {
+                major: version.major,
+                minor: None,
+                patch: None,
+            }
+        } else if version.minor != 0 {
+            Self {
+                major: 0,
+                minor: Some(version.minor),
+                patch: None,
+            }
+        } else {
+            Self {
+                major: 0,
+                minor: Some(0),
+                patch: Some(version.patch),
+            }
+        }
+    }
+}
+
+impl fmt::Display for CompatClass {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match (self.minor, self.patch) {
+            (Some(minor), Some(patch)) => write!(f, "{}.{minor}.{patch}", self.major),
+            (Some(minor), None) => write!(f, "{}.{minor}", self.major),
+            (None, None) => write!(f, "{}", self.major),
+            (None, Some(_)) => unreachable!("patch class requires minor class"),
+        }
     }
 }
 
@@ -161,6 +217,15 @@ impl<Ix: InternIx> Interner<Ix, String> {
 impl PackageInterner {
     pub fn intern_pkg(&mut self, source: SourceIx, name: impl Into<String>) -> PkgIx {
         self.intern(PkgId::new(source, name))
+    }
+
+    pub fn intern_domain(
+        &mut self,
+        source: SourceIx,
+        name: impl Into<String>,
+        compat: CompatClass,
+    ) -> PkgIx {
+        self.intern(PkgId::domain(source, name, compat))
     }
 
     pub fn intern_default(&mut self, name: impl Into<String>) -> PkgIx {

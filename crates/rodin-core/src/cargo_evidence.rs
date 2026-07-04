@@ -1,22 +1,28 @@
 use std::collections::{BTreeMap, BTreeSet};
 use std::fmt::Write as _;
-use std::fs;
+use std::fs::{self, File};
+use std::io::Read as _;
 use std::path::{Path, PathBuf};
 use std::time::Instant;
 
 use eyre::{Context, Result, bail};
 use facet::Facet;
+use flate2::read::GzDecoder;
+use rodin_facts::CompatClass;
 use semver::{Version, VersionReq};
+use tar::Archive;
 
 use crate::{
-    CompiledIndex, CounterfactualResult, Decree, LearnedKind, Problem, RecordSelection, RootReq,
-    SyntheticDep, WarmFactVerifier, counterfactual_drop_dependency, solve,
+    CompiledIndex, CounterfactualResult, LearnedKind, Problem, RecordSelection, RootReq,
+    SyntheticDep, WarmFactVerifier, counterfactual_drop_dependency, domain_label, solve,
     warm_bundle_from_learned,
 };
 
 const DEFAULT_FACET_CC: &str = "/Users/amos/oss/facet-cc";
 const DEFAULT_REGISTRY_SRC: &str =
     "/Users/amos/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f";
+const DEFAULT_REGISTRY_CACHE: &str =
+    "/Users/amos/.cargo/registry/cache/index.crates.io-1949cf8c6b5b557f";
 
 #[derive(Clone, Debug, Facet, PartialEq)]
 pub struct CargoEvidenceReport {
@@ -120,15 +126,21 @@ pub struct CargoChangedSelection {
 struct ExtractedCargoUniverse {
     index: CompiledIndex,
     problem: Problem,
-    lock_versions: BTreeMap<String, Vec<Version>>,
+    lock_versions: Vec<LockedDomain>,
     gaps: Vec<CargoExtractionGap>,
     indexed_edges: usize,
 }
 
 struct ExtractionModel<'a> {
     target_names: &'a BTreeSet<String>,
-    representative: &'a BTreeMap<String, Version>,
-    duplicate_names: &'a BTreeSet<String>,
+    locked_domains: &'a BTreeMap<(String, CompatClass), Version>,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+struct LockedDomain {
+    name: String,
+    class: CompatClass,
+    version: Version,
 }
 
 #[derive(Clone, Debug, Default)]
@@ -172,15 +184,15 @@ struct LockDep {
 #[must_use]
 pub fn render_cargo_evidence_markdown(report: &CargoEvidenceReport) -> String {
     let mut out = String::new();
-    out.push_str("## Round 4: real-world Cargo.lock evidence\n\n");
+    out.push_str("## Round 5: per-major Cargo range evidence\n\n");
     let _ = writeln!(
         out,
-        "Source snapshot: `{}` Cargo.lock plus local Cargo registry cache. The extractor is offline-only, indexes cached registry alternatives for locked package names, and encodes the Cargo.lock snapshot as decrees to the representative locked version for each package name. Rodin models one selected version per package name; Cargo.lock entries with multiple coexisting versions are classified rather than hidden.\n",
+        "Source snapshot: `{}` Cargo.lock plus local Cargo registry source/cache artifacts. The extractor is offline-only, reads local Cargo.toml files and `.crate` archives directly, indexes cached registry alternatives for locked package names, and models Cargo-compatible coexisting domains keyed by package name and compatibility class.\n",
         report.workspace
     );
     out.push_str("### Extraction\n\n");
     out.push_str(
-        "Locked versions use Cargo.lock's concrete dependency list as active edges. Cached alternative versions use parseable manifest dependencies, while dev, optional, and target-conditional manifest dependencies are classified as modeling gaps and left inactive in this round.\n\n",
+        "Readable manifests contribute real requirement ranges. Cargo.lock supplies the oracle snapshot and, where a dependency line names an exact locked version, a compatibility-class hint for rebinding that range into the right Rodin domain. Dev, optional, and target-conditional manifest dependencies are classified as modeling gaps and left inactive in this round.\n\n",
     );
     let _ = writeln!(
         out,
@@ -216,7 +228,7 @@ pub fn render_cargo_evidence_markdown(report: &CargoEvidenceReport) -> String {
     out.push_str("### Cargo.lock oracle\n\n");
     let _ = writeln!(
         out,
-        "- exact package-name matches: {}/{} ({:.2}%)\n- divergences: {}\n",
+        "- exact locked-domain matches: {}/{} ({:.2}%)\n- divergences: {}\n",
         report.oracle.exact_matches,
         report.oracle.compared_names,
         report.oracle.match_rate * 100.0,
@@ -310,6 +322,19 @@ fn gap_counts(gaps: &[CargoExtractionGap]) -> BTreeMap<CargoExtractionGapKind, u
     counts
 }
 
+fn default_registry_cache_for_src(registry_src: &Path) -> PathBuf {
+    registry_src
+        .file_name()
+        .map(|index| {
+            registry_src
+                .parent()
+                .and_then(Path::parent)
+                .map(|registry| registry.join("cache").join(index))
+                .unwrap_or_else(|| PathBuf::from(DEFAULT_REGISTRY_CACHE))
+        })
+        .unwrap_or_else(|| PathBuf::from(DEFAULT_REGISTRY_CACHE))
+}
+
 pub fn append_cargo_evidence_round(path: &Path, report: &CargoEvidenceReport) -> Result<()> {
     let mut existing =
         fs::read_to_string(path).wrap_err_with(|| format!("reading {}", path.display()))?;
@@ -327,10 +352,16 @@ pub fn run_facet_cc_evidence() -> Result<CargoEvidenceReport> {
 }
 
 pub fn run_cargo_evidence(workspace: &Path, registry_src: &Path) -> Result<CargoEvidenceReport> {
-    let extracted = extract_cargo_universe(workspace, registry_src)?;
+    let registry_cache = default_registry_cache_for_src(registry_src);
+    let extracted = extract_cargo_universe(workspace, registry_src, &registry_cache)?;
     let roots = extracted.problem.roots.len();
-    let lock_packages = extracted.lock_versions.values().map(Vec::len).sum();
-    let lock_unique_names = extracted.lock_versions.len();
+    let lock_packages = extracted.lock_versions.len();
+    let lock_unique_names = extracted
+        .lock_versions
+        .iter()
+        .map(|locked| locked.name.clone())
+        .collect::<BTreeSet<_>>()
+        .len();
     let indexed_package_names = extracted.index.package_count();
     let indexed_versions = extracted.index.version_count();
 
@@ -368,7 +399,7 @@ pub fn run_cargo_evidence(workspace: &Path, registry_src: &Path) -> Result<Cargo
             }
         },
     };
-    let oracle = compare_to_lock(&extracted.lock_versions, &selected);
+    let oracle = compare_to_lock(&extracted.lock_versions, &selected, &extracted.gaps);
     let warm_counterfactual = if solve_stats.solved {
         warm_counterfactual(&extracted, &selected, &learned, &derivations).ok()
     } else {
@@ -448,7 +479,7 @@ fn warm_counterfactual(
         .roots
         .iter()
         .map(|root| root.name.as_str())
-        .find(|name| selected.contains_key(*name))
+        .find(|name| selected_domain_for_base(&extracted.index, selected, name).is_some())
         .unwrap_or_else(|| {
             extracted
                 .problem
@@ -468,6 +499,20 @@ fn warm_counterfactual(
         &dropped,
     )?;
     Ok(warm_from_counterfactual(dropped, result))
+}
+
+fn selected_domain_for_base(
+    index: &CompiledIndex,
+    selected: &BTreeMap<String, Version>,
+    base: &str,
+) -> Option<String> {
+    selected.keys().find_map(|label| {
+        index
+            .package(label)
+            .and_then(|pkg| index.base_name(pkg))
+            .is_some_and(|name| name == base)
+            .then(|| label.clone())
+    })
 }
 
 fn warm_from_counterfactual(
@@ -498,62 +543,46 @@ fn warm_from_counterfactual(
     }
 }
 
-fn extract_cargo_universe(workspace: &Path, registry_src: &Path) -> Result<ExtractedCargoUniverse> {
+fn extract_cargo_universe(
+    workspace: &Path,
+    registry_src: &Path,
+    registry_cache: &Path,
+) -> Result<ExtractedCargoUniverse> {
     let lock_path = workspace.join("Cargo.lock");
     let lock = parse_lock(&fs::read_to_string(&lock_path).wrap_err("reading Cargo.lock")?)?;
     let lock_by_name = lock_versions_by_name(&lock);
-    let duplicate_names = duplicate_names(&lock_by_name);
-    let representative = representative_versions(&lock_by_name);
+    let locked_domains = locked_domains(&lock);
+    let locked_domain_versions = locked_domain_versions(&locked_domains);
+    let registry_sources = registry_sources_by_name(&lock);
     let workspace_members = workspace_members(workspace)?;
     let local_manifests = local_manifest_paths(workspace, &workspace_members)?;
-    let mut gaps = duplicate_names
-        .iter()
-        .filter_map(|name| {
-            lock_by_name.get(name).map(|versions| CargoExtractionGap {
-                kind: CargoExtractionGapKind::MultipleLockedVersionsUnsupported,
-                package: name.clone(),
-                detail: format!(
-                    "Cargo.lock contains {}; Rodin currently has one global version domain per package name",
-                    display_versions(versions)
-                ),
-            })
-        })
-        .collect::<Vec<_>>();
+    let mut gaps = Vec::new();
     let mut index = CompiledIndex::empty();
     let mut indexed_edges = 0;
     let target_names: BTreeSet<_> = lock_by_name.keys().cloned().collect();
     let model = ExtractionModel {
         target_names: &target_names,
-        representative: &representative,
-        duplicate_names: &duplicate_names,
+        locked_domains: &locked_domain_versions,
     };
 
     for package_name in &target_names {
-        let versions = candidate_versions(
-            package_name,
-            &lock,
-            registry_src,
-            &duplicate_names,
-            &representative,
-        )?;
+        let versions = candidate_versions(package_name, &lock, registry_src, registry_cache)?;
         for version in versions {
             let source = lock
                 .iter()
                 .find(|pkg| pkg.name == *package_name && pkg.version == version)
-                .and_then(|pkg| pkg.source.clone());
-            let manifest = manifest_path(
+                .and_then(|pkg| pkg.source.clone())
+                .or_else(|| registry_sources.get(package_name).cloned());
+            let manifest = manifest_text(
                 workspace,
                 registry_src,
+                registry_cache,
                 &local_manifests,
                 package_name,
                 &version,
                 source.as_deref(),
             );
-            let manifest_deps = match manifest
-                .as_ref()
-                .and_then(|path| fs::read_to_string(path).ok())
-                .map(|text| parse_manifest_deps(&text))
-            {
+            let manifest_deps = match manifest.as_ref().map(|text| parse_manifest_deps(text)) {
                 Some(Ok(deps)) => deps,
                 Some(Err(err)) => {
                     gaps.push(CargoExtractionGap {
@@ -591,19 +620,20 @@ fn extract_cargo_universe(workspace: &Path, registry_src: &Path) -> Result<Extra
 
     let roots = local_manifests
         .keys()
-        .filter_map(|name| representative.get(name).map(|version| (name, version)))
+        .filter_map(|name| {
+            lock_by_name
+                .get(name)
+                .and_then(|versions| versions.last())
+                .map(|version| (name, version))
+        })
         .map(|(name, version)| RootReq::new(name.clone(), format!("={version}")))
         .collect();
     let mut problem = Problem::new(roots);
     problem.learned_kind = LearnedKind::Family;
-    problem.decrees = representative
-        .iter()
-        .map(|(name, version)| Decree::new(name.clone(), format!("={version}")))
-        .collect();
     Ok(ExtractedCargoUniverse {
         index,
         problem,
-        lock_versions: lock_by_name,
+        lock_versions: locked_domains,
         gaps,
         indexed_edges,
     })
@@ -619,16 +649,15 @@ fn deps_for_version(
 ) -> Vec<SyntheticDep> {
     let mut out = Vec::new();
     let mut seen = BTreeSet::new();
-    let activate_manifest_deps = locked_package.is_none();
     {
         let mut builder = ManifestDepBuilder {
             package_name,
             version,
+            locked_package,
             model,
             gaps,
             seen: &mut seen,
             out: &mut out,
-            activate: activate_manifest_deps,
         };
         for deps in manifest.deps_by_name.values() {
             for dep in deps {
@@ -642,35 +671,34 @@ fn deps_for_version(
             if seen.contains(&dep.name) {
                 continue;
             }
-            let Some(rep) = model.representative.get(&dep.name) else {
+            let Some(dep_version) = dep.version.as_ref() else {
                 gaps.push(CargoExtractionGap {
                     kind: CargoExtractionGapKind::DependencyOutsideLockUniverse,
                     package: format!("{package_name}@{version}"),
-                    detail: dep.name.clone(),
+                    detail: format!("{} has no version in Cargo.lock edge", dep.name),
                 });
                 continue;
             };
-            if model.duplicate_names.contains(&dep.name)
-                && dep.version.as_ref().is_some_and(|version| version != rep)
+            let class = CompatClass::from_version(dep_version);
+            if !model
+                .locked_domains
+                .contains_key(&(dep.name.clone(), class))
             {
                 gaps.push(CargoExtractionGap {
-                    kind: CargoExtractionGapKind::DroppedDuplicateVersionEdge,
+                    kind: CargoExtractionGapKind::DependencyOutsideLockUniverse,
                     package: format!("{package_name}@{version}"),
-                    detail: format!(
-                        "{}@{} is not the representative {}",
-                        dep.name,
-                        dep.version.as_ref().expect("checked"),
-                        rep
-                    ),
+                    detail: format!("{}@{} missing locked domain", dep.name, dep_version),
                 });
                 continue;
             }
-            out.push(SyntheticDep::normal(dep.name.clone(), format!("={rep}")));
+            out.push(
+                SyntheticDep::normal(dep.name.clone(), format!("={dep_version}")).class_hint(class),
+            );
             seen.insert(dep.name.clone());
             gaps.push(CargoExtractionGap {
                 kind: CargoExtractionGapKind::LockExactFallback,
                 package: format!("{package_name}@{version}"),
-                detail: format!("{} -> {} ={}", package_name, dep.name, rep),
+                detail: format!("{} -> {} ={}", package_name, dep.name, dep_version),
             });
         }
     }
@@ -680,11 +708,11 @@ fn deps_for_version(
 struct ManifestDepBuilder<'a, 'b> {
     package_name: &'a str,
     version: &'a Version,
+    locked_package: Option<&'a LockPackage>,
     model: &'a ExtractionModel<'a>,
     gaps: &'b mut Vec<CargoExtractionGap>,
     seen: &'b mut BTreeSet<String>,
     out: &'b mut Vec<SyntheticDep>,
-    activate: bool,
 }
 
 impl ManifestDepBuilder<'_, '_> {
@@ -697,21 +725,7 @@ impl ManifestDepBuilder<'_, '_> {
             });
             return;
         }
-        let Some(rep) = self.model.representative.get(&dep.actual) else {
-            return;
-        };
-        if self.model.duplicate_names.contains(&dep.actual) {
-            self.gaps.push(CargoExtractionGap {
-                kind: CargoExtractionGapKind::DroppedDuplicateVersionEdge,
-                package: self.package_version(),
-                detail: format!(
-                    "{} uses duplicate package {}; representative is {}",
-                    dep.key, dep.actual, rep
-                ),
-            });
-            return;
-        }
-        let req = dep.req.clone().unwrap_or_else(|| format!("={rep}"));
+        let req = dep.req.clone().unwrap_or_else(|| "*".to_owned());
         if VersionReq::parse(&req).is_err() {
             self.gaps.push(CargoExtractionGap {
                 kind: CargoExtractionGapKind::SemverRequirementRejected,
@@ -747,7 +761,7 @@ impl ManifestDepBuilder<'_, '_> {
                 detail: dep.actual.clone(),
             });
         }
-        if !self.activate || dep.kind == DepKind::Dev || dep.target || dep.optional {
+        if dep.kind == DepKind::Dev || dep.target || dep.optional {
             return;
         }
         let mut synthetic = SyntheticDep::normal(dep.key.clone(), req);
@@ -755,6 +769,9 @@ impl ManifestDepBuilder<'_, '_> {
         synthetic.features = dep.features.clone();
         synthetic.default_features = dep.default_features;
         synthetic.optional = dep.optional;
+        if let Some(class) = self.locked_class_hint(dep) {
+            synthetic = synthetic.class_hint(class);
+        }
         self.out.push(synthetic);
         self.seen.insert(dep.actual.clone());
     }
@@ -762,44 +779,53 @@ impl ManifestDepBuilder<'_, '_> {
     fn package_version(&self) -> String {
         format!("{}@{}", self.package_name, self.version)
     }
+
+    fn locked_class_hint(&self, dep: &ManifestDep) -> Option<CompatClass> {
+        let locked = self.locked_package?;
+        let version = locked.dependencies.iter().find_map(|line| {
+            (line.name == dep.actual || line.name == dep.key)
+                .then(|| line.version.clone())
+                .flatten()
+        })?;
+        Some(CompatClass::from_version(&version))
+    }
 }
 
 fn compare_to_lock(
-    lock_versions: &BTreeMap<String, Vec<Version>>,
+    lock_versions: &[LockedDomain],
     selected: &BTreeMap<String, Version>,
+    gaps: &[CargoExtractionGap],
 ) -> CargoOracleReport {
     let mut exact_matches = 0;
     let mut divergences = Vec::new();
-    for (name, versions) in lock_versions {
-        match versions.as_slice() {
-            [single] => match selected.get(name) {
-                Some(selected) if selected == single => exact_matches += 1,
-                Some(selected) => divergences.push(CargoDivergence {
-                    kind: CargoDivergenceKind::VersionMismatch,
-                    package: name.clone(),
-                    cargo_lock_versions: vec![single.to_string()],
-                    rodin_version: Some(selected.to_string()),
-                    classification: "Rodin solved against cached registry alternatives without Cargo.lock pinning".to_owned(),
-                }),
-                None => divergences.push(CargoDivergence {
-                    kind: CargoDivergenceKind::MissingInRodin,
-                    package: name.clone(),
-                    cargo_lock_versions: vec![single.to_string()],
-                    rodin_version: None,
-                    classification: "not reached under current normal/build/dev/feature projection".to_owned(),
-                }),
-            },
-            many => divergences.push(CargoDivergence {
-                kind: CargoDivergenceKind::MultipleLockedVersionsUnsupported,
-                package: name.clone(),
-                cargo_lock_versions: many.iter().map(ToString::to_string).collect(),
-                rodin_version: selected.get(name).map(ToString::to_string),
-                classification: "Cargo selected multiple versions of one package name; Rodin currently has one global domain per package name".to_owned(),
+    let locked_labels = lock_versions
+        .iter()
+        .map(|locked| domain_label(&locked.name, locked.class))
+        .collect::<BTreeSet<_>>();
+    for locked in lock_versions {
+        let label = domain_label(&locked.name, locked.class);
+        match selected.get(&label) {
+            Some(selected) if selected == &locked.version => exact_matches += 1,
+            Some(selected) => divergences.push(CargoDivergence {
+                kind: CargoDivergenceKind::VersionMismatch,
+                package: label,
+                cargo_lock_versions: vec![locked.version.to_string()],
+                rodin_version: Some(selected.to_string()),
+                classification:
+                    "same package compatibility class selected a different version from Cargo.lock"
+                        .to_owned(),
+            }),
+            None => divergences.push(CargoDivergence {
+                kind: CargoDivergenceKind::MissingInRodin,
+                package: label.clone(),
+                cargo_lock_versions: vec![locked.version.to_string()],
+                rodin_version: None,
+                classification: classify_missing_locked_domain(locked, gaps),
             }),
         }
     }
     for (name, version) in selected {
-        if !lock_versions.contains_key(name) {
+        if !locked_labels.contains(name) {
             divergences.push(CargoDivergence {
                 kind: CargoDivergenceKind::ExtraInRodin,
                 package: name.clone(),
@@ -823,20 +849,45 @@ fn compare_to_lock(
     }
 }
 
+fn classify_missing_locked_domain(locked: &LockedDomain, gaps: &[CargoExtractionGap]) -> String {
+    let package_version = format!("{}@{}", locked.name, locked.version);
+    let mut kinds = BTreeSet::new();
+    for gap in gaps.iter().filter(|gap| gap.package == package_version) {
+        kinds.insert(gap.kind.clone());
+    }
+    for gap in gaps.iter().filter(|gap| gap.detail == locked.name) {
+        kinds.insert(gap.kind.clone());
+    }
+    if kinds.contains(&CargoExtractionGapKind::ManifestMissing) {
+        "manifest unavailable for this locked package artifact".to_owned()
+    } else if kinds.contains(&CargoExtractionGapKind::TargetConditionalDependency) {
+        "target-conditional dependency projection is inactive in this round".to_owned()
+    } else if kinds.contains(&CargoExtractionGapKind::OptionalDependency) {
+        "feature/optional dependency projection is inactive in this round".to_owned()
+    } else if kinds.contains(&CargoExtractionGapKind::DevDependency) {
+        "dev-dependency projection is inactive in this round".to_owned()
+    } else if kinds.contains(&CargoExtractionGapKind::BuildDependency) {
+        "build-dependency projection is inactive in this round".to_owned()
+    } else if kinds.contains(&CargoExtractionGapKind::DependencyOutsideLockUniverse) {
+        "manifest dependency references an out-of-snapshot crate or an unversioned Cargo.lock edge"
+            .to_owned()
+    } else if kinds.contains(&CargoExtractionGapKind::SemverRequirementRejected) {
+        "manifest requirement was not representable by Rodin's current semver subset".to_owned()
+    } else if kinds.contains(&CargoExtractionGapKind::LockExactFallback) {
+        "reached only through Cargo.lock exact-edge fallback, not real manifest range solving"
+            .to_owned()
+    } else {
+        "locked package class was not reached under the extracted root/range/feature projection"
+            .to_owned()
+    }
+}
+
 fn candidate_versions(
     name: &str,
     lock: &[LockPackage],
     registry_src: &Path,
-    duplicate_names: &BTreeSet<String>,
-    representative: &BTreeMap<String, Version>,
+    registry_cache: &Path,
 ) -> Result<Vec<Version>> {
-    if duplicate_names.contains(name) {
-        return representative
-            .get(name)
-            .cloned()
-            .map(|version| vec![version])
-            .ok_or_else(|| eyre::eyre!("missing representative for {name}"));
-    }
     let is_registry = lock.iter().any(|pkg| {
         pkg.name == name
             && pkg
@@ -845,11 +896,14 @@ fn candidate_versions(
                 .is_some_and(|source| source.starts_with("registry+"))
     });
     if !is_registry {
-        return representative
-            .get(name)
-            .cloned()
-            .map(|version| vec![version])
-            .ok_or_else(|| eyre::eyre!("missing representative for {name}"));
+        let mut versions = lock
+            .iter()
+            .filter(|pkg| pkg.name == name)
+            .map(|pkg| pkg.version.clone())
+            .collect::<Vec<_>>();
+        versions.sort();
+        versions.dedup();
+        return Ok(versions);
     }
     let mut versions = Vec::new();
     for entry in fs::read_dir(registry_src).wrap_err("reading registry src")? {
@@ -866,37 +920,80 @@ fn candidate_versions(
             versions.push(version);
         }
     }
-    if versions.is_empty()
-        && let Some(version) = representative.get(name)
-    {
-        versions.push(version.clone());
+    if registry_cache.exists() {
+        for entry in fs::read_dir(registry_cache).wrap_err("reading registry cache")? {
+            let entry = entry?;
+            let Some(file_name) = entry.file_name().to_str().map(str::to_owned) else {
+                continue;
+            };
+            let Some(version_text) = file_name
+                .strip_prefix(&format!("{name}-"))
+                .and_then(|text| text.strip_suffix(".crate"))
+            else {
+                continue;
+            };
+            if let Ok(version) = Version::parse(version_text) {
+                versions.push(version);
+            }
+        }
+    }
+    if versions.is_empty() {
+        versions.extend(
+            lock.iter()
+                .filter(|pkg| pkg.name == name)
+                .map(|pkg| pkg.version.clone()),
+        );
     }
     versions.sort();
     versions.dedup();
     Ok(versions)
 }
 
-fn manifest_path(
+fn manifest_text(
     workspace: &Path,
     registry_src: &Path,
+    registry_cache: &Path,
     local_manifests: &BTreeMap<String, PathBuf>,
     name: &str,
     version: &Version,
     source: Option<&str>,
-) -> Option<PathBuf> {
+) -> Option<String> {
     if source.is_some_and(|source| source.starts_with("registry+")) {
-        Some(
+        fs::read_to_string(
             registry_src
                 .join(format!("{name}-{version}"))
                 .join("Cargo.toml"),
         )
+        .ok()
+        .or_else(|| manifest_text_from_crate(registry_cache, name, version).ok())
     } else {
         local_manifests
             .get(name)
             .cloned()
             .or_else(|| Some(workspace.join(name).join("Cargo.toml")))
+            .and_then(|path| fs::read_to_string(path).ok())
     }
-    .filter(|path| path.exists())
+}
+
+fn manifest_text_from_crate(
+    registry_cache: &Path,
+    name: &str,
+    version: &Version,
+) -> Result<String> {
+    let path = registry_cache.join(format!("{name}-{version}.crate"));
+    let file = File::open(&path).wrap_err_with(|| format!("opening {}", path.display()))?;
+    let decoder = GzDecoder::new(file);
+    let mut archive = Archive::new(decoder);
+    let wanted = format!("{name}-{version}/Cargo.toml");
+    for entry in archive.entries().wrap_err("reading .crate archive")? {
+        let mut entry = entry?;
+        if entry.path()?.to_string_lossy() == wanted {
+            let mut text = String::new();
+            entry.read_to_string(&mut text)?;
+            return Ok(text);
+        }
+    }
+    bail!("Cargo.toml not found in {}", path.display())
 }
 
 fn parse_lock(text: &str) -> Result<Vec<LockPackage>> {
@@ -1242,33 +1339,41 @@ fn lock_versions_by_name(lock: &[LockPackage]) -> BTreeMap<String, Vec<Version>>
     out
 }
 
-fn duplicate_names(lock_by_name: &BTreeMap<String, Vec<Version>>) -> BTreeSet<String> {
-    lock_by_name
+fn locked_domains(lock: &[LockPackage]) -> Vec<LockedDomain> {
+    let mut out = lock
         .iter()
-        .filter_map(|(name, versions)| (versions.len() > 1).then_some(name.clone()))
+        .map(|package| LockedDomain {
+            name: package.name.clone(),
+            class: CompatClass::from_version(&package.version),
+            version: package.version.clone(),
+        })
+        .collect::<Vec<_>>();
+    out.sort_by(|left, right| {
+        left.name
+            .cmp(&right.name)
+            .then_with(|| left.class.cmp(&right.class))
+            .then_with(|| left.version.cmp(&right.version))
+    });
+    out.dedup();
+    out
+}
+
+fn locked_domain_versions(domains: &[LockedDomain]) -> BTreeMap<(String, CompatClass), Version> {
+    domains
+        .iter()
+        .map(|domain| ((domain.name.clone(), domain.class), domain.version.clone()))
         .collect()
 }
 
-fn representative_versions(
-    lock_by_name: &BTreeMap<String, Vec<Version>>,
-) -> BTreeMap<String, Version> {
-    lock_by_name
-        .iter()
-        .filter_map(|(name, versions)| {
-            versions
-                .last()
-                .cloned()
-                .map(|version| (name.clone(), version))
+fn registry_sources_by_name(lock: &[LockPackage]) -> BTreeMap<String, String> {
+    lock.iter()
+        .filter_map(|pkg| {
+            pkg.source
+                .as_ref()
+                .filter(|source| source.starts_with("registry+"))
+                .map(|source| (pkg.name.clone(), source.clone()))
         })
         .collect()
-}
-
-fn display_versions(versions: &[Version]) -> String {
-    versions
-        .iter()
-        .map(ToString::to_string)
-        .collect::<Vec<_>>()
-        .join(", ")
 }
 
 fn parse_quoted(value: &str) -> Option<String> {
