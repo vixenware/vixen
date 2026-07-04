@@ -82,8 +82,19 @@ C. **ROUND 1 VERDICT (2026-07-04): THE STRONG BET FAILED.** Real data
    FUSION — lockstep =pins (serde↔serde_core) aren't search freedom;
    families fuse into one search variable; (2) PER-EDGE granularity —
    exclusions only need the RELEVANT EDGE stable, not the whole manifest.
-   If round 2 also fails, the volumes layer runs without widening leverage
-   and severability (FIXED 7) is the exit. Round 2 dispatched.
+   ROUND 2 (5a6e4c56): fusion real but MARGINAL (1.8% of edges strictly
+   lockstep; whole-manifest 8139→7894 blocks — keep fusion as optional
+   preprocessing + UX, not load-bearing). PER-EDGE stability is the real
+   structure: 13.4x collapse, median 11 versions/edge-block, p90 41.7,
+   77.3% of edges ≤5 blocks.
+   **PROPOSED RESOLUTION OF C (pending Amos):** regions stay as validated
+   (boxes + feature literals; algebra held). WIDENING is per-exclusion,
+   across the parent-version range where the derivation's EDGE-SUPPORT is
+   invariant — "a fact's validity range is its read-set's stability
+   range" (tier-2's move inside the solver). SPLITS are conflict-driven,
+   at the change-points of the edges relevant to the refuting derivation
+   — not global manifest change-points (March's framing, corrected by
+   data). Evidence: rodin-c-evidence.md rounds 1+2.
 D. **The worker model.** In-process parallelism first (workers claim
    regions, pool facts). Later: could workers be fleet executors? (The
    solver's facts-plus-regions shape looks suspiciously shippable.)
