@@ -28,3 +28,40 @@ TWO LAWS (need Amos before build):
    identity). sops seals files; we seal DATAFLOW. Open design:
    taint granularity, interactive-approval points, plan-vs-apply
    reveal timing.
+
+## Co-design rulings (Amos, 2026-07-04)
+
+Q1 TAINT GRANULARITY: (b) STRUCTURAL PRECISION — per-leaf where the
+machine understands the derivation (doc/tree/map/TEMPLATE ops),
+whole-output for opaque exec runs. This makes TEMPLATING the crux:
+a template render is the canonical structured secret flow (hole A
+secret, hole B public, output text). Precision requires a
+TAINT-AWARE, demand-aware template engine.
+  => GINGEMBRE UNIFICATION (Amos): a template IS a grammar (snark
+  parses it) and rendering IS evaluation with holes as demand edges
+  — so a template is a vix function of its holes. Lowering gingembre
+  (Dodeca SSG, partially on snark, currently uses picante) to the
+  machine pays 4 ways: Dodeca warm incremental rebuilds; config-gen
+  = same primitive; per-hole secret taint = real; picante dropped.
+  NEXT: recon round (gingembre today / what picante provides / the
+  grammar shape) before committing — parallel to vixen-infra recon.
+
+Q2 LATTICE: recipients = INTERSECTION of input recipient sets;
+widening only via explicit capability-gated journaled DECLASSIFY.
+Two rules, nothing else. CONFIRMED.
+
+Q3 REVEAL TIMING: plan never reveals (shows identities, not
+plaintext) → plan produces the REVEAL MANIFEST for free →
+apply-start BATCH approval (one prompt, session lease); CI
+substitutes KMS policy. COMPLICATION (Amos): multi-round approval
+if a revealed value determines which secret is needed next
+(data-dependent secret demand = pick()/lazy-map for reveals). RULE:
+secret references STATICALLY RESOLVABLE by default (manifest
+complete, one approval); secret-names-secret is a DECLARED
+MULTI-PHASE apply, approved per phase. Multiple Touch-IDs only when
+explicitly opted into multi-phase.
+
+Q4 SALTED IDENTITY: STILL OPEN. Rec = hybrid (c): public identity =
+hash(ciphertext) (per-seal, dictionary-proof, finer-is-safe) + an
+OPTIONAL recipient-sealed content tag for dedup/change-detection;
+rotation chooses bump-vs-preserve the tag. Awaiting Amos.
