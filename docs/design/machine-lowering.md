@@ -233,12 +233,33 @@ iteration already routes per-element demand through memo boundaries
 by construction; that is why body-level loops may never need to
 exist).
 
+## Trace (the unified stream)
+
 - The vix lowering EMITS instrumentation ops carrying the three-moment
   vocabulary: node-demanded, memo-hit/miss, spawn, park, resume,
   finish — static ids mapping to nodes/spans via the lowering's
   tables. Innards mode = full story (tests, wtf, playground lanes);
   Production strips to structural suspension events. Tests are trace
   assertions; ABSENCE is the laziness proof.
+
+## The word "store" — one addressing scheme, three residencies
+
+Amos flagged the collision: THE STORE, unqualified, means the
+durable shared CAS for build results (artifact bytes, fleet-shared,
+GC'd — the vixen store). The machine's ValueStore must always be
+called the VALUE STORE. Relationship: one addressing scheme
+(everything keys by content hash — values by canonical content,
+pendings/memo by invocation identity, artifacts by bytes), three
+residencies: (1) eval-lifetime RAM (frames/arenas — dies); (2)
+daemon-lifetime value store + memo map (survives reloads — that IS
+the daemon's warmth; its durability path is already ruled:
+"persistence only at content-addressed boundaries: memo, journal,
+lowerings" — serializing this tier is the journal/C5 story, staged
+post-parity); (3) the store (durable CAS). The value store is the
+SPINE (small structural values holding identities), the store is
+the FLESH (artifact bytes, moved on demand); artifact bytes NEVER
+enter the value store. Fleet shipping: spines travel cheap, flesh
+moves on demand.
 
 ## The driver (the demand scheduler)
 
