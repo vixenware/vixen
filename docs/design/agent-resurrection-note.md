@@ -357,6 +357,28 @@ comparisons + Jump + two-hole JumpIfZero (weavy_zero/weavy_nonzero,
 no trampoline round-trip), op_needs_unimplemented_stencil DELETED,
 differentials incl. match-shaped chain + Production stripped-target;
 116/116 with jit feature verified).
+**THE PROMOTION ARC (post-milestone, 2026-07-04 evening), all
+accepted**: B1 demand-sunk lets (e32bf7acf); promotion slice
+(f4d3c5a76 — PendingInvocation as first-class store value unifying
+partial/closure/tree/array/map pendings); CORRECTION slice
+(14d30b96e) after TWO Amos catches, both banked as P3 amendments in
+machine-lowering.md: (1) force-at-unwrap = force in disguise →
+demand is a compiler-inserted typed coercion, bits-strict/
+identity-lazy; (2) "static-only, no runtime checks" was an
+OVERCLAIM → Realized<T>=Ready|Pending declared enum, READ BARRIERS
+statically placed/dynamically resolved at container-fed bits sites,
+fib zero-barrier asserted, guard-stencil speculation is the future
+cost dial. fn_ref-in-store staleness hazard fixed (closure hash
+authoritative) BEFORE warm reload. Ledger: 17/0/40/3 → moving.
+PLAYGROUND DEMO LIVE (6f43ebdd2): pnpm --filter
+@bearcove/snark-playground run dev → merge-demand machine trace
+with left.o as dashed PENDING node + Demand-again warm collapse.
+STANDING LESSON (Amos, twice in one arc): when a construct seems
+free, check which word the cost is hiding in ("coercion" hid a read
+barrier). Surface tensions; never narrate past them.
+NEXT: warm reload (de-mined), then B3 types.vix → B4 exec depth →
+B5 documents → funeral gate.
+
 **THE MILESTONE IS COMPLETE** (bf3648f12, 212/212 verified
 personally): merge-demand.vix on the machine, left.o absent from
 the trace, BOTH LANES — Lane::{Interp,Jit} through one LaneRuntime/
