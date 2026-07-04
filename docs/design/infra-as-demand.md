@@ -176,3 +176,17 @@ system, built a bad one, named it something else (DDC, dbt, DVC,
 orchestrators). Pitch template: your DAG tool is our special case;
 your cache is our store; your lineage is our journal; we can PROVE
 ours.
+
+## Round 6 coda — BUSINESS DIRECTION RULING (Amos)
+
+Going through the domain sweep produced a NEGATIVE result Amos
+values: "I don't want to have anything to do with those industries.
+I definitely don't want to be selling a product for them. They
+might find a use for it, but I don't want to be in the business of
+selling." STANDING DIRECTION: the domain rounds were ARCHITECTURE
+VALIDATION (the model held everywhere; that was their value), not a
+sales roadmap. Vixen's business stays aimed at the world Amos
+inhabits (code/builds/deploys/cargo-shaped work). Other verticals
+reach the engine through the OPEN side as ecosystem, never through
+vixen sales. No agent should generate GTM/vertical-sales material
+for these domains.
