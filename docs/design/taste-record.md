@@ -11,62 +11,89 @@ Format: question → decision I'd make → why → what would change my mind.
 
 ## Language semantics
 
-**1. Type-closure hash contents.** RULED in substance (synthesis §3‡):
-fn identity = hash(fn canon AST, sorted canon ASTs of every referenced
-type declaration, transitively). Remaining taste: generic instantiations
-hash the INSTANTIATED closure (the type arguments are part of the
-referencing site's identity, not the definition's); capability values
-already join keys as captures, no special-casing. Must land before any
-shared cache exists. Brief-ready.
+**1. Type-closure hash contents.** RULED (2026-07-04, Amos, walkthrough):
+"not just types, but also CODE" — fn identity = closure hash over the
+fn's canonical AST plus the canonical ASTs of EVERYTHING it references,
+transitively: functions AND type declarations. Convergent proof the same
+day: the warm-daemon blast-radius test showed a real leaf edit leaves the
+caller's memo entry hitting (stale result served — a false positive, the
+forbidden outcome); pinned as warm_reload_leaf_semantic_edit_currently_
+hits_stale_entry + an #[ignore] test of the correct behavior. Fix
+dispatched (SCC-aware closure hashing, both evaluators lockstep).
+Generics status honestly: the SURFACE exists (grammar v0.2 has generics
+in types/patterns) but neither evaluator instantiates them semantically
+yet — the instantiated-closure note is forward-looking, not current.
 
-**2. Closure captures (constitution amendment A2).** RULED: closures
-capture env NODES lazily; identity-uses force captures. The flip is a
-lockstep change (oracle + engine + harness in one commit) — write the
-brief so the harness pins the OLD behavior in the commit before and the
-NEW behavior after; no window where the two evaluators disagree.
+**2. Closure captures (constitution amendment A2).** RULED — and in
+plain words (confirmed with Amos, walkthrough): the OLD behavior is that
+creating a closure evaluates its captured bindings right then and stores
+the values; the NEW behavior is that a closure just holds handles to the
+(possibly unevaluated) bindings, and evaluation happens only when the
+closure's identity is needed (hash/ship/compare) or its body actually
+runs. Creating a closure computes nothing — consistent with everything
+else. The flip is a lockstep change (oracle + engine + harness in one
+commit); no window where the two evaluators disagree.
 
-**3. toml()/json() shape-checking.** When a declared shape is given,
-mismatches are HARD errors (missing field, wrong type — no coercions, no
-defaulting); with no declared shape, you get the structural Value form.
-Why: coercion rules are a tarpit and cargo manifests don't need them;
-hard-error keeps the pure-parse story honest (deps_of must fail loudly,
-not guess). Would change my mind: a real registry corpus showing widespread
-manifests that only parse under leniency — then leniency becomes an
-explicit, named mode, never the default. Depends on the user type surface
-(entry 17) for declaring shapes in vix itself.
+**3. toml()/json() shape-checking.** RULED (Amos, walkthrough): declared
+shape ⇒ mismatches are HARD errors, no coercions, no defaulting; no
+declared shape ⇒ structural Value form. Coercion rules are a tarpit and
+crates.io wouldn't admit non-conforming manifests anyway. Depends on the
+user type surface (entry 8) for declaring shapes in vix itself.
+Follow-on question surfaced by implementation (real-world-inputs agent,
+NOT yet ruled): JSON null currently maps to Option::None — whether vix
+wants a first-class null/option story at the Value level needs a ruling
+before shapes land.
 
-**4. Per-field struct laziness.** v1 stays strict-except-trees (recorded
-in code). v2: constructors bind field NODES — per-field laziness for
-free, consistent with env-maps-names-to-nodes. Do it when a real program
-demonstrates waste, not before; the constitution already reserves it.
+**4. Per-field struct laziness.** WANTED (Amos, walkthrough). Today the
+engine constructs structs strictly except for tree-typed fields (a
+recorded deferral in the constitution, not a version of the language —
+the earlier "v1/v2" phrasing here collided with the spec's invariant
+numbers and is gone). The design target: constructors bind field NODES,
+giving per-field laziness for free, consistent with env-maps-names-to-
+nodes. Sequence it as a lockstep change when it next brushes real work.
 
-**5. Path-demand refinement through merges.** v1 widens to Identity at
-merge nodes (constitution §7) — correct, possibly wasteful. Refine only
-with its own harness assertion (engine-refined ⊂ engine-v1 run flushes on
-a corpus program built to show it). Low priority until a lua.vix-scale
-program pays the widening visibly.
+**5. Path-demand through merged trees (in plain words).** Say a program
+builds `let m = merge(a, b)` and someone demands one file: `m / "x.h"`.
+Today the engine treats reaching through the merge as needing the WHOLE
+merged tree's identity — so both a and b flush completely to serve one
+file. Correct, but wasteful. The refinement: let the single-path demand
+tunnel through the merge (right-wins: ask b for "x.h", fall back to a)
+so only the winning file's producer pays. Decision: do it only as an
+optimization carrying its own harness assertion (a corpus program where
+the refined engine provably flushes fewer runs than today's), and only
+when a real program pays the waste visibly. Until then today's behavior
+stands — it is conservative in the allowed direction.
 
-**6. Batching policy beyond memo boundaries.** Keep "batch = memo unit"
-(V11) until measurements argue otherwise; the joint-demand sets are the
-policy socket. Feed it the weavy stencil timings when tuning starts.
-Never let policy change semantics (V4 guards this).
+**6. Batching policy beyond memo boundaries.** CLOSED (Amos: "I don't
+think we're even going to revisit"). Batch = memo unit, period; the
+joint-demand sets remain the socket if the future disagrees.
 
 **7. demand_path conflation wart.** The oracle (mirrored by the engine)
 conflates "path not in tree" (error) with "path not yet produced" (wait).
-Decision: make it a typed distinction (PathMissing vs PathPending) SOON —
-the resolve view, fleet timeouts, and producing-tree UX all want it.
-Small lockstep change; brief-ready.
+Decision: typed distinction (PathMissing vs PathPending). Amos's deeper
+framing, banked from the walkthrough: the hard question about trees has
+always been progressive-vs-fixed — a fully-Merkled tree can't also be
+progressively available, since content arriving later would change the
+root hash. The design's answer, which the wart fix should follow: a tree
+is either Resolved (hash exists, immutable — "missing" is decidable
+immediately) or Producing (per-path availability now, whole-tree hash
+only at flush — "missing" is only decidable when the producer FINISHES;
+until then the honest semantic for an unwritten path is wait). So:
+PathMissing fires immediately on Resolved trees, and on Producing trees
+only after Finished; before that it's PathPending. Lockstep change.
 
-**8. User type surface (enums/structs/match in user code).** The next
-language design round after the MVP. It gates: shape declarations
-(entry 3), self-hosted intelligence queries (synthesis query plane), and
-richer manifest modeling. Grammar and AST already carry the surface;
-what's missing is evaluator semantics + the checking story. This is a
-design round WITH Amos, not a brief.
+**8. User type surface (enums/structs/match in user code).** DIRECTION
+AGREED (Amos, walkthrough): already went over this — sketches exist
+(types.vix), and the target is a language very close to Rust, because
+vix targets Rust builds and Rust shapes are the right fit. Grammar and
+AST carry the surface; what remains is evaluator semantics + the
+checking story, and that remainder is implementation-round work against
+the agreed direction, gating shape declarations (entry 3) and
+self-hosted intelligence queries.
 
-**9. Capability-threading sugar (implicits).** Don't. Re-open only if
-cargo.vix in practice shows unbearable threading pain. Explicitness is
-part of the auditability story.
+**9. Capability-threading sugar (implicits).** CLOSED (Amos: "not
+actually an open question"). Don't. Explicitness is part of the
+auditability story.
 
 ## Engine and substrate
 

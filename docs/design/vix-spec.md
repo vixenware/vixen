@@ -89,10 +89,12 @@ problem statement, origin-labeled (root manifest / user).
   positives never.**
 - **V9. Identity is two-tier: fingerprint × read-set** (the anti-Nix
   pillar; read-sets include directory enumerations and stat-misses).
-- **V10. The closure hash joins every memo key — including the canonical
-  ASTs of every type declaration the code references, transitively.**
-  (The type-closure ruling, synthesis §3‡; the identity hole is real and
-  must close before any shared cache exists.)
+- **V10. The closure hash joins every memo key — covering the canonical
+  ASTs of EVERYTHING the code references, transitively: functions AND
+  type declarations.** (§3‡ ruling, extended by Amos 2026-07-04: "not
+  just types, but also code." The hole is proven live — a warm reload
+  served a stale result after a leaf edit; the #[ignore]d blast-radius
+  test is the fix's oracle. Must close before any shared cache exists.)
 - **V11. Aggregation unit = memo unit.**
 - **V12. Every vix value is hashable AND totally ordered; collect yields
   the canonical total order, never arrival order; scheduling
