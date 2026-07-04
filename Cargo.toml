@@ -101,6 +101,12 @@ fastrand = "2"
 # temp files
 tempfile = "3"
 
+# version facts
+semver = "1.0.28"
+
+# property testing
+proptest = { version = "1.11.0", default-features = false, features = ["std"] }
+
 # logging
 tracing = { version = "0.1", default-features = false, features = ["std"] }
 tracing-subscriber = { version = "0.3", default-features = false, features = [
