@@ -320,9 +320,22 @@ written in fable over a snark parse of fable source. NO incrementality
 in fable ever — the incremental version of the same query IS the vix
 version; that contrast is the demo. Rust binder stays the differential
 oracle for self-hosted queries (no-two-novel-implementations).
-MY NEXT ARC: the vix driver per machine-lowering.md (same directory —
-READ IT; it is the arc's constitution). Slice 1: driver skeleton +
-cached lowerings, eval.vix arithmetic core on the machine.
+MY ARC STATE (machine-lowering.md is the constitution; read it):
+driver DONE (d47d31cf5 — INVOKE protocol: memo boundary = HostCall +
+Await; hit=sync fill, miss=spawn+park; parked never re-polled).
+AST lowering slice 1 DONE (82345a3d3 — Machine::load/demand_i64,
+closure hashes as memo identity, scalar subset errors loudly).
+MATCH slice DONE (e31a4fe28 — fib(20)=6765 in EXACTLY 21 spawns,
+linear; untaken arms provably never spawn by trace absence; jumps
+were the fable agent's, adopted after dedupe — CHECK FOR CONCURRENT
+WEAVY EDITS BEFORE ADDING OPS, two collisions already). wasm caught
+a real 32-bit overflow (1usize<<32) — always RUN the wasm check and
+READ its output before pushing (missed once, recorded).
+NEXT SLICE: the value store + handles (composites across node
+boundaries — machine-lowering.md "Values across node boundaries";
+the fable agent's task-lifetime store design is the same shape) →
+then eval.vix (self-hosting: enums/strings/Map/match-on-variants) →
+exec seam → merge-demand.vix THE MILESTONE.
 
 **THE TEETH (ruled order)**: 1.5 EXECUTES FIRST — migrate fable off
 cstree onto snark (grammar => parser => codegen'd typed AST, the
