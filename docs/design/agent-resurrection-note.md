@@ -527,3 +527,21 @@ questions for Amos (inference depth, generics, coercions, error
 philosophy). IN FLIGHT ALSO: real-process lane, Rodin thrash
 diagnosis, OCI rebase (#2434). MERGED TODAY: #2431 foundation,
 #2433 THE FUNERAL.
+
+**CHECKER RULINGS (Amos amendments, 2026-07-05):** Q1-Q9 as
+adjudicated EXCEPT: MODULES FROM THE START — no single-file
+simplification anywhere; Q1 boundaries = MODULE boundaries (public
+items fully annotated, inference inside); Q8 prelude = just
+auto-imported ordinary modules (vix::, caps:: resolve through the
+real module system; Machine::load grows multi-file). Q10 AMENDED BY
+AMOS: NO RUST ORACLE TWIN — "only one impl + a spec" (I nearly
+reinstalled the two-evaluators disease); contract = SPEC + ABSOLUTE
+CORPUS ASSERTIONS (accept/reject/facts/spans pinned, PARITY-style).
+Proposed + pending Amos confirm: the single impl is WRITTEN IN VIX
+(ladder collapses: ast() → spec+corpus → vix checker, fixpoint
+bootstrap; machine's loud subset errors remain the substrate guard
+during construction). Remaining recon rulings 2-7,9 stand as
+adjudicated (monomorphization intended, fn types = pending sugar,
+literals-only coercion, strict exhaustiveness hard-error, separate
+namespaces, accumulate-LSP/fail-fast-machine + report-all,
+AbiClass facts w/ content-hashed structural type ids).
