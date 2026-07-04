@@ -457,3 +457,7 @@ demo), executor-side step gating, top-down DAG view + lanes/rails view
 side), snark alphabet parametrization (PL core), DWARF suspend-point
 annotations, den repo creation (NOT yet — wait for an installable
 artifact).
+
+HOST RENAME (2026-07-04, Amos): the Linux x86_64 box is now
+`ssh miles.local` — the name `mur` is STALE (global CLAUDE.md not
+yet updated; trust this note).
