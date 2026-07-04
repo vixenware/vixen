@@ -65,3 +65,31 @@ Q4 SALTED IDENTITY: RULED (Amos) — HYBRID (c): public identity =
 hash(ciphertext) (per-seal, dictionary-proof, finer-is-safe) + an
 OPTIONAL recipient-sealed content tag for dedup/change-detection;
 rotation chooses bump-vs-preserve the tag. All four secrets laws now ruled.
+
+## Gingembre recon adjudicated (Amos rulings, 2026-07-04)
+
+1. THE RECON FOUND DEBT, NOT DOCTRINE (Amos, on
+   shortcodes-as-HTML-post-process): "Of course. And that's wrong.
+   And we already know the right shape." Shortcodes belong IN the
+   grammar (snark embedded/injected regions — the machinery the
+   playground's layered injection already uses); the post-process is
+   tech debt to burn, not an architecture to respect.
+2. THE CHRYSALIS RULING: "Dodeca BADLY wants to disappear within
+   vixen. It was a proto-vixen. Manual. Fragile. Budding." Full
+   unification IS the goal; picante's 30+ queries are all debt; the
+   recon's PARTIAL/DOESN'T-FOLLOW entries measured
+   distance-to-goal, not validity. The recon doc = the migration
+   map (branch gingembre-snark-unification).
+3. LOOP MEMO-KEY IDENTITY: confirmed core-vix design (Amos: "we do
+   need to solve that"). The React-key question for demand engines:
+   per-element invocation identity under list edits. Axes:
+   position-keyed (shifts thrash memo) / content-keyed (reorder-
+   stable, duplicate + mutation questions) / explicit key_by
+   (user identity). Trees have a natural key (path); the design
+   question is arbitrary runtime lists. QUEUED for co-design;
+   gates template for-loops and any runtime iteration.
+4. CLOSURE CODE SHIPPING: DE-ESCALATED (Amos: "Why not? But also
+   why? I don't see any problem either way"). Not doctrine — the
+   fleet design picks the pragmatic option (spine=identity travels;
+   code fetched as content-addressed flesh on demand, the store's
+   own model applied to code); nothing gates on it.
