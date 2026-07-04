@@ -91,7 +91,25 @@ blocked belongs to weavy::task.*
    sample (scalar fns, lets, arithmetic, recursive memo-boundary
    calls — fib in vix) with its own pinned contract; the AST lowering
    (machine/lower.rs) targets it first.
-2. Store + handles; composite results; types.vix.
-3. Exec seam as await-fed runs; merge-demand.vix — THE MILESTONE:
-   left.o absent, both lanes, trace-asserted.
-4. Corpus parity → delete the frozen evaluators (A5's funeral clause).
+2. Store + handles; composite results. DONE (3e5fc0d5e, de16419cc,
+   fb6014559): content-hash dedup store, STORE hosts, memo-key handle
+   canonicalization, canonical Maps (sorted pairs, last-wins,
+   history-independent hashes), TotalF64 at boundaries/IEEE inside,
+   eval.vix demo()==42.0 bits-exact on the machine.
+3. Exec seam as await-fed runs; merge-demand.vix — THE MILESTONE.
+   **DONE** (b7863f8d8 interp + 5387c9b95 branch stencils +
+   bf3648f12 lane seam): pending tree branches ARE invocation
+   identities (content = closure-hash × canonical args); collect
+   never demands; `/` walks only the demanded branch; selected():
+   object spawns EXACTLY once for two units, run set exactly
+   {wanted.o}, left.o RunRequested-ABSENT, warm = 2-event trace —
+   asserted identically on BOTH lanes (Lane::Interp | Lane::Jit
+   through one LaneRuntime/LaneTask seam; burst() sees only
+   advance()). fallback() pins absence-costs-a-run; subtree_chain
+   clean. 212/212. Parked: JIT lane seeds root args via a
+   per-invocation wrapper program (full re-JIT per spawn) because
+   JitTask lacks driver-side frame seeding — fix is weavy-side
+   spawn-with-initial-frame, then the wrapper dies. Parked: general
+   closures (only partial-application-of-named-fn lowers).
+4. Corpus parity → delete the frozen evaluators (A5's funeral
+   clause). ← NEXT.

@@ -357,13 +357,19 @@ comparisons + Jump + two-hole JumpIfZero (weavy_zero/weavy_nonzero,
 no trampoline round-trip), op_needs_unimplemented_stencil DELETED,
 differentials incl. match-shaped chain + Production stripped-target;
 116/116 with jit feature verified).
-IN FLIGHT NOW:
-- 95608c01: LANE 2 = the both-lanes half of THE MILESTONE. Pins:
-  one seam either lane (Advance shape, no if-jit in burst loop),
-  Machine lane parameter, hosts identical from both lanes (adapt
-  driver-side only), lane-parameterized corpus incl. milestone
-  trio + fib + untaken + eval bits-exact, DriveEvent equality
-  across lanes. When green THE MILESTONE IS COMPLETE.
+**THE MILESTONE IS COMPLETE** (bf3648f12, 212/212 verified
+personally): merge-demand.vix on the machine, left.o absent from
+the trace, BOTH LANES — Lane::{Interp,Jit} through one LaneRuntime/
+LaneTask seam, burst() sees only advance(); milestone trio + fib +
+untaken + eval-bits-exact all lane-pinned with DriveEvent equality.
+The prior-art adjudication makes this doubly load-bearing: merge
+tunneling is the one language-semantics claim no scrubber killed —
+this trace IS the novelty demonstration. PARKED from lane 2: JIT
+root-arg seeding uses a per-invocation wrapper program (full
+program clone + re-JIT per spawn) because JitTask lacks driver-side
+frame seeding; fix = weavy-side spawn-with-initial-frame, then kill
+the wrapper (queued delegation). NEXT PER CONSTITUTION: corpus
+parity → delete the frozen evaluators (A5's funeral clause).
 FABLE UNIFICATION DONE + ACCEPTED (d04968da6 + 2c657da88 +
 4767bdeaa, agent d92a7abb): the dense path is DELETED — rg for
 dense/FableInterp/run_dense in fable/src returns nothing (verified
