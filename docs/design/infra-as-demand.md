@@ -72,3 +72,32 @@ DAG w/ rediff diffs; vx apply = same graph live; vx why <addr> =
 journal query (invocation, config span, generations); vx adopt =
 probe + config gen. Build and apply are the same screen because
 they are the same machine.
+
+## Round 3: kubernetes/argo (blue/green, auto-rollback)
+
+FITS: GitOps = demand(deployment) over source w/ memo (Argo CD's
+pitch is our degenerate case); blue/green = parallel tree
+materialization, blue memo-held + custody-kept (STILL WARM), cutover
+= one selector reconcile, environment GC = custody policy ("keep N
+generations"), history = journal generations; AUTO-ROLLBACK =
+DEMAND MOVING: promotion is Cond over analysis evidence
+(select(ok ? green : blue), phase-4 dynamic demand) — rollback
+re-decides to blue which never stopped being a value. Argo
+Workflows = subsumed (DAG jobs = vix with a worse language).
+
+MISSING (four, bounded, none touch the engine core):
+1. PUSH INVALIDATION inlet: watch streams → mark journal
+   observations stale → re-demand standing roots. Feed, not
+   semantics.
+2. STANDING-DEMAND scheduler: "keep demanded forever" — warm daemon
+   is 90%; missing loop ties reload-diffs + stale observations to
+   auto re-demand of registered roots.
+3. TEMPORAL vocabulary: windows/deadlines/hold-steps for canary
+   analysis. Lands as SCHEDULER POLICY per the batching precedent,
+   but the vocabulary is genuinely new surface to design.
+4. FIELD-LEVEL CUSTODY: overlapping owners (HPA inside our
+   Deployment) — refine custody ledger to field paths; k8s
+   managedFields is the prior art to steal.
+BOUNDARY (state plainly): vixen manages control-plane truth, not
+runtime supervision — kubelet keeps its job; a service's "output"
+is a claim continuously re-verified.
