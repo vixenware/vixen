@@ -1,5 +1,5 @@
-use std::path::PathBuf;
 use std::io::{self, Write};
+use std::path::PathBuf;
 
 use eyre::{ContextCompat, Result, bail};
 

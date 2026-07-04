@@ -5,9 +5,9 @@ use std::path::Path;
 use eyre::{Context, Result};
 use facet::Facet;
 use rodin_facts::{
-    Atom, Clause, ClauseId, ClauseStore, Derivation, DerivationId, DerivationStore, Exclusion,
-    ExclusionId, ExclusionStore, FeatIx, FeatureInterner, PackageInterner, PinRef, PkgId, PkgIx,
-    Premise, Region, RuleKind, SourceInterner, SourceIx, VersionSet,
+    Assignment, Atom, Clause, ClauseId, ClauseStore, Derivation, DerivationId, DerivationStore,
+    Exclusion, ExclusionId, ExclusionStore, FeatIx, FeatureInterner, PackageInterner, PinRef,
+    PkgId, PkgIx, Premise, Region, RuleKind, SourceInterner, SourceIx, VersionSet,
 };
 use semver::{Version, VersionReq};
 
@@ -133,9 +133,16 @@ pub struct SolveResult {
     pub candidates_existing: usize,
     pub steps: Vec<SolveStep>,
     pub trace: Vec<String>,
+    pub final_domains: BTreeMap<String, FinalDomain>,
     pub learned: Vec<LearnedNoGood>,
     pub derivations: DerivationStore,
     pub clauses: ClauseStore,
+}
+
+#[derive(Clone, Debug)]
+pub struct FinalDomain {
+    pub allowed: VersionSet,
+    pub reasons: Vec<Premise>,
 }
 
 #[derive(Clone, Debug, Eq, Facet, PartialEq)]
@@ -154,6 +161,7 @@ pub struct RecordPackage {
     pub id: String,
     pub source: String,
     pub name: String,
+    pub versions: Vec<String>,
 }
 
 #[derive(Clone, Debug, Eq, Facet, PartialEq)]
@@ -168,6 +176,7 @@ pub struct RecordNode {
     pub version: String,
     pub features: Vec<String>,
     pub why: Vec<String>,
+    pub ladder: Vec<RecordRung>,
 }
 
 #[derive(Clone, Debug, Eq, Facet, PartialEq)]
@@ -176,6 +185,21 @@ pub struct RecordEdge {
     pub from: String,
     pub to: String,
     pub requirement: String,
+}
+
+#[derive(Clone, Debug, Eq, Facet, PartialEq)]
+pub struct RecordRung {
+    pub version: String,
+    pub verdict: RungVerdict,
+}
+
+#[derive(Clone, Debug, Eq, Facet, PartialEq)]
+#[repr(C)]
+pub enum RungVerdict {
+    Selected,
+    ExcludedByRequirement { edges: Vec<String> },
+    KilledByFact { fact_id: String },
+    Unexplained,
 }
 
 #[derive(Clone, Debug, Eq, Facet, PartialEq)]
@@ -1033,7 +1057,10 @@ impl<'a> Solver<'a> {
                 .unwrap_or_default();
             self.steps.push(SolveStep::Conflict {
                 empty_pkg: self.package_label(pkg).to_owned(),
-                edges_involved: support_edge_ids(&support_from_premises(self.index, &premises)),
+                edges_involved: support_edge_ids(
+                    self.index,
+                    &support_from_premises(self.index, &premises),
+                ),
             });
             self.learn(Conflict {
                 premises,
@@ -1204,7 +1231,10 @@ impl<'a> Solver<'a> {
                     .unwrap_or_default();
                 self.steps.push(SolveStep::Conflict {
                     empty_pkg: self.package_label(pkg).to_owned(),
-                    edges_involved: support_edge_ids(&support_from_premises(self.index, &premises)),
+                    edges_involved: support_edge_ids(
+                        self.index,
+                        &support_from_premises(self.index, &premises),
+                    ),
                 });
                 return Err(Conflict {
                     premises,
@@ -1305,7 +1335,8 @@ impl<'a> Solver<'a> {
                 .iter()
                 .all(|version| !next.contains(version))
         {
-            let edges_involved = support_edge_ids(&support_from_premises(self.index, &premises));
+            let edges_involved =
+                support_edge_ids(self.index, &support_from_premises(self.index, &premises));
             self.trace.push(format!(
                 "{}: {} ∩ {} = empty -> conflict",
                 self.package_label(pkg),
@@ -1325,7 +1356,8 @@ impl<'a> Solver<'a> {
         if let Some(selected) = &domain.selected
             && !next.contains(selected)
         {
-            let edges_involved = support_edge_ids(&support_from_premises(self.index, &premises));
+            let edges_involved =
+                support_edge_ids(self.index, &support_from_premises(self.index, &premises));
             self.trace.push(format!(
                 "{}: selected {} not in {} ∩ {} -> conflict",
                 self.package_label(pkg),
@@ -1452,7 +1484,7 @@ impl<'a> Solver<'a> {
         ));
         self.steps.push(SolveStep::Learn {
             region: record_region(self.index, &region),
-            support_edges: support_edge_ids(&support),
+            support_edges: support_edge_ids(self.index, &support),
             widened_from: point_versions,
             widened_to: widened_versions,
         });
@@ -1495,6 +1527,20 @@ impl<'a> Solver<'a> {
                     .insert(feature.to_owned());
             }
         }
+        let final_domains: BTreeMap<String, FinalDomain> = state
+            .domains
+            .iter()
+            .filter(|(_, domain)| domain.active)
+            .map(|(pkg, domain)| {
+                (
+                    self.index.name(*pkg).unwrap_or_default().to_owned(),
+                    FinalDomain {
+                        allowed: domain.allowed.clone(),
+                        reasons: domain.reasons.clone(),
+                    },
+                )
+            })
+            .collect();
         self.trace.push(format!(
             "solution: {}",
             selected
@@ -1529,6 +1575,7 @@ impl<'a> Solver<'a> {
             candidates_existing: self.candidates_existing,
             steps: self.steps,
             trace: self.trace,
+            final_domains,
             learned: self.learned,
             derivations: self.derivations,
             clauses: self.index.clauses.clone(),
@@ -1655,14 +1702,34 @@ fn display_support(support: &BTreeSet<EdgeKey>) -> String {
         .join(", ")
 }
 
-fn edge_id(parent: &str, dep: &str) -> String {
-    format!("edge:{parent}->{dep}")
+fn package_id(source: &str, name: &str) -> String {
+    format!("{source}:{name}")
 }
 
-fn support_edge_ids(support: &BTreeSet<EdgeKey>) -> Vec<String> {
+fn package_id_for_name(index: &CompiledIndex, name: &str) -> String {
+    let Some(pkg) = index.package(name) else {
+        return package_id(CRATES_IO, name);
+    };
+    let source = index
+        .packages
+        .resolve(pkg)
+        .and_then(|pkg_id| index.sources.resolve_str(pkg_id.source))
+        .unwrap_or(CRATES_IO);
+    package_id(source, name)
+}
+
+fn edge_id(index: &CompiledIndex, parent: &str, dep: &str) -> String {
+    format!(
+        "edge:{}->{}",
+        package_id_for_name(index, parent),
+        package_id_for_name(index, dep)
+    )
+}
+
+fn support_edge_ids(index: &CompiledIndex, support: &BTreeSet<EdgeKey>) -> Vec<String> {
     support
         .iter()
-        .map(|edge| edge_id(&edge.parent, &edge.dep))
+        .map(|edge| edge_id(index, &edge.parent, &edge.dep))
         .collect()
 }
 
@@ -2064,9 +2131,15 @@ fn record_packages(index: &CompiledIndex) -> Vec<RecordPackage> {
                 .unwrap_or(CRATES_IO)
                 .to_owned();
             RecordPackage {
-                id: name.clone(),
-                source,
+                id: package_id(&source, name),
+                source: source.clone(),
                 name: name.clone(),
+                versions: index
+                    .versions(*pkg)
+                    .iter()
+                    .rev()
+                    .map(ToString::to_string)
+                    .collect(),
             }
         })
         .collect()
@@ -2094,14 +2167,17 @@ fn record_graph(index: &CompiledIndex, problem: &Problem, result: &SolveResult) 
             continue;
         };
         for dep in &manifest.deps {
+            if dep.optional {
+                continue;
+            }
             if !result.selected.contains_key(&dep.actual) {
                 continue;
             }
-            let id = edge_id(parent, &dep.actual);
+            let id = edge_id(index, parent, &dep.actual);
             edges.entry(id.clone()).or_insert_with(|| RecordEdge {
                 id,
-                from: parent.clone(),
-                to: dep.actual.clone(),
+                from: package_id_for_name(index, parent),
+                to: package_id_for_name(index, &dep.actual),
                 requirement: dep.req.clone(),
             });
             why.entry(dep.actual.clone()).or_default().push(format!(
@@ -2121,10 +2197,11 @@ fn record_graph(index: &CompiledIndex, problem: &Problem, result: &SolveResult) 
                 .map(|features| features.iter().cloned().collect())
                 .unwrap_or_default();
             RecordNode {
-                pkg: pkg.clone(),
+                pkg: package_id_for_name(index, pkg),
                 version: version.to_string(),
                 features,
                 why: why.remove(pkg).unwrap_or_default(),
+                ladder: record_ladder(index, result, pkg, version),
             }
         })
         .collect();
@@ -2132,6 +2209,133 @@ fn record_graph(index: &CompiledIndex, problem: &Problem, result: &SolveResult) 
     RecordGraph {
         nodes,
         edges: edges.into_values().collect(),
+    }
+}
+
+fn record_ladder(
+    index: &CompiledIndex,
+    result: &SolveResult,
+    pkg_name: &str,
+    selected: &Version,
+) -> Vec<RecordRung> {
+    let Some(pkg) = index.package(pkg_name) else {
+        return Vec::new();
+    };
+    let mut out = Vec::new();
+    for version in index.versions(pkg).iter().rev() {
+        if version < selected {
+            continue;
+        }
+        let verdict = if version == selected {
+            RungVerdict::Selected
+        } else if result
+            .final_domains
+            .get(pkg_name)
+            .is_some_and(|domain| !domain.allowed.contains(version))
+        {
+            let edges = result
+                .final_domains
+                .get(pkg_name)
+                .map(|domain| {
+                    support_edge_ids(index, &support_from_premises(index, &domain.reasons))
+                })
+                .unwrap_or_default();
+            RungVerdict::ExcludedByRequirement { edges }
+        } else {
+            let assignment = assignment_with_rebound(index, result, pkg, version);
+            result
+                .learned
+                .iter()
+                .enumerate()
+                .find(|(_, fact)| fact.region.contains_assignment(&assignment))
+                .map_or(RungVerdict::Unexplained, |(ix, _)| {
+                    RungVerdict::KilledByFact {
+                        fact_id: format!("fact-{ix}"),
+                    }
+                })
+        };
+        out.push(RecordRung {
+            version: version.to_string(),
+            verdict,
+        });
+    }
+    out
+}
+
+fn assignment_with_rebound(
+    index: &CompiledIndex,
+    result: &SolveResult,
+    rebound_pkg: PkgIx,
+    rebound_version: &Version,
+) -> Assignment {
+    let mut versions = BTreeMap::new();
+    for (name, version) in &result.selected {
+        if let Some(pkg) = index.package(name) {
+            let version = if pkg == rebound_pkg {
+                rebound_version.clone()
+            } else {
+                version.clone()
+            };
+            versions.insert(pkg, version);
+        }
+    }
+
+    let mut features = BTreeSet::new();
+    for (name, enabled) in &result.enabled_features {
+        let Some(pkg) = index.package(name) else {
+            continue;
+        };
+        for feature in enabled {
+            if let Some(feat) = index.features.get_str(feature) {
+                features.insert((pkg, feat));
+            }
+        }
+    }
+
+    add_forced_dependency_closure(index, &mut versions);
+
+    Assignment { versions, features }
+}
+
+fn add_forced_dependency_closure(index: &CompiledIndex, versions: &mut BTreeMap<PkgIx, Version>) {
+    loop {
+        let mut changed = false;
+        let current: Vec<_> = versions
+            .iter()
+            .map(|(pkg, version)| (*pkg, version.clone()))
+            .collect();
+        for (pkg, version) in current {
+            let Some(manifest) = index.manifests.get(&(pkg, version)) else {
+                continue;
+            };
+            for dep in &manifest.deps {
+                if dep.optional {
+                    continue;
+                }
+                let Some(dep_pkg) = index.package(&dep.actual) else {
+                    continue;
+                };
+                if versions.contains_key(&dep_pkg) {
+                    continue;
+                }
+                let Ok(req) = parse_req(&dep.req) else {
+                    continue;
+                };
+                let candidates: Vec<_> = index
+                    .versions(dep_pkg)
+                    .iter()
+                    .filter(|version| req.contains(version))
+                    .cloned()
+                    .collect();
+                if let [candidate] = candidates.as_slice() {
+                    versions.insert(dep_pkg, candidate.clone());
+                    changed = true;
+                }
+            }
+        }
+        if !changed {
+            break;
+        }
     }
 }
 
@@ -2149,7 +2353,7 @@ fn record_facts(index: &CompiledIndex, learned: &[LearnedNoGood]) -> Vec<RecordF
             RecordFact {
                 id: format!("fact-{ix}"),
                 kind: fact.kind.as_str().to_owned(),
-                support_edges: support_edge_ids(&fact.support),
+                support_edges: support_edge_ids(index, &fact.support),
                 widened_from: fact.point_versions,
                 widened_to: fact.widened_versions,
                 summary: format!("{region_text} is impossible"),
@@ -2721,8 +2925,19 @@ mod tests {
         let decoded: SolveRecord = facet_json::from_str(&json)?;
 
         assert_eq!(decoded, record);
-        assert!(record.graph.edges.iter().any(|edge| edge.id == "edge:web->codec"));
-        assert!(record.facts.iter().any(|fact| !fact.support_edges.is_empty()));
+        assert!(
+            record
+                .graph
+                .edges
+                .iter()
+                .any(|edge| edge.id == "edge:crates.io:web->crates.io:codec")
+        );
+        assert!(
+            record
+                .facts
+                .iter()
+                .any(|fact| !fact.support_edges.is_empty())
+        );
         assert!(record.steps.iter().any(|step| {
             matches!(
                 step,
@@ -2733,6 +2948,43 @@ mod tests {
                 } if pkg == "tokio-like"
             )
         }));
+        Ok(())
+    }
+
+    #[test]
+    fn solved_pressure_records_explain_every_higher_ladder_rung() -> Result<()> {
+        let mut solved = 0;
+        let mut unsat = Vec::new();
+        let mut unexplained = Vec::new();
+        for scenario in pressure_scenarios()? {
+            let name = scenario.name.clone();
+            let shape = scenario.shape.clone();
+            let record = match solve_record(&scenario.index, name.clone(), shape, scenario.problem)
+            {
+                Ok(record) => record,
+                Err(err) => {
+                    tracing::debug!(scenario = name, error = %err, "pressure scenario has no solve record");
+                    unsat.push(name);
+                    continue;
+                }
+            };
+            solved += 1;
+            for node in &record.graph.nodes {
+                for rung in &node.ladder {
+                    if matches!(rung.verdict, RungVerdict::Unexplained) {
+                        unexplained
+                            .push(format!("{} {} {}", record.scenario, node.pkg, rung.version));
+                    }
+                }
+            }
+        }
+
+        assert_eq!(solved, 5);
+        assert_eq!(unsat, ["exclusion-collision", "lockstep-trap"]);
+        assert!(
+            unexplained.is_empty(),
+            "unexplained higher ladder rungs: {unexplained:?}"
+        );
         Ok(())
     }
 }
