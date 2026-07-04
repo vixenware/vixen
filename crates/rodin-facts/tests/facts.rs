@@ -3,8 +3,8 @@ use std::collections::{BTreeMap, BTreeSet};
 use proptest::prelude::*;
 use rodin_facts::{
     Assignment, Atom, Clause, ClauseId, ClauseStore, Derivation, DerivationId, DerivationStore,
-    Exclusion, ExclusionId, ExclusionStore, FeatIx, Interval, PinRef, PkgIx, Premise, Region,
-    ReplayError, RuleKind, VersionSet, WidenCert,
+    Exclusion, ExclusionId, ExclusionStore, FeatIx, Interval, PackageInterner, PinRef, PkgId,
+    PkgIx, Premise, Region, ReplayError, RuleKind, SourceInterner, SourceIx, VersionSet, WidenCert,
 };
 use semver::{Version, VersionReq};
 
@@ -107,6 +107,31 @@ fn version_req_conversion_matches_semver_for_release_versions() {
             );
         }
     }
+}
+
+#[test]
+fn package_interner_distinguishes_same_name_across_sources() {
+    let mut sources = SourceInterner::new();
+    let crates_io = sources.intern("crates.io");
+    let private = sources.intern("private");
+    assert_ne!(crates_io, private);
+    assert_eq!(sources.resolve_str(crates_io), Some("crates.io"));
+
+    let mut packages = PackageInterner::new();
+    let left = packages.intern(PkgId::new(crates_io, "derive"));
+    let right = packages.intern(PkgId::new(private, "derive"));
+    let default = packages.intern_default("derive");
+
+    assert_ne!(left, right);
+    assert_ne!(right, default);
+    assert_eq!(
+        packages.resolve(left),
+        Some(&PkgId::new(crates_io, "derive"))
+    );
+    assert_eq!(
+        packages.resolve(default),
+        Some(&PkgId::new(SourceIx::DEFAULT, "derive"))
+    );
 }
 
 #[test]

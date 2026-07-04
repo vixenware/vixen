@@ -12,7 +12,9 @@ pub use derivation::{
     RuleKind, WidenCert,
 };
 pub use exclusion::{Exclusion, ExclusionId, ExclusionStore};
-pub use interner::{FeatIx, Interner, PkgIx};
+pub use interner::{
+    FeatIx, FeatureInterner, Interner, PackageInterner, PkgId, PkgIx, SourceInterner, SourceIx,
+};
 pub use region::{Assignment, Region};
 pub use version_set::{Interval, VersionSet};
 

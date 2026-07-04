@@ -171,7 +171,10 @@ impl VersionSet {
     /// what Rodin's package-version facts are expected to provide. Cargo's
     /// prerelease admission policy is not representable as a finite union of
     /// plain total-order half-open intervals because it creates infinitely many
-    /// prerelease holes above otherwise admitted release ranges.
+    /// prerelease holes above otherwise admitted release ranges. `rodin.md`
+    /// agenda B records prerelease admission as a v2 requirement, likely via a
+    /// per-interval admission flag or an ordering trick; this function does not
+    /// attempt that model.
     #[must_use]
     pub fn from_req(req: &VersionReq) -> Self {
         req.comparators.iter().fold(Self::universe(), |set, cmp| {
