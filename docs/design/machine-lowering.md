@@ -61,7 +61,22 @@ blocked belongs to weavy::task.*
   creation), never inside machine arithmetic (IEEE there, bitwise-
   pinned across lanes).
 
-## Trace (the unified stream)
+## Let bindings are demand-sunk statically (ruled during parity B1)
+
+The lowerer discovered eager `let` lowering violates G06/G07 (unused
+binding must create nothing). The fix is NOT runtime thunks — that is
+A6's banned dynamic machinery. RULING: within a body, demand is
+resolved AT LOWERING TIME. A binding's initializer is emitted at the
+earliest point dominating its uses on each execution path: unused →
+never emitted (the ops simply don't exist in the task program —
+absence at the PROGRAM level, the same proof style as everything
+else); used only in some match arms → sunk into those arms (one arm
+executes, so once-per-path holds); used before and after a branch →
+emitted once at first-dominating use. At most one evaluation per
+path; no thunks, tags, or force flags ever. Purity makes elision
+unobservable except through demanded slots (V2), which is the point:
+this is "the graph materializes as bodies reach call sites" carried
+down INTO bodies — code no demand path reaches is never emitted.
 
 - The vix lowering EMITS instrumentation ops carrying the three-moment
   vocabulary: node-demanded, memo-hit/miss, spawn, park, resume,

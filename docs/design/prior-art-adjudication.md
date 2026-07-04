@@ -181,11 +181,56 @@ typed invocation AST → commuting-flag-normalized cache key + sandbox
 ceilings from grammar roles" stands unclaimed in both patent and
 practice corpora. C6 core: SURVIVED, now with the patent search done.
 
-## Still open after Round 2
+## GPT report (round 2) — kill vectors, adjudicated
 
-GPT's report (R1 unsat-core/MUS + counterfactual manifest diffs; R2
-observation-justified widening; dune/memo — the nearest-miss suspect
-for demand-driven incremental engines; Tvix/Fac/OMake/Jenga/redo
-tail). Reading debt: Vesta RR-177 imports/evaluation section (the
-one Q2 hedge), Konat thesis, Atria-era MVFS whitepapers (dead links;
-physical copies only).
+- **R1**: SURVIVED exact wording. Spack has constraint-origin
+  tracking + unsat cause trees, but its own Result.to_dict excludes
+  "anything related to unsatisfiability" from SATISFIABLE results —
+  direct evidence selected-version derivations are not its output
+  artifact. OPIUM = the suggest-what-to-remove/optimization ancestor.
+  No counterfactual-manifest-diff product surface found anywhere.
+- **R2**: SURVIVED exact wording, and gained its theory lineage:
+  generalized nogoods + symmetric explanation learning widen learned
+  constraints by STRUCTURAL/logical justification; uv ASSUMES
+  per-version metadata uniformity (declared, unverified — lockfile
+  unsound when violated); nobody widens by OBSERVED read-set
+  stability, per-edge. Cite the CP literature as ancestry.
+- **C3 merge tunneling**: SURVIVED the targeted hunt — the top
+  suspect CLEARED. dune Memo is a serious incremental engine (tens
+  of millions of nodes, dynamic deps, cycles) but memoization is an
+  EXPLICIT API call, cells are not content-keyed by code, and
+  nothing tunnels through merged outputs. Determinate Nix lazy trees
+  = INPUT-side demand (source copying granularity), not merged-output
+  producer selection. Buck2 projection = staging, not selection.
+- **C2-rewrite related work grows**: Mandala (@op Python decorator,
+  content-addressed code+dependency versioning per call — MUST cite),
+  R targets (function + globals dependency-closure hashing),
+  charmonium.cache (durable, code+env-sensitive). All opt-in
+  decorators; none every-call, none types, none language-runtime.
+  joblib explicitly FAILS transitive code invalidation (documented
+  issue: nested helper edit doesn't invalidate).
+
+## FINAL SCOREBOARD (two rounds, six reports)
+
+SURVIVED, claimable, strength order:
+1. **R2 widening-by-verified-observation** (unanimous both rounds;
+   theory ancestors are structural, not observational).
+2. **C3 merge tunneling** (survived a targeted second-round hunt;
+   THE MILESTONE demo is the demonstration).
+3. **C1 the composition** (six reports, no full-combination system).
+4. **C6 grammar-as-single-source** (survived practice corpus AND
+   patent search; ccache=ad-hoc, Bazel=generates-not-parses).
+5. **R1 counterfactual product surface** (Spack/OPIUM adjacent).
+6. **C4 soundness posture** (VFS mediation, false-negatives-only) —
+   design argument; mechanism ancestry Vesta(2000)→BuildXL.
+CEDED / REWRITTEN: C2 → "static transitive closure hash incl. TYPES,
+every call, durable" with Vesta/Unison/Mandala credits; C5 → two
+deltas atop gg(draft)+Trustix; C7 → content-hash-discovered fleet
+joining only.
+
+## Remaining reading debt
+
+Vesta RR-177 imports/evaluation section (the one call-by-value
+hedge), Konat thesis, Atria-era MVFS whitepapers (physical only),
+dune Memo code-level inspection (GPT recommends; medium confidence),
+Mandala paper close-read before writing C2's related work.
