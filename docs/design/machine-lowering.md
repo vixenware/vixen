@@ -78,6 +78,50 @@ unobservable except through demanded slots (V2), which is the point:
 this is "the graph materializes as bodies reach call sites" carried
 down INTO bodies — code no demand path reaches is never emitted.
 
+**THE PROMOTION SLICE (Amos: "charge head-on into that situation
+instead of waiting for it to creep up on us" — ruled 2026-07-04,
+supersedes waiting):** build promotion NOW, deliberately, with a
+forcing construct. The design that fell out of charging:
+
+P1. ONE REPRESENTATION. PendingInvocation (fn closure-hash ×
+canonical args-so-far × remaining arity) becomes a first-class
+store value kind. Partial applications, closures-as-values, pending
+tree branches, pending array elements, and promoted bindings are
+ALL this one thing. There is no closure runtime — a closure IS a
+pending invocation with remaining params; calling it supplies the
+rest and demands through INVOKE. (This also discharges the O12
+shipping debt by construction: pending identities are
+content-addressed, hence wire-stable.)
+
+P2. IDENTITY IS NEVER OBTAINED BY FORCING. Pending values hash by
+invocation identity (input-addressing); forced values hash by
+content (content-addressing). Memo keys over pending args are
+therefore FINER than eventual content equality — that is the SAFE
+direction (extra misses possible, wrong hits impossible). Forcing
+a value in order to hash it is FORBIDDEN — it would let hashing
+destroy laziness. Language-level equality (==) on possibly-pending
+values is a DEMANDING operation: it forces both sides, like any
+other touch. (This is the Nix-input-addressing vs
+Unison-content-addressing tension, resolved by holding both with a
+strict direction rule.)
+
+P3. DEMAND-ON-TOUCH stays the one dynamic mechanism: touching a
+pending handle in a demanding position goes through the driver's
+INVOKE path (hit = sync fill, miss = spawn+park). Promotion adds no
+machinery — it REUSES the graph.
+
+P4. FORCING CONSTRUCT (zero grammar changes): lazy Map values —
+inserts store pending refs for promotable call initializers; .get
+with a computed key demands ONLY the selected entry. Test: map of
+two expensive producers, computed key selects one, the other is
+trace-absent, both lanes. This is data-dependent demand that
+sinking can never resolve, met on our terms.
+
+P5. First-class closure SYNTAX (callee-as-expression, closures
+returned from fns) waits only on grammar admission; the value
+representation ships in this slice, so grammar admission later
+costs the machine nothing.
+
 **The escalation rule (Amos flagged the cliff; ruled with them,
 2026-07-04):** one more construct — first-class closures capturing
 bindings, or loops — makes static demand placement research-grade
