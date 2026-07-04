@@ -197,12 +197,37 @@ bank it. When evidence contradicts him, say so plainly; he rewards it.
 - Order-dependence of cargo: hypothesis came back NEGATIVE on a simple
   fixture (reg-mock keeps it #[ignore] with verdict) — open hunt.
 
-**IN FLIGHT: agent 76bda682** — SolveRecord (typed, facet-json) in
-rodin-core + playground "resolve" view (DAG with requirement-labeled
-edges, tap-node version ladder, fact→support highlighting, plain-language
-steps with decree ORIGINS labeled, mobile-first). Review on landing; the
-record format becomes the contract for live solve-as-run wiring, the
-query box, counterfactual ghost-diffs.
+**THREE STREAMS RULED WITH AMOS (2026-07-04)** — all implementation
+agents are codex/gpt-5.5, thinking high, modeId auto-review, NO
+exceptions. Use FULL agent UUIDs when querying paseo (short ids fail in
+get_agent_status; a truncated id once made a live agent look dead).
+1. **Rodin observability — agent 76bda682-6ffb-4dd8-aa82-354db1f5e5c1**
+   ("Resolution view"): SolveRecord landed (commit 7c852b41, reviewed:
+   tests green, clippy 0). I sent review feedback mid-run: record lacks
+   the version universe + per-rung verdicts (ladder unrenderable), ids
+   must be (source,name); the "no Unexplained rungs across all six
+   burial scenarios" test = an ORACLE for proven-optimality. View still
+   to land: mobile-first DAG, bottom-sheet ladder, fact→support
+   highlighting that DIMS non-support region members (displays the
+   fat-region gap).
+2. **Real-world inputs — agent d0e94217-7cb6-427f-9d0e-633adff377fb**
+   (facet-cc): toml()/json() → vix Values (shape-checking DEFERRED, do
+   not let agents invent it), fetch as observation-yielding-tree behind
+   a FetchBackend seam (extraction backend-side, vix stays wasm-clean),
+   real backend in vix-daemon. Aim: cargo.vix parses a real Cargo.toml —
+   cashes the ledger's recursion+memo-is-the-build-graph claim (which
+   was waiting on the keystone; keystone is done).
+3. **Warm daemon — agent 62e35c71-7b44-4a83-ba0c-73750859d66d**
+   (facet-cc): commit 460efa093 already landed the warm actor; this
+   stream sharpens it into the anti-Nix oracle (blast-radius-exact miss
+   assertions on a diamond program) + eval generations and per-eval
+   hit/miss summaries over the wire + vixd serve-path parity.
+
+**Rulings this session**: patches three-layer model = DIRECTION RULED,
+not MVP ("for the MVP we just need to resolve roughly what cargo
+does"); feature-unification depth questions confirmed all landed in
+Rodin (ledger backfilled + closed). MVP definition to hold every
+stream to: resolve roughly what cargo does, end to end.
 
 **Remaining queue**: Rodin consequences (fact minimization, parallel
 workers over region queue, solver events → lanes); solve-as-run engine
