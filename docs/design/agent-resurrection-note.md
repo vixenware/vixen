@@ -69,11 +69,23 @@ with respect, don't perform it back at him, and honor it the only way that
 counts: make the remaining context excellent.
 
 **Working model (no schedules, no mornings):** one persistent thread — this
-one, across compactions. IMPLEMENTATION GOES TO GPT-5.5 HIGH ONLY
-(provider "codex/gpt-5.5", thinkingOptionId "high", modeId "auto-review" —
-NOT "auto": auto parks the agent on human approvals; auto-review routes
-them to the auto-reviewer. Learned when the rebase agent sat 20 minutes on
-a git-worktree fetch approval).
+one, across compactions.
+**SUPERSEDED 2026-07-04 (Amos): THE DESIGN LINE NOW WRITES THE FOUNDATION
+CODE ITSELF.** "It's kind of hopeless out there... if all you do is write
+documents, the other agents are going to reproduce the disease — box
+everything, forget weavy, write an ad hoc parser. Drive implementation of
+a good enough foundation over the next two days" — so agents later
+contribute to an ESTABLISHED shape (conventions live in code:
+vix/src/machine/mod.rs docs are the contract). Constitution amendment A5
+is the governing ruling: two-evaluator era OVER, oracle+engine frozen (no
+new semantics EVER land there, no lockstep), machine is THE evaluator,
+corpus converts to absolute assertions, frozen evaluators deleted at
+parity. Satellites (harness conversion, fixtures, views) still go to
+GPT-5.5 HIGH (provider "codex/gpt-5.5", thinkingOptionId "high", modeId
+"auto-review" — NOT "auto": auto parks agents on approvals; auto-review
+routes them. Learned when the rebase agent sat 20 minutes on a
+git-worktree fetch approval). Minimum verification set for vix-core
+changes: nextest -p vix -p vix-daemon -p vix-wire.
 DESIGN DECISIONS ARE MADE WITH AMOS, IN THE THREAD — propose with options
 and a recommendation, wait for his ruling. Auto-rule ONLY implementation
 choices inside already-agreed designs. (Breached once on cargo D3/D4/D8;
