@@ -234,3 +234,193 @@ Vesta RR-177 imports/evaluation section (the one call-by-value
 hedge), Konat thesis, Atria-era MVFS whitepapers (physical only),
 dune Memo code-level inspection (GPT recommends; medium confidence),
 Mandala paper close-read before writing C2's related work.
+
+---
+
+## Reading debt closed (2026-07-04)
+
+Three of the five items above are closed by primary-source reads
+below (Konat thesis and Atria-era MVFS whitepapers remain open —
+not attempted this pass). All sources were reachable; nothing to
+report as inaccessible.
+
+### 1. Dune Memo, code-level (github.com/ocaml/dune, `src/memo/`, shallow clone at HEAD)
+
+**(a) Cell identity — is anything content-hashed, especially CODE?**
+NOT FOUND. A memo cell's identity is the pair (function `Spec.t`,
+input value), never a hash of the function's code:
+
+> `and Dep_node : sig type ('i, 'o) t = { id : Id.t ... ; spec : ('i, 'o) Spec.t ; input : 'i ; mutable state : State.t ; mutable value : 'o Value.t ; ... }`
+> — `src/memo/node.ml:38-48`
+
+> `type ('i, 'o) t = { name : string option ; witness : 'i Type_eq.Id.t option ; input : (module Store_intf.Input with type t = 'i) ; node_kind : ('i, 'o) Node_kind.t ; f : 'i -> 'o Fiber.t ; human_readable_description : ... }`
+> — `src/memo/spec.ml:68-80`
+
+`Spec.t` stores the closure `f` itself (by reference, for execution)
+but nothing hashes `f`'s code; the table/cell is keyed by `name` +
+`input` (via a user-supplied `Store_intf.Input` module: `to_dyn` /
+hashing on the *argument*, not the function). Confirmed by the
+public API doc: `Memo.create` "creates a memoized version of the
+function `f`" via an **explicit call** (`src/memo/memo.mli:284-310`)
+— memoization is opt-in per function definition, not automatic
+content-addressing of arbitrary code.
+
+**(b) Demand-driven top-down? Never-materialized pending nodes?**
+YES to demand-driven; the "pending node" analog is real but scoped
+per-input, not per merged-output. `Store_intf.S.find_or_add`:
+
+> `(** [find_or_add t key ~f] returns the value associated with [key], or, if [key] is not present, adds [f key] and returns it, in a single hash-table lookup. *)`
+> — `src/memo/store_intf.ml:16-18`
+
+A `Dep_node` is created and its `State.t` starts `Not_cached`; it is
+only advanced through `Restoring`/`Computing` to `Cached` when
+something actually calls `Memo.exec` on that input
+(`src/memo/exec.ml:229-262`, `exec_dep_node`/`consider_and_compute_without_adding_dep`).
+Nothing is computed until demanded, and dependency discovery is
+dynamic top-down (`Deps_collector` records what a running computation
+actually reads, `src/memo/exec.ml:121-140`). This is real
+demand-driven memoization, not eager per-invalidation propagation
+(see the invalidation-strategy comment at `src/memo/node.ml:354-376`,
+which explicitly restarts the whole run rather than eagerly walking
+reverse-deps).
+
+**(c) Cache durable/shared, or in-process?** In-process only. The
+default store backing a `Memo.Table` is `Stdune.Table`, a plain
+OCaml hash table (`src/memo/store.ml:28-43`, `src/memo/store_intf.ml:23-39`);
+grepping the entire `src/memo/` tree for `disk|persist|serializ|marshal|sqlite|Digest`
+returns zero hits. `Caches.clear` is just an in-memory registry of
+callbacks (`src/memo/caches.ml`). No persistence, no cross-process or
+cross-machine sharing anywhere in the memo layer.
+
+**(d) Demand tunneling through composite outputs?** NOT FOUND at the
+memo layer, and structurally can't be: a memo cell's identity is
+per-(spec, single input) — there is no notion of a "composite output"
+object inside `Memo` that a caller could partially demand from without
+the callee itself exposing per-component memoized accessors. This
+corroborates GPT's round-2 finding ("memoization is an EXPLICIT API
+call, cells are not content-keyed by code, and nothing tunnels through
+merged outputs") with a primary-source read instead of a secondary
+claim.
+
+**Consequence:** C1 and C3 both upgrade from "GPT round-2 hunt, medium
+confidence" to primary-source-confirmed. Dune Memo is real, serious,
+demand-driven incremental infrastructure, but it threatens neither
+claim: no code-content identity (C1's "every-call content-hash memo"
+is unmatched here), no durability (C1's "durable cross-machine
+journal" unmatched), no merged-output tunneling (C3's core claim
+unmatched). Cite Dune Memo in C1/C3's related work as the closest
+"serious demand-driven build-adjacent memo engine that still isn't
+any of these three things."
+
+### 2. Mandala (github.com/amakelov/mandala + `scipy-mandala.pdf` paper)
+
+**(a) What does per-call identity cover — code? transitive deps? TYPES?**
+Code and its *transitive call-dependency closure*, via two independent
+mechanisms, but never types:
+
+> "Per-function content-addressed versioning (Torvalds et al., 2005; Lozano, 2017), where the version of a function is a hash of its source code and the hashes of the functions it calls. The storage can determine, based only on the state of the codebase, whether a given call is up-to-date or not."
+> — §4.2 Versioning, p.7
+
+> "Dynamic dependency tracking, where each function call traces the dependencies it calls. This avoids the need for static analysis of the code to find dependencies... it provides a stronger notion of reusability, as certain changes of the codebase may invalidate only a part of all memoized calls to an @op."
+> — §4.2 Versioning, p.7
+
+Value/argument identity is separate and unrelated to code identity:
+content IDs are "hashes of the Python objects" via `joblib`
+serialization (§2.1, p.3; limitations §6, p.8). Types are never
+mentioned as part of either the content ID or the version hash —
+NOT FOUND, and the "non-breaking versioning" limitation
+(§6, p.8: "a function f can be changed by extracting a subroutine g
+out of it... g is now an invisible (to the storage) dependency of f")
+shows the dependency tracking is call-graph-based, not type-based.
+
+**(b) Opt-in decorator or automatic?** Opt-in per function, applied
+through automatic (i.e., non-manual-addressing) memoization semantics
+once opted in:
+
+> "mandala uses *automatic* memoization (Norvig, 1991) which is applied via the combination of a decorator (`@op`) and a context manager which specifies the `Storage` object to use."
+> — §2.1, p.3
+
+"Automatic" here describes the memoization *mechanism* (no manual
+save/load calls), not automatic *enrollment* — every memoized function
+must be individually decorated with `@op`.
+
+**(c) Storage durability/sharing model?** Optional local disk
+persistence, not shown to be cross-machine/journaled:
+
+> "The memoization can optionally be made persistent to disk, which is what you would typically want in a long-running project."
+> — §2.1, p.3
+
+> "the 'address' of a value is now implicit in the code that produced it, and the value itself is stored in a shared storage backend"
+> — §2.2, p.4 ("shared" here means shared/deduplicated *across calls within one Storage*, per the dedup discussion in §2.2, not shared across machines)
+
+**Consequence:** C2's related-work paragraph is now primary-source
+verified, not just GPT-cited. Mandala must be credited prominently:
+it is the closest existing system to "every-call automatic memo
+boundary keyed by code+transitive-deps," and it beats Unison on code
+identity precision (Mandala hashes actual dependency closure
+dynamically; Unison hashes syntax trees). It still does not survive
+against C2's full claim: no types in the key, opt-in per-function
+(not every call in a runtime), and durability is a local-disk option
+with no cross-machine journal semantics. No change to the CEDED
+verdict — this closes the citation with confidence rather than
+changing the outcome.
+
+### 3. Vesta RR-177 (Heydon, Levin, Mann, Yu; SRC Research Report 177, tim-mann.org/papers/SRC-RR-177.pdf), evaluation/imports sections only
+
+**Verdict: no lazy/on-demand import evaluation exists anywhere in the
+SDL. Import resolution is strict/eager, uniformly, as part of ordinary
+call-by-value evaluation. The one hedge closes flatly in favor of
+"Vesta is not demand-driven."**
+
+The Import clause binds a name directly to the result of evaluating
+the imported file, with no deferral:
+
+> "In the ImpSpecR case, the name is bound to the t_closure value that results from evaluation of the contents of a file according to the Model evaluation rules of Section A.3.3.13."
+> — Appendix A.3.3.15 Imports, p.189
+
+A Model's evaluation rule (A.3.3.13, p.183) makes the strictness
+explicit — Files and Imports are evaluated *unconditionally* every
+time a model is evaluated, and only the model's *body* (`Block`) is
+deferred by wrapping it in a zero-argument closure:
+
+> "Eval( Files Imports Block , C) = { val C0 = Eval( Files Imports , emptybinding); return Eval( LAMBDA () Block , _append(C0, C)); }"
+> — Appendix A.3.3.13 Model, p.183
+
+> "Eval( Files Imports , C) = _append(Eval( Files , C), Eval( Imports , C))"
+> — Appendix A.3.3.13 Model, p.184
+
+Since `Imports` itself recurses into the same Model evaluation rule
+for every imported file, the *entire transitive import graph* of a
+model is walked and evaluated eagerly the moment the model is
+evaluated — regardless of whether the imported closures are ever
+called. The only laziness present is the ordinary, universal
+call-by-value laziness of "a function body doesn't run until the
+function is called" (the `LAMBDA () Block` wrapper) — the same
+deferral every strict language gives every function, not an
+import-specific or demand-driven mechanism. Function-call argument
+evaluation elsewhere in the language is confirmed strict too, closing
+off any other place laziness could hide:
+
+> "act = Eval( Expr_i , C); // value for i-th actual" (evaluated unconditionally for each of the first n formals, before the call proceeds)
+> — Table A.8, Evaluation rule for FuncCall, p.184
+
+**Consequence:** the hedge on C3 ("Vesta's path-deps are cache
+precision under call-by-value" — "modulo import loading") is
+withdrawn. C3's resolution line can now read flatly: Vesta is
+call-by-value throughout, including model imports; its fine-grained
+caching (§7) is a *precision* mechanism layered on top of eager
+evaluation, not a demand-driven evaluation strategy. This also
+firms up C1's composition claim, which depends on no single prior
+system combining a demand-driven pure language with durable
+content-hash memoization and effects — Vesta is now confirmed clean
+on "not demand-driven" with no remaining unverified corner.
+
+### Net effect on the scoreboard
+
+No claim changes verdict. Three items move from "cited/GPT-hunted,
+medium confidence" to "primary-source verified, high confidence":
+**C1** (composition — Dune Memo and Vesta both confirmed clean),
+**C3** (merge tunneling — Dune Memo confirmed clean; Vesta's
+call-by-value hedge closed), **C2** (related-work precision — Mandala's
+exact mechanism now quotable instead of paraphrased from GPT).
+Outstanding: Konat thesis, Atria-era MVFS whitepapers — still unread.
