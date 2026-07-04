@@ -108,22 +108,31 @@ auditability story.
 
 ## Engine and substrate
 
-**10. Weavy suspend ABI.** Suspend ONLY at run boundaries (the places
-demand blocks — strictness points against pending runs); suspended state
-= arena + run-latch tables in the lowered Ctx (constitution §6+addendum);
-resume keyed by run id; frontier enumerable always (V26). Prove with the
-suspension-trace differential exactly as weavy::jit::async did. The one
-place a wrong shape means a rewrite — design line, not delegable.
+**10. Weavy suspend ABI.** RULED (Amos, 2026-07-04): suspend ONLY at run
+boundaries (the places demand blocks — strictness points against pending
+runs); suspended state = the working graph + run-latch tables in the
+lowered Ctx (constitution §6+addendum); resume keyed by run id; frontier
+enumerable always (V26). Prove with the suspension-trace differential
+exactly as weavy::jit::async did. Amos's addendum, banked: this does NOT
+mean single-threaded — the driver should be an ordinary async-runtime
+shape (worker threads picking up ready nodes, work-stealing included);
+the language's semantics make that safe by construction (scheduling
+nondeterminism is unobservable — canonical order, V12).
 
-**11. Engine warm reload (arena persistence).** The MEMO TABLE and the
-journal persist (content-addressed, canon-hash-keyed — same as the
-oracle's warm story); the ARENA does not (node ids are positional,
-per-eval). Warm eval = fresh arena + persistent memo + persistent
-journal. Why: persistence belongs only at content-addressed boundaries;
-persisting positional state is how incremental systems rot (rustc's
-dep-graph is the cautionary tale we already rejected). Would change my
-mind: measurements showing arena rebuild dominates warm evals on real
-programs — then cache the LOWERING, still keyed by canon hashes.
+**11. What survives between warm evaluations.** CORRECTED BY AMOS
+(2026-07-04, same shape as entry 5's correction): I had "cache the
+lowering keyed by canonical hashes" as an escape hatch; Amos: "you're
+keeping as a backup strategy the thing we should be doing from the
+beginning." RULED: the lowering cache is PRIMARY, not fallback.
+Terminology, since "arena" was opaque (Amos: "that screams memory
+allocation... there are 12 different kinds of graph"): the thing NOT
+persisted is the per-evaluation WORKING GRAPH — the flat array of nodes
+the engine builds to evaluate one program once, where nodes reference
+each other by positional index into that array (slot 17 means slot 17
+of THIS eval only). What persists, all keyed by content: the memo table
+(closure-hash × args → result), the journal (pins), and the LOWERING
+cache (program canonical hash → ready-to-instantiate graph shape).
+The rule in one line: persist facts keyed by content, never positions.
 
 **12. Engine-in-daemon.** After the current warm-daemon stream lands:
 vixd evaluates via the ENGINE with the oracle shadow-evaluating and the
@@ -168,12 +177,20 @@ parents) — my hypothesis is the order-dependence lives there, not in
 plain version selection. The harness makes the proof free whenever it
 appears; do not spend design-line time hunting.
 
-**19. VersionReq: capability type vs language type.** Capability-
-provided. The language never learns semver: ecosystems are closures
-(V18's boundary), each brings its own requirement semantics; vix needs
-only opaque values with hash+order; the solver consumes compiled
-interval sets runtime-side (rodin-facts). Debian-class ecosystems later
-confirm this: their constraint language differs, the seam doesn't.
+**19. Versions in the language.** RULED (Amos, 2026-07-04), replacing
+my too-strong "the language never learns semver": vix gets VERSION
+LITERALS — thin. A distinct literal form producing a Version value with
+semver-shaped total ordering (dotted-numeric; prerelease per semver,
+since the language is deliberately Rust-shaped) — because versions-as-
+strings order WRONG ("1.10.0" < "1.9.0" lexicographically), violating
+the total-ordering invariant's intent, and version sweeps are promised
+as ordinary vix maps. What stays OUT of the language: requirement
+interpretation (^, ~, ranges, prerelease admission) — that is the
+ecosystem closure's business and varies per ecosystem; debian-class
+orderings (epochs, dpkg tilde) come as capability-provided types
+through the same seam. Precedent for the spend: paths vs strings are
+already distinct literal types. Grammar + Value + both evaluators:
+delegable brief when convenient.
 
 **20. Registry layout probing.** Capability business entirely: index
 URL templates, sparse layout, auth — config data inside the registry
@@ -222,6 +239,20 @@ established; NT driver vs paid-fuse is a business call, not a design one.
 
 **28. Aggregation heuristics.** Wait for measurements (entry 6's
 sibling). Sound by purity; only profitability is in question.
+
+**31. The Value enum is a device, not the value model.** RULED in
+direction (Amos, 2026-07-04, on the MergedTree question — it made him
+"see red"): the shared Value enum is the naive interpreter's
+representation — "where everything goes to die" — and must not be
+enshrined as the system's value model, especially not through the weavy
+lowering; facet-value already exists as the generic value vocabulary.
+Immediate consequence (dispatched): the lazy MergedTree variant moves
+OUT of the shared Value enum into engine-internal representation —
+shipping forces identity anyway, so a lazy merge must never cross a
+wire or enter the shared vocabulary. Longer arc for the lowering: value
+representation in the lowered world is an open design item (facet-value
+/ weavy-native shapes), to be decided when the lowering is designed —
+NOT by accretion onto the enum.
 
 ## Meta
 

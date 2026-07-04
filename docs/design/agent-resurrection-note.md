@@ -162,10 +162,21 @@ facet-cc; pnpm dev --port 4180 in apps/playground).
 PLAIN LANGUAGE. No decision-numbers (D3/D4), no section letters (agenda C),
 no dense jargon-chains — he called both out. Quote documents BY NAME AND
 PATH; he cannot see your docs while chatting, often reads ON MOBILE. Ease
-him in with background before questions. ONE question at a time. Decisions
+him in with background before questions. ONE question at a time (or two,
+when he asks for batched adjudication). Decisions
 are made WITH him — propose with options + a recommendation, wait. Digests
 quote verbatim (scissors, not pen). When he muses, that's design signal —
 bank it. When evidence contradicts him, say so plainly; he rewards it.
+EVERY QUESTION SELF-CONTAINED (third correction, 2026-07-04): define every
+term inside the question itself, even terms he coined — "you have to
+assume I haven't done the prerequisite readings... your question has to
+involve all the introductory material." Never say "the arena" — say "the
+per-evaluation working graph, the flat array of nodes the engine builds
+to run one program once." There are 12 kinds of graph in this system;
+always say WHICH one. Watch for his recurring correction pattern: when
+you frame something as "conservative now, optimize later," check whether
+the "later" thing is actually the foundation (merge tunneling, lowering
+cache — both corrected the same way, same day).
 
 ## STATE (2026-07-04, Rodin day — supersedes older state sections)
 
