@@ -177,6 +177,25 @@ guard/IC/deopt investment becomes load-bearing rather than a lane.
 Devirtualization-by-analysis is demoted to opportunism where a
 world happens to be locally closed.
 
+P3-ENCODING (Amos: "ABI-wise, we can pack presence bits anywhere —
+[A][B][C][realization bitset]"; queued as the slice AFTER warm
+reload): presence bitsets replace boxed Realized<T>. STORE SIDE
+(bits are INSERT-TIME FACTS — store values are immutable, so
+realization never flips a stored bit; second touches are cheap via
+the memo store, not entry mutation): realized values inline as raw
+bits (no per-value box/entry/indirection), pending values as
+identity handles, one bit discriminates; hashing per P2 unchanged
+(bit selects content-vs-identity contribution). The bitset is a
+SYNTHESIZED DECLARED FIELD via mem::declared — debugger reads it
+like any field. FRAME SIDE (frames are mutable scratch — bits DO
+flip): lazy temporaries are (flag word, value word); barrier =
+JumpIfZero on the flag, ZERO host calls on the Ready path (kills
+the STORE_TAG round-trip); a demanding coercion writes bits back +
+sets the flag so later touches in the body pay only the test. No
+bit-packing in frames (space is cheap); packing pays in store
+layouts (hashing, cache line, dedup). Semantics identical to boxed
+Realized — tests change only in host-count assertions.
+
 P-HAZARD (flagged in review, must die before warm reload): the
 pending store encoding carries fn_ref — a program-table INDEX —
 inside a content-addressed value. Indices go stale across reload;
