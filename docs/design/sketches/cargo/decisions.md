@@ -67,6 +67,16 @@ that no feature ever activates can fail a build that should succeed.
 Depth (term language, universes, determinism, additivity) being designed
 in-thread; this section gets the outcome.
 
+**OUTCOME (backfilled 2026-07-04) — SECTION CLOSED; normative text lives in
+rodin.md.** The depth questions all landed during the Rodin cycle:
+universes = separate solves per compilation context (round-2 ruling: "not
+even a question"); determinism = Rodin FIXED 6 + 11 (determinism through
+optimality; proven optimality the only mode); additivity = features form a
+join-semilattice, propagation-only, with declared exclusions constraining
+feasibility (round-2 beyond-cargo ruling); default-features sugar = closed,
+implementation properties only. "Version choices are the only decision
+points" carried into Rodin as FIXED 3.
+
 VERIFICATION vs the March verbatim record (march-solver-recovered-verbatim.md
 §tension-iii): the features-as-propagated-Horn-terms framing is a JULY
 invention, NOT recovered — March never modeled feature activation as
