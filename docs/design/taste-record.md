@@ -18,8 +18,11 @@ transitively: functions AND type declarations. Convergent proof the same
 day: the warm-daemon blast-radius test showed a real leaf edit leaves the
 caller's memo entry hitting (stale result served — a false positive, the
 forbidden outcome); pinned as warm_reload_leaf_semantic_edit_currently_
-hits_stale_entry + an #[ignore] test of the correct behavior. Fix
-dispatched (SCC-aware closure hashing, both evaluators lockstep).
+hits_stale_entry + an #[ignore] test of the correct behavior. FIX
+LANDED same day (facet-cc b5f838e2d): SCC-aware closure hashes in
+module tables, both evaluators lockstep, the pinned test un-ignored and
+green (…misses_exact_theoretical_blast_radius), type-decl edits miss
+exactly their transitive users, verified here 56/56 zero skipped.
 Generics status honestly: the SURFACE exists (grammar v0.2 has generics
 in types/patterns) but neither evaluator instantiates them semantically
 yet — the instantiated-closure note is forward-looking, not current.
