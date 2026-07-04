@@ -3,10 +3,22 @@ import downgradeCascade from "./samples/rodin-downgrade-cascade.json";
 import holeTrap from "./samples/rodin-hole-trap.json";
 
 type RungVerdict =
-  | "Selected"
-  | "Unexplained"
-  | { ExcludedByRequirement: { edges: string[] } }
-  | { KilledByFact: { fact_id: string } };
+  | { Selected: { selection_digest: string } }
+  | { Unexplained: { digest: string } }
+  | { Killed: { reason: KillReason } };
+
+type KillReason =
+  | { RootConstraint: { digest: string; pins: string[] } }
+  | { Decree: { digest: string; pins: string[] } }
+  | { DependencyConstraint: { digest: string; edges: string[]; pins: string[] } }
+  | { LearnedExclusion: { fact_id: string; proof_root: string; proof_digest: string } };
+
+interface SelectionDerivation {
+  pkg: string;
+  version: string;
+  digest: string;
+  killed_higher: Array<{ version: string; reason: KillReason }>;
+}
 
 type VerificationStatus = "LocallyLearned" | "VerifiedImported" | "ShrunkInvalidWiden";
 
@@ -26,7 +38,7 @@ interface RecordNode {
   pkg: string;
   version: string;
   features: string[];
-  why: string[];
+  derivation: SelectionDerivation;
   ladder: RecordRung[];
 }
 
@@ -46,14 +58,13 @@ interface RecordFact {
   support_edges: string[];
   widened_from: number;
   widened_to: number;
-  summary: string;
 }
 
 type SolveStep =
   | { Demand: { pkg: string; requirement: string } }
   | { Decree: { origin: "Root" | "User"; pkg: string; requirement: string } }
   | { Intersect: { pkg: string; before: string; applied: string; after: string } }
-  | { ForcedPick: { pkg: string; version: string; reason: string } }
+  | { ForcedPick: { pkg: string; version: string } }
   | { Expand: { pkg: string; version: string; candidates_remaining: number; manifests_read: number } }
   | { Conflict: { empty_pkg: string; edges_involved: string[] } }
   | {
@@ -176,7 +187,7 @@ function stepSentence(step: SolveStep, packages: Map<string, RecordPackage>): st
     return `${step.Intersect.pkg} narrowed from ${step.Intersect.before} by ${step.Intersect.applied} to ${step.Intersect.after}`;
   }
   if ("ForcedPick" in step) {
-    return `picked ${step.ForcedPick.pkg} ${step.ForcedPick.version}: ${step.ForcedPick.reason}`;
+    return `picked ${step.ForcedPick.pkg} ${step.ForcedPick.version}`;
   }
   if ("Expand" in step) {
     return `read ${step.Expand.pkg} ${step.Expand.version}; ${step.Expand.candidates_remaining} candidates remained`;
@@ -210,26 +221,58 @@ function edgeDisplay(edgeId: string, packages: Map<string, RecordPackage>): stri
 }
 
 function factForVerdict(verdict: RungVerdict): string | null {
-  return typeof verdict === "object" && "KilledByFact" in verdict
-    ? verdict.KilledByFact.fact_id
+  return "Killed" in verdict && "LearnedExclusion" in verdict.Killed.reason
+    ? verdict.Killed.reason.LearnedExclusion.fact_id
     : null;
 }
 
 function edgesForVerdict(verdict: RungVerdict): string[] {
-  return typeof verdict === "object" && "ExcludedByRequirement" in verdict
-    ? verdict.ExcludedByRequirement.edges
+  return "Killed" in verdict && "DependencyConstraint" in verdict.Killed.reason
+    ? verdict.Killed.reason.DependencyConstraint.edges
     : [];
 }
 
 function verdictText(verdict: RungVerdict, facts: Map<string, RecordFact>, packages: Map<string, RecordPackage>): string {
-  if (verdict === "Selected") return "selected";
-  if (verdict === "Unexplained") return "unexplained";
-  if ("KilledByFact" in verdict) {
-    const fact = facts.get(verdict.KilledByFact.fact_id);
-    return fact ? `blocked by ${fact.id}: ${fact.summary}` : `blocked by ${verdict.KilledByFact.fact_id}`;
+  if ("Selected" in verdict) return `selected ${shortDigest(verdict.Selected.selection_digest)}`;
+  if ("Unexplained" in verdict) return `unexplained ${shortDigest(verdict.Unexplained.digest)}`;
+  const reason = verdict.Killed.reason;
+  if ("LearnedExclusion" in reason) {
+    const fact = facts.get(reason.LearnedExclusion.fact_id);
+    return fact ? `blocked by ${fact.id} ${shortDigest(fact.proof_digest)}` : `blocked by ${reason.LearnedExclusion.fact_id}`;
   }
-  const edges = verdict.ExcludedByRequirement.edges.map((edge) => edgeDisplay(edge, packages)).join(", ");
-  return `blocked by requirement${edges ? `: ${edges}` : ""}`;
+  if ("RootConstraint" in reason) return `root ${shortDigest(reason.RootConstraint.digest)}`;
+  if ("Decree" in reason) return `decree ${shortDigest(reason.Decree.digest)}`;
+  const edges = reason.DependencyConstraint.edges.map((edge) => edgeDisplay(edge, packages)).join(", ");
+  return `constraint ${shortDigest(reason.DependencyConstraint.digest)}${edges ? ` ${edges}` : ""}`;
+}
+
+function factText(fact: RecordFact): string {
+  const region = fact.region.map((term) => `${term.pkg} ${term.versions}`).join("; ");
+  return `${shortDigest(fact.proof_digest)} ${region}`;
+}
+
+function shortDigest(digest: string): string {
+  return digest.slice(0, 12);
+}
+
+function selectedVerdict(verdict: RungVerdict): boolean {
+  return "Selected" in verdict;
+}
+
+function pinsForVerdict(verdict: RungVerdict): string[] {
+  if (!("Killed" in verdict)) return [];
+  const reason = verdict.Killed.reason;
+  if ("RootConstraint" in reason) return reason.RootConstraint.pins;
+  if ("Decree" in reason) return reason.Decree.pins;
+  if ("DependencyConstraint" in reason) return reason.DependencyConstraint.pins;
+  return [];
+}
+
+function proofDigestForVerdict(verdict: RungVerdict): string | null {
+  if ("Killed" in verdict && "LearnedExclusion" in verdict.Killed.reason) {
+    return verdict.Killed.reason.LearnedExclusion.proof_digest;
+  }
+  return null;
 }
 
 export function ResolveView() {
@@ -376,7 +419,7 @@ export function ResolveView() {
                 onClick={() => setSelectedFact(selectedFact === fact.id ? null : fact.id)}
               >
                 <span>{fact.id}</span>
-                <span>{fact.summary}</span>
+                <span>{factText(fact)}</span>
               </button>
             ))}
           </div>
@@ -414,9 +457,7 @@ function NodeLadder(props: {
     <div className="resolve-ladder">
       <h3>{pkg?.name ?? props.node.pkg}@{props.node.version}</h3>
       <div className="resolve-why">
-        {props.node.why.map((why) => (
-          <span key={why}>{why}</span>
-        ))}
+        <span>{shortDigest(props.node.derivation.digest)}</span>
       </div>
       <div className="resolve-rungs">
         {props.node.ladder.map((rung) => {
@@ -424,7 +465,7 @@ function NodeLadder(props: {
           return (
             <button
               key={rung.version}
-              className={rung.verdict === "Selected" ? "resolve-rung resolve-rung-selected" : "resolve-rung"}
+              className={selectedVerdict(rung.verdict) ? "resolve-rung resolve-rung-selected" : "resolve-rung"}
               onClick={() => {
                 if (fact) props.onFact(fact);
               }}
@@ -434,6 +475,8 @@ function NodeLadder(props: {
               {edgesForVerdict(rung.verdict).length > 0 && (
                 <span>{edgesForVerdict(rung.verdict).map((edge) => edgeDisplay(edge, props.packages)).join(", ")}</span>
               )}
+              {pinsForVerdict(rung.verdict).length > 0 && <span>{pinsForVerdict(rung.verdict).join(", ")}</span>}
+              {proofDigestForVerdict(rung.verdict) && <span>{shortDigest(proofDigestForVerdict(rung.verdict) ?? "")}</span>}
               {fact && props.selectedFact === fact && <span>highlighting support</span>}
             </button>
           );

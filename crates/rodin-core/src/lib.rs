@@ -305,6 +305,7 @@ pub struct FeatureExclusion {
 #[derive(Clone, Debug)]
 pub struct SolveResult {
     pub selected: BTreeMap<String, Version>,
+    pub selected_derivations: Vec<SelectionDerivation>,
     pub enabled_features: BTreeMap<String, BTreeSet<String>>,
     pub decisions: usize,
     pub conflicts: usize,
@@ -332,7 +333,6 @@ pub struct SolveRecord {
     pub steps: Vec<SolveStep>,
     pub graph: RecordGraph,
     pub facts: Vec<RecordFact>,
-    pub trace: Vec<String>,
 }
 
 #[derive(Clone, Debug, Eq, Facet, PartialEq)]
@@ -354,7 +354,7 @@ pub struct RecordNode {
     pub pkg: String,
     pub version: String,
     pub features: Vec<String>,
-    pub why: Vec<String>,
+    pub derivation: SelectionDerivation,
     pub ladder: Vec<RecordRung>,
 }
 
@@ -375,10 +375,9 @@ pub struct RecordRung {
 #[derive(Clone, Debug, Eq, Facet, PartialEq)]
 #[repr(C)]
 pub enum RungVerdict {
-    Selected,
-    ExcludedByRequirement { edges: Vec<String> },
-    KilledByFact { fact_id: String },
-    Unexplained,
+    Selected { selection_digest: String },
+    Killed { reason: KillReason },
+    Unexplained { digest: String },
 }
 
 #[derive(Clone, Debug, Eq, Facet, PartialEq)]
@@ -391,7 +390,6 @@ pub struct RecordFact {
     pub support_edges: Vec<String>,
     pub widened_from: usize,
     pub widened_to: usize,
-    pub summary: String,
 }
 
 #[derive(Clone, Debug, Eq, Facet, PartialEq)]
@@ -401,9 +399,105 @@ pub struct RecordRegionTerm {
 }
 
 #[derive(Clone, Debug, Eq, Facet, PartialEq)]
+pub struct SelectionDerivation {
+    pub pkg: String,
+    pub version: String,
+    pub digest: String,
+    pub killed_higher: Vec<CandidateKill>,
+}
+
+#[derive(Clone, Debug, Eq, Facet, PartialEq)]
+pub struct CandidateKill {
+    pub version: String,
+    pub reason: KillReason,
+}
+
+#[derive(Clone, Debug, Eq, Facet, PartialEq)]
+#[repr(C)]
+pub enum KillReason {
+    RootConstraint {
+        digest: String,
+        pins: Vec<String>,
+    },
+    Decree {
+        digest: String,
+        pins: Vec<String>,
+    },
+    DependencyConstraint {
+        digest: String,
+        edges: Vec<String>,
+        pins: Vec<String>,
+    },
+    LearnedExclusion {
+        fact_id: String,
+        proof_root: String,
+        proof_digest: String,
+    },
+}
+
+impl KillReason {
+    #[must_use]
+    pub fn digest(&self) -> &str {
+        match self {
+            Self::RootConstraint { digest, .. }
+            | Self::Decree { digest, .. }
+            | Self::DependencyConstraint { digest, .. } => digest,
+            Self::LearnedExclusion { proof_digest, .. } => proof_digest,
+        }
+    }
+}
+
+#[derive(Clone, Debug, Eq, Facet, PartialEq)]
 pub struct RecordSelection {
     pub pkg: String,
     pub version: String,
+}
+
+#[derive(Clone, Debug, Eq, Facet, PartialEq)]
+#[repr(C)]
+pub enum CounterfactualQuery {
+    DropDependency { package: String },
+    DecreeVersion { package: String, version: String },
+}
+
+#[derive(Clone, Debug, Eq, Facet, PartialEq)]
+#[repr(C)]
+pub enum ManifestEdit {
+    RemoveRootDependency {
+        package: String,
+    },
+    AddOrReplaceDecree {
+        package: String,
+        requirement: String,
+    },
+}
+
+#[derive(Clone, Debug, Eq, Facet, PartialEq)]
+pub struct SelectionDiff {
+    pub added: Vec<RecordSelection>,
+    pub removed: Vec<RecordSelection>,
+    pub changed: Vec<ChangedSelection>,
+}
+
+#[derive(Clone, Debug, Eq, Facet, PartialEq)]
+pub struct ChangedSelection {
+    pub pkg: String,
+    pub from: String,
+    pub to: String,
+}
+
+#[derive(Clone, Debug, Eq, Facet, PartialEq)]
+pub struct CounterfactualResult {
+    pub query: CounterfactualQuery,
+    pub manifest_edit: ManifestEdit,
+    pub selected_diff: SelectionDiff,
+    pub warm_decisions: usize,
+    pub cold_decisions: usize,
+    pub warm_conflicts: usize,
+    pub cold_conflicts: usize,
+    pub warm_facts_used: usize,
+    pub warm_facts_scoped_out: usize,
+    pub oracle_selected_equal: bool,
 }
 
 #[derive(Clone, Debug, Eq, Facet, PartialEq)]
@@ -434,7 +528,6 @@ pub enum SolveStep {
     ForcedPick {
         pkg: String,
         version: String,
-        reason: String,
     },
     Expand {
         pkg: String,
@@ -1540,7 +1633,6 @@ impl<'a> Solver<'a> {
                         self.steps.push(SolveStep::ForcedPick {
                             pkg: self.package_label(pkg).to_owned(),
                             version: version.to_string(),
-                            reason: "only candidate".to_owned(),
                         });
                     }
                     domain.selected = selected;
@@ -1859,6 +1951,8 @@ impl<'a> Solver<'a> {
                 })
             })
             .collect();
+        let selected_derivations =
+            selection_derivations(self.index, &state, &selected, &self.learned);
         let mut enabled_features: BTreeMap<String, BTreeSet<String>> = BTreeMap::new();
         for (pkg, feat) in state.features {
             if let (Some(name), Some(feature)) =
@@ -1911,6 +2005,7 @@ impl<'a> Solver<'a> {
         ));
         SolveResult {
             selected,
+            selected_derivations,
             enabled_features,
             decisions: self.decisions,
             conflicts: self.conflicts,
@@ -2717,6 +2812,186 @@ fn selected_versions(state: &State) -> BTreeMap<PkgIx, Version> {
         .collect()
 }
 
+fn selection_derivations(
+    index: &CompiledIndex,
+    state: &State,
+    selected: &BTreeMap<String, Version>,
+    learned: &[LearnedNoGood],
+) -> Vec<SelectionDerivation> {
+    selected
+        .iter()
+        .map(|(pkg_name, selected_version)| {
+            let killed_higher: Vec<_> = index
+                .package(pkg_name)
+                .map(|pkg| {
+                    index
+                        .versions(pkg)
+                        .iter()
+                        .rev()
+                        .filter(|version| *version > selected_version)
+                        .filter_map(|version| {
+                            candidate_kill_reason(
+                                index, state, selected, learned, pkg, pkg_name, version,
+                            )
+                            .map(|reason| CandidateKill {
+                                version: version.to_string(),
+                                reason,
+                            })
+                        })
+                        .collect::<Vec<_>>()
+                })
+                .unwrap_or_default();
+            let digest = selection_digest(pkg_name, selected_version, &killed_higher);
+            SelectionDerivation {
+                pkg: pkg_name.clone(),
+                version: selected_version.to_string(),
+                digest,
+                killed_higher,
+            }
+        })
+        .collect()
+}
+
+fn candidate_kill_reason(
+    index: &CompiledIndex,
+    state: &State,
+    selected: &BTreeMap<String, Version>,
+    learned: &[LearnedNoGood],
+    pkg: PkgIx,
+    pkg_name: &str,
+    version: &Version,
+) -> Option<KillReason> {
+    if let Some(domain) = state.domains.get(&pkg)
+        && !domain.allowed.contains(version)
+    {
+        return Some(constraint_kill_reason(
+            index,
+            pkg_name,
+            version,
+            &domain.reasons,
+        ));
+    }
+
+    let assignment = assignment_with_rebound_from_selected(index, selected, state, pkg, version);
+    let direct_assignment = {
+        let mut assignment = assignment.clone();
+        apply_direct_dependency_versions(index, pkg, version, &mut assignment.versions);
+        assignment
+    };
+    learned.iter().enumerate().find_map(|(ix, fact)| {
+        (fact.region.contains_assignment(&assignment)
+            || fact.region.contains_assignment(&direct_assignment))
+        .then(|| KillReason::LearnedExclusion {
+            fact_id: format!("fact-{ix}"),
+            proof_root: fact.proof_root.0.clone(),
+            proof_digest: fact.proof_digest.0.clone(),
+        })
+    })
+}
+
+fn constraint_kill_reason(
+    index: &CompiledIndex,
+    pkg_name: &str,
+    version: &Version,
+    premises: &[Premise],
+) -> KillReason {
+    let pins = pins_from_premises(premises);
+    let edges = support_edge_ids(index, &support_from_premises(index, premises));
+    let root_pins: Vec<_> = pins
+        .iter()
+        .filter(|pin| pin.starts_with("root:"))
+        .cloned()
+        .collect();
+    let decree_pins: Vec<_> = pins
+        .iter()
+        .filter(|pin| pin.starts_with("decree:"))
+        .cloned()
+        .collect();
+    if !decree_pins.is_empty() {
+        let digest = constraint_digest("decree", pkg_name, version, &decree_pins, &edges);
+        KillReason::Decree {
+            digest,
+            pins: decree_pins,
+        }
+    } else if !root_pins.is_empty() && edges.is_empty() {
+        let digest = constraint_digest("root", pkg_name, version, &root_pins, &edges);
+        KillReason::RootConstraint {
+            digest,
+            pins: root_pins,
+        }
+    } else {
+        let digest = constraint_digest("dependency", pkg_name, version, &pins, &edges);
+        KillReason::DependencyConstraint {
+            digest,
+            edges,
+            pins,
+        }
+    }
+}
+
+fn pins_from_premises(premises: &[Premise]) -> Vec<String> {
+    premises
+        .iter()
+        .filter_map(|premise| {
+            if let Premise::Pin(pin) = premise {
+                Some(pin.0.clone())
+            } else {
+                None
+            }
+        })
+        .collect()
+}
+
+fn constraint_digest(
+    kind: &str,
+    pkg_name: &str,
+    version: &Version,
+    pins: &[String],
+    edges: &[String],
+) -> String {
+    let mut out = format!("kill:{kind}:{pkg_name}@{version}\n");
+    for pin in pins {
+        let _ = writeln!(out, "pin:{pin}");
+    }
+    for edge in edges {
+        let _ = writeln!(out, "edge:{edge}");
+    }
+    digest_str(&out)
+}
+
+fn selection_digest(pkg_name: &str, selected: &Version, killed: &[CandidateKill]) -> String {
+    let mut out = format!("selection:{pkg_name}@{selected}\n");
+    for kill in killed {
+        let _ = writeln!(out, "kill:{}:{}", kill.version, kill.reason.digest());
+    }
+    digest_str(&out)
+}
+
+fn assignment_with_rebound_from_selected(
+    index: &CompiledIndex,
+    selected: &BTreeMap<String, Version>,
+    state: &State,
+    rebound_pkg: PkgIx,
+    rebound_version: &Version,
+) -> Assignment {
+    let mut versions = BTreeMap::new();
+    for (name, version) in selected {
+        if let Some(pkg) = index.package(name) {
+            let version = if pkg == rebound_pkg {
+                rebound_version.clone()
+            } else {
+                version.clone()
+            };
+            versions.insert(pkg, version);
+        }
+    }
+    add_forced_dependency_closure(index, &mut versions);
+    Assignment {
+        versions,
+        features: state.features.clone(),
+    }
+}
+
 fn last_hypothesis(state: &State) -> Option<Hypothesis> {
     state.hypotheses.last().cloned()
 }
@@ -3044,7 +3319,6 @@ pub fn solve_record(
         steps: result.steps,
         graph,
         facts,
-        trace: result.trace,
     })
 }
 
@@ -3072,6 +3346,168 @@ pub fn solve_round3_record(name: &str) -> Result<SolveRecord> {
         scenario.shape.clone(),
         scenario.problem,
     )
+}
+
+pub fn counterfactual_drop_dependency(
+    index: &CompiledIndex,
+    base_problem: &Problem,
+    completed: &SolveResult,
+    warm_facts: &VerifiedWarmFacts,
+    package: impl Into<String>,
+) -> Result<CounterfactualResult> {
+    let package = package.into().to_ascii_lowercase();
+    let mut modified = base_problem.clone();
+    modified.roots.retain(|root| root.name != package);
+    run_counterfactual(
+        index,
+        completed,
+        warm_facts,
+        modified,
+        BTreeSet::from([package.clone()]),
+        CounterfactualQuery::DropDependency {
+            package: package.clone(),
+        },
+        ManifestEdit::RemoveRootDependency { package },
+    )
+}
+
+pub fn counterfactual_decree_version(
+    index: &CompiledIndex,
+    base_problem: &Problem,
+    completed: &SolveResult,
+    warm_facts: &VerifiedWarmFacts,
+    package: impl Into<String>,
+    version: impl Into<String>,
+) -> Result<CounterfactualResult> {
+    let package = package.into().to_ascii_lowercase();
+    let version = version.into();
+    let parsed = Version::parse(&version).wrap_err_with(|| format!("parsing version {version}"))?;
+    let requirement = format!("={parsed}");
+    let mut modified = base_problem.clone();
+    modified.decrees.retain(|decree| decree.name != package);
+    modified
+        .decrees
+        .push(Decree::new(package.clone(), requirement.clone()));
+    run_counterfactual(
+        index,
+        completed,
+        warm_facts,
+        modified,
+        BTreeSet::from([package.clone()]),
+        CounterfactualQuery::DecreeVersion {
+            package: package.clone(),
+            version: parsed.to_string(),
+        },
+        ManifestEdit::AddOrReplaceDecree {
+            package,
+            requirement,
+        },
+    )
+}
+
+fn run_counterfactual(
+    index: &CompiledIndex,
+    completed: &SolveResult,
+    warm_facts: &VerifiedWarmFacts,
+    mut modified: Problem,
+    touched: BTreeSet<String>,
+    query: CounterfactualQuery,
+    manifest_edit: ManifestEdit,
+) -> Result<CounterfactualResult> {
+    let scoped = scope_warm_facts_for_counterfactual(index, warm_facts, &touched);
+    let warm_facts_used = scoped.facts.len();
+    let warm_facts_scoped_out = warm_facts.facts.len().saturating_sub(warm_facts_used);
+    modified.warm_facts = scoped;
+    let warm = solve(index, modified.clone()).map_err(|err| eyre::eyre!("{err:?}"))?;
+
+    modified.warm_facts = VerifiedWarmFacts::new();
+    let cold = solve(index, modified).map_err(|err| eyre::eyre!("{err:?}"))?;
+    let oracle_selected_equal = warm.selected == cold.selected;
+
+    Ok(CounterfactualResult {
+        query,
+        manifest_edit,
+        selected_diff: selection_diff(&completed.selected, &warm.selected),
+        warm_decisions: warm.decisions,
+        cold_decisions: cold.decisions,
+        warm_conflicts: warm.conflicts,
+        cold_conflicts: cold.conflicts,
+        warm_facts_used,
+        warm_facts_scoped_out,
+        oracle_selected_equal,
+    })
+}
+
+fn scope_warm_facts_for_counterfactual(
+    index: &CompiledIndex,
+    warm_facts: &VerifiedWarmFacts,
+    touched: &BTreeSet<String>,
+) -> VerifiedWarmFacts {
+    VerifiedWarmFacts {
+        facts: warm_facts
+            .facts
+            .iter()
+            .filter(|fact| !warm_fact_touches(index, fact, touched))
+            .cloned()
+            .collect(),
+        rejected: warm_facts.rejected.clone(),
+    }
+}
+
+fn warm_fact_touches(
+    index: &CompiledIndex,
+    fact: &VerifiedWarmFact,
+    touched: &BTreeSet<String>,
+) -> bool {
+    fact.fact
+        .support
+        .iter()
+        .any(|edge| touched.contains(&edge.parent) || touched.contains(&edge.dep))
+        || fact
+            .fact
+            .region
+            .versions
+            .keys()
+            .any(|pkg| index.name(*pkg).is_some_and(|name| touched.contains(name)))
+}
+
+fn selection_diff(
+    before: &BTreeMap<String, Version>,
+    after: &BTreeMap<String, Version>,
+) -> SelectionDiff {
+    let added = after
+        .iter()
+        .filter(|(pkg, _)| !before.contains_key(*pkg))
+        .map(|(pkg, version)| RecordSelection {
+            pkg: pkg.clone(),
+            version: version.to_string(),
+        })
+        .collect();
+    let removed = before
+        .iter()
+        .filter(|(pkg, _)| !after.contains_key(*pkg))
+        .map(|(pkg, version)| RecordSelection {
+            pkg: pkg.clone(),
+            version: version.to_string(),
+        })
+        .collect();
+    let changed = before
+        .iter()
+        .filter_map(|(pkg, from)| {
+            after.get(pkg).and_then(|to| {
+                (to != from).then(|| ChangedSelection {
+                    pkg: pkg.clone(),
+                    from: from.to_string(),
+                    to: to.to_string(),
+                })
+            })
+        })
+        .collect();
+    SelectionDiff {
+        added,
+        removed,
+        changed,
+    }
 }
 
 pub fn write_round3_record(name: &str, path: &Path) -> Result<SolveRecord> {
@@ -3112,19 +3548,7 @@ fn record_packages(index: &CompiledIndex) -> Vec<RecordPackage> {
         .collect()
 }
 
-fn record_graph(index: &CompiledIndex, problem: &Problem, result: &SolveResult) -> RecordGraph {
-    let mut why: BTreeMap<String, Vec<String>> = BTreeMap::new();
-    for root in &problem.roots {
-        why.entry(root.name.clone())
-            .or_default()
-            .push(format!("root manifest demands {}", display_req(&root.req)));
-    }
-    for decree in &problem.decrees {
-        why.entry(decree.name.clone())
-            .or_default()
-            .push(format!("user decree requires {}", display_req(&decree.req)));
-    }
-
+fn record_graph(index: &CompiledIndex, _problem: &Problem, result: &SolveResult) -> RecordGraph {
     let mut edges = BTreeMap::<String, RecordEdge>::new();
     for (parent, version) in &result.selected {
         let Some(parent_pkg) = index.package(parent) else {
@@ -3147,13 +3571,14 @@ fn record_graph(index: &CompiledIndex, problem: &Problem, result: &SolveResult) 
                 to: package_id_for_name(index, &dep.actual),
                 requirement: dep.req.clone(),
             });
-            why.entry(dep.actual.clone()).or_default().push(format!(
-                "{parent}@{version} requires {} {}",
-                dep.actual, dep.req
-            ));
         }
     }
 
+    let derivations: BTreeMap<_, _> = result
+        .selected_derivations
+        .iter()
+        .map(|derivation| (derivation.pkg.as_str(), derivation.clone()))
+        .collect();
     let nodes = result
         .selected
         .iter()
@@ -3167,7 +3592,15 @@ fn record_graph(index: &CompiledIndex, problem: &Problem, result: &SolveResult) 
                 pkg: package_id_for_name(index, pkg),
                 version: version.to_string(),
                 features,
-                why: why.remove(pkg).unwrap_or_default(),
+                derivation: derivations.get(pkg.as_str()).cloned().unwrap_or_else(|| {
+                    let digest = selection_digest(pkg, version, &[]);
+                    SelectionDerivation {
+                        pkg: pkg.clone(),
+                        version: version.to_string(),
+                        digest,
+                        killed_higher: Vec::new(),
+                    }
+                }),
                 ladder: record_ladder(index, result, pkg, version),
             }
         })
@@ -3189,42 +3622,36 @@ fn record_ladder(
         return Vec::new();
     };
     let mut out = Vec::new();
+    let derivation = result
+        .selected_derivations
+        .iter()
+        .find(|derivation| derivation.pkg == pkg_name);
     for version in index.versions(pkg).iter().rev() {
         if version < selected {
             continue;
         }
         let verdict = if version == selected {
-            RungVerdict::Selected
-        } else if result
-            .final_domains
-            .get(pkg_name)
-            .is_some_and(|domain| !domain.allowed.contains(version))
-        {
-            let edges = result
-                .final_domains
-                .get(pkg_name)
-                .map(|domain| {
-                    support_edge_ids(index, &support_from_premises(index, &domain.reasons))
-                })
-                .unwrap_or_default();
-            RungVerdict::ExcludedByRequirement { edges }
+            RungVerdict::Selected {
+                selection_digest: derivation
+                    .map(|derivation| derivation.digest.clone())
+                    .unwrap_or_else(|| selection_digest(pkg_name, selected, &[])),
+            }
         } else {
-            let assignment = assignment_with_rebound(index, result, pkg, version);
-            let direct_assignment =
-                assignment_with_direct_deps_from_rebound(index, result, pkg, version);
-            result
-                .learned
-                .iter()
-                .enumerate()
-                .find(|(_, fact)| {
-                    fact.region.contains_assignment(&assignment)
-                        || fact.region.contains_assignment(&direct_assignment)
+            derivation
+                .and_then(|derivation| {
+                    derivation
+                        .killed_higher
+                        .iter()
+                        .find(|kill| kill.version == version.to_string())
                 })
-                .map_or(RungVerdict::Unexplained, |(ix, _)| {
-                    RungVerdict::KilledByFact {
-                        fact_id: format!("fact-{ix}"),
-                    }
-                })
+                .map_or_else(
+                    || RungVerdict::Unexplained {
+                        digest: constraint_digest("unexplained", pkg_name, version, &[], &[]),
+                    },
+                    |kill| RungVerdict::Killed {
+                        reason: kill.reason.clone(),
+                    },
+                )
         };
         out.push(RecordRung {
             version: version.to_string(),
@@ -3232,57 +3659,6 @@ fn record_ladder(
         });
     }
     out
-}
-
-fn assignment_with_rebound(
-    index: &CompiledIndex,
-    result: &SolveResult,
-    rebound_pkg: PkgIx,
-    rebound_version: &Version,
-) -> Assignment {
-    let mut versions = BTreeMap::new();
-    for (name, version) in &result.selected {
-        if let Some(pkg) = index.package(name) {
-            let version = if pkg == rebound_pkg {
-                rebound_version.clone()
-            } else {
-                version.clone()
-            };
-            versions.insert(pkg, version);
-        }
-    }
-
-    let mut features = BTreeSet::new();
-    for (name, enabled) in &result.enabled_features {
-        let Some(pkg) = index.package(name) else {
-            continue;
-        };
-        for feature in enabled {
-            if let Some(feat) = index.features.get_str(feature) {
-                features.insert((pkg, feat));
-            }
-        }
-    }
-
-    add_forced_dependency_closure(index, &mut versions);
-
-    Assignment { versions, features }
-}
-
-fn assignment_with_direct_deps_from_rebound(
-    index: &CompiledIndex,
-    result: &SolveResult,
-    rebound_pkg: PkgIx,
-    rebound_version: &Version,
-) -> Assignment {
-    let mut assignment = assignment_with_rebound(index, result, rebound_pkg, rebound_version);
-    apply_direct_dependency_versions(
-        index,
-        rebound_pkg,
-        rebound_version,
-        &mut assignment.versions,
-    );
-    assignment
 }
 
 fn add_forced_dependency_closure(index: &CompiledIndex, versions: &mut BTreeMap<PkgIx, Version>) {
@@ -3364,11 +3740,6 @@ fn record_facts(index: &CompiledIndex, learned: &[LearnedNoGood]) -> Vec<RecordF
         .enumerate()
         .map(|(ix, fact)| {
             let region = record_region(index, &fact.region);
-            let region_text = region
-                .iter()
-                .map(|term| format!("{} {}", term.pkg, term.versions))
-                .collect::<Vec<_>>()
-                .join("; ");
             RecordFact {
                 id: format!("fact-{ix}"),
                 kind: fact.kind.as_str().to_owned(),
@@ -3377,7 +3748,6 @@ fn record_facts(index: &CompiledIndex, learned: &[LearnedNoGood]) -> Vec<RecordF
                 support_edges: support_edge_ids(index, &fact.support),
                 widened_from: fact.point_versions,
                 widened_to: fact.widened_versions,
-                summary: format!("{region_text} is impossible"),
                 region,
             }
         })
@@ -4128,6 +4498,126 @@ mod tests {
         Ok(())
     }
 
+    #[test]
+    fn selected_derivations_ship_kill_claims_for_successes() -> Result<()> {
+        let scenario = downgrade_cascade()?;
+        let result =
+            solve(&scenario.index, scenario.problem).map_err(|err| eyre::eyre!("{err:?}"))?;
+        let web = result
+            .selected_derivations
+            .iter()
+            .find(|derivation| derivation.pkg == "web")
+            .expect("web selected derivation");
+
+        assert_eq!(web.version, "1.0.0");
+        assert_eq!(web.killed_higher.len(), 2);
+        assert!(
+            web.killed_higher
+                .iter()
+                .all(|kill| matches!(kill.reason, KillReason::LearnedExclusion { .. }))
+        );
+        assert!(web.killed_higher.iter().all(|kill| {
+            matches!(
+                &kill.reason,
+                KillReason::LearnedExclusion {
+                    proof_root,
+                    proof_digest,
+                    ..
+                } if !proof_root.is_empty() && proof_root == proof_digest
+            )
+        }));
+        Ok(())
+    }
+
+    #[test]
+    fn counterfactual_drop_dependency_matches_cold_modified_problem() -> Result<()> {
+        let (index, problem) = counterfactual_surface_fixture()?;
+        let completed = solve(&index, problem.clone()).map_err(|err| eyre::eyre!("{err:?}"))?;
+        let verified = verified_warm_facts(&index, &completed)?;
+
+        let counterfactual =
+            counterfactual_drop_dependency(&index, &problem, &completed, &verified, "noise")?;
+
+        assert_eq!(
+            counterfactual.manifest_edit,
+            ManifestEdit::RemoveRootDependency {
+                package: "noise".to_owned()
+            }
+        );
+        assert!(counterfactual.oracle_selected_equal);
+        assert_eq!(
+            counterfactual.selected_diff.removed,
+            vec![RecordSelection {
+                pkg: "noise".to_owned(),
+                version: "1.0.0".to_owned()
+            }]
+        );
+        assert!(
+            counterfactual.warm_decisions < counterfactual.cold_decisions,
+            "warm={} cold={}",
+            counterfactual.warm_decisions,
+            counterfactual.cold_decisions
+        );
+        assert_eq!(counterfactual.warm_decisions, 1);
+        assert_eq!(counterfactual.cold_decisions, 3);
+        assert_eq!(counterfactual.warm_conflicts, 0);
+        assert_eq!(counterfactual.cold_conflicts, 1);
+        Ok(())
+    }
+
+    #[test]
+    fn counterfactual_decree_version_matches_cold_modified_problem() -> Result<()> {
+        let (index, problem) = counterfactual_surface_fixture()?;
+        let completed = solve(&index, problem.clone()).map_err(|err| eyre::eyre!("{err:?}"))?;
+        let verified = verified_warm_facts(&index, &completed)?;
+
+        let counterfactual = counterfactual_decree_version(
+            &index, &problem, &completed, &verified, "noise", "1.0.0",
+        )?;
+
+        assert_eq!(
+            counterfactual.manifest_edit,
+            ManifestEdit::AddOrReplaceDecree {
+                package: "noise".to_owned(),
+                requirement: "=1.0.0".to_owned()
+            }
+        );
+        assert!(counterfactual.oracle_selected_equal);
+        assert!(counterfactual.selected_diff.added.is_empty());
+        assert!(counterfactual.selected_diff.removed.is_empty());
+        assert!(counterfactual.selected_diff.changed.is_empty());
+        assert!(
+            counterfactual.warm_decisions < counterfactual.cold_decisions,
+            "warm={} cold={}",
+            counterfactual.warm_decisions,
+            counterfactual.cold_decisions
+        );
+        assert_eq!(counterfactual.warm_decisions, 1);
+        assert_eq!(counterfactual.cold_decisions, 3);
+        assert_eq!(counterfactual.warm_conflicts, 0);
+        assert_eq!(counterfactual.cold_conflicts, 1);
+
+        let json = facet_json::to_string(&counterfactual)?;
+        let decoded: CounterfactualResult = facet_json::from_str(&json)?;
+        assert_eq!(decoded, counterfactual);
+        Ok(())
+    }
+
+    #[test]
+    fn counterfactual_scope_gate_drops_touched_warm_facts() -> Result<()> {
+        let (index, problem) = counterfactual_surface_fixture()?;
+        let completed = solve(&index, problem.clone()).map_err(|err| eyre::eyre!("{err:?}"))?;
+        let verified = verified_warm_facts(&index, &completed)?;
+
+        let counterfactual =
+            counterfactual_decree_version(&index, &problem, &completed, &verified, "a", "3.0.0")?;
+
+        assert!(counterfactual.oracle_selected_equal);
+        assert!(counterfactual.warm_facts_scoped_out > 0);
+        assert_eq!(counterfactual.warm_facts_used, 0);
+        Ok(())
+    }
+
     fn tamper_first_clause_witness(bundle: &mut WarmFactBundle) {
         let WarmProofSource::Inline(graph) = &mut bundle.proofs else {
             return;
@@ -4197,6 +4687,41 @@ mod tests {
                 .get(&fact.proof_root)
                 .is_some_and(|node| matches!(node.rule, ProofRule::Widen { .. }))
         })
+    }
+
+    fn verified_warm_facts(
+        index: &CompiledIndex,
+        completed: &SolveResult,
+    ) -> Result<VerifiedWarmFacts> {
+        let bundle = warm_bundle_from_learned(index, &completed.learned, &completed.derivations)?;
+        let verified = WarmFactVerifier::for_index(index).verify(index, &bundle);
+        assert!(
+            verified.rejected.is_empty(),
+            "fresh local bundle rejected warm facts: {:?}",
+            verified.rejected
+        );
+        Ok(verified)
+    }
+
+    fn counterfactual_surface_fixture() -> Result<(CompiledIndex, Problem)> {
+        let mut index = CompiledIndex::empty();
+        add_leaf_versions(&mut index, "a", 1, 3);
+        index.add_package_version("noise", v(1, 0, 0), Vec::new(), BTreeMap::new());
+        index.add_package_version("x", v(1, 0, 0), Vec::new(), BTreeMap::new());
+        index.add_package_version(
+            "x",
+            v(2, 0, 0),
+            vec![SyntheticDep::normal("a", "=1.0.0")],
+            BTreeMap::new(),
+        );
+        index.finish_synthetic()?;
+        let mut problem = Problem::new(vec![
+            RootReq::new("a", "*"),
+            RootReq::new("noise", "*"),
+            RootReq::new("x", "*"),
+        ]);
+        problem.learned_kind = LearnedKind::Plain;
+        Ok((index, problem))
     }
 
     #[test]
@@ -4292,7 +4817,7 @@ mod tests {
             solved += 1;
             for node in &record.graph.nodes {
                 for rung in &node.ladder {
-                    if matches!(rung.verdict, RungVerdict::Unexplained) {
+                    if matches!(rung.verdict, RungVerdict::Unexplained { .. }) {
                         unexplained
                             .push(format!("{} {} {}", record.scenario, node.pkg, rung.version));
                     }
