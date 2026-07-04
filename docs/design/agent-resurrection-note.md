@@ -260,6 +260,27 @@ still the paramount remaining me-work before July 7; command-grammar
 spec; weavy suspend ABI; type-closure identity brief; top-down DAG for
 builds (task 44).
 
+## THE ALIGNMENT (2026-07-04 evening — READ BEFORE TOUCHING vix/machine)
+
+Constitution A5+A6 govern everything now. The short form: ONE
+implementation of vix ever (no oracle/reference/interpreter tiers —
+frozen legacy dies at parity); typed instructions over UNTAGGED operands
+(tags/dynamic machinery banned totally — Amos: "not even as a treat");
+discriminants-for-sum-types are fine, kind-markers-on-operands are not;
+suspension ONLY for started-and-blocked computations (never
+spawn-everything; millions of nodes are pure data); ONE unified trace,
+instrumentation as weavy IR ops stripped by mode, tests = trace
+assertions (absence proves laziness); portability is weavy's concern,
+invisible to vix; FABLE (facet-cc/fable, extremely minimal, maybe not
+even snark-based yet) is a SIBLING not a lowering target — it grows the
+shared teeth first (typed user types, host async, ABI/frames) because
+small programs derisk the scary substrate. Green is not the metric; the
+right shape is. WATCH THE REFLEX: four same-day catches (merge
+tunneling, lowering cache, weavy-first, tags) were all "runnable this
+afternoon" beating "right shape". When something feels like a tower of
+unknowns: smaller language, same shape — never same language, softer
+shape. Amos will patiently nudge; let him.
+
 ## Queued for delegation (write prompts as needed)
 
 

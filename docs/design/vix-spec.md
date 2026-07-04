@@ -146,10 +146,14 @@ problem statement, origin-labeled (root manifest / user).
   a recorded killer across the six burial scenarios) checks V21/V22.
 
 ### Substrate and product boundary
-- **V24. Interpret-first: the interpreter is the reference and is always
-  available; JIT is an accelerator that must never diverge and is never
-  a prerequisite** (iOS/wasm forbid JIT). Enforced: weavy differential
-  interp==JIT on results AND suspension traces.
+- **V24 (REWRITTEN by A6, 2026-07-04). One implementation of vix, ever;
+  no implementation is a semantic authority.** The reference is the
+  written semantics plus the pinned trace corpus. Typed instructions
+  over untagged operands; no tags, no dynamic machinery, no "checked
+  mode". How a target executes lowered programs (JIT or portable) is
+  weavy's concern, invisible to vix. Weavy internally keeps its lanes
+  matching (differential incl. suspension traces) — a substrate
+  property, not a vix tier.
 - **V25. The vix crate stays WASM-clean** (snark-wasm links it; tokio
   and the real world live in vix-daemon/vix-wire/backends).
 - **V26. Nodes are plain data; no host closures in node state; the

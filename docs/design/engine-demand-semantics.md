@@ -220,6 +220,52 @@ thing." Ruled:
   established in code, not briefs, so later agents contribute to an
   established shape instead of reproducing the disease.
 
+**A6 — THE ALIGNMENT (Amos + design line, 2026-07-04, evening; supersedes
+every reference-implementation notion including parts of A5 and V24).**
+- **ONE implementation of vix, ever.** Not a reference, not an oracle,
+  not an interpreter, not a simplified/eager/early one. Testing is
+  TRACE-BASED: the implementation has a record mode; tests assert
+  sequences, presence, and ABSENCE of events in traces (absence is how
+  laziness is proven). The pinned corpus contracts are that artifact.
+- **NO dynamic-language machinery. None.** No tags on operands, no
+  kind-markers consulted at runtime, no fallible arithmetic, no checked
+  "reference lane". Typed instructions (AddI64 ≠ AddF64) over untagged
+  operands; every "what is this" is answered at lowering time by the
+  types. A sum type's discriminant is the TYPE's own layout, matched by
+  code that statically knows the type — that is not a tag. Layouts are
+  compile-time knowledge + introspection metadata (DWARF-like), never
+  runtime dispatch. If a safety net is ever wanted it is STATIC
+  validation of lowered programs (wasm-style), never runtime checks.
+- **Portability is weavy's concern, not vix's.** Vix lowers to weavy;
+  how a target executes (JIT or not) is invisible above the waterline.
+  No implementation tier is a semantic authority; the written semantics
+  and the pinned traces are the reference.
+- **Fable is a SIBLING, not a lowering target.** Vix does not lower
+  through fable (generating fable to express laziness is wrong-shaped).
+  Both lower to weavy. Fable — extremely minimal today — grows teeth in
+  exactly the directions vix needs from the shared substrate: typed
+  everything (user structs/enums with layouts), async interaction with
+  the host, the custom ABI/frame model. Every scary substrate unknown
+  becomes a small fable×weavy question first.
+- **Suspension is only for the started-and-blocked.** A computation
+  that began and cannot make forward progress suspends. An undemanded
+  node is pure data — no future, no frame, no cost (graphs have
+  millions of nodes). Never spawn-everything. Joint-demand batching at
+  memo boundaries is a SCHEDULER POLICY about when to begin — not a
+  default, never a return to spawning.
+- **One unified trace, and instrumentation is weavy IR.** You emit IR
+  with however much instrumentation you want; weavy strips/ignores it
+  by mode (tests trace innards; production keeps suspension points for
+  observability). Language events, memo hits, suspension — one channel,
+  feeding tests AND the lanes/playground views. The no-println
+  discipline becomes structural.
+- **The milestone ("this afternoon means the right shape")**: a
+  compound value assembled from several producers, one path selected,
+  the unselected producers PROVABLY never executing (trace absence),
+  through the VM and JIT. Not cargo. Green is not the metric; zero
+  passing tests for a day is acceptable while the foundation is shaped
+  right. "We're building a cathedral."
+
 ## 7. What v1 defers (recorded so nobody "fixes" them silently)
 
 - Per-field struct laziness (v1: pick strict-except-trees, note in code).
