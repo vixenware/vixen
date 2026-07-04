@@ -76,3 +76,34 @@ recomputation not 3x-everything, agreement dedupes to zero extra
 storage. CT-style "we publish divergence incidents" is a
 transparency posture worth having independent of the security
 story.
+
+## The provenance policy layer (vs Cargo's posture)
+
+GIGO was too fatalistic: consensus can't see its inputs, but a
+system that pins OBSERVATIONS polices them. Three layers, each
+killing an attack class Cargo cannot touch:
+
+1. SOURCE PROVENANCE — kills the xz class: tarball-vs-repo
+   divergence becomes a checkable claim (build from pinned repo, or
+   diff tarball against pinned commit, fail on unexplained delta).
+   Cargo's lockfile pins the tarball hash — i.e. faithfully pins
+   the poison.
+2. BUILD PROVENANCE — no opaque artifacts: C/C++ built through the
+   observed seam; prebuilt-binary hole gone; a build.rs phoning
+   home is an UNPINNED FETCH OBSERVATION = build failure (the
+   sandbox already enforces this). Cargo runs build scripts with
+   ambient network/filesystem.
+3. PUBLISHING PROVENANCE — the new one: pin HOW each version was
+   published (trusted publishing vs API key, identity, workflow) as
+   a journal observation; make the TRANSITION a policy event —
+   trusted→API-key on the next version is what maintainer
+   compromise looks like from outside, and nothing anywhere fails
+   on it today. Enforceable at RESOLUTION time (Rodin sees facts:
+   don't select the regressed version; counterfactuals explain the
+   pin). Verbs: fail / warn / quarantine-N-days.
+
+Synthesis with three-heads: heads catch build-time divergence,
+provenance catches input-side anomalies — different halves, same
+journal. All retro-queryable ("every dep whose channel regressed
+this year") — in the self-hosted future, a vix query over the
+journal.
