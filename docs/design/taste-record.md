@@ -254,6 +254,17 @@ representation in the lowered world is an open design item (facet-value
 / weavy-native shapes), to be decided when the lowering is designed —
 NOT by accretion onto the enum.
 
+**32. Fable: higher-order call callees.** Surfaced by the snark
+migration (fable parses postfix calls, lowering accepts only identifier
+intrinsic callees — pre-existing behavior, preserved). My taste: keep
+callees identifier-only until fable grows user FUNCTIONS (tooth 2) —
+then callees become resolved function references, still not arbitrary
+expressions; first-class function VALUES are a separate, later decision
+that vix (which has them via partial application) will force
+deliberately. Also banked from the migration: the old cstree lexer
+accepted `none` and then panicked — the migration deleted a latent
+crash by keeping the actually-working surface (`null`).
+
 ## Meta
 
 **29. The two-agent structure after July 7.** Keep it: a design line
