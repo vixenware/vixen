@@ -72,7 +72,7 @@ proptest! {
             let left = &pair[0];
             let right = &pair[1];
             prop_assert!(left.upper <= right.lower);
-            prop_assert_ne!(left.upper, right.lower);
+            prop_assert_ne!(&left.upper, &right.lower);
         }
     }
 
