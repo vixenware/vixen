@@ -116,6 +116,16 @@ C. **ROUND 1 VERDICT (2026-07-04): THE STRONG BET FAILED.** Real data
    at the change-points of the edges relevant to the refuting derivation
    — not global manifest change-points (March's framing, corrected by
    data). Evidence: rodin-c-evidence.md rounds 1+2.
+   **RULED CLOSED (2026-07-04, round 3):** rodin-core v0 exists (sequential
+   set-domain core, guarded clauses native, 64 workspace tests green) and
+   dynamic evidence supports the design: aggregate widening factor 7.5x
+   (13 point exclusions → 98 widened) across the six burial shapes, warm
+   facts saved decisions+conflicts on re-solves (= the counterfactual-query
+   latency budget), generated cascade trace in the report appendix.
+   Uneven by fact kind — the per-kind table is the tuning map, not a
+   threat. KNOWN GAP from review: learned regions are FATTER than their
+   support (trace step 14: one-edge support, four-package region) — v0.1
+   must minimize facts to their derivation support; fat facts widen worse.
 D. **The worker model.** In-process parallelism first (workers claim
    regions, pool facts). Later: could workers be fleet executors? (The
    solver's facts-plus-regions shape looks suspiciously shippable.)
