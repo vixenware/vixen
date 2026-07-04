@@ -52,11 +52,13 @@ agenda; sections marked FIXED are settled by prior rulings or by evidence.*
 
 ## OPEN — the co-design agenda, in proposed order
 
-A. **The fact/term language.** What exactly is a fact? Sketch: terms over
-   (package, version-set) and (package@v, feature) with guarded Horn
-   implications; no-goods as incompatibilities over unions-of-intervals.
-   Question: one representation for both propagation clauses and learned
-   facts, or two (clauses vs region-exclusions)?
+A. **RULED (2026-07-04): TWO STORES, married by derivation.** Clauses
+   (manifest-compiled implications incl. guarded/weak, indexed by the atoms
+   they mention) feed propagation; exclusions (learned regions, unions of
+   intervals, hole-tolerant) feed the frontier. Every exclusion carries its
+   derivation — proof (replay/scoping by pins), explanation (4-layer),
+   and widening certificate in one object. Prototyped standalone as
+   crates/rodin-facts (type design normative in the brief/dispatch).
 B. **The canonical order, precisely.** OURS (import-don't-imitate). Needs
    a total order over complete solutions, pure of search. Candidate:
    lexicographic over packages sorted by name, comparing versions
