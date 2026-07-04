@@ -50,6 +50,27 @@ agenda; sections marked FIXED are settled by prior rulings or by evidence.*
     a run; Rodin's interior (regions claimed, facts learned, incumbent
     improved) should feed the same console. [the dream, thrice-yes'd]
 
+11. **PROVEN OPTIMALITY IS THE ONLY MODE.** Not the default — the only
+    mode. Early stopping is not allowed, ever: first-found-and-quit is the
+    door through which scheduling leaks into answers (cargo's disease).
+    Bounds closed or it isn't a result. [Amos, 2026-07-04]
+12. **The result is a QUERYABLE ARTIFACT, not a version list.** Resolution
+    returns the dependency DAG *plus* the complete decision record: every
+    node carries its derivation (which requirement edges and facts chose
+    its version; which facts killed each higher band). Two query classes:
+    PROVENANCE (pure reads over the record: who pulls in openssl, why is
+    this feature on, why not 1.0.228) — instant; COUNTERFACTUAL (what
+    would it take to: drop openssl / unify hyper / reach tokio 1.40) —
+    each is an ORDINARY RE-SOLVE with an amended problem statement,
+    cheap because same pins ⇒ all learned facts stay valid (round 3's
+    warm-resolve measurement is literally this feature's latency budget).
+    Counterfactual answers are DIFFS + minimal manifest amendments +
+    apply-button; the decree→manifest-edit translation belongs to the
+    registry capability (bidirectionality doctrine, same as command
+    grammars). UNSAT counterfactuals return the impossibility derivation
+    ("not without relaxing Z") — even 'no' is actionable. [Amos's
+    openssl/hyper queries, 2026-07-04]
+
 ## OPEN — the co-design agenda, in proposed order
 
 A. **RULED (2026-07-04): TWO STORES, married by derivation.** Clauses
