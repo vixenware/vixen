@@ -1,10 +1,16 @@
 # Tooth 2 — frames and the calling convention (session agenda)
 
-*The co-design session document for fable functions, prepared per the
-standing agreement: the ABI is the one place a wrong shape means a
-rewrite, so it gets ruled with Amos before code exists. Every question
-is self-contained. My recommendation is marked on each; nothing here
-is decided until the session says so.*
+*RULED (session with Amos, 2026-07-04): Q1 frames-as-declared-records
+in a per-task arena — "the debugger reads frames the way it reads
+values, through layouts. I'm sold too." Q2 frame-direct argument
+passing — "works well for vix's value semantics." Q3 the await-spill
+rule — yes. Q4 yes, WITH AMOS'S REFINEMENT: the ABI must DISTINGUISH
+SYNC AND ASYNC await points — a host call that always completes is a
+plain call (no park machinery, no spill boundary); only awaitable
+sites get await-point numbering and the spill rule. Q5 delegated to
+the design line (call/return/frame-alloc stencils before arithmetic
+variety stands). Q6 frame-granular trace events — yes. Implementation
+go: "let's go go go."*
 
 ## What exists today (the ground truth this builds on)
 
