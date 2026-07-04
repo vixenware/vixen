@@ -78,6 +78,24 @@ unobservable except through demanded slots (V2), which is the point:
 this is "the graph materializes as bodies reach call sites" carried
 down INTO bodies — code no demand path reaches is never emitted.
 
+**The escalation rule (Amos flagged the cliff; ruled with them,
+2026-07-04):** one more construct — first-class closures capturing
+bindings, or loops — makes static demand placement research-grade
+(strictness analysis / lazy code motion territory; undecidable in
+general for higher-order code). We do NOT go there. When sinking
+can't decide, PROMOTE: the binding lowers as a pending invocation
+ref (closure-hash × captures) and demand flows through the driver's
+existing INVOKE/await/memo path. Not a thunk — no tags, no force
+checks; the ONE dynamic demand mechanism is the graph, and
+promotion escalates to it. Analysis precision is thus a COST dial
+(dumb = more frames, still lazy, still correct), never a
+correctness question, never a second mechanism. Third valve: the
+admission gate — no construct enters the language without a
+decidable demand story or an explicit promotion rule (combinator
+iteration already routes per-element demand through memo boundaries
+by construction; that is why body-level loops may never need to
+exist).
+
 - The vix lowering EMITS instrumentation ops carrying the three-moment
   vocabulary: node-demanded, memo-hit/miss, spawn, park, resume,
   finish — static ids mapping to nodes/spans via the lowering's
