@@ -495,3 +495,15 @@ language — resolver and preflight want the same type).
 OCI PROBE LANDED (PR #2434, 258/258 verified): whiteout-aware
 merged view w/ winning-layer attribution, 3-layer fixture, focused
 tar reader (dep rejected deliberately), preflight sample.
+
+**NEXT ARC RULED (Amos): CHECKER + SELF-HOSTED QUERIES, COMBINED**
+("seems related" — and they are, deeply): THE CHECKER IS A QUERY
+ENGINE. Name resolution, type-of, exhaustiveness ARE code-
+intelligence queries; building the checker AS the query plane's
+first customer avoids the rustc/rust-analyzer split at birth — one
+program-analysis implementation serving diagnostics AND the LSP
+(behind vix-lsp's existing LanguageQueries trait seam), Rust first
+with differential-oracle discipline, vix-hosted versions later
+swapping in behind the same seam (the self-hosting demo). LOOP
+IDENTITY co-design: NOW, in-thread (Amos Q2=a). Consolidation: my
+call — living docs are the record, no formal pass.
