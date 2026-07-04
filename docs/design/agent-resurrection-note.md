@@ -376,8 +376,30 @@ with left.o as dashed PENDING node + Demand-again warm collapse.
 STANDING LESSON (Amos, twice in one arc): when a construct seems
 free, check which word the cost is hiding in ("coercion" hid a read
 barrier). Surface tensions; never narrate past them.
-NEXT: warm reload (de-mined), then B3 types.vix → B4 exec depth →
-B5 documents → funeral gate.
+WARM RELOAD DONE + ACCEPTED (28db6bbf4, 310/310 four-crate verified):
+Machine::reload preserves memo map + value store across new tables;
+NO invalidation machinery (hashes ARE the invalidator); O02-O08 all
+class 1 (ledger 24/0/33/3); O07 = exact transitive-user diff on enum
+reorder, both lanes; cross-generation pending test proves the fn_ref
+fix. Frozen-file touches were mechanical .as_str() only — freeze
+intact. SNARK CODEGEN CAPABILITIES DONE (4d037d7cf: anonymous-token
+fields, deterministic hidden-enum aliases, repeat/sepBy fixtures;
+consumers regenerated). SESSION RULINGS BANKED MEANWHILE (all in
+machine-lowering.md + store-architecture.md): P3-DOCTRINE (open
+world: raw bits by RULES not proofs — reload/fleet/eval make
+provability closed-world; speculation IS the cost model, guard/IC
+stencils load-bearing); P3-ENCODING (presence bitsets: insert-time
+facts in store w/ inline ready values, flip-able flag words in
+frames, zero-host Ready path — DISPATCHED as current slice);
+"store" DISAMBIGUATED (THE STORE = durable artifact CAS; machine's
+= value store; spine/flesh; one addressing, three residencies);
+store-architecture.md NEW (bytes trustless/claims need policy,
+tiers=residency, tenants=claim namespaces, three-heads=determinism
+QA + dedupe-ratio alarm, provenance policy layer: source/build/
+publishing provenance as pinned observations — Rodin enforces at
+resolution time; Rodin facts are claims → trust-scoped sharing).
+NEXT after encoding slice: B3 types.vix → B4 exec depth → B5
+documents → funeral gate.
 
 **THE MILESTONE IS COMPLETE** (bf3648f12, 212/212 verified
 personally): merge-demand.vix on the machine, left.o absent from
