@@ -275,3 +275,17 @@ general value rendering.
 Therefore the migration should wait for those facade-side machine gaps or an
 explicit machine-lane event adapter surface. Vixenware-side work should be
 limited to the daemon adapter and generated Vox client once that surface exists.
+
+## Adjudication (accepted 2026-07-04)
+
+Recon accepted. Consequences banked:
+1. The facade-gap table above IS the Innards-mode trace spec,
+   concretized — folded into the machine lane's B4 brief (exec depth
+   carries run ids/serving/observations/command metadata; sink+step
+   gating and span/name enrichment ride the same slice).
+2. THE FUNERAL GATE GROWS ONE CLAUSE: parity ledger 100% AND
+   vix-daemon migrated to the Machine facade (playground client
+   regenerated; production-path vox slice test as specified above).
+   A funeral that strands vix-daemon on the oracle is forbidden.
+3. Migration itself waits for the facade gaps; vixenware-side work
+   stays limited to the daemon adapter + regeneration.
