@@ -329,3 +329,19 @@ is making them explicit. Cousin of the secrets-taint law: ambient
 state is the enemy for identity and security alike.
 Gates cleared: template for-loops, runtime iteration, keyed
 collections — all now lowering work, no new machinery.
+
+## Projection-narrowed memo (Amos, 2026-07-05): "same rules as the VFS"
+
+RULED DIRECTION: language-level memo adopts the EXEC TWO-TIER SHAPE.
+"You may take the entire session state, but if you only use
+is_patron, that's the only thing you invalidate on." Coarse key =
+composite identity (as today); FINE tier = the PROJECTIONS the body
+actually touched. Two mechanisms, layered like everything else:
+STATIC narrowing where the checker proves the projection set
+(compile-time key refinement, free at runtime — demand-sinking's
+cousin), OBSERVED-projection verification where access is dynamic
+(tier-2 for values: composite changed but touched projections
+didn't → still a hit). This is the Vesta secondary-key move (PLDI
+2000 fine-grained deps, adjudicated in the scrub) reborn with our
+identity discipline — and it is what makes big-input programs
+(checkers over ASTs, templates over sessions) incrementally sane.
