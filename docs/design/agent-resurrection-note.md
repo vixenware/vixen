@@ -507,3 +507,23 @@ with differential-oracle discipline, vix-hosted versions later
 swapping in behind the same seam (the self-hosting demo). LOOP
 IDENTITY co-design: NOW, in-thread (Amos Q2=a). Consolidation: my
 call — living docs are the record, no formal pass.
+
+**THE CHECKER ARC IS LAUNCHED (2026-07-05, "the chills are shared —
+let's land this"):** the ladder: ast() value surface → Rust checker
+(differential oracle) → projection-narrowed memo → vix-written
+checker → SELF-CHECK (the checker checking its own source; warm
+per-definition re-checking = rust-analyzer's value proposition as a
+side effect of the machine). CAN THE CHECKER BE WRITTEN IN VIX: YES
+structurally (recursive enums/match/maps/tuples suffice; eval.vix
+is the proof-of-shape); gaps: ast() surface (dispatched,
+vix-ast-value worktree), projection-narrowed memo (ruled, exec
+two-tier shape generalized — static narrowing + observed
+projections; "you may take the whole session but invalidate only on
+is_patron"), ergonomics (partials suffice v1). Checker recon
+dispatched (vix-checker-recon worktree): requirements floor from
+parked checker-era items, query decomposition = the query-plane
+vocabulary = the projection-memo units, type-system design
+questions for Amos (inference depth, generics, coercions, error
+philosophy). IN FLIGHT ALSO: real-process lane, Rodin thrash
+diagnosis, OCI rebase (#2434). MERGED TODAY: #2431 foundation,
+#2433 THE FUNERAL.
