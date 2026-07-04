@@ -110,6 +110,35 @@ pending handle in a demanding position goes through the driver's
 INVOKE path (hit = sync fill, miss = spawn+park). Promotion adds no
 machinery — it REUSES the graph.
 
+P3-AMENDED (Amos caught the regression: "so you've reintroduced a
+forcing function into the language"): the first implementation made
+Option.unwrap the touch — that is `force` wearing a nicer name (one
+library fn elevated to a semantic primitive, and it over-forces:
+passing an unwrapped value to a callee that ignores it would run
+the producer). CORRECTED RULE — **bits are strict, identities are
+lazy**: demand is a TYPED COERCION the lowerer inserts exactly
+where a Pending<T> flows into a bits-consuming position (arithmetic
+operand, match tag read, string/path comparison, bits-typed Ret,
+scalar arg-write at a memo boundary). unwrap is a pure Option-shell
+op (result may stay pending); Map.get demands NOTHING (map shape is
+known at construction — key-presence is structural; contrast
+pending TREES where path-presence costs a run because shape IS the
+producer's output: demand exactly the question asked). Composites
+cross memo boundaries as identities (lazy); scalars coerce at the
+boundary (strict). Pendingness is tracked STATICALLY in slot
+schemas — no runtime is-it-bits checks (A6), and no
+pending-polymorphic params (that would be laziness coloring,
+GHC-levity research territory — the bits/identity split makes the
+coloring question never arise). No operation in the language is
+named or shaped like `force`.
+
+P-HAZARD (flagged in review, must die before warm reload): the
+pending store encoding carries fn_ref — a program-table INDEX —
+inside a content-addressed value. Indices go stale across reload;
+resolution must go through the closure hash (identity_hash →
+fn_hashes lookup), with fn_ref at most a cache invalidated by
+reload.
+
 P4. FORCING CONSTRUCT (zero grammar changes): lazy Map values —
 inserts store pending refs for promotable call initializers; .get
 with a computed key demands ONLY the selected entry. Test: map of
