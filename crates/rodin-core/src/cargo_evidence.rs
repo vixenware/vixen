@@ -114,6 +114,7 @@ pub enum CargoExtractionGapKind {
     DevDependency,
     OptionalDependency,
     SemverRequirementRejected,
+    WorkspaceDependencyUnresolved,
 }
 
 #[derive(Clone, Debug, Facet, PartialEq)]
@@ -455,7 +456,9 @@ fn render_oracle_markdown(out: &mut String, report: &CargoOracleReport) {
         let _ = writeln!(out, "| {verdict:?} | {count} |");
     }
     out.push('\n');
-    out.push_str("| kind | package | Cargo.lock | Rodin | verdict | classification | accepted policy |\n");
+    out.push_str(
+        "| kind | package | Cargo.lock | Rodin | verdict | classification | accepted policy |\n",
+    );
     out.push_str("|---|---|---|---|---|---|---|\n");
     for divergence in &report.divergences {
         let _ = writeln!(
@@ -499,7 +502,12 @@ fn render_accepted_divergence_policies(out: &mut String, report: &CargoEvidenceR
     out.push_str("| policy | Rodin rule |\n|---|---|\n");
     for policy in policies {
         let rule = accepted_policy_rule(&policy);
-        let _ = writeln!(out, "| {} | {} |", markdown_cell(&policy), markdown_cell(rule));
+        let _ = writeln!(
+            out,
+            "| {} | {} |",
+            markdown_cell(&policy),
+            markdown_cell(rule)
+        );
     }
     out.push('\n');
 }
@@ -1161,6 +1169,14 @@ struct ManifestDepBuilder<'a, 'b> {
 
 impl ManifestDepBuilder<'_, '_> {
     fn push(&mut self, dep: &ManifestDep) {
+        if dep.workspace {
+            self.gaps.push(CargoExtractionGap {
+                kind: CargoExtractionGapKind::WorkspaceDependencyUnresolved,
+                package: self.package_version(),
+                detail: dep.key.clone(),
+            });
+            return;
+        }
         if !self.model.projection.includes_target(dep.target.as_deref()) {
             self.gaps.push(CargoExtractionGap {
                 kind: CargoExtractionGapKind::TargetConditionalDependency,
@@ -1252,10 +1268,8 @@ fn compare_to_lock(
             Some(selected) => {
                 let classification =
                     classify_version_mismatch(oracle, &label, selected, fresh_reference);
-                let (verdict, accepted_policy) = verdict_for_divergence(
-                    CargoDivergenceKind::VersionMismatch,
-                    &classification,
-                );
+                let (verdict, accepted_policy) =
+                    verdict_for_divergence(CargoDivergenceKind::VersionMismatch, &classification);
                 divergences.push(CargoDivergence {
                     kind: CargoDivergenceKind::VersionMismatch,
                     package: label.clone(),
@@ -1355,6 +1369,9 @@ fn verdict_for_divergence(
     if classification.contains("manifest unavailable") {
         return (CargoDivergenceVerdict::ExtractionBug, None);
     }
+    if classification.contains("workspace dependency inheritance could not be resolved") {
+        return (CargoDivergenceVerdict::ExtractionBug, None);
+    }
     if classification.contains("semver subset") {
         return (
             CargoDivergenceVerdict::SemverModelInterpretationDifference,
@@ -1406,6 +1423,7 @@ fn classify_missing_locked_domain(locked: &LockedDomain, gaps: &[CargoExtraction
             CargoExtractionGapKind::ManifestMissing
                 | CargoExtractionGapKind::ManifestDependencyUnparsed
                 | CargoExtractionGapKind::SemverRequirementRejected
+                | CargoExtractionGapKind::WorkspaceDependencyUnresolved
         ) {
             kinds.insert(gap.kind.clone());
         }
@@ -1431,6 +1449,9 @@ fn classify_missing_locked_domain(locked: &LockedDomain, gaps: &[CargoExtraction
             .to_owned()
     } else if kinds.contains(&CargoExtractionGapKind::SemverRequirementRejected) {
         "manifest requirement was not representable by Rodin's current semver subset".to_owned()
+    } else if kinds.contains(&CargoExtractionGapKind::WorkspaceDependencyUnresolved) {
+        "workspace dependency inheritance could not be resolved from the root workspace table"
+            .to_owned()
     } else if kinds.contains(&CargoExtractionGapKind::LockExactFallback) {
         "reached only through Cargo.lock exact-edge fallback, not real manifest range solving"
             .to_owned()
@@ -2268,5 +2289,20 @@ mod tests {
         assert_eq!(serde.req.as_deref(), Some("1"));
         assert_eq!(serde.features, ["derive"]);
         Ok(())
+    }
+
+    #[test]
+    fn package_name_does_not_require_literal_version() {
+        assert_eq!(
+            package_name(
+                r#"
+                [package]
+                name = "wasm-browser-tests"
+                version.workspace = true
+                "#
+            )
+            .as_deref(),
+            Some("wasm-browser-tests")
+        );
     }
 }

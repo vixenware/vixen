@@ -3452,3 +3452,45 @@ Solve trace tail:
 | DependencyOutsideLockUniverse | `aho-corasick@1.0.2` | doc-comment |
 
 4771 additional extraction/modeling gaps omitted from this table; the JSON artifact carries the full set.
+
+## Round 8: Per-row Cargo oracle convergence STOP
+
+Round 8 started with two concrete extraction bugs from the remaining row set:
+
+- Local workspace manifests whose package version is inherited with `version.workspace = true` were not indexed as local manifests, which made `rust-examples@0.10`, `wasm-browser-tests@0.10`, and `wasm-inprocess-tests@0.10` appear as `ManifestMissing`.
+- Member dependencies written as `foo.workspace = true` or `{ workspace = true, ... }` were not resolved through the root `[workspace.dependencies]` table before Rodin built dependency edges, so many real workspace requirements were either absent or degraded to wildcard requirements.
+
+Both extraction bugs are fixed in the extractor. The parser now:
+
+- indexes local manifests by package name without requiring a literal package version;
+- parses root workspace dependency definitions once;
+- resolves inherited workspace dependencies before dep-kind, target, feature, and semver filtering;
+- rejects unresolved inherited workspace dependencies as `WorkspaceDependencyUnresolved` extraction gaps rather than solving them as unconstrained `*` requirements;
+- emits typed per-row verdict fields in the facet-json report shape: `ExtractionBug`, `SemverModelInterpretationDifference`, or `LegitimateTieBreakDifference`, plus an optional accepted-divergence policy name.
+
+The full Round 8 matrix did not complete after those extraction fixes. The fixed-target release evidence path completed extraction and solve with the faithful graph:
+
+| projection | indexed edges | extraction/modeling gaps | solve wall ms |
+|---|---:|---:|---:|
+| fixed target/runtime | 8280 | 8737 | 2736 |
+
+The lock-union/dev projection completed extraction but did not complete solve before this round was stopped:
+
+| projection | indexed edges | extraction/modeling gaps | observed decisions | observed conflicts | last observed domain |
+|---|---:|---:|---:|---:|---|
+| lock union/dev | 12912 | 3982 | 18000 | 9392 | `derive_more@2` |
+
+The stopped invocation was the normal evidence command in release mode:
+
+```text
+cargo run --release -p rodin-core --bin rodin-cargo-evidence -- --append docs/design/rodin-c-evidence.md --json-out output/rodin-cargo-evidence.json
+```
+
+It was interrupted after the lock-union solve continued progressing through high-conflict domains without producing the matrix artifact. No Round 8 convergence table is claimed from partial output. The STOP is therefore specific: fixing the extraction bugs exposed a faithful lock-union search case that current Rodin does not complete promptly enough for the evidence matrix.
+
+Verification completed for the code path changes:
+
+| command | result |
+|---|---|
+| `cargo nextest run -p rodin-core -p rodin-facts` | 34/34 passed |
+| `cargo clippy -p rodin-core -p rodin-facts -- -D warnings` | passed |
