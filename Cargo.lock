@@ -2195,6 +2195,8 @@ name = "rodin-core"
 version = "0.1.0"
 dependencies = [
  "eyre",
+ "facet 0.50.0-rc.4",
+ "facet-json 0.50.0-rc.4",
  "pretty_assertions",
  "rodin-facts",
  "rodin-survey",
