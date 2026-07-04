@@ -5,6 +5,7 @@ import type { DaemonClient, DemandEvent } from "./generated/daemon";
 import { DemandGraph } from "./graph";
 import { Lanes } from "./lanes";
 import { Inspector } from "./inspector";
+import { ResolveView } from "./resolve";
 import { byteToUtf16, utf16ToByte } from "./offsets";
 import luaSample from "./samples/lua.vix?raw";
 
@@ -32,7 +33,7 @@ export function App() {
   const [cursor, setCursor] = useState<number | null>(null);
   const [inspected, setInspected] = useState<DemandEvent | null>(null);
   const [showAll, setShowAll] = useState(false);
-  const [view, setView] = useState<"trace" | "lanes">("trace");
+  const [view, setView] = useState<"trace" | "lanes" | "resolve">("trace");
 
   const busy = status === "connecting" || status === "running" || status === "stepping";
 
@@ -101,7 +102,7 @@ export function App() {
   }
 
   return (
-    <div className="shell">
+    <div className={view === "resolve" ? "shell shell-resolve" : "shell"}>
       <header>
         <span className="brand">vixen</span>
         <span className="brand-sub">demand, observed</span>
@@ -142,6 +143,12 @@ export function App() {
               >
                 lanes
               </button>
+              <button
+                className={view === "resolve" ? "view-btn view-btn-active" : "view-btn"}
+                onClick={() => setView("resolve")}
+              >
+                resolve
+              </button>
             </div>
             {view === "trace" && (
               <label className="steptoggle">
@@ -174,7 +181,9 @@ export function App() {
             <span className={`status status-${status}`}>{status}</span>
           </div>
           <div className="graph-scroll">
-            {events.length === 0 ? (
+            {view === "resolve" ? (
+              <ResolveView />
+            ) : events.length === 0 ? (
               <p className="hint">
                 Run <code>vixd</code> locally, then demand an entry point. Every memo miss/hit,
                 spawn, exec serving class and observation streams here as it happens — in step
@@ -189,7 +198,10 @@ export function App() {
                 onSelect={(e) => {
                   setInspected(e);
                   const span =
-                    e.tag === "Done" || e.tag === "Failed" || e.tag === "Observation"
+                    e.tag === "Done" ||
+                    e.tag === "Failed" ||
+                    e.tag === "Observation" ||
+                    e.tag === "Summary"
                       ? null
                       : e.span;
                   if (span) {
@@ -206,7 +218,10 @@ export function App() {
                 onSelect={(e) => {
                   setInspected(e);
                   const span =
-                    e.tag === "Done" || e.tag === "Failed" || e.tag === "Observation"
+                    e.tag === "Done" ||
+                    e.tag === "Failed" ||
+                    e.tag === "Observation" ||
+                    e.tag === "Summary"
                       ? null
                       : e.span;
                   if (span) {

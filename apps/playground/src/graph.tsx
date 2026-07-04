@@ -41,6 +41,8 @@ function rowClass(e: DemandEvent): string {
       return "ev-done";
     case "Failed":
       return "ev-failed";
+    case "Summary":
+      return "ev-done";
   }
 }
 
@@ -71,6 +73,8 @@ function label(e: DemandEvent): string {
       return "done";
     case "Failed":
       return "failed";
+    case "Summary":
+      return "summary";
   }
 }
 
@@ -93,6 +97,8 @@ function statusText(e: DemandEvent): string {
       return "evaluation finished";
     case "Failed":
       return "evaluation failed";
+    case "Summary":
+      return "evaluation summary";
   }
 }
 
@@ -100,6 +106,7 @@ function atLabel(e: DemandEvent): string | null {
   switch (e.tag) {
     case "Done":
     case "Failed":
+    case "Summary":
       return null;
     default:
       return `+${(Number(e.at) / 1000).toFixed(1)}ms`;
@@ -185,6 +192,7 @@ function layout(events: DemandEvent[]): Row[] {
         break;
       case "Done":
       case "Failed":
+      case "Summary":
         depth = 0;
         break;
     }

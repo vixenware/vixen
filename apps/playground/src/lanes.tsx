@@ -86,7 +86,7 @@ export function Lanes(props: {
   // Max timestamp across all timed events (all variants except Done/Failed have `at`)
   let maxAt = 1n;
   for (const e of events) {
-    if (e.tag !== "Done" && e.tag !== "Failed") {
+    if (e.tag !== "Done" && e.tag !== "Failed" && e.tag !== "Summary") {
       if (e.at > maxAt) maxAt = e.at;
     }
   }
