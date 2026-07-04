@@ -461,3 +461,14 @@ artifact).
 HOST RENAME (2026-07-04, Amos): the Linux x86_64 box is now
 `ssh miles.local` — the name `mur` is STALE (global CLAUDE.md not
 yet updated; trust this note).
+
+**CORPUS PARITY COMPLETE (2026-07-04 night, B5 = 650ed6008 +
+summary fixes a4a3ec476): PARITY.md reads 57/0/0/3 row-derived,
+246/246, both lanes.** Full B-arc: B1 sinking → promotion →
+coercion/barrier corrections → warm reload → encoding → B3 types →
+B4 exec/fetch depth (lua.vix ON THE MACHINE, enriched Innards
+events, run IDs, serving class) → B5 documents/ordering. FUNERAL
+GATE remaining: (1) facade trio (live sink/step gating, entry-param
+metadata, value renderer — dispatched), (2) vix-daemon migration
+(recon done, waits on trio), (3) Amos sign-off, THEN Phase C
+deletion of oracle.rs+engine.rs as its own commit. Do not batch.
