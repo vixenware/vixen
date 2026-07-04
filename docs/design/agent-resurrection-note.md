@@ -281,6 +281,21 @@ afternoon" beating "right shape". When something feels like a tower of
 unknowns: smaller language, same shape — never same language, softer
 shape. Amos will patiently nudge; let him.
 
+**TOOTH 2 COMPLETE (facet-cc weavy, commits 30a23923b..8acbdce43,
+all pushed; PR facet-rs/facet#2431 open)**: weavy::task = frames as
+declared records in per-task arenas, frame-direct calling convention
+(three-address typed ops over frame offsets — no operand stack, spill
+rule holds by construction), suspension through live frames, inline
+composites by value (48-byte stress + mutation isolation), JIT lane
+differential-pinned on results+steps+traces (call/ret/hostcall exit
+to driver trampoline; direct threading later), sync HostCall (cannot
+park structurally), F64 (bitwise-pinned), Op::Trace instrumentation
+stripped by TraceMode (Production = not compiled at all). Registers:
+confirmed-deferred (everything spilled; offsets are the contract;
+await-spill rule permits registers between awaits later). Tooth 3 =
+async host futures feeding readiness slots + real executor driver.
+Tooth-1 agent (fable structs/enums/match, d92a7abb) in flight.
+
 **THE TEETH (ruled order)**: 1.5 EXECUTES FIRST — migrate fable off
 cstree onto snark (grammar => parser => codegen'd typed AST, the
 vix/gingembre pattern; "snark is MADE for this" — Amos) so tooth 1's
