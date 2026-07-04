@@ -482,3 +482,16 @@ PendingInvocations; code = content-addressed flesh; lua ACROSS TWO
 MACHINES ON THE MACHINE) → deletion: oracle.rs, engine.rs, graph.rs,
 5,445 lines. A5's clause satisfied: ONE IMPLEMENTATION REMAINS.
 Merge is Amos's button on PR #2433.
+
+**QUEUED CORE-VIX DESIGN (co-design with Amos, both discovered by
+real consumers):** (1) LOOP MEMO-KEY IDENTITY — per-element
+invocation identity under list edits (the React-key question for
+demand engines; gates template for-loops and all runtime
+iteration; axes: position/content/explicit key_by; trees have
+natural path keys). (2) VERSION VALUE KIND — semantic version
+ordering/comparison surface (OCI glibc preflight stops at string
+equality without it; it is Rodin's vocabulary surfacing in the
+language — resolver and preflight want the same type).
+OCI PROBE LANDED (PR #2434, 258/258 verified): whiteout-aware
+merged view w/ winning-layer attribution, 3-layer fixture, focused
+tar reader (dep rejected deliberately), preflight sample.
