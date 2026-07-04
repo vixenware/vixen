@@ -212,7 +212,14 @@ SolveResult::deferred_weak_dependencies. The March engine must support
 guarded implications natively; that is now a requirement, not a nicety.
 
 
-## Patches/overrides — the three-layer model (PROPOSED 2026-07-04)
+## Patches/overrides — the three-layer model (DIRECTION RULED 2026-07-04, NOT MVP)
+
+Amos: "this is where we want to go... generally the direction we want to
+go in. It's just not extremely part of the MVP — for the MVP we just need
+to be able to resolve roughly what cargo does." So: the three layers below
+are the agreed direction; nothing in the MVP may foreclose them (decrees
+already exist in Rodin's problem statement); building the overlay layers
+waits until after cargo-parity resolution works end to end.
 
 Amos: cargo's [patch] "suuuuuuuucks" — changes patched identity, requires
 whack-a-mole sibling patching, semver theater. Root cause: ONE mechanism
