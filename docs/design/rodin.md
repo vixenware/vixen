@@ -72,11 +72,15 @@ B. **RULED (2026-07-04): lexicographic over (source, true name), versions
    req mentions one) — documented in from_req, release-equivalence tested;
    Rodin must model admission eventually (per-interval flag or ordering
    trick), ON THE RECORD as a v2 requirement.
-C. **The frontier representation** — the realism question. Regions as
-   per-package interval boxes (orthotopes) were March's sketch and its
-   critique's biggest doubt (unions, feature-conditional shapes).
-   Compactness is THE empirical risk. Decide the v1 representation and
-   the measurement that would falsify it.
+C. **PROPOSED + UNDER EMPIRICAL VALIDATION (2026-07-04).** V1: regions =
+   rodin-facts Region (version boxes + feature literals); splits ONLY at
+   metadata change-points (the widening scan defines them); the bet: the
+   effective space is metadata-distinct BLOCKS, few per package. Falsifier
+   instrumented from day one (region/exclusion counts, subtract blowups,
+   raw-versions:blocks ratio on real crates.io data). Survey dispatched:
+   crates/rodin-survey → docs/design/rodin-c-evidence.md (real index data,
+   ~400-crate closure, block ratios + region-algebra stress). Severability
+   (FIXED 7) is the safety net if the bet loses.
 D. **The worker model.** In-process parallelism first (workers claim
    regions, pool facts). Later: could workers be fleet executors? (The
    solver's facts-plus-regions shape looks suspiciously shippable.)
