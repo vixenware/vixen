@@ -592,3 +592,29 @@ LADDER STATUS: see itself (ast, done) → check itself (checker v0,
 DONE) → build itself (crate.vix, slice 2 rebasing). The chrysalis
 sentence is now literally true: unchecked code, but not for long —
 the checker that will check checker.vix is checker.vix.
+
+**EXEC SEAM RULINGS (2026-07-05, all four Amos-direct):**
+(1) BACKENDS DIE — no design reason they exist; one orchestrator-owned
+lifecycle, substrate PRIMITIVES (materialize/launch/report), placement
+is a DATUM. (2) Tier-2 verification is LOCAL-DRIVER by liveness:
+executors are EPHEMERAL (may be gone at verify time) + colocation;
+read-sets ship in Outcome as type obligation (kills the verified
+ReadSet::default() hole at driver.rs:3890). (3) A JOIN IS A DEPENDENCY
+EDGE — topology is orchestrator-only, executors just exec, observer
+closures may NOT create edges; executor-side join is illegal by the
+same law, identity table lives in orchestrator. (4) VFS+SANDBOX are
+THE two vixen primitives (in conjunction — VFS presents the declared
+world, sandbox makes escape impossible) and they ARE the product-side
+substrate: open vix = trusts-host, vixen = enforcing substrate leaf.
+Recon agent dispatched into vixenware for both primitives + the
+integration seam + read-OBSERVATION feasibility (observed read-sets
+from the VFS = R2 pattern at the exec layer).
+AUDITS BANKED: vix-exec-seam-audit branch (3 shipped forks: fleet-only
+join, ReadSet::default() vacuous tier-2, RunStarted timing lies; 3
+lanes not 2, completion-at-spawn is MAJORITY behavior) +
+audit-machine-laws branch (slip mechanism: laziness+result pins on
+sync oracle lane, assertions sort/count traces discarding order; 5
+unpinned laws ranked; Pin A fake≡real differential = umbrella, Pin B
+async-fake overlap witness → in unforce-exec fix lane, Pin C mount
+ceiling). STANDING RULE REAFFIRMED: questions to Amos must be
+self-contained + carry a recommendation.
