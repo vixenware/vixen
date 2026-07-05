@@ -338,8 +338,14 @@ pub struct SolveResult {
     pub enabled_features: BTreeMap<String, BTreeSet<String>>,
     pub decisions: usize,
     pub conflicts: usize,
+    pub restarts: usize,
     pub manifests_read: usize,
     pub candidates_existing: usize,
+    pub learned_scans: usize,
+    pub learned_prunes: usize,
+    pub learned_conflicts: usize,
+    pub learned_subsumed: usize,
+    pub learned_replaced: usize,
     pub steps: Vec<SolveStep>,
     pub trace: Vec<String>,
     pub final_domains: BTreeMap<String, FinalDomain>,
@@ -581,8 +587,10 @@ pub enum SolveStep {
 
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct LearnedNoGood {
+    pub active: bool,
     pub region: Region,
     pub derivation: DerivationId,
+    pub exclusion: ExclusionId,
     pub support: BTreeSet<EdgeKey>,
     pub point_versions: usize,
     pub widened_versions: usize,
@@ -609,8 +617,14 @@ pub enum SolveError {
     NoSolution {
         decisions: usize,
         conflicts: usize,
+        restarts: usize,
         manifests_read: usize,
         candidates_existing: usize,
+        learned_scans: usize,
+        learned_prunes: usize,
+        learned_conflicts: usize,
+        learned_subsumed: usize,
+        learned_replaced: usize,
         trace: Vec<String>,
         learned: Vec<LearnedNoGood>,
         derivations: DerivationStore,
@@ -713,20 +727,87 @@ struct Conflict {
 #[derive(Clone, Debug)]
 struct Solver<'a> {
     index: &'a CompiledIndex,
+    options: SolverOptions,
     problem_kind: LearnedKind,
     feature_exclusions: Vec<(PkgIx, FeatIx, FeatIx)>,
     exclusions: ExclusionStore,
     derivations: DerivationStore,
     learned: Vec<LearnedNoGood>,
+    learned_by_package: BTreeMap<PkgIx, BTreeSet<usize>>,
+    learned_without_packages: BTreeSet<usize>,
+    activity: BTreeMap<PkgIx, f64>,
     conflicts: usize,
     decisions: usize,
+    restarts: usize,
+    restart_window: usize,
+    next_restart_conflict: usize,
+    restart_requested: bool,
     manifests_read: usize,
     candidates_existing: usize,
+    learned_scans: usize,
+    learned_prunes: usize,
+    learned_conflicts: usize,
+    learned_subsumed: usize,
+    learned_replaced: usize,
     next_hypothesis: u32,
     steps: Vec<SolveStep>,
     trace: Vec<String>,
     #[cfg(feature = "perf-diagnostics")]
     diagnostics: SolverDiagnostics,
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+struct SolverOptions {
+    indexed_exclusions: bool,
+    subsume_learned: bool,
+    activity_ordering: bool,
+    restarts: bool,
+}
+
+impl SolverOptions {
+    const FULL: Self = Self {
+        indexed_exclusions: true,
+        subsume_learned: true,
+        activity_ordering: true,
+        restarts: true,
+    };
+
+    const LEGACY: Self = Self {
+        indexed_exclusions: false,
+        subsume_learned: false,
+        activity_ordering: false,
+        restarts: false,
+    };
+
+    const FIX1: Self = Self {
+        indexed_exclusions: true,
+        subsume_learned: false,
+        activity_ordering: false,
+        restarts: false,
+    };
+
+    const FIX2: Self = Self {
+        indexed_exclusions: true,
+        subsume_learned: true,
+        activity_ordering: false,
+        restarts: false,
+    };
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+enum SearchFailure {
+    Backtrack,
+    Restart,
+}
+
+fn solver_options_from_env() -> SolverOptions {
+    match std::env::var("RODIN_SOLVER_FIX_LEVEL").as_deref() {
+        Ok("0" | "legacy") => SolverOptions::LEGACY,
+        Ok("1" | "fix1") => SolverOptions::FIX1,
+        Ok("2" | "fix2") => SolverOptions::FIX2,
+        Ok("3" | "full") | Err(_) => SolverOptions::FULL,
+        Ok(_) => SolverOptions::FULL,
+    }
 }
 
 #[cfg(feature = "perf-diagnostics")]
@@ -1535,7 +1616,15 @@ pub fn solve(
     index: &CompiledIndex,
     problem: Problem,
 ) -> std::result::Result<SolveResult, Box<SolveError>> {
-    let mut solver = Solver::new(index, problem.learned_kind);
+    solve_with_options(index, problem, solver_options_from_env())
+}
+
+fn solve_with_options(
+    index: &CompiledIndex,
+    problem: Problem,
+    options: SolverOptions,
+) -> std::result::Result<SolveResult, Box<SolveError>> {
+    let mut solver = Solver::new(index, problem.learned_kind, options);
     for fact in &problem.warm_facts.facts {
         solver.install_warm_fact(fact.clone());
     }
@@ -1545,29 +1634,52 @@ pub fn solve(
         solver.learn(conflict);
         return Err(Box::new(solver.no_solution()));
     }
-    match solver.search(state) {
-        Ok(state) => Ok(solver.finish(state)),
-        Err(()) => Err(Box::new(solver.no_solution())),
+    loop {
+        match solver.search(state.clone()) {
+            Ok(state) => return Ok(solver.finish(state)),
+            Err(SearchFailure::Restart) => {
+                solver.restarts += 1;
+                solver.restart_requested = false;
+                solver.trace.push(format!(
+                    "restart {}: learned facts retained",
+                    solver.restarts
+                ));
+            }
+            Err(SearchFailure::Backtrack) => return Err(Box::new(solver.no_solution())),
+        }
     }
 }
 
 impl<'a> Solver<'a> {
-    fn new(index: &'a CompiledIndex, problem_kind: LearnedKind) -> Self {
+    fn new(index: &'a CompiledIndex, problem_kind: LearnedKind, options: SolverOptions) -> Self {
         let mut derivations = DerivationStore::new();
         for id in (0..index.clauses.len()).map(|ix| ClauseId(ix as u32)) {
             derivations.note_clause(id);
         }
         Self {
             index,
+            options,
             problem_kind,
             feature_exclusions: Vec::new(),
             exclusions: ExclusionStore::new(),
             derivations,
             learned: Vec::new(),
+            learned_by_package: BTreeMap::new(),
+            learned_without_packages: BTreeSet::new(),
+            activity: BTreeMap::new(),
             conflicts: 0,
             decisions: 0,
+            restarts: 0,
+            restart_window: 64,
+            next_restart_conflict: 64,
+            restart_requested: false,
             manifests_read: 0,
             candidates_existing: 0,
+            learned_scans: 0,
+            learned_prunes: 0,
+            learned_conflicts: 0,
+            learned_subsumed: 0,
+            learned_replaced: 0,
             next_hypothesis: 0,
             steps: Vec::new(),
             trace: Vec::new(),
@@ -1590,13 +1702,15 @@ impl<'a> Solver<'a> {
             return;
         };
         let mut fact = verified.fact;
+        fact.active = true;
         fact.derivation = derivation;
         let id = self.exclusions.append(Exclusion {
             region: fact.region.clone(),
             derivation,
         });
+        fact.exclusion = id;
         self.derivations.note_exclusion(id, derivation);
-        self.learned.push(fact);
+        self.push_learned_fact(fact);
     }
 
     fn seed_problem(&mut self, problem: &Problem, state: &mut State) -> Result<(), Conflict> {
@@ -1702,11 +1816,11 @@ impl<'a> Solver<'a> {
         Ok(())
     }
 
-    fn search(&mut self, mut state: State) -> Result<State, ()> {
+    fn search(&mut self, mut state: State) -> Result<State, SearchFailure> {
         if let Err(conflict) = self.propagate(&mut state) {
             self.conflicts += 1;
             self.learn(conflict);
-            return Err(());
+            return self.conflict_failure(&state);
         }
         let Some(pkg) = self.next_package(&state) else {
             self.assert_solution(&state);
@@ -1732,7 +1846,7 @@ impl<'a> Solver<'a> {
                 selected: selected_versions(&state),
                 decision: last_hypothesis(&state),
             });
-            return Err(());
+            return self.conflict_failure(&state);
         }
         let candidate_count = candidates.len();
         self.candidates_existing += candidate_count;
@@ -1758,22 +1872,28 @@ impl<'a> Solver<'a> {
             }
             #[cfg(feature = "perf-diagnostics")]
             if self.decisions.is_multiple_of(perf_diag_interval()) {
-                self.diagnostics
-                    .emit_snapshot(self.decisions, self.conflicts, self.learned.len());
+                self.diagnostics.emit_snapshot(
+                    self.decisions,
+                    self.conflicts,
+                    active_learned_count(&self.learned),
+                );
             }
             #[cfg(feature = "perf-diagnostics")]
             if let Some(limit) = perf_diag_decision_limit()
                 && self.decisions >= limit
             {
-                self.diagnostics
-                    .emit_snapshot(self.decisions, self.conflicts, self.learned.len());
+                self.diagnostics.emit_snapshot(
+                    self.decisions,
+                    self.conflicts,
+                    active_learned_count(&self.learned),
+                );
                 tracing::warn!(
                     target: "rodin_perf_diag",
                     decisions = self.decisions,
                     conflicts = self.conflicts,
                     "rodin perf diagnostic decision limit reached"
                 );
-                return Err(());
+                return Err(SearchFailure::Backtrack);
             }
             self.trace.push(format!(
                 "expand {} {} (highest remaining of {candidate_count} candidates) - reads 1 manifest",
@@ -1800,11 +1920,13 @@ impl<'a> Solver<'a> {
                 hypothesis = hyp,
                 "rodin decision"
             );
-            if let Ok(solution) = self.search(branch) {
-                return Ok(solution);
+            match self.search(branch) {
+                Ok(solution) => return Ok(solution),
+                Err(SearchFailure::Restart) => return Err(SearchFailure::Restart),
+                Err(SearchFailure::Backtrack) => {}
             }
         }
-        Err(())
+        Err(SearchFailure::Backtrack)
     }
 
     fn propagate(&mut self, state: &mut State) -> Result<(), Conflict> {
@@ -1863,13 +1985,14 @@ impl<'a> Solver<'a> {
     }
 
     fn apply_exclusions(&mut self, state: &mut State) -> Result<(), Conflict> {
-        let learned = self.learned.clone();
-        for (ix, fact) in learned.iter().enumerate() {
+        for ix in self.candidate_learned_facts(state) {
             #[cfg(feature = "perf-diagnostics")]
             {
                 self.diagnostics.exclusion_scans += 1;
             }
-            let premise = Premise::Exclusion(ExclusionId(ix as u32));
+            self.learned_scans += 1;
+            let fact = &self.learned[ix];
+            let premise = Premise::Exclusion(fact.exclusion);
             let mut unsatisfied = Vec::new();
             let mut disjoint = false;
             for (pkg, versions) in &fact.region.versions {
@@ -1901,6 +2024,7 @@ impl<'a> Solver<'a> {
                     {
                         self.diagnostics.exclusion_conflicts += 1;
                     }
+                    self.learned_conflicts += 1;
                     return Err(Conflict {
                         premises: vec![premise],
                         selected: selected_versions(state),
@@ -1922,11 +2046,36 @@ impl<'a> Solver<'a> {
                     if next != current {
                         self.diagnostics.exclusion_prunes += 1;
                     }
+                    if next != current {
+                        self.learned_prunes += 1;
+                    }
                     self.intersect_domain(state, pkg, next, premise)?;
                 }
             }
         }
         Ok(())
+    }
+
+    fn candidate_learned_facts(&self, state: &State) -> BTreeSet<usize> {
+        if !self.options.indexed_exclusions {
+            return self
+                .learned
+                .iter()
+                .enumerate()
+                .filter_map(|(ix, fact)| fact.active.then_some(ix))
+                .collect();
+        }
+        let mut out = self.learned_without_packages.clone();
+        for pkg in state
+            .domains
+            .iter()
+            .filter_map(|(pkg, domain)| domain.active.then_some(*pkg))
+        {
+            if let Some(facts) = self.learned_by_package.get(&pkg) {
+                out.extend(facts);
+            }
+        }
+        out
     }
 
     fn force_singletons(&mut self, state: &mut State) -> Result<(), Conflict> {
@@ -2132,13 +2281,34 @@ impl<'a> Solver<'a> {
     }
 
     fn next_package(&self, state: &State) -> Option<PkgIx> {
-        state
+        // Activity and restarts only choose which unresolved domain to inspect next.
+        // They do not change candidate ordering inside a domain, and learned facts
+        // are replay-checked no-goods, so this changes exploration order rather
+        // than the set of satisfying assignments Rodin may return.
+        let candidates = state
             .domains
             .iter()
             .filter(|(_, domain)| domain.active && domain.selected.is_none())
             .filter(|(pkg, _)| self.candidates(state, **pkg).len() > 1)
-            .min_by_key(|(pkg, _)| self.index.name(**pkg).unwrap_or_default().to_owned())
-            .map(|(pkg, _)| *pkg)
+            .map(|(pkg, _)| *pkg);
+        if self.options.activity_ordering {
+            candidates.max_by(|left, right| {
+                self.package_activity(*left)
+                    .total_cmp(&self.package_activity(*right))
+                    .then_with(|| {
+                        self.index
+                            .name(*right)
+                            .unwrap_or_default()
+                            .cmp(self.index.name(*left).unwrap_or_default())
+                    })
+            })
+        } else {
+            candidates.min_by_key(|pkg| self.index.name(*pkg).unwrap_or_default().to_owned())
+        }
+    }
+
+    fn package_activity(&self, pkg: PkgIx) -> f64 {
+        self.activity.get(&pkg).copied().unwrap_or(0.0)
     }
 
     fn candidates(&self, state: &State, pkg: PkgIx) -> Vec<Version> {
@@ -2164,6 +2334,7 @@ impl<'a> Solver<'a> {
     fn learn(&mut self, conflict: Conflict) {
         #[cfg(feature = "perf-diagnostics")]
         self.diagnostics.record_conflict(self.index, &conflict);
+        self.bump_activity(&conflict);
         let mut premises = conflict.premises;
         if let Some(hypothesis) = &conflict.decision {
             premises.push(Premise::Hypothesis(hypothesis.id));
@@ -2241,14 +2412,11 @@ impl<'a> Solver<'a> {
             widened_from: point_versions,
             widened_to: widened_versions,
         });
-        let exclusion = self.exclusions.append(Exclusion {
-            region: region.clone(),
-            derivation,
-        });
-        self.derivations.note_exclusion(exclusion, derivation);
         let mut fact = LearnedNoGood {
+            active: true,
             region,
             derivation,
+            exclusion: ExclusionId(u32::MAX),
             support,
             point_versions,
             widened_versions,
@@ -2281,7 +2449,123 @@ impl<'a> Solver<'a> {
             fact.proof_root = root.clone();
             fact.proof_digest = ProofDigest(root.0);
         }
+        if self.install_learned_fact(fact) && self.should_restart_after_learn() {
+            self.restart_requested = true;
+        }
+    }
+
+    fn install_learned_fact(&mut self, mut fact: LearnedNoGood) -> bool {
+        if self.options.subsume_learned {
+            if self
+                .learned
+                .iter()
+                .filter(|existing| existing.active)
+                .any(|existing| existing.region.contains_region(&fact.region))
+            {
+                self.learned_subsumed += 1;
+                tracing::debug!(
+                    suppressed = self.learned_subsumed,
+                    region = %display_region(self.index, &fact.region),
+                    "learned no-good suppressed by existing superset"
+                );
+                return false;
+            }
+
+            let mut removed = 0;
+            for existing in &mut self.learned {
+                if existing.active
+                    && existing.verification_status == VerificationStatus::LocallyLearned
+                    && fact.region.contains_region(&existing.region)
+                {
+                    existing.active = false;
+                    removed += 1;
+                }
+            }
+            if removed > 0 {
+                self.learned_replaced += removed;
+                self.rebuild_learned_index();
+                tracing::debug!(
+                    removed,
+                    total_removed = self.learned_replaced,
+                    region = %display_region(self.index, &fact.region),
+                    "learned no-good replaced contained facts"
+                );
+            }
+        }
+
+        let exclusion = self.exclusions.append(Exclusion {
+            region: fact.region.clone(),
+            derivation: fact.derivation,
+        });
+        self.derivations.note_exclusion(exclusion, fact.derivation);
+        fact.exclusion = exclusion;
+        self.push_learned_fact(fact);
+        true
+    }
+
+    fn push_learned_fact(&mut self, fact: LearnedNoGood) {
+        let ix = self.learned.len();
         self.learned.push(fact);
+        self.index_learned_fact(ix);
+    }
+
+    fn rebuild_learned_index(&mut self) {
+        self.learned_by_package.clear();
+        self.learned_without_packages.clear();
+        for ix in 0..self.learned.len() {
+            self.index_learned_fact(ix);
+        }
+    }
+
+    fn index_learned_fact(&mut self, ix: usize) {
+        if !self.learned[ix].active {
+            return;
+        }
+        let packages = mentioned_packages(&self.learned[ix].region);
+        if packages.is_empty() {
+            self.learned_without_packages.insert(ix);
+        } else {
+            for pkg in packages {
+                self.learned_by_package.entry(pkg).or_default().insert(ix);
+            }
+        }
+    }
+
+    fn bump_activity(&mut self, conflict: &Conflict) {
+        if !self.options.activity_ordering {
+            return;
+        }
+        for value in self.activity.values_mut() {
+            *value *= 0.95;
+        }
+        if let Some(hypothesis) = &conflict.decision {
+            *self.activity.entry(hypothesis.pkg).or_default() += 1.0;
+        }
+        for pkg in self
+            .index
+            .support_packages(&support_from_premises(self.index, &conflict.premises))
+        {
+            *self.activity.entry(pkg).or_default() += 1.0;
+        }
+    }
+
+    fn should_restart_after_learn(&mut self) -> bool {
+        if !self.options.restarts || self.conflicts < self.next_restart_conflict {
+            return false;
+        }
+        self.next_restart_conflict = self
+            .next_restart_conflict
+            .saturating_add(self.restart_window.max(1));
+        self.restart_window = self.restart_window.saturating_mul(2).max(1);
+        true
+    }
+
+    fn conflict_failure(&self, state: &State) -> Result<State, SearchFailure> {
+        if self.restart_requested && !state.hypotheses.is_empty() {
+            Err(SearchFailure::Restart)
+        } else {
+            Err(SearchFailure::Backtrack)
+        }
     }
 
     fn finish(mut self, state: State) -> SolveResult {
@@ -2346,8 +2630,8 @@ impl<'a> Solver<'a> {
             self.manifests_read,
             self.candidates_existing,
             self.conflicts,
-            self.learned.iter().map(|fact| fact.widened_versions).sum::<usize>(),
-            self.learned.iter().map(|fact| fact.point_versions).sum::<usize>()
+            self.learned.iter().filter(|fact| fact.active).map(|fact| fact.widened_versions).sum::<usize>(),
+            self.learned.iter().filter(|fact| fact.active).map(|fact| fact.point_versions).sum::<usize>()
         ));
         SolveResult {
             selected,
@@ -2355,8 +2639,14 @@ impl<'a> Solver<'a> {
             enabled_features,
             decisions: self.decisions,
             conflicts: self.conflicts,
+            restarts: self.restarts,
             manifests_read: self.manifests_read,
             candidates_existing: self.candidates_existing,
+            learned_scans: self.learned_scans,
+            learned_prunes: self.learned_prunes,
+            learned_conflicts: self.learned_conflicts,
+            learned_subsumed: self.learned_subsumed,
+            learned_replaced: self.learned_replaced,
             steps: self.steps,
             trace: self.trace,
             final_domains,
@@ -2372,14 +2662,20 @@ impl<'a> Solver<'a> {
             self.manifests_read,
             self.candidates_existing,
             self.conflicts,
-            self.learned.iter().map(|fact| fact.widened_versions).sum::<usize>(),
-            self.learned.iter().map(|fact| fact.point_versions).sum::<usize>()
+            self.learned.iter().filter(|fact| fact.active).map(|fact| fact.widened_versions).sum::<usize>(),
+            self.learned.iter().filter(|fact| fact.active).map(|fact| fact.point_versions).sum::<usize>()
         ));
         SolveError::NoSolution {
             decisions: self.decisions,
             conflicts: self.conflicts,
+            restarts: self.restarts,
             manifests_read: self.manifests_read,
             candidates_existing: self.candidates_existing,
+            learned_scans: self.learned_scans,
+            learned_prunes: self.learned_prunes,
+            learned_conflicts: self.learned_conflicts,
+            learned_subsumed: self.learned_subsumed,
+            learned_replaced: self.learned_replaced,
             trace: self.trace,
             learned: self.learned,
             derivations: self.derivations,
@@ -2488,6 +2784,19 @@ fn display_support(support: &BTreeSet<EdgeKey>) -> String {
         .map(|edge| format!("{}->{} edge", edge.parent, edge.dep))
         .collect::<Vec<_>>()
         .join(", ")
+}
+
+fn mentioned_packages(region: &Region) -> BTreeSet<PkgIx> {
+    region
+        .versions
+        .keys()
+        .copied()
+        .chain(region.features.iter().map(|(pkg, _, _)| *pkg))
+        .collect()
+}
+
+fn active_learned_count(learned: &[LearnedNoGood]) -> usize {
+    learned.iter().filter(|fact| fact.active).count()
 }
 
 #[cfg(feature = "perf-diagnostics")]
@@ -3270,8 +3579,9 @@ fn candidate_kill_reason(
         assignment
     };
     learned.iter().enumerate().find_map(|(ix, fact)| {
-        (fact.region.contains_assignment(&assignment)
-            || fact.region.contains_assignment(&direct_assignment))
+        (fact.active
+            && (fact.region.contains_assignment(&assignment)
+                || fact.region.contains_assignment(&direct_assignment)))
         .then(|| KillReason::LearnedExclusion {
             fact_id: format!("fact-{ix}"),
             proof_root: fact.proof_root.0.clone(),
@@ -3488,6 +3798,7 @@ impl Round3Report {
             .iter()
             .chain(&self.natural)
             .flat_map(|scenario| scenario.learned.iter())
+            .filter(|fact| fact.active)
             .collect();
         let total_point: usize = learned.iter().map(|fact| fact.point_versions).sum();
         let total_wide: usize = learned.iter().map(|fact| fact.widened_versions).sum();
@@ -3678,6 +3989,7 @@ pub fn warm_bundle_from_learned(
     let graph = Arc::new(graph);
     let facts = learned
         .iter()
+        .filter(|fact| fact.active)
         .map(|fact| WarmLearnedNoGood {
             fact: fact.clone(),
             proof_root: fact.proof_root.clone(),
@@ -4144,6 +4456,7 @@ fn apply_direct_dependency_versions(
 fn record_facts(index: &CompiledIndex, learned: &[LearnedNoGood]) -> Vec<RecordFact> {
     learned
         .iter()
+        .filter(|fact| fact.active)
         .enumerate()
         .map(|(ix, fact)| {
             let region = record_region(index, &fact.region);
@@ -4546,7 +4859,7 @@ fn push_scenario_row(out: &mut String, row: &ScenarioResult, warm: bool) {
         );
         out.push_str(" | ");
     }
-    out.push_str(&row.learned.len().to_string());
+    out.push_str(&active_learned_count(&row.learned).to_string());
     out.push_str(" |\n");
 }
 
@@ -4554,7 +4867,9 @@ fn learned_by_kind(report: &Round3Report) -> BTreeMap<LearnedKind, Vec<&LearnedN
     let mut out: BTreeMap<LearnedKind, Vec<&LearnedNoGood>> = BTreeMap::new();
     for scenario in report.natural.iter().chain(&report.pressure) {
         for fact in &scenario.learned {
-            out.entry(fact.kind).or_default().push(fact);
+            if fact.active {
+                out.entry(fact.kind).or_default().push(fact);
+            }
         }
     }
     out
@@ -4743,6 +5058,35 @@ mod tests {
                         fact.derivation
                     )
                 })?;
+            }
+        }
+        Ok(())
+    }
+
+    #[test]
+    fn round3_pressure_selections_match_legacy_solver_order() -> Result<()> {
+        for scenario in pressure_scenarios()? {
+            for (label, problem) in [
+                ("cold", scenario.problem.clone()),
+                ("perturbed", scenario.perturbed.clone()),
+            ] {
+                let legacy =
+                    solve_with_options(&scenario.index, problem.clone(), SolverOptions::LEGACY);
+                let full = solve(&scenario.index, problem);
+                match (legacy, full) {
+                    (Ok(legacy), Ok(full)) => assert_eq!(
+                        full.selected, legacy.selected,
+                        "{} {label} selected set changed under perf fixes",
+                        scenario.name
+                    ),
+                    (Err(_), Err(_)) => {}
+                    (legacy, full) => {
+                        return Err(eyre::eyre!(
+                            "{} {label} solved/unsat outcome changed: legacy={legacy:?} full={full:?}",
+                            scenario.name
+                        ));
+                    }
+                }
             }
         }
         Ok(())

@@ -3575,3 +3575,36 @@ Verification for the diagnostic instrumentation:
 | `cargo nextest run -p rodin-core -p rodin-facts` | 34/34 passed |
 | `cargo clippy -p rodin-core -p rodin-facts -- -D warnings` | passed |
 | `cargo clippy -p rodin-core --features perf-diagnostics -- -D warnings` | passed |
+
+## Solver performance fixes: lock-union completion
+
+The accepted diagnosis pointed at three separable fixes. This pass implemented them in order with a hard invariant: the fixes may change search order and pruning cost, but not the selected set for a given problem. The invariant is covered by production-path tests that compare the legacy solver order against the fixed solver on Round 3 pressure scenarios, and compare lexical versus activity/restart search on a cargo-artifact extraction fixture.
+
+Implemented changes:
+
+- learned-fact propagation no longer clones the full learned vector before scanning;
+- active learned facts are indexed by mentioned package, so propagation scans only facts touching active domains;
+- learned-fact subsumption suppresses new facts contained by an active existing fact and deactivates active existing facts contained by a new broader fact;
+- deactivated facts remain in the proof archive, so broader surviving facts can still replay through replaced exclusions;
+- package activity is bumped from conflict attribution, decayed every conflict, and used to choose the next unresolved package; version candidates inside a package remain highest-first;
+- geometric restarts clear the trail and keep learned facts.
+
+Cumulative lock-union/dev measurements:
+
+| level | status | decisions | conflicts | restarts | active learned facts | learned scans | prunes | subsumed | replaced | wall ms | note |
+|---|---|---:|---:|---:|---:|---:|---:|---:|---:|---:|---|
+| before | did not complete | 18,000 | 9,392 | 0 | 6,778 at 13k checkpoint | 113,020,458 at 13k checkpoint | 3,390 at 13k checkpoint | 0 | 0 | - | Round 8/diagnosis stop; scan count is from the last diagnostic checkpoint, not extrapolated |
+| fix1: indexed scan/no clone | stopped | 6,000 | 3,118 | 0 | 3,118 | 23,902,038 | 1,560 | 0 | 0 | - | same lexical search pathology; stopped after reproducing old shape |
+| fix2: subsumption | capped | 18,038 | 9,392 | 0 | 2 | 92,398 | 4,696 | 9,390 | 0 | 161,124 | scan cost collapsed, search still did not complete before the 18k diagnostic cap |
+| fix3: activity + restart | completed | 457 | 69 | 1 | 24 | 13,331 | 39 | 42 | 3 | 3,464 | lock-union/dev projection solved |
+
+Final oracle recheck from regenerated `output/rodin-cargo-evidence.json`:
+
+| projection | solved | decisions | conflicts | restarts | wall ms | historical exact | fresh exact |
+|---|---|---:|---:|---:|---:|---:|---:|
+| fixed-target runtime | true | 238 | 2 | 0 | 1,549 | 790/892 | 795/892 |
+| lock-union dev-included | true | 457 | 69 | 1 | 3,464 | 848/892 | 853/892 |
+
+The fixed-target warm counterfactual dropped root dependency `copypatch`; warm/cold selected sets remained equal, with warm 235 decisions / 0 conflicts versus cold 238 decisions / 2 conflicts.
+
+The remaining lock-oracle divergences are the already-classified model/extraction rows in the regenerated artifact; this performance pass did not change Cargo interpretation policy.

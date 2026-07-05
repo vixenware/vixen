@@ -122,7 +122,13 @@ pub struct CargoSolveStats {
     pub solved: bool,
     pub decisions: usize,
     pub conflicts: usize,
+    pub restarts: usize,
     pub learned_facts: usize,
+    pub learned_scans: usize,
+    pub learned_prunes: usize,
+    pub learned_conflicts: usize,
+    pub learned_subsumed: usize,
+    pub learned_replaced: usize,
     pub point_versions: usize,
     pub widened_versions: usize,
     pub widening_factor: f64,
@@ -360,11 +366,16 @@ fn render_projection_markdown(out: &mut String, report: &CargoProjectionReport) 
     out.push_str("#### Solve numbers\n\n");
     let _ = writeln!(
         out,
-        "| solved | decisions | conflicts | learned facts | point versions | widened versions | widening factor | wall ms |\n|---|---:|---:|---:|---:|---:|---:|---:|\n| {} | {} | {} | {} | {} | {} | {:.3} | {} |\n",
+        "| solved | decisions | conflicts | restarts | learned facts | learned scans | learned prunes | subsumed | replaced | point versions | widened versions | widening factor | wall ms |\n|---|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|\n| {} | {} | {} | {} | {} | {} | {} | {} | {} | {} | {} | {:.3} | {} |\n",
         report.solve.solved,
         report.solve.decisions,
         report.solve.conflicts,
+        report.solve.restarts,
         report.solve.learned_facts,
+        report.solve.learned_scans,
+        report.solve.learned_prunes,
+        report.solve.learned_subsumed,
+        report.solve.learned_replaced,
         report.solve.point_versions,
         report.solve.widened_versions,
         report.solve.widening_factor,
@@ -782,14 +793,20 @@ fn run_projection_evidence(
     tracing::info!(projection = ?projection, wall_ms, "rodin cargo evidence solve finished");
     let (selected, solve_stats, learned, derivations) = match solved {
         Ok(result) => {
-            let stats = solve_stats(
-                true,
-                result.decisions,
-                result.conflicts,
+            let stats = solve_stats(SolveStatsInput {
+                solved: true,
+                decisions: result.decisions,
+                conflicts: result.conflicts,
+                restarts: result.restarts,
                 wall_ms,
-                &result.learned,
-                &result.trace,
-            );
+                learned_scans: result.learned_scans,
+                learned_prunes: result.learned_prunes,
+                learned_conflicts: result.learned_conflicts,
+                learned_subsumed: result.learned_subsumed,
+                learned_replaced: result.learned_replaced,
+                learned: &result.learned,
+                trace: &result.trace,
+            });
             (
                 result.selected.clone(),
                 stats,
@@ -801,12 +818,31 @@ fn run_projection_evidence(
             crate::SolveError::NoSolution {
                 decisions,
                 conflicts,
+                restarts,
+                learned_scans,
+                learned_prunes,
+                learned_conflicts,
+                learned_subsumed,
+                learned_replaced,
                 learned,
                 derivations,
                 trace,
                 ..
             } => {
-                let stats = solve_stats(false, decisions, conflicts, wall_ms, &learned, &trace);
+                let stats = solve_stats(SolveStatsInput {
+                    solved: false,
+                    decisions,
+                    conflicts,
+                    restarts,
+                    wall_ms,
+                    learned_scans,
+                    learned_prunes,
+                    learned_conflicts,
+                    learned_subsumed,
+                    learned_replaced,
+                    learned: &learned,
+                    trace: &trace,
+                });
                 (BTreeMap::new(), stats, learned, derivations)
             }
         },
@@ -851,21 +887,40 @@ fn run_projection_evidence(
     })
 }
 
-fn solve_stats(
+struct SolveStatsInput<'a> {
     solved: bool,
     decisions: usize,
     conflicts: usize,
+    restarts: usize,
     wall_ms: u64,
-    learned: &[crate::LearnedNoGood],
-    trace: &[String],
-) -> CargoSolveStats {
-    let point_versions = learned.iter().map(|fact| fact.point_versions).sum();
-    let widened_versions = learned.iter().map(|fact| fact.widened_versions).sum();
+    learned_scans: usize,
+    learned_prunes: usize,
+    learned_conflicts: usize,
+    learned_subsumed: usize,
+    learned_replaced: usize,
+    learned: &'a [crate::LearnedNoGood],
+    trace: &'a [String],
+}
+
+fn solve_stats(input: SolveStatsInput<'_>) -> CargoSolveStats {
+    let active = input
+        .learned
+        .iter()
+        .filter(|fact| fact.active)
+        .collect::<Vec<_>>();
+    let point_versions = active.iter().map(|fact| fact.point_versions).sum();
+    let widened_versions = active.iter().map(|fact| fact.widened_versions).sum();
     CargoSolveStats {
-        solved,
-        decisions,
-        conflicts,
-        learned_facts: learned.len(),
+        solved: input.solved,
+        decisions: input.decisions,
+        conflicts: input.conflicts,
+        restarts: input.restarts,
+        learned_facts: active.len(),
+        learned_scans: input.learned_scans,
+        learned_prunes: input.learned_prunes,
+        learned_conflicts: input.learned_conflicts,
+        learned_subsumed: input.learned_subsumed,
+        learned_replaced: input.learned_replaced,
         point_versions,
         widened_versions,
         widening_factor: if point_versions == 0 {
@@ -873,8 +928,9 @@ fn solve_stats(
         } else {
             widened_versions as f64 / point_versions as f64
         },
-        wall_ms,
-        trace_tail: trace
+        wall_ms: input.wall_ms,
+        trace_tail: input
+            .trace
             .iter()
             .rev()
             .take(12)
@@ -2198,6 +2254,7 @@ fn quoted_values(value: &str) -> Vec<String> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::{SolverOptions, solve_with_options};
 
     #[test]
     fn parses_lock_dependency_versions() -> Result<()> {
@@ -2304,5 +2361,139 @@ mod tests {
             .as_deref(),
             Some("wasm-browser-tests")
         );
+    }
+
+    #[test]
+    fn cargo_artifact_selection_is_search_order_invariant() -> Result<()> {
+        let temp = std::env::temp_dir().join(format!(
+            "rodin-cargo-selection-invariant-{}",
+            std::process::id()
+        ));
+        if temp.exists() {
+            fs::remove_dir_all(&temp)?;
+        }
+        let workspace = temp.join("workspace");
+        let registry_src = temp.join("registry-src");
+        let registry_cache = temp.join("registry-cache");
+        fs::create_dir_all(workspace.join("app"))?;
+        fs::create_dir_all(&registry_src)?;
+        fs::create_dir_all(&registry_cache)?;
+        fs::write(
+            workspace.join("Cargo.toml"),
+            r#"
+            [workspace]
+            members = ["app"]
+            "#,
+        )?;
+        fs::write(
+            workspace.join("app").join("Cargo.toml"),
+            r#"
+            [package]
+            name = "app"
+            version = "1.0.0"
+
+            [dependencies]
+            x = "*"
+            y = "*"
+            "#,
+        )?;
+        fs::write(
+            workspace.join("Cargo.lock"),
+            r#"
+            version = 4
+
+            [[package]]
+            name = "a"
+            version = "1.0.0"
+            source = "registry+https://example.invalid/index"
+
+            [[package]]
+            name = "app"
+            version = "1.0.0"
+            dependencies = [
+              "x",
+              "y",
+            ]
+
+            [[package]]
+            name = "x"
+            version = "1.0.0"
+            source = "registry+https://example.invalid/index"
+            dependencies = [
+              "a 1.0.0",
+            ]
+
+            [[package]]
+            name = "y"
+            version = "1.0.0"
+            source = "registry+https://example.invalid/index"
+            dependencies = [
+              "a 1.0.0",
+            ]
+            "#,
+        )?;
+        for (name, version, deps) in [
+            ("a", "1.0.0", ""),
+            ("a", "1.0.1", ""),
+            ("x", "1.0.0", "a = \"=1.0.0\""),
+            ("x", "1.0.1", "a = \"=1.0.1\""),
+            ("y", "1.0.0", "a = \"=1.0.0\""),
+        ] {
+            let dir = registry_src.join(format!("{name}-{version}"));
+            fs::create_dir_all(&dir)?;
+            fs::write(
+                dir.join("Cargo.toml"),
+                format!(
+                    r#"
+                    [package]
+                    name = "{name}"
+                    version = "{version}"
+
+                    [dependencies]
+                    {deps}
+                    "#
+                ),
+            )?;
+        }
+        let fresh = vec![
+            LockPackage {
+                name: "a".to_owned(),
+                version: Version::parse("1.0.1")?,
+                source: Some("registry+https://example.invalid/index".to_owned()),
+                dependencies: Vec::new(),
+            },
+            LockPackage {
+                name: "x".to_owned(),
+                version: Version::parse("1.0.1")?,
+                source: Some("registry+https://example.invalid/index".to_owned()),
+                dependencies: Vec::new(),
+            },
+        ];
+        let extracted = extract_cargo_universe(
+            &workspace,
+            &registry_src,
+            &registry_cache,
+            CargoProjectionMode::FixedTargetRuntime,
+            Some(&fresh),
+        )?;
+        let lexical = solve_with_options(
+            &extracted.index,
+            extracted.problem.clone(),
+            SolverOptions {
+                indexed_exclusions: true,
+                subsume_learned: true,
+                activity_ordering: false,
+                restarts: false,
+            },
+        )
+        .map_err(|err| eyre::eyre!("{err:?}"))?;
+        let full = solve_with_options(&extracted.index, extracted.problem, SolverOptions::FULL)
+            .map_err(|err| eyre::eyre!("{err:?}"))?;
+        assert_eq!(
+            full.selected, lexical.selected,
+            "cargo artifact selection changed under activity/restart search"
+        );
+        fs::remove_dir_all(temp)?;
+        Ok(())
     }
 }
