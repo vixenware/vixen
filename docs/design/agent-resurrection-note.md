@@ -671,3 +671,16 @@ store), solve interior is FLESH (JIT'd, untraced), perf bar reframed
 (warm solves free ⇒ cold kernel may be 5-10x slower and still win).
 AMOS STANDING DIRECTIVE: one failed spike ≠ verdict; push until
 absolutely-no-way-in-hell; rodin-core is the ORACLE, never discarded.
+
+**SPIKE A (RODIN HALF) LANDED + VERIFIED (branch rodin-vix-capability,
+3/3 my run):** rodin-core kernel wrapped as a machine capability
+(rodin-vix-bridge crate); learned facts as content-addressed store
+values (region + support identities + derivation + replay result);
+DIFFERENTIAL ORACLE GREEN (selections + facts identical direct vs
+via machine); warm demo: same-bytes redemand = memo hit, 0 kernel
+invocations; req-narrowing = 1 invocation under byte cutoff with the
+semantic seam pre-classifying it monotone-safe (expected 0 once
+vix-semantic-cutoff lands — the integration is pinned, not vague).
+IMPEDANCE FINDING: facet version skew (open repo rc.5 vs vixen
+pinned rc.4) — vix ValueBundle stays a runtime carrier, can't derive
+vixen's Facet; real integration wants facet version alignment.
