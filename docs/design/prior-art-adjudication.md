@@ -461,3 +461,24 @@ different manifests where declared-equality CAN'T widen but
 read-set-stability CAN) but UNBUILT. Until built, do NOT claim R2's
 novel mechanism as existing — claim only declared-per-edge widening,
 which is not novel. Amos decision pending: build the demonstration.
+
+## R2 CROWN JEWEL — NOW BUILT AND DEMONSTRATED (2026-07-05, verified 39/39)
+
+The correction above is RESOLVED. The novel R2 mechanism —
+widening by observed read-set stability — is now IMPLEMENTED
+(commit eea6a0dd, Round 10): WidenEvidence::ObservedReadSet
+{read_set_digest, snapshot_id} distinguishes observation from
+declared-structure; read-sets derive from actual conflict-clause
+premises (the FIELDS the solver consumed: actual/kind/optional/req),
+deliberately NOT feature/default-feature cosmetic metadata; offline
+sparse-index fixture (crates/rodin-core/fixtures/r2-sparse-index/)
+keeps it reproducible. grep for ObservedReadSet/read_set now returns
+matches in lib.rs + derivation.rs + cargo_evidence.rs (was ZERO).
+THE MEASURED WIN (the demonstration, not the claim): on the killer
+scenario — neighbor versions 1.0.0/1.0.1/1.0.2 differing in cosmetic
+feature metadata but IDENTICAL consumed read-sets — declared
+widening prunes 2, READ-SET widening prunes 3; added prunes 1 vs 2.
+Read-set widening does work declared-structure widening PROVABLY
+CANNOT. The deeply-novel, 6/6-surviving claim is no longer just
+survived-in-review — it fires, on data, offline-reproducible.
+Claim status: R2 novel mechanism EXISTS and is demonstrated.
