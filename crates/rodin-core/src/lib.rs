@@ -391,6 +391,9 @@ pub struct SolveResult {
     pub learned_replaced: usize,
     pub steps: Vec<SolveStep>,
     pub trace: Vec<String>,
+    /// Wall-clock time of the whole solve (seed + search to fixpoint), in
+    /// microseconds. Set by [`solve`]; `0` on the raw `finish` path.
+    pub wall_us: u64,
     pub final_domains: BTreeMap<String, FinalDomain>,
     pub learned: Vec<LearnedNoGood>,
     pub derivations: DerivationStore,
@@ -1995,6 +1998,7 @@ fn solve_with_options(
     problem: Problem,
     options: SolverOptions,
 ) -> std::result::Result<SolveResult, Box<SolveError>> {
+    let started = std::time::Instant::now();
     let mut solver = Solver::new(index, problem.learned_kind, options, problem.context.clone());
     for fact in &problem.warm_facts.facts {
         solver.install_warm_fact(fact.clone());
@@ -2007,7 +2011,11 @@ fn solve_with_options(
     }
     loop {
         match solver.search(state.clone()) {
-            Ok(state) => return Ok(solver.finish(state)),
+            Ok(state) => {
+                let mut result = solver.finish(state);
+                result.wall_us = started.elapsed().as_micros().try_into().unwrap_or(u64::MAX);
+                return Ok(result);
+            }
             Err(SearchFailure::Restart) => {
                 solver.restarts += 1;
                 solver.restart_requested = false;
@@ -2524,7 +2532,10 @@ impl<'a> Solver<'a> {
                 self.intersect_domain(state, *pkg, set.clone(), premise)
             }
             Consequent::Feature(pkg, feat) => {
-                self.activate(state, *pkg, premise.clone());
+                // Enabling a feature does not pull a package into the graph — only
+                // a dependency edge (InGraph) does. A stray feature-enable on a
+                // package no edge activated must stay inert (it is harmlessly
+                // recorded and applies if some edge later activates the package).
                 self.enable_feature(state, *pkg, *feat, vec![premise]);
                 Ok(())
             }
@@ -3000,6 +3011,15 @@ impl<'a> Solver<'a> {
             selection_derivations(self.index, &state, &selected, &self.learned);
         let mut enabled_features: BTreeMap<String, BTreeSet<String>> = BTreeMap::new();
         for (pkg, feat) in &state.features {
+            // A feature can be recorded on a package no edge activated (an inert
+            // feature-enable); only report features of packages actually selected.
+            if !state
+                .domains
+                .get(pkg)
+                .is_some_and(|domain| domain.selected.is_some())
+            {
+                continue;
+            }
             if let (Some(name), Some(feature)) = (
                 self.index.name(*pkg),
                 self.index.features.resolve_str(*feat),
@@ -3067,6 +3087,7 @@ impl<'a> Solver<'a> {
             learned_replaced: self.learned_replaced,
             steps: self.steps,
             trace: self.trace,
+            wall_us: 0,
             final_domains,
             learned: self.learned,
             derivations: self.derivations,
@@ -6004,6 +6025,54 @@ mod tests {
             .map_err(|err| eyre::eyre!("{err:?}"))?;
         assert!(both.selected.contains_key("winapi@1"));
         assert!(both.selected.contains_key("nixlib@1"));
+        Ok(())
+    }
+
+    #[test]
+    fn optional_dep_is_not_activated_by_a_weak_feature_or_false_cfg() -> Result<()> {
+        // Mirrors jiff's jiff-static structure: an optional dep referenced only by
+        // a non-default feature (`static-tz` -> `dep:jiff-static`) and a weak
+        // feature (`tz-fat` -> `jiff-static?/tz-fat`), plus a mandatory
+        // always-false-cfg edge (jiff's version-locking hack). None should pull it.
+        let mut index = CompiledIndex::empty();
+        index.add_package_version(
+            "jiff-static",
+            v(0, 2, 0),
+            Vec::new(),
+            BTreeMap::from([("tz-fat".to_owned(), Vec::new())]),
+        );
+        index.add_package_version(
+            "jiff",
+            v(0, 2, 0),
+            vec![
+                SyntheticDep::normal("jiff-static", "=0.2.0").optional(true),
+                SyntheticDep::normal("jiff-static", "=0.2.0").target("cfg(any())"),
+            ],
+            BTreeMap::from([
+                ("default".to_owned(), vec!["tz-fat".to_owned()]),
+                ("tz-fat".to_owned(), vec!["jiff-static?/tz-fat".to_owned()]),
+                ("static-tz".to_owned(), vec!["dep:jiff-static".to_owned()]),
+            ]),
+        );
+        index.add_package_version(
+            "app",
+            v(1, 0, 0),
+            vec![SyntheticDep::normal("jiff", "=0.2.0")],
+            BTreeMap::new(),
+        );
+        index.finish_synthetic()?;
+
+        let result = solve(
+            &index,
+            Problem::new(vec![RootReq::new("app", "*")])
+                .with_context(ResolveContext::for_target(linux_cfg())),
+        )
+        .map_err(|err| eyre::eyre!("{err:?}"))?;
+        assert!(
+            !result.selected.keys().any(|key| key.starts_with("jiff-static")),
+            "jiff-static must not be activated (static-tz off, cfg(any()) false): {:?}",
+            result.selected.keys().collect::<Vec<_>>()
+        );
         Ok(())
     }
 

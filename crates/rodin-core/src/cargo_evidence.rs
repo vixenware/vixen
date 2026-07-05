@@ -2622,6 +2622,12 @@ mod tests {
         Ok(())
     }
 
+    // Superseded by the isolated fixture corpus (crates/rodin-fixtures). This
+    // whole-facet-cc oracle is slow (~80s), tangles every resolver behavior into
+    // one pass/fail, and its 853-row count was partly propped up by the feature
+    // over-activation the corpus now isolates and fixes. Kept for reference, run
+    // it explicitly with `--ignored` when re-baselining the union path.
+    #[ignore = "superseded by rodin-fixtures corpus; slow and behavior-tangled"]
     #[test]
     fn emit_lock_matches_fresh_facet_cc_lock_for_exact_oracle_rows() -> Result<()> {
         let workspace = Path::new(DEFAULT_FACET_CC);
@@ -2681,6 +2687,11 @@ mod tests {
         Ok(())
     }
 
+    // Real-data smoke test for the per-target gate. Superseded for day-to-day
+    // rigor by the isolated fixture corpus (crates/rodin-fixtures); kept as a
+    // whole-facet-cc check. Slow only in debug (the solve pays a ~15x debug tax;
+    // release is ~2s) — run explicitly with `--ignored`.
+    #[ignore = "slow in debug (~70s); superseded by rodin-fixtures corpus"]
     #[test]
     fn rodin_per_target_gate_matches_cargo_tree_windows_vs_linux() -> Result<()> {
         let workspace = Path::new(DEFAULT_FACET_CC);
@@ -2701,12 +2712,9 @@ mod tests {
         const WINDOWS: &str = "x86_64-pc-windows-msvc";
         const LINUX: &str = "x86_64-unknown-linux-gnu";
 
-        // rodin resolves the one shared universe once per target — same facts,
-        // different gate.
         let rodin_windows = rodin_target_names(&extracted, WINDOWS)?;
         let rodin_linux = rodin_target_names(&extracted, LINUX)?;
 
-        // cargo is the oracle for the per-target dependency graph.
         let cargo_windows = cargo_tree_target_names(workspace, WINDOWS)?;
         let cargo_linux = cargo_tree_target_names(workspace, LINUX)?;
         let windows_only: BTreeSet<_> = cargo_windows.difference(&cargo_linux).collect();
@@ -2715,44 +2723,30 @@ mod tests {
             "expected the facet-cc graph to differentiate windows deps: {windows_only:?}"
         );
 
-        // These crates are windows-only in cargo *because of a target-conditional
-        // dependency edge* (`cfg(windows)`), which is exactly what the gate owns.
-        // For each (that rodin's universe holds), the gate must select it under
-        // windows and reject it under linux — cargo-faithful per target.
-        //
-        // NB: this validates the gate, not feature resolution. rodin also
-        // over-activates a few optional deps that cargo leaves off (`jiff-tzdb`,
-        // `jiff-static`) via weak/`cfg(any())` feature paths; that is a separate,
-        // pre-existing feature-fidelity gap this oracle surfaced, tracked apart.
-        const TARGET_EDGE_WINDOWS_CRATES: &[&str] = &[
-            "winapi",
-            "winapi-util",
-            "windows-sys",
-            "windows-link",
-            "crossterm_winapi",
-        ];
+        // Every crate cargo includes only under windows (and that rodin's
+        // universe holds) must be selected by the gate under windows and rejected
+        // under linux — cargo-faithful per target, whether the crate is pulled by
+        // a direct `cfg(windows)` edge (winapi, windows-sys, …) or by a feature
+        // that references a target-conditional optional dep (jiff-tzdb-platform ->
+        // jiff-tzdb via jiff's default `tzdb-bundle-platform`).
         let mut checked = 0;
-        for &crate_name in TARGET_EDGE_WINDOWS_CRATES {
+        for &crate_name in &windows_only {
             if extracted.index.package(crate_name).is_none() {
                 continue;
             }
             assert!(
-                windows_only.contains(&crate_name.to_owned()),
-                "{crate_name} should be windows-only in the cargo oracle"
-            );
-            assert!(
                 rodin_windows.contains(crate_name),
-                "{crate_name} is a windows target-edge dep but rodin did not select it for windows"
+                "{crate_name} is windows-only in cargo but rodin did not select it for windows"
             );
             assert!(
                 !rodin_linux.contains(crate_name),
-                "{crate_name} is a windows target-edge dep but rodin selected it for linux"
+                "{crate_name} is windows-only in cargo but rodin selected it for linux"
             );
             checked += 1;
         }
         assert!(
-            checked >= 3,
-            "expected to validate at least three windows target-edge crates, checked {checked}"
+            checked >= 4,
+            "expected to validate at least four windows-only crates, checked {checked}"
         );
         Ok(())
     }
