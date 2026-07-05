@@ -16,6 +16,7 @@ use semver::{Version, VersionReq};
 
 pub mod cargo_evidence;
 mod lock_emit;
+pub mod workspace;
 
 pub use cargo_evidence::{
     CargoDivergence, CargoDivergenceKind, CargoEvidenceReport, CargoExtractionGap,
@@ -24,6 +25,7 @@ pub use cargo_evidence::{
     run_cargo_evidence, run_facet_cc_evidence,
 };
 pub use lock_emit::{LockDependency, LockPackageRow, emit_lock};
+pub use workspace::{PhantomEdge, WorkspaceResolution, resolve_workspace};
 
 const CRATES_IO: &str = "crates.io";
 const FEATURE_SCOPES: &[&str] = &["normal", "build", "dev"];
