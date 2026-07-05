@@ -550,3 +550,24 @@ RULED (Amos): THE CHECKER IS WRITTEN IN VIX — "in code that is for
 now unchecked! But... not for long." The collapsed ladder is the
 plan of record: ast() → spec+corpus → vix checker → fixpoint
 self-check. Unchecked-vix era is temporary by design.
+
+**BOARD (2026-07-05 early, post-checker-launch):** MERGED to facet
+main: #2431 foundation, #2433 FUNERAL, #2435 real-process lane,
+#2436 ast() (merged prematurely by my gate error — two reds rode
+along; #2439 fixes both: vix-wire rustdoc tag + nextest leash for
+the 3x coverage-slow fable checker tests; RED-GATED watch running).
+OPEN PR TRAIN (order: 2439 first, others rebase behind): #2437
+spec+corpus (VERIFIED 87+1skip; watch chained), #2438 modules
+(VERIFIED 207/207; agent self-merges after prelude auto-import
+commit), #2440 crate slice 2 (VERIFIED 204+89 real-lane; real rustc
+oracle: binary runs, unit-graph diffed), #2441 projection memo
+(VERIFIED 207/207; is_patron named test; tier-2 repins under new
+coarse key). VIXENWARE: Rodin thrash fixes in flight (invariant
+pin: search order only, never answers — pinned-selections
+assertions; STOP-and-revert if any selection changes). CHECKER
+IGNITION ARMED: when #2437 merges, dispatch checker-v0 IN VIX
+(resolve_ref + type_of over ast(), corpus-harness-driven, on a
+fresh worktree off main). MERGE-GATE LESSON (banked in behavior):
+watch/check/merge as separate red-gated steps, never &&-chained.
+INTERRUPT LESSON (Amos): interrupts = they want the floor, NEVER
+skip verification — run it after.
