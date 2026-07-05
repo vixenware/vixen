@@ -22,7 +22,13 @@ impl RustVolume {
         let this = Self::alloc().set_ivars(VolumeIvars {
             file_system: unsafe {
                 Retained::retain(file_system as *const FSUnaryFileSystem as *mut FSUnaryFileSystem)
-                    .unwrap()
+                    .unwrap_or_else(|| {
+                        log_event(
+                            "error",
+                            "vixen-fskit failed to retain filesystem for volume",
+                        );
+                        panic!("failed to retain filesystem for volume")
+                    })
             },
             items: Mutex::new(items),
             routed: Mutex::new(RoutedItems {
@@ -39,20 +45,13 @@ impl RustVolume {
     }
 
     pub(crate) fn get_cached_item(&self, item_id: u64) -> Option<Retained<RustItem>> {
-        self.ivars()
-            .items
-            .lock()
-            .expect("items mutex poisoned")
+        lock_unpoisoned(&self.ivars().items, "volume items")
             .get(&item_id)
             .cloned()
     }
 
     pub(crate) fn cache_item(&self, item: Retained<RustItem>) -> Retained<RustItem> {
-        self.ivars()
-            .items
-            .lock()
-            .expect("items mutex poisoned")
-            .insert(item.item_id(), item.clone());
+        lock_unpoisoned(&self.ivars().items, "volume items").insert(item.item_id(), item.clone());
         item
     }
 
@@ -61,15 +60,8 @@ impl RustVolume {
             return;
         }
 
-        self.ivars()
-            .items
-            .lock()
-            .expect("items mutex poisoned")
-            .remove(&item_id);
-        self.ivars()
-            .routed
-            .lock()
-            .expect("routed items mutex poisoned")
+        lock_unpoisoned(&self.ivars().items, "volume items").remove(&item_id);
+        lock_unpoisoned(&self.ivars().routed, "volume routed items")
             .by_key
             .retain(|_, local_id| *local_id != item_id);
     }
@@ -83,20 +75,12 @@ impl RustVolume {
         // Retain routed items for every still-live provider generation (multiple prefixes
         // can be connected at once); drop entries whose provider disconnected.
         let live_generations = root_peer_state().live_generations();
-        let live_local_ids = self
-            .ivars()
-            .items
-            .lock()
-            .expect("items mutex poisoned")
+        let live_local_ids = lock_unpoisoned(&self.ivars().items, "volume items")
             .keys()
             .copied()
             .collect::<std::collections::HashSet<_>>();
 
-        let mut routed = self
-            .ivars()
-            .routed
-            .lock()
-            .expect("routed items mutex poisoned");
+        let mut routed = lock_unpoisoned(&self.ivars().routed, "volume routed items");
         routed.by_key.retain(|key, local_id| {
             live_generations.contains(&key.connection_generation)
                 && live_local_ids.contains(local_id)
@@ -263,7 +247,13 @@ impl RustVolume {
                     Ok(status_item.attributes_for_request(request))
                 }
             }
-            VirtualKind::None => self.refresh_backend_item(item, request),
+            VirtualKind::None => {
+                log_event(
+                    "error",
+                    "vixen-fskit synchronous backend attributes path is disabled",
+                );
+                Err(posix_error(libc::EIO))
+            }
         }
     }
 
@@ -276,13 +266,18 @@ impl RustVolume {
         let parent_local_id = item.parent_local_id();
         let item_name = fs_filename_string(&item.fs_name());
         let (client, current_generation) = self.connected_client_for_item(item)?;
-        let result = block_on_vfs(async move {
-            let result = client
-                .get_attributes(backend_item_id)
-                .await
-                .map_err(|error| vox_rpc_errno("get_attributes", error))?;
-            Ok::<_, i32>((result, current_generation))
-        })?;
+        let result = run_vfs(
+            VfsOp::Attributes,
+            root_peer_state().subscribe_cancellation(),
+            async move {
+                let result = client
+                    .get_attributes(backend_item_id)
+                    .await
+                    .map_err(|error| vox_rpc_errno("get_attributes", error))?;
+                Ok::<_, i32>((result, current_generation))
+            },
+        )
+        .map_err(posix_error)?;
 
         let (result, _) = result;
         if result.error != 0 {
@@ -310,16 +305,21 @@ impl RustVolume {
     pub(crate) fn lookup_item(
         &self,
         directory: &RustItem,
-        name: &FSFileName,
+        requested_name: String,
     ) -> Result<(Retained<FSItem>, Retained<FSFileName>), Retained<NSError>> {
-        let requested_name = fs_filename_string(name);
-
         if requested_name == "." {
-            let item: Retained<FSItem> = self
-                .get_cached_item(directory.item_id())
-                .expect("directory should be cached")
-                .into_super();
-            return Ok((item, fs_filename(".")));
+            if let Some(item) = self.get_cached_item(directory.item_id()) {
+                let item: Retained<FSItem> = item.into_super();
+                return Ok((item, fs_filename(".")));
+            }
+            log_event(
+                "error",
+                format!(
+                    "vixen-fskit lookup missing cached directory {}",
+                    directory.debug_summary()
+                ),
+            );
+            return Err(posix_error(libc::ENOENT));
         }
 
         if requested_name == ".." {
@@ -330,10 +330,14 @@ impl RustVolume {
         }
 
         if directory.item_id() == ROOT_LOCAL_ID && requested_name == VIXENFS_DIR_NAME {
-            let item = self
-                .get_cached_item(VIXENFS_DIR_ID)
-                .expect(".vixenfs dir should be cached");
-            return Ok((item.clone().into_super(), item.fs_name()));
+            if let Some(item) = self.get_cached_item(VIXENFS_DIR_ID) {
+                return Ok((item.clone().into_super(), item.fs_name()));
+            }
+            log_event(
+                "error",
+                "vixen-fskit lookup missing cached .vixenfs directory",
+            );
+            return Err(posix_error(libc::ENOENT));
         }
 
         // Mount root: any other name must be a claimed prefix. Resolve it to that provider's
@@ -366,13 +370,18 @@ impl RustVolume {
         let parent_local_id = directory.item_id();
         let requested_name_for_rpc = requested_name.clone();
         let (client, generation) = self.connected_client_for_item(directory)?;
-        let result = block_on_vfs(async move {
-            let lookup = client
-                .lookup(parent_backend_id, requested_name_for_rpc)
-                .await
-                .map_err(|error| vox_rpc_errno("lookup", error))?;
-            Ok::<_, i32>((lookup, generation))
-        })?;
+        let result = run_vfs(
+            VfsOp::Lookup,
+            root_peer_state().subscribe_cancellation(),
+            async move {
+                let lookup = client
+                    .lookup(parent_backend_id, requested_name_for_rpc)
+                    .await
+                    .map_err(|error| vox_rpc_errno("lookup", error))?;
+                Ok::<_, i32>((lookup, generation))
+            },
+        )
+        .map_err(posix_error)?;
 
         let (LookupResult { attrs, error }, generation) = result;
         if error != 0 {
@@ -425,7 +434,7 @@ impl RustVolume {
         directory: &RustItem,
         cookie: FSDirectoryCookie,
         verifier: FSDirectoryVerifier,
-        attributes: Option<&FSItemGetAttributesRequest>,
+        provide_attributes: bool,
         packer: &FSDirectoryEntryPacker,
     ) -> Result<FSDirectoryVerifier, Retained<NSError>> {
         if directory.item_id() == VIXENFS_DIR_ID {
@@ -438,7 +447,7 @@ impl RustVolume {
                 self.cache_item(RustItem::status_json(root_peer_state().status_json_bytes()))
             };
             if cookie == unsafe { FSDirectoryCookieInitial } {
-                let attrs = item.attributes_for_request(attributes);
+                let attrs = item.attributes_for_request(None);
                 log_event(
                     "debug",
                     format!(
@@ -452,7 +461,7 @@ impl RustVolume {
                         FSItemType::File,
                         FSItemID(STATUS_JSON_ID),
                         0,
-                        if attributes.is_some() {
+                        if provide_attributes {
                             Some(attrs.as_ref())
                         } else {
                             None
@@ -468,9 +477,13 @@ impl RustVolume {
             // Root listing: `.vixenfs`, then one directory per live prefix provider. All
             // local — no backend RPC at the root; each prefix dir routes to its provider
             // only when entered (via the generic backend path keyed by generation).
-            let meta_dir = self
-                .get_cached_item(VIXENFS_DIR_ID)
-                .expect(".vixenfs dir should be cached");
+            let Some(meta_dir) = self.get_cached_item(VIXENFS_DIR_ID) else {
+                log_event(
+                    "error",
+                    "vixen-fskit enumerate missing cached .vixenfs directory",
+                );
+                return Err(posix_error(libc::ENOENT));
+            };
             let mut entries: Vec<Retained<RustItem>> = vec![meta_dir];
             for (prefix, generation) in root_peer_state().live_prefixes() {
                 entries.push(self.prefix_dir_item(&prefix, generation));
@@ -486,7 +499,7 @@ impl RustVolume {
             };
             let total = entries.len();
             for (index, item) in entries.iter().enumerate().skip(start) {
-                let attrs = item.attributes_for_request(attributes);
+                let attrs = item.attributes_for_request(None);
                 let next_cookie = if index + 1 == total {
                     0
                 } else {
@@ -506,7 +519,7 @@ impl RustVolume {
                         attrs.r#type(),
                         FSItemID(item.item_id()),
                         next_cookie,
-                        if attributes.is_some() {
+                        if provide_attributes {
                             Some(attrs.as_ref())
                         } else {
                             None
@@ -524,13 +537,18 @@ impl RustVolume {
         let directory_backend_id = directory.backend_item_id();
         let parent_local_id = directory.item_id();
         let (client, generation) = self.connected_client_for_item(directory)?;
-        let result = block_on_vfs(async move {
-            let listing = client
-                .read_dir(directory_backend_id, cookie, verifier)
-                .await
-                .map_err(|error| vox_rpc_errno("read_dir", error))?;
-            Ok::<_, i32>((listing, generation))
-        })?;
+        let result = run_vfs(
+            VfsOp::Enumerate,
+            root_peer_state().subscribe_cancellation(),
+            async move {
+                let listing = client
+                    .read_dir(directory_backend_id, cookie, verifier)
+                    .await
+                    .map_err(|error| vox_rpc_errno("read_dir", error))?;
+                Ok::<_, i32>((listing, generation))
+            },
+        )
+        .map_err(posix_error)?;
 
         let (
             ReadDirResult {
@@ -555,7 +573,7 @@ impl RustVolume {
                 &entry.name,
                 &entry_attributes(&entry),
             );
-            let attrs = item.attributes_for_request(attributes);
+            let attrs = item.attributes_for_request(None);
             log_event(
                 "debug",
                 format!(
@@ -574,7 +592,7 @@ impl RustVolume {
                     attrs.r#type(),
                     FSItemID(item.item_id()),
                     entry_cookie,
-                    if attributes.is_some() {
+                    if provide_attributes {
                         Some(attrs.as_ref())
                     } else {
                         None
@@ -642,13 +660,18 @@ impl RustVolume {
         let backend_item_id = item.backend_item_id();
         let offset = offset.max(0) as u64;
         let (client, _) = self.connected_client_for_item(item)?;
-        let result = block_on_vfs(async move {
-            let result = client
-                .read(backend_item_id, offset, length as u64)
-                .await
-                .map_err(|error| vox_rpc_errno("read", error))?;
-            Ok::<_, i32>(result)
-        })?;
+        let result = run_vfs(
+            VfsOp::Read,
+            root_peer_state().subscribe_cancellation(),
+            async move {
+                let result = client
+                    .read(backend_item_id, offset, length as u64)
+                    .await
+                    .map_err(|error| vox_rpc_errno("read", error))?;
+                Ok::<_, i32>(result)
+            },
+        )
+        .map_err(posix_error)?;
 
         match result {
             ReadResult { data, error: 0 } => {

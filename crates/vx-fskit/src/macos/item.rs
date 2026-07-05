@@ -11,7 +11,8 @@ use vx_services::ItemAttributes as VfsItemAttributes;
 
 use super::support::{
     ROOT_BACKEND_ID, ROOT_LOCAL_ID, STATUS_JSON_ID, STATUS_JSON_NAME, VIXENFS_DIR_ID,
-    VIXENFS_DIR_NAME, fs_filename, fs_filename_string, fs_item_attributes, fs_item_type, unix_time,
+    VIXENFS_DIR_NAME, fs_filename, fs_filename_string, fs_item_attributes, fs_item_type,
+    lock_unpoisoned, unix_time,
 };
 
 #[derive(Clone, Copy, PartialEq, Eq)]
@@ -184,18 +185,11 @@ impl RustItem {
     }
 
     pub(super) fn parent_local_id(&self) -> u64 {
-        self.ivars()
-            .state
-            .lock()
-            .expect("item state mutex poisoned")
-            .parent_local_id
+        lock_unpoisoned(&self.ivars().state, "item state").parent_local_id
     }
 
     pub(super) fn fs_name(&self) -> Retained<FSFileName> {
-        self.ivars()
-            .state
-            .lock()
-            .expect("item state mutex poisoned")
+        lock_unpoisoned(&self.ivars().state, "item state")
             .name
             .clone()
     }
@@ -204,11 +198,7 @@ impl RustItem {
         &self,
         request: Option<&FSItemGetAttributesRequest>,
     ) -> Retained<FSItemAttributes> {
-        let state = self
-            .ivars()
-            .state
-            .lock()
-            .expect("item state mutex poisoned");
+        let state = lock_unpoisoned(&self.ivars().state, "item state");
         fs_item_attributes(
             request,
             self.item_id(),
@@ -227,11 +217,7 @@ impl RustItem {
         name: &str,
         attrs: &VfsItemAttributes,
     ) {
-        let mut state = self
-            .ivars()
-            .state
-            .lock()
-            .expect("item state mutex poisoned");
+        let mut state = lock_unpoisoned(&self.ivars().state, "item state");
         state.name = fs_filename(name);
         state.parent_local_id = parent_local_id;
         state.item_type = fs_item_type(attrs.item_type);
@@ -242,11 +228,7 @@ impl RustItem {
     }
 
     pub(super) fn update_name_and_parent(&self, parent_local_id: u64, name: &str) {
-        let mut state = self
-            .ivars()
-            .state
-            .lock()
-            .expect("item state mutex poisoned");
+        let mut state = lock_unpoisoned(&self.ivars().state, "item state");
         state.name = fs_filename(name);
         state.parent_local_id = parent_local_id;
     }
@@ -254,11 +236,7 @@ impl RustItem {
     /// Store the rendered `status.json` bytes and sync `size` to their length, so a
     /// subsequent read serves exactly these bytes (consistent size + content).
     pub(super) fn update_status(&self, bytes: Vec<u8>) {
-        let mut state = self
-            .ivars()
-            .state
-            .lock()
-            .expect("item state mutex poisoned");
+        let mut state = lock_unpoisoned(&self.ivars().state, "item state");
         state.size = bytes.len() as u64;
         state.modified_time = unix_time();
         state.status_bytes = bytes;
@@ -266,10 +244,7 @@ impl RustItem {
 
     /// The exact `status.json` bytes last stored (whose length equals the reported size).
     pub(super) fn status_bytes(&self) -> Vec<u8> {
-        self.ivars()
-            .state
-            .lock()
-            .expect("item state mutex poisoned")
+        lock_unpoisoned(&self.ivars().state, "item state")
             .status_bytes
             .clone()
     }
@@ -278,11 +253,7 @@ impl RustItem {
     /// served until the last close. Subsequent opens just bump the refcount and keep the
     /// existing snapshot, so concurrent readers all see one consistent view.
     pub(super) fn status_open(&self, bytes: Vec<u8>) {
-        let mut state = self
-            .ivars()
-            .state
-            .lock()
-            .expect("item state mutex poisoned");
+        let mut state = lock_unpoisoned(&self.ivars().state, "item state");
         if state.status_open_count == 0 {
             state.size = bytes.len() as u64;
             state.modified_time = unix_time();
@@ -294,30 +265,17 @@ impl RustItem {
     /// Close a handle on `status.json`. The frozen snapshot is kept after the last close
     /// (a fresh render replaces it on the next getAttributes/open when not open).
     pub(super) fn status_close(&self) {
-        let mut state = self
-            .ivars()
-            .state
-            .lock()
-            .expect("item state mutex poisoned");
+        let mut state = lock_unpoisoned(&self.ivars().state, "item state");
         state.status_open_count = state.status_open_count.saturating_sub(1);
     }
 
     /// Whether any handle is currently open on `status.json` (snapshot is frozen).
     pub(super) fn status_is_open(&self) -> bool {
-        self.ivars()
-            .state
-            .lock()
-            .expect("item state mutex poisoned")
-            .status_open_count
-            > 0
+        lock_unpoisoned(&self.ivars().state, "item state").status_open_count > 0
     }
 
     pub(super) fn debug_summary(&self) -> String {
-        let state = self
-            .ivars()
-            .state
-            .lock()
-            .expect("item state mutex poisoned");
+        let state = lock_unpoisoned(&self.ivars().state, "item state");
         format!(
             "local={} backend={} parent={} gen={} name={} kind={} type={:?} mode={:#o} size={}",
             self.ivars().local_item_id,

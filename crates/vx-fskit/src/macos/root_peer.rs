@@ -10,7 +10,7 @@ use vx_services::VfsClient;
 use super::OwnedVixenFsConfig;
 use super::log_event;
 use super::logging::log_filter_path;
-use super::support::runtime;
+use super::support::{VfsCancellation, lock_unpoisoned, runtime};
 
 static ROOT_PEER_STATE: OnceLock<RootPeerState> = OnceLock::new();
 const STATUS_JSON_SIZE: usize = 8192;
@@ -23,6 +23,7 @@ pub(super) struct RootPeerState {
     app_group_path: PathBuf,
     log_filter_path: PathBuf,
     inner: Arc<Mutex<RootPeerSnapshot>>,
+    cancellation_tx: tokio::sync::watch::Sender<VfsCancellation>,
     /// Set once the VFS socket listener has been started. Only the mounting instance
     /// flips this; probe-only instances never do, so they never bind the socket.
     listener_started: Arc<AtomicBool>,
@@ -61,6 +62,7 @@ impl RootPeerState {
                 generation: 0,
                 disconnect_reason: Some("not connected".to_owned()),
             })),
+            cancellation_tx: tokio::sync::watch::channel(VfsCancellation::initial()).0,
             listener_started: Arc::new(AtomicBool::new(false)),
         };
         // NB: the listener is NOT started here. A single `mount` makes FSKit create the
@@ -145,10 +147,7 @@ impl RootPeerState {
     }
 
     fn record_connected(&self, prefix: String, client: VfsClient) -> u64 {
-        let mut snapshot = self
-            .inner
-            .lock()
-            .expect("root peer snapshot mutex poisoned");
+        let mut snapshot = lock_unpoisoned(&self.inner, "root peer snapshot");
         snapshot.generation += 1;
         let generation = snapshot.generation;
         snapshot
@@ -160,31 +159,34 @@ impl RootPeerState {
     }
 
     fn record_closed(&self, prefix: &str, generation: u64, reason: &str) {
-        let mut snapshot = self
-            .inner
-            .lock()
-            .expect("root peer snapshot mutex poisoned");
-        // Only drop the entry if it's still the one that closed — a newer connection may
-        // have re-claimed the same prefix in the meantime.
-        if snapshot
-            .clients
-            .get(prefix)
-            .is_some_and(|entry| entry.generation == generation)
-        {
-            snapshot.clients.remove(prefix);
-        }
-        if snapshot.clients.is_empty() {
-            snapshot.disconnect_reason = Some(reason.to_owned());
+        let removed = {
+            let mut snapshot = lock_unpoisoned(&self.inner, "root peer snapshot");
+            // Only drop the entry if it's still the one that closed — a newer connection may
+            // have re-claimed the same prefix in the meantime.
+            let removed = if snapshot
+                .clients
+                .get(prefix)
+                .is_some_and(|entry| entry.generation == generation)
+            {
+                snapshot.clients.remove(prefix);
+                true
+            } else {
+                false
+            };
+            if snapshot.clients.is_empty() {
+                snapshot.disconnect_reason = Some(reason.to_owned());
+            }
+            removed
+        };
+        if removed {
+            self.cancel_inflight(libc::ESTALE, format!("provider closed: {reason}"));
         }
     }
 
     fn record_disconnect(&self, reason: String) {
         // An accept that never registered a client (e.g. handshake failure) — just note why,
         // without disturbing any live prefixes.
-        let mut snapshot = self
-            .inner
-            .lock()
-            .expect("root peer snapshot mutex poisoned");
+        let mut snapshot = lock_unpoisoned(&self.inner, "root peer snapshot");
         if snapshot.clients.is_empty() {
             snapshot.disconnect_reason = Some(reason);
         }
@@ -193,10 +195,7 @@ impl RootPeerState {
     /// The client serving the connection with this generation — used to route a routed item
     /// back to the prefix provider that owns it.
     pub(super) fn client_for_generation(&self, generation: u64) -> Result<VfsClient, i32> {
-        let snapshot = self
-            .inner
-            .lock()
-            .expect("root peer snapshot mutex poisoned");
+        let snapshot = lock_unpoisoned(&self.inner, "root peer snapshot");
         snapshot
             .clients
             .values()
@@ -207,10 +206,7 @@ impl RootPeerState {
 
     /// The client for a named prefix, plus its generation (used to enter `/<prefix>/`).
     pub(super) fn client_for_prefix(&self, prefix: &str) -> Option<(VfsClient, u64)> {
-        let snapshot = self
-            .inner
-            .lock()
-            .expect("root peer snapshot mutex poisoned");
+        let snapshot = lock_unpoisoned(&self.inner, "root peer snapshot");
         snapshot
             .clients
             .get(prefix)
@@ -220,10 +216,7 @@ impl RootPeerState {
     /// Live prefixes and the generation serving each, sorted by name — the directories the
     /// mount root exposes.
     pub(super) fn live_prefixes(&self) -> Vec<(String, u64)> {
-        let snapshot = self
-            .inner
-            .lock()
-            .expect("root peer snapshot mutex poisoned");
+        let snapshot = lock_unpoisoned(&self.inner, "root peer snapshot");
         let mut prefixes: Vec<(String, u64)> = snapshot
             .clients
             .iter()
@@ -235,10 +228,7 @@ impl RootPeerState {
 
     /// All live connection generations — the set a routed-item cache should retain.
     pub(super) fn live_generations(&self) -> Vec<u64> {
-        let snapshot = self
-            .inner
-            .lock()
-            .expect("root peer snapshot mutex poisoned");
+        let snapshot = lock_unpoisoned(&self.inner, "root peer snapshot");
         snapshot
             .clients
             .values()
@@ -247,10 +237,7 @@ impl RootPeerState {
     }
 
     pub(super) fn generation(&self) -> u64 {
-        self.inner
-            .lock()
-            .expect("root peer snapshot mutex poisoned")
-            .generation
+        lock_unpoisoned(&self.inner, "root peer snapshot").generation
     }
 
     fn socket_path_string(&self) -> String {
@@ -258,36 +245,63 @@ impl RootPeerState {
     }
 
     pub(super) fn status_json_bytes(&self) -> Vec<u8> {
-        let snapshot = self
-            .inner
-            .lock()
-            .expect("root peer snapshot mutex poisoned");
-        let mut live_prefixes: Vec<String> = snapshot.clients.keys().cloned().collect();
-        live_prefixes.sort();
+        let payload = {
+            let snapshot = lock_unpoisoned(&self.inner, "root peer snapshot");
+            let mut live_prefixes: Vec<String> = snapshot.clients.keys().cloned().collect();
+            live_prefixes.sort();
 
-        let payload = StatusPayload {
-            connected: !snapshot.clients.is_empty(),
-            ever_connected: snapshot.ever_connected,
-            bundle_version: Some(self.bundle_version.clone()),
-            bundle_identifier: Some(self.bundle_identifier.clone()),
-            app_group_path: Some(self.app_group_path.display().to_string()),
-            socket_path: Some(self.socket_path.display().to_string()),
-            log_filter_path: Some(self.log_filter_path.display().to_string()),
-            extension_pid: Some(unsafe { libc::getpid() as u32 }),
-            connected_at: None,
-            disconnected_at: None,
-            uptime_seconds: None,
-            disconnect_reason: snapshot.disconnect_reason.clone(),
-            live_prefixes,
+            StatusPayload {
+                connected: !snapshot.clients.is_empty(),
+                ever_connected: snapshot.ever_connected,
+                bundle_version: Some(self.bundle_version.clone()),
+                bundle_identifier: Some(self.bundle_identifier.clone()),
+                app_group_path: Some(self.app_group_path.display().to_string()),
+                socket_path: Some(self.socket_path.display().to_string()),
+                log_filter_path: Some(self.log_filter_path.display().to_string()),
+                extension_pid: Some(unsafe { libc::getpid() as u32 }),
+                connected_at: None,
+                disconnected_at: None,
+                uptime_seconds: None,
+                disconnect_reason: snapshot.disconnect_reason.clone(),
+                live_prefixes,
+            }
         };
-        let mut bytes = facet_json::to_string(&payload)
-            .expect("StatusPayload serialization should not fail")
-            .into_bytes();
+        let mut bytes = match facet_json::to_string(&payload) {
+            Ok(json) => json.into_bytes(),
+            Err(error) => {
+                log_event(
+                    "error",
+                    format!("vixen-fskit status payload serialization failed: {error:?}"),
+                );
+                b"status unavailable\n".to_vec()
+            }
+        };
         if bytes.len() < STATUS_JSON_SIZE {
             bytes.resize(STATUS_JSON_SIZE - 1, b' ');
             bytes.push(b'\n');
         }
         bytes
+    }
+
+    pub(super) fn subscribe_cancellation(&self) -> tokio::sync::watch::Receiver<VfsCancellation> {
+        self.cancellation_tx.subscribe()
+    }
+
+    pub(super) fn cancel_inflight(&self, errno: i32, reason: impl Into<String>) {
+        let current = self.cancellation_tx.borrow().generation;
+        let cancellation = VfsCancellation {
+            generation: current.wrapping_add(1),
+            errno,
+            reason: reason.into(),
+        };
+        log_event(
+            "warn",
+            format!(
+                "vixen-fskit cancelling in-flight vfs ops errno={} reason={}",
+                cancellation.errno, cancellation.reason
+            ),
+        );
+        self.cancellation_tx.send_replace(cancellation);
     }
 }
 

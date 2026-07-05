@@ -85,6 +85,7 @@ define_class!(
             reply: &block2::DynBlock<dyn Fn(*mut objc2_foundation::NSError)>,
         ) {
             log_event("info", "vixen-fskit unloadResource");
+            root_peer_state().cancel_inflight(libc::ESTALE, "filesystem unloadResource");
             let file_system = self.as_super();
             let status =
                 unsafe { FSContainerStatus::notReadyWithStatus(&posix_error(libc::ENOTCONN)) };

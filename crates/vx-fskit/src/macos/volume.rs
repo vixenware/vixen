@@ -25,9 +25,10 @@ use super::item::{RustItem, VirtualKind, as_rust_item};
 use super::log_event;
 use super::root_peer::root_peer_state;
 use super::support::{
-    ROOT_BACKEND_ID, ROOT_LOCAL_ID, ROUTED_ITEM_ID_START, STATUS_JSON_ID, STATUS_JSON_NAME,
-    VIXENFS_DIR_ID, VIXENFS_DIR_NAME, VOLUME_NAME, attr_valid_mask, block_on_vfs, entry_attributes,
-    fs_filename, fs_filename_string, posix_error, vox_rpc_errno,
+    ROOT_BACKEND_ID, ROOT_LOCAL_ID, ROUTED_ITEM_ID_START, ReplyGuard, RetainedObjc, STATUS_JSON_ID,
+    STATUS_JSON_NAME, VIXENFS_DIR_ID, VIXENFS_DIR_NAME, VOLUME_NAME, VfsOp, attr_valid_mask,
+    entry_attributes, fs_filename, fs_filename_string, lock_unpoisoned, posix_error, run_vfs,
+    runtime, vox_rpc_errno,
 };
 
 mod helpers;
@@ -97,6 +98,7 @@ define_class!(
         #[unsafe(method(unmountWithReplyHandler:))]
         unsafe fn unmountWithReplyHandler(&self, reply: &block2::DynBlock<dyn Fn()>) {
             log_event("info", "vixen-fskit unmount");
+            root_peer_state().cancel_inflight(libc::ESTALE, "volume unmount");
             let ready = unsafe { FSContainerStatus::ready() };
             unsafe { FSFileSystemBase::setContainerStatus(&*self.ivars().file_system, &ready) };
             reply.call(());
@@ -119,11 +121,12 @@ define_class!(
             item: &FSItem,
             reply: &block2::DynBlock<dyn Fn(*mut FSItemAttributes, *mut NSError)>,
         ) {
+            let reply = ReplyGuard::<dyn Fn(*mut FSItemAttributes, *mut NSError)>::copy(
+                "getAttributes",
+                reply,
+            );
             let Some(item) = as_rust_item(item) else {
-                reply.call((
-                    ptr::null_mut(),
-                    Retained::into_raw(posix_error(libc::ENOENT)),
-                ));
+                reply.error(libc::ENOENT);
                 return;
             };
             log_event(
@@ -134,6 +137,40 @@ define_class!(
                     item.debug_summary()
                 ),
             );
+
+            if item.virtual_kind() == VirtualKind::None {
+                let Some(volume) = RetainedObjc::retain(self) else {
+                    reply.error(libc::EIO);
+                    return;
+                };
+                let Some(item) = RetainedObjc::retain(item) else {
+                    reply.error(libc::EIO);
+                    return;
+                };
+                runtime().spawn_blocking(move || {
+                    let volume = unsafe { volume.get() };
+                    let item = unsafe { item.get() };
+                    match volume.refresh_backend_item(item, None) {
+                        Ok(attrs) => {
+                            log_event(
+                                "debug",
+                                format!(
+                                    "vixen-fskit getAttributes.reply valid_mask={:#x} file_id={} parent={} type={:?} mode={:#o} size={}",
+                                    attr_valid_mask(&attrs),
+                                    unsafe { attrs.fileID().0 },
+                                    unsafe { attrs.parentID().0 },
+                                    unsafe { attrs.r#type() },
+                                    unsafe { attrs.mode() },
+                                    unsafe { attrs.size() }
+                                ),
+                            );
+                            reply.reply((Retained::into_raw(attrs), ptr::null_mut()));
+                        }
+                        Err(error) => reply.reply((ptr::null_mut(), Retained::into_raw(error))),
+                    }
+                });
+                return;
+            }
 
             match self.attributes_for_item(item, Some(desired_attributes)) {
                 Ok(attrs) => {
@@ -149,9 +186,9 @@ define_class!(
                             unsafe { attrs.size() }
                         ),
                     );
-                    reply.call((Retained::into_raw(attrs), ptr::null_mut()))
+                    reply.reply((Retained::into_raw(attrs), ptr::null_mut()))
                 }
-                Err(error) => reply.call((ptr::null_mut(), Retained::into_raw(error))),
+                Err(error) => reply.reply((ptr::null_mut(), Retained::into_raw(error))),
             }
         }
 
@@ -162,11 +199,12 @@ define_class!(
             item: &FSItem,
             reply: &block2::DynBlock<dyn Fn(*mut FSItemAttributes, *mut NSError)>,
         ) {
+            let reply = ReplyGuard::<dyn Fn(*mut FSItemAttributes, *mut NSError)>::copy(
+                "setAttributes",
+                reply,
+            );
             let Some(item) = as_rust_item(item) else {
-                reply.call((
-                    ptr::null_mut(),
-                    Retained::into_raw(posix_error(libc::ENOENT)),
-                ));
+                reply.error(libc::ENOENT);
                 return;
             };
             log_event(
@@ -180,10 +218,7 @@ define_class!(
             );
 
             if item.virtual_kind() != VirtualKind::None {
-                reply.call((
-                    ptr::null_mut(),
-                    Retained::into_raw(posix_error(libc::EACCES)),
-                ));
+                reply.error(libc::EACCES);
                 return;
             }
 
@@ -205,28 +240,48 @@ define_class!(
             let (client, _) = match self.connected_client_for_item(item) {
                 Ok(connected) => connected,
                 Err(error) => {
-                    reply.call((ptr::null_mut(), Retained::into_raw(error)));
+                    reply.reply((ptr::null_mut(), Retained::into_raw(error)));
                     return;
                 }
             };
-            let result = block_on_vfs(async move {
-                let result = client
-                    .set_attributes(backend_item_id, params)
-                    .await
-                    .map_err(|error| vox_rpc_errno("set_attributes", error))?;
-                Ok::<_, i32>(result)
-            });
+            let Some(volume) = RetainedObjc::retain(self) else {
+                reply.error(libc::EIO);
+                return;
+            };
+            let Some(item) = RetainedObjc::retain(item) else {
+                reply.error(libc::EIO);
+                return;
+            };
+            runtime().spawn_blocking(move || {
+                let result = run_vfs(
+                    VfsOp::Mutate,
+                    root_peer_state().subscribe_cancellation(),
+                    async move {
+                        let result = client
+                            .set_attributes(backend_item_id, params)
+                            .await
+                            .map_err(|error| vox_rpc_errno("set_attributes", error))?;
+                        Ok::<_, i32>(result)
+                    },
+                );
 
-            match result {
-                Ok(VfsResult { error: 0 }) => match self.refresh_backend_item(item, None) {
-                    Ok(attrs) => reply.call((Retained::into_raw(attrs), ptr::null_mut())),
-                    Err(error) => reply.call((ptr::null_mut(), Retained::into_raw(error))),
-                },
-                Ok(VfsResult { error }) => {
-                    reply.call((ptr::null_mut(), Retained::into_raw(posix_error(error))))
+                match result {
+                    Ok(VfsResult { error: 0 }) => {
+                        let volume = unsafe { volume.get() };
+                        let item = unsafe { item.get() };
+                        match volume.refresh_backend_item(item, None) {
+                            Ok(attrs) => reply.reply((Retained::into_raw(attrs), ptr::null_mut())),
+                            Err(error) => reply.reply((ptr::null_mut(), Retained::into_raw(error))),
+                        }
+                    }
+                    Ok(VfsResult { error }) => {
+                        reply.reply((ptr::null_mut(), Retained::into_raw(posix_error(error))))
+                    }
+                    Err(error) => {
+                        reply.reply((ptr::null_mut(), Retained::into_raw(posix_error(error))))
+                    }
                 }
-                Err(error) => reply.call((ptr::null_mut(), Retained::into_raw(error))),
-            }
+            });
         }
 
         #[unsafe(method(lookupItemNamed:inDirectory:replyHandler:))]
@@ -236,12 +291,11 @@ define_class!(
             directory: &FSItem,
             reply: &block2::DynBlock<dyn Fn(*mut FSItem, *mut FSFileName, *mut NSError)>,
         ) {
+            let reply = ReplyGuard::<dyn Fn(*mut FSItem, *mut FSFileName, *mut NSError)>::copy(
+                "lookup", reply,
+            );
             let Some(directory) = as_rust_item(directory) else {
-                reply.call((
-                    ptr::null_mut(),
-                    ptr::null_mut(),
-                    Retained::into_raw(posix_error(libc::ENOENT)),
-                ));
+                reply.error(libc::ENOENT);
                 return;
             };
             let requested_name = fs_filename_string(name);
@@ -254,24 +308,36 @@ define_class!(
                 ),
             );
 
-            match self.lookup_item(directory, name) {
-                Ok((item, item_name)) => {
-                    if let Some(item) = as_rust_item(item.as_ref()) {
-                        log_event(
-                            "info",
-                            format!("vixen-fskit lookupItem.reply {}", item.debug_summary()),
-                        );
+            let Some(volume) = RetainedObjc::retain(self) else {
+                reply.error(libc::EIO);
+                return;
+            };
+            let Some(directory) = RetainedObjc::retain(directory) else {
+                reply.error(libc::EIO);
+                return;
+            };
+            runtime().spawn_blocking(move || {
+                let volume = unsafe { volume.get() };
+                let directory = unsafe { directory.get() };
+                match volume.lookup_item(directory, requested_name) {
+                    Ok((item, item_name)) => {
+                        if let Some(item) = as_rust_item(item.as_ref()) {
+                            log_event(
+                                "info",
+                                format!("vixen-fskit lookupItem.reply {}", item.debug_summary()),
+                            );
+                        }
+                        reply.reply((
+                            Retained::into_raw(item),
+                            Retained::into_raw(item_name),
+                            ptr::null_mut(),
+                        ))
                     }
-                    reply.call((
-                        Retained::into_raw(item),
-                        Retained::into_raw(item_name),
-                        ptr::null_mut(),
-                    ))
+                    Err(error) => {
+                        reply.reply((ptr::null_mut(), ptr::null_mut(), Retained::into_raw(error)))
+                    }
                 }
-                Err(error) => {
-                    reply.call((ptr::null_mut(), ptr::null_mut(), Retained::into_raw(error)))
-                }
-            }
+            });
         }
 
         #[unsafe(method(reclaimItem:replyHandler:))]
@@ -318,12 +384,11 @@ define_class!(
             new_attributes: &objc2_fs_kit::FSItemSetAttributesRequest,
             reply: &block2::DynBlock<dyn Fn(*mut FSItem, *mut FSFileName, *mut NSError)>,
         ) {
+            let reply = ReplyGuard::<dyn Fn(*mut FSItem, *mut FSFileName, *mut NSError)>::copy(
+                "create", reply,
+            );
             let Some(directory) = as_rust_item(directory) else {
-                reply.call((
-                    ptr::null_mut(),
-                    ptr::null_mut(),
-                    Retained::into_raw(posix_error(libc::ENOENT)),
-                ));
+                reply.error(libc::ENOENT);
                 return;
             };
             let requested_name = fs_filename_string(name);
@@ -338,11 +403,7 @@ define_class!(
             );
 
             if !self.directory_allows_mutation(directory) {
-                reply.call((
-                    ptr::null_mut(),
-                    ptr::null_mut(),
-                    Retained::into_raw(posix_error(libc::EACCES)),
-                ));
+                reply.error(libc::EACCES);
                 return;
             }
 
@@ -358,19 +419,11 @@ define_class!(
                 FSItemType::Directory => vx_services::ItemType::Directory,
                 FSItemType::File => vx_services::ItemType::File,
                 FSItemType::Symlink => {
-                    reply.call((
-                        ptr::null_mut(),
-                        ptr::null_mut(),
-                        Retained::into_raw(posix_error(libc::ENOTSUP)),
-                    ));
+                    reply.error(libc::ENOTSUP);
                     return;
                 }
                 _ => {
-                    reply.call((
-                        ptr::null_mut(),
-                        ptr::null_mut(),
-                        Retained::into_raw(posix_error(libc::ENOTSUP)),
-                    ));
+                    reply.error(libc::ENOTSUP);
                     return;
                 }
             };
@@ -379,72 +432,91 @@ define_class!(
             let (client, generation) = match self.connected_client_for_item(directory) {
                 Ok(connected) => connected,
                 Err(error) => {
-                    reply.call((ptr::null_mut(), ptr::null_mut(), Retained::into_raw(error)));
+                    reply.reply((ptr::null_mut(), ptr::null_mut(), Retained::into_raw(error)));
                     return;
                 }
             };
-            let result = block_on_vfs({
-                let requested_name = requested_name.clone();
-                let client = client.clone();
-                async move {
-                    let result = client
-                        .create(parent_backend_id, requested_name, create_type, mode)
-                        .await
-                        .map_err(|error| vox_rpc_errno("create", error))?;
-                    Ok::<_, i32>(result)
-                }
-            });
-
-            match result {
-                Ok(CreateResult { item_id, error: 0 }) => {
-                    let attrs_result = block_on_vfs(async move {
-                        let attrs = client
-                            .get_attributes(item_id)
-                            .await
-                            .map_err(|error| vox_rpc_errno("get_attributes", error))?;
-                        Ok::<_, i32>(attrs)
+            let Some(volume) = RetainedObjc::retain(self) else {
+                reply.error(libc::EIO);
+                return;
+            };
+            let Some(directory) = RetainedObjc::retain(directory) else {
+                reply.error(libc::EIO);
+                return;
+            };
+            runtime().spawn_blocking(move || {
+                let create_result =
+                    run_vfs(VfsOp::Mutate, root_peer_state().subscribe_cancellation(), {
+                        let requested_name = requested_name.clone();
+                        let client = client.clone();
+                        async move {
+                            let result = client
+                                .create(parent_backend_id, requested_name, create_type, mode)
+                                .await
+                                .map_err(|error| vox_rpc_errno("create", error))?;
+                            Ok::<_, i32>(result)
+                        }
                     });
-                    match attrs_result {
-                        Ok(GetAttributesResult { attrs, error: 0 }) => {
-                            let local_item_id = self.local_item_id(generation, attrs.item_id);
-                            let item = self.cached_backend_item(
-                                local_item_id,
-                                directory.item_id(),
-                                generation,
-                                &requested_name,
-                                &attrs,
-                            );
-                            reply.call((
-                                Retained::into_raw(item.clone().into_super()),
-                                Retained::into_raw(item.fs_name()),
-                                ptr::null_mut(),
-                            ));
-                        }
-                        Ok(GetAttributesResult { error, .. }) => {
-                            reply.call((
-                                ptr::null_mut(),
-                                ptr::null_mut(),
-                                Retained::into_raw(posix_error(error)),
-                            ));
-                        }
-                        Err(error) => {
-                            reply.call((
-                                ptr::null_mut(),
-                                ptr::null_mut(),
-                                Retained::into_raw(error),
-                            ));
+
+                match create_result {
+                    Ok(CreateResult { item_id, error: 0 }) => {
+                        let attrs_result = run_vfs(
+                            VfsOp::Attributes,
+                            root_peer_state().subscribe_cancellation(),
+                            async move {
+                                let attrs = client
+                                    .get_attributes(item_id)
+                                    .await
+                                    .map_err(|error| vox_rpc_errno("get_attributes", error))?;
+                                Ok::<_, i32>(attrs)
+                            },
+                        );
+                        match attrs_result {
+                            Ok(GetAttributesResult { attrs, error: 0 }) => {
+                                let volume = unsafe { volume.get() };
+                                let directory = unsafe { directory.get() };
+                                let local_item_id = volume.local_item_id(generation, attrs.item_id);
+                                let item = volume.cached_backend_item(
+                                    local_item_id,
+                                    directory.item_id(),
+                                    generation,
+                                    &requested_name,
+                                    &attrs,
+                                );
+                                reply.reply((
+                                    Retained::into_raw(item.clone().into_super()),
+                                    Retained::into_raw(item.fs_name()),
+                                    ptr::null_mut(),
+                                ));
+                            }
+                            Ok(GetAttributesResult { error, .. }) => {
+                                reply.reply((
+                                    ptr::null_mut(),
+                                    ptr::null_mut(),
+                                    Retained::into_raw(posix_error(error)),
+                                ));
+                            }
+                            Err(error) => {
+                                reply.reply((
+                                    ptr::null_mut(),
+                                    ptr::null_mut(),
+                                    Retained::into_raw(posix_error(error)),
+                                ));
+                            }
                         }
                     }
+                    Ok(CreateResult { error, .. }) => reply.reply((
+                        ptr::null_mut(),
+                        ptr::null_mut(),
+                        Retained::into_raw(posix_error(error)),
+                    )),
+                    Err(error) => reply.reply((
+                        ptr::null_mut(),
+                        ptr::null_mut(),
+                        Retained::into_raw(posix_error(error)),
+                    )),
                 }
-                Ok(CreateResult { error, .. }) => reply.call((
-                    ptr::null_mut(),
-                    ptr::null_mut(),
-                    Retained::into_raw(posix_error(error)),
-                )),
-                Err(error) => {
-                    reply.call((ptr::null_mut(), ptr::null_mut(), Retained::into_raw(error)))
-                }
-            }
+            });
         }
 
         #[unsafe(method(createSymbolicLinkNamed:inDirectory:attributes:linkContents:replyHandler:))]
@@ -511,8 +583,9 @@ define_class!(
             directory: &FSItem,
             reply: &block2::DynBlock<dyn Fn(*mut NSError)>,
         ) {
+            let reply = ReplyGuard::<dyn Fn(*mut NSError)>::copy("remove", reply);
             let Some(item) = as_rust_item(item) else {
-                reply.call((Retained::into_raw(posix_error(libc::ENOENT)),));
+                reply.error(libc::ENOENT);
                 return;
             };
             let directory_details = as_rust_item(directory)
@@ -529,7 +602,7 @@ define_class!(
             );
 
             if item.virtual_kind() != VirtualKind::None {
-                reply.call((Retained::into_raw(posix_error(libc::EACCES)),));
+                reply.error(libc::EACCES);
                 return;
             }
 
@@ -537,26 +610,40 @@ define_class!(
             let (client, _) = match self.connected_client_for_item(item) {
                 Ok(connected) => connected,
                 Err(error) => {
-                    reply.call((Retained::into_raw(error),));
+                    reply.reply((Retained::into_raw(error),));
                     return;
                 }
             };
-            let result = block_on_vfs(async move {
-                let result = client
-                    .delete(backend_item_id)
-                    .await
-                    .map_err(|error| vox_rpc_errno("delete", error))?;
-                Ok::<_, i32>(result)
-            });
+            let item_id = item.item_id();
+            let Some(volume) = RetainedObjc::retain(self) else {
+                reply.error(libc::EIO);
+                return;
+            };
+            runtime().spawn_blocking(move || {
+                let result = run_vfs(
+                    VfsOp::Mutate,
+                    root_peer_state().subscribe_cancellation(),
+                    async move {
+                        let result = client
+                            .delete(backend_item_id)
+                            .await
+                            .map_err(|error| vox_rpc_errno("delete", error))?;
+                        Ok::<_, i32>(result)
+                    },
+                );
 
-            match result {
-                Ok(VfsResult { error: 0 }) => {
-                    self.remove_cached_item(item.item_id());
-                    reply.call((ptr::null_mut(),));
+                match result {
+                    Ok(VfsResult { error: 0 }) => {
+                        let volume = unsafe { volume.get() };
+                        volume.remove_cached_item(item_id);
+                        reply.reply((ptr::null_mut(),));
+                    }
+                    Ok(VfsResult { error }) => {
+                        reply.reply((Retained::into_raw(posix_error(error)),))
+                    }
+                    Err(error) => reply.reply((Retained::into_raw(posix_error(error)),)),
                 }
-                Ok(VfsResult { error }) => reply.call((Retained::into_raw(posix_error(error)),)),
-                Err(error) => reply.call((Retained::into_raw(error),)),
-            }
+            });
         }
 
         #[unsafe(method(renameItem:inDirectory:named:toNewName:inDirectory:overItem:replyHandler:))]
@@ -570,25 +657,17 @@ define_class!(
             over_item: Option<&FSItem>,
             reply: &block2::DynBlock<dyn Fn(*mut FSFileName, *mut NSError)>,
         ) {
+            let reply = ReplyGuard::<dyn Fn(*mut FSFileName, *mut NSError)>::copy("rename", reply);
             let Some(item) = as_rust_item(item) else {
-                reply.call((
-                    ptr::null_mut(),
-                    Retained::into_raw(posix_error(libc::ENOENT)),
-                ));
+                reply.error(libc::ENOENT);
                 return;
             };
             let Some(source_directory) = as_rust_item(source_directory) else {
-                reply.call((
-                    ptr::null_mut(),
-                    Retained::into_raw(posix_error(libc::ENOENT)),
-                ));
+                reply.error(libc::ENOENT);
                 return;
             };
             let Some(destination_directory) = as_rust_item(destination_directory) else {
-                reply.call((
-                    ptr::null_mut(),
-                    Retained::into_raw(posix_error(libc::ENOENT)),
-                ));
+                reply.error(libc::ENOENT);
                 return;
             };
             log_event(
@@ -611,10 +690,7 @@ define_class!(
                 || !self.directory_allows_mutation(source_directory)
                 || !self.directory_allows_mutation(destination_directory)
             {
-                reply.call((
-                    ptr::null_mut(),
-                    Retained::into_raw(posix_error(libc::EACCES)),
-                ));
+                reply.error(libc::EACCES);
                 return;
             }
 
@@ -624,7 +700,7 @@ define_class!(
             let (client, generation) = match self.connected_client_for_item(item) {
                 Ok(connected) => connected,
                 Err(error) => {
-                    reply.call((ptr::null_mut(), Retained::into_raw(error)));
+                    reply.reply((ptr::null_mut(), Retained::into_raw(error)));
                     return;
                 }
             };
@@ -635,38 +711,51 @@ define_class!(
                 ) && directory.generation() != 0
                     && directory.generation() != generation
                 {
-                    reply.call((
-                        ptr::null_mut(),
-                        Retained::into_raw(posix_error(libc::ESTALE)),
-                    ));
+                    reply.error(libc::ESTALE);
                     return;
                 }
             }
 
-            let result = block_on_vfs({
-                let new_name = new_name.clone();
-                async move {
-                    let result = client
-                        .rename(backend_item_id, new_parent_id, new_name)
-                        .await
-                        .map_err(|error| vox_rpc_errno("rename", error))?;
-                    Ok::<_, i32>(result)
+            let destination_local_id = destination_directory.item_id();
+            let over_item_id = over_item.and_then(as_rust_item).map(RustItem::item_id);
+            let Some(volume) = RetainedObjc::retain(self) else {
+                reply.error(libc::EIO);
+                return;
+            };
+            let Some(item) = RetainedObjc::retain(item) else {
+                reply.error(libc::EIO);
+                return;
+            };
+            runtime().spawn_blocking(move || {
+                let result = run_vfs(VfsOp::Mutate, root_peer_state().subscribe_cancellation(), {
+                    let new_name = new_name.clone();
+                    async move {
+                        let result = client
+                            .rename(backend_item_id, new_parent_id, new_name)
+                            .await
+                            .map_err(|error| vox_rpc_errno("rename", error))?;
+                        Ok::<_, i32>(result)
+                    }
+                });
+
+                match result {
+                    Ok(VfsResult { error: 0 }) => {
+                        let volume = unsafe { volume.get() };
+                        let item = unsafe { item.get() };
+                        item.update_name_and_parent(destination_local_id, &new_name);
+                        if let Some(over_item_id) = over_item_id {
+                            volume.remove_cached_item(over_item_id);
+                        }
+                        reply.reply((Retained::into_raw(fs_filename(&new_name)), ptr::null_mut()))
+                    }
+                    Ok(VfsResult { error }) => {
+                        reply.reply((ptr::null_mut(), Retained::into_raw(posix_error(error))))
+                    }
+                    Err(error) => {
+                        reply.reply((ptr::null_mut(), Retained::into_raw(posix_error(error))))
+                    }
                 }
             });
-
-            match result {
-                Ok(VfsResult { error: 0 }) => {
-                    item.update_name_and_parent(destination_directory.item_id(), &new_name);
-                    if let Some(over_item) = over_item.and_then(as_rust_item) {
-                        self.remove_cached_item(over_item.item_id());
-                    }
-                    reply.call((Retained::into_raw(fs_filename(&new_name)), ptr::null_mut()))
-                }
-                Ok(VfsResult { error }) => {
-                    reply.call((ptr::null_mut(), Retained::into_raw(posix_error(error))))
-                }
-                Err(error) => reply.call((ptr::null_mut(), Retained::into_raw(error))),
-            }
         }
 
         #[unsafe(method(enumerateDirectory:startingAtCookie:verifier:providingAttributes:usingPacker:replyHandler:))]
@@ -679,8 +768,10 @@ define_class!(
             packer: &FSDirectoryEntryPacker,
             reply: &block2::DynBlock<dyn Fn(FSDirectoryVerifier, *mut NSError)>,
         ) {
+            let reply =
+                ReplyGuard::<dyn Fn(FSDirectoryVerifier, *mut NSError)>::copy("enumerate", reply);
             let Some(directory) = as_rust_item(directory) else {
-                reply.call((0, Retained::into_raw(posix_error(libc::ENOENT))));
+                reply.error(libc::ENOENT);
                 return;
             };
             log_event(
@@ -693,10 +784,34 @@ define_class!(
                 ),
             );
 
-            match self.enumerate_directory(directory, cookie, verifier, attributes, packer) {
-                Ok(next_verifier) => reply.call((next_verifier, ptr::null_mut())),
-                Err(error) => reply.call((0, Retained::into_raw(error))),
-            }
+            let Some(volume) = RetainedObjc::retain(self) else {
+                reply.error(libc::EIO);
+                return;
+            };
+            let Some(directory) = RetainedObjc::retain(directory) else {
+                reply.error(libc::EIO);
+                return;
+            };
+            let Some(packer) = RetainedObjc::retain(packer) else {
+                reply.error(libc::EIO);
+                return;
+            };
+            let provide_attributes = attributes.is_some();
+            runtime().spawn_blocking(move || {
+                let volume = unsafe { volume.get() };
+                let directory = unsafe { directory.get() };
+                let packer = unsafe { packer.get() };
+                match volume.enumerate_directory(
+                    directory,
+                    cookie,
+                    verifier,
+                    provide_attributes,
+                    packer,
+                ) {
+                    Ok(next_verifier) => reply.reply((next_verifier, ptr::null_mut())),
+                    Err(error) => reply.reply((0, Retained::into_raw(error))),
+                }
+            });
         }
 
         #[unsafe(method(activateWithOptions:replyHandler:))]
@@ -731,6 +846,7 @@ define_class!(
             reply: &block2::DynBlock<dyn Fn(*mut NSError)>,
         ) {
             log_event("info", "vixen-fskit deactivateWithOptions");
+            root_peer_state().cancel_inflight(libc::ESTALE, "volume deactivate");
             reply.call((ptr::null_mut(),));
         }
     }
@@ -795,8 +911,9 @@ define_class!(
             buffer: &FSMutableFileDataBuffer,
             reply: &block2::DynBlock<dyn Fn(usize, *mut NSError)>,
         ) {
+            let reply = ReplyGuard::<dyn Fn(usize, *mut NSError)>::copy("read", reply);
             let Some(item) = as_rust_item(item) else {
-                reply.call((0, Retained::into_raw(posix_error(libc::ENOENT))));
+                reply.error(libc::ENOENT);
                 return;
             };
             log_event(
@@ -809,10 +926,27 @@ define_class!(
                 ),
             );
 
-            match self.read_item(item, offset, length, buffer) {
-                Ok(actual) => reply.call((actual, ptr::null_mut())),
-                Err(error) => reply.call((0, Retained::into_raw(error))),
-            }
+            let Some(volume) = RetainedObjc::retain(self) else {
+                reply.error(libc::EIO);
+                return;
+            };
+            let Some(item) = RetainedObjc::retain(item) else {
+                reply.error(libc::EIO);
+                return;
+            };
+            let Some(buffer) = RetainedObjc::retain(buffer) else {
+                reply.error(libc::EIO);
+                return;
+            };
+            runtime().spawn_blocking(move || {
+                let volume = unsafe { volume.get() };
+                let item = unsafe { item.get() };
+                let buffer = unsafe { buffer.get() };
+                match volume.read_item(item, offset, length, buffer) {
+                    Ok(actual) => reply.reply((actual, ptr::null_mut())),
+                    Err(error) => reply.reply((0, Retained::into_raw(error))),
+                }
+            });
         }
 
         #[unsafe(method(writeContents:toFile:atOffset:replyHandler:))]
@@ -823,8 +957,9 @@ define_class!(
             offset: libc::off_t,
             reply: &block2::DynBlock<dyn Fn(usize, *mut NSError)>,
         ) {
+            let reply = ReplyGuard::<dyn Fn(usize, *mut NSError)>::copy("write", reply);
             let Some(item) = as_rust_item(item) else {
-                reply.call((0, Retained::into_raw(posix_error(libc::ENOENT))));
+                reply.error(libc::ENOENT);
                 return;
             };
             log_event(
@@ -838,7 +973,7 @@ define_class!(
             );
 
             if item.virtual_kind() != VirtualKind::None {
-                reply.call((0, Retained::into_raw(posix_error(libc::EACCES))));
+                reply.error(libc::EACCES);
                 return;
             }
 
@@ -848,28 +983,34 @@ define_class!(
             let (client, _) = match self.connected_client_for_item(item) {
                 Ok(connected) => connected,
                 Err(error) => {
-                    reply.call((0, Retained::into_raw(error)));
+                    reply.reply((0, Retained::into_raw(error)));
                     return;
                 }
             };
-            let result = block_on_vfs(async move {
-                let result = client
-                    .write(backend_item_id, offset, bytes)
-                    .await
-                    .map_err(|error| vox_rpc_errno("write", error))?;
-                Ok::<_, i32>(result)
-            });
+            runtime().spawn_blocking(move || {
+                let result = run_vfs(
+                    VfsOp::Write,
+                    root_peer_state().subscribe_cancellation(),
+                    async move {
+                        let result = client
+                            .write(backend_item_id, offset, bytes)
+                            .await
+                            .map_err(|error| vox_rpc_errno("write", error))?;
+                        Ok::<_, i32>(result)
+                    },
+                );
 
-            match result {
-                Ok(WriteResult {
-                    bytes_written,
-                    error: 0,
-                }) => reply.call((bytes_written as usize, ptr::null_mut())),
-                Ok(WriteResult { error, .. }) => {
-                    reply.call((0, Retained::into_raw(posix_error(error))));
+                match result {
+                    Ok(WriteResult {
+                        bytes_written,
+                        error: 0,
+                    }) => reply.reply((bytes_written as usize, ptr::null_mut())),
+                    Ok(WriteResult { error, .. }) => {
+                        reply.reply((0, Retained::into_raw(posix_error(error))));
+                    }
+                    Err(error) => reply.reply((0, Retained::into_raw(posix_error(error)))),
                 }
-                Err(error) => reply.call((0, Retained::into_raw(error))),
-            }
+            });
         }
     }
 
