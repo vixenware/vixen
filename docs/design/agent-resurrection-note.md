@@ -661,3 +661,13 @@ providers, deadline/error-reply verification under the real FSKit
 protocol, kill_fskitd escalation drills, the full
 poison→fence→sacrifice→remount sequence. The wedge oracle, caged.
 Arrange later on souffle (Mac Studio M2, the Metal/heavy-work box).
+
+**RODIN-IN-VIX (2026-07-05, the day's biggest design turn):** position
+banked in docs/design/rodin-in-vix.md. Fact lifecycle → machine
+(kernel as capability, semantic-cutoff comparator = projection-memo's
+successor); kernel itself: CDCL mutation is LINEAR → functional-in-
+place via reuse analysis (Perceus/Lean class, refcount==1 from the
+store), solve interior is FLESH (JIT'd, untraced), perf bar reframed
+(warm solves free ⇒ cold kernel may be 5-10x slower and still win).
+AMOS STANDING DIRECTIVE: one failed spike ≠ verdict; push until
+absolutely-no-way-in-hell; rodin-core is the ORACLE, never discarded.
