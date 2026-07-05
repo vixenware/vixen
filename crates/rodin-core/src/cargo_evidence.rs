@@ -2287,9 +2287,50 @@ fn quoted_values(value: &str) -> Vec<String> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::{SolverOptions, emit_lock, solve_with_options};
+    use crate::{ResolveContext, SolverOptions, emit_lock, solve, solve_with_options};
 
     type PackageBlockKey = (String, Version, Option<String>);
+
+    /// Base names cargo includes in the dependency graph for `triple`, offline.
+    fn cargo_tree_target_names(workspace: &Path, triple: &str) -> Result<BTreeSet<String>> {
+        let output = Command::new("cargo")
+            .args([
+                "tree", "-e", "normal,build", "--target", triple, "--prefix", "none", "--offline",
+            ])
+            .current_dir(workspace)
+            .output()
+            .wrap_err("running cargo tree oracle")?;
+        if !output.status.success() {
+            eyre::bail!(
+                "cargo tree --target {triple} failed: {}",
+                command_tail(&output.stderr)
+            );
+        }
+        let text = String::from_utf8(output.stdout).wrap_err("decoding cargo tree output")?;
+        Ok(text
+            .lines()
+            .filter_map(|line| line.split_whitespace().next())
+            .map(str::to_owned)
+            .collect())
+    }
+
+    /// Base names rodin selects for `triple` (the rustc cfg oracle drives the gate).
+    fn rodin_target_names(
+        extracted: &ExtractedCargoUniverse,
+        triple: &str,
+    ) -> Result<BTreeSet<String>> {
+        let target = rodin_survey::TargetCfg::from_rustc(triple)?;
+        let problem = extracted
+            .problem
+            .clone()
+            .with_context(ResolveContext::for_target(target));
+        let result = solve(&extracted.index, problem).map_err(|err| eyre::eyre!("{err:?}"))?;
+        Ok(result
+            .selected
+            .keys()
+            .filter_map(|label| label.rsplit_once('@').map(|(name, _)| name.to_owned()))
+            .collect())
+    }
 
     #[test]
     fn parses_lock_dependency_versions() -> Result<()> {
@@ -2637,6 +2678,82 @@ mod tests {
                 "emitted Cargo.lock block diverged for {key:?}"
             );
         }
+        Ok(())
+    }
+
+    #[test]
+    fn rodin_per_target_gate_matches_cargo_tree_windows_vs_linux() -> Result<()> {
+        let workspace = Path::new(DEFAULT_FACET_CC);
+        let registry_src = Path::new(DEFAULT_REGISTRY_SRC);
+        let registry_cache = default_registry_cache_for_src(registry_src);
+        let fresh = run_fresh_lock_oracle(workspace)?;
+        let fresh_lock = fresh
+            .lock
+            .ok_or_else(|| eyre::eyre!("fresh lock oracle did not solve"))?;
+        let extracted = extract_cargo_universe(
+            workspace,
+            registry_src,
+            &registry_cache,
+            CargoProjectionMode::LockUnionDev,
+            Some(&fresh_lock),
+        )?;
+
+        const WINDOWS: &str = "x86_64-pc-windows-msvc";
+        const LINUX: &str = "x86_64-unknown-linux-gnu";
+
+        // rodin resolves the one shared universe once per target — same facts,
+        // different gate.
+        let rodin_windows = rodin_target_names(&extracted, WINDOWS)?;
+        let rodin_linux = rodin_target_names(&extracted, LINUX)?;
+
+        // cargo is the oracle for the per-target dependency graph.
+        let cargo_windows = cargo_tree_target_names(workspace, WINDOWS)?;
+        let cargo_linux = cargo_tree_target_names(workspace, LINUX)?;
+        let windows_only: BTreeSet<_> = cargo_windows.difference(&cargo_linux).collect();
+        assert!(
+            windows_only.len() >= 3,
+            "expected the facet-cc graph to differentiate windows deps: {windows_only:?}"
+        );
+
+        // These crates are windows-only in cargo *because of a target-conditional
+        // dependency edge* (`cfg(windows)`), which is exactly what the gate owns.
+        // For each (that rodin's universe holds), the gate must select it under
+        // windows and reject it under linux — cargo-faithful per target.
+        //
+        // NB: this validates the gate, not feature resolution. rodin also
+        // over-activates a few optional deps that cargo leaves off (`jiff-tzdb`,
+        // `jiff-static`) via weak/`cfg(any())` feature paths; that is a separate,
+        // pre-existing feature-fidelity gap this oracle surfaced, tracked apart.
+        const TARGET_EDGE_WINDOWS_CRATES: &[&str] = &[
+            "winapi",
+            "winapi-util",
+            "windows-sys",
+            "windows-link",
+            "crossterm_winapi",
+        ];
+        let mut checked = 0;
+        for &crate_name in TARGET_EDGE_WINDOWS_CRATES {
+            if extracted.index.package(crate_name).is_none() {
+                continue;
+            }
+            assert!(
+                windows_only.contains(&crate_name.to_owned()),
+                "{crate_name} should be windows-only in the cargo oracle"
+            );
+            assert!(
+                rodin_windows.contains(crate_name),
+                "{crate_name} is a windows target-edge dep but rodin did not select it for windows"
+            );
+            assert!(
+                !rodin_linux.contains(crate_name),
+                "{crate_name} is a windows target-edge dep but rodin selected it for linux"
+            );
+            checked += 1;
+        }
+        assert!(
+            checked >= 3,
+            "expected to validate at least three windows target-edge crates, checked {checked}"
+        );
         Ok(())
     }
 
