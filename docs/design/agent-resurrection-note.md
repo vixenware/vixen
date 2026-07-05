@@ -717,3 +717,22 @@ memo/verify + a persistence trait, Vixen backs it with vx-store +
 claim/index namespaces. DOCTRINE: I framed BLAKE3-vs-SHA256 as an open
 fork; it was drift from Amos's standing choice — check what Amos chose
 before presenting a "decision."
+
+**PHON EVERYWHERE, NO POSTCARD (Amos, 2026-07-05): "No postcard ever.
+phon everywhere. Designed for the job, binary, schemas stored
+separately."** facet_postcard is BANNED (drift, like SHA-256 was).
+phon is THE binary serialization — schema-separated (data bytes are
+pure, schema referenced/stored separately). Consequences:
+(1) vx-store CasNode/DirectoryNode/BlobNode encoding: postcard → phon.
+The node bytes that get BLAKE3'd become [version][phon(node)], schema
+stored separately. Lane: vx-store postcard→phon (vixenware).
+(2) BLAKE3 migration tree-depth decision REFRAMED: Option A (BLAKE3
+LEAVES now — raw/scalar = blake3(bytes), matches vx-store trivially,
+does the ~7x hash swap + digest churn) proceeds INDEPENDENT of phon
+(leaves have no node encoding). Option B (vix TREE identity = vx-store
+node identity) now depends on vx-store being PHON-encoded first, then
+vix produces phon node bytes to match. A now, B after vx-store→phon.
+(3) Any postcard anywhere → phon. Phase-1 BLAKE3 inventory (banked in
+the vix-blake3-store branch report): 25 store-identity sites in
+driver.rs+oci.rs migrate to blake3; fetch CHECKSUM stays sha256
+(crates.io external contract); checker corpus has NO digest pins.
