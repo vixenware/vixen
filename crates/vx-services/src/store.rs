@@ -2,7 +2,7 @@
 //!
 //! The store is a validated key-value store with two object types:
 //! - **Chunks**: Raw bytes (<=4MB), stored at `chunks/blake3/{xx}/{hash}`
-//! - **Nodes**: Versioned postcard-encoded structures, stored at `nodes/blake3/{xx}/{hash}`
+//! - **Nodes**: Versioned PHON-encoded structures, stored at `nodes/blake3/{xx}/{hash}`
 //!
 //! All chunking, assembly, and Merkle tree construction logic lives in shared
 //! library code used by clients. The store validates structure but never chunks
@@ -24,11 +24,12 @@ use facet::Facet;
 /// Bump this when making breaking changes to the CAS RPC interface.
 pub const STORE_PROTOCOL_VERSION: u32 = 5;
 
-/// Versioned postcard node format version.
-/// Node bytes are `[version: u32 LE][postcard payload]`.
+/// Versioned PHON node format version.
+/// Node bytes are `[version: u32 LE][phon payload]`. The PHON schema is not
+/// embedded in node bytes; it is declared separately by [`CasNode::phon_schema`].
 /// The version prefix is part of the hashed content — a version bump
 /// produces different hashes for identical logical content.
-pub const CAS_NODE_VERSION: u32 = 1;
+pub const CAS_NODE_VERSION: u32 = 2;
 
 // =============================================================================
 // CDC Constants
@@ -239,7 +240,9 @@ impl std::fmt::Display for ContentHash {
 /// Top-level CAS node enum. All nodes are stored at `nodes/blake3/{xx}/{hash}`
 /// where hash = blake3(serialized_bytes).
 ///
-/// Serialization format: `[CAS_NODE_VERSION: u32 LE][postcard payload]`
+/// Serialization format: `[CAS_NODE_VERSION: u32 LE][phon payload]`.
+/// The PHON schema closure is separate from the payload bytes; use
+/// [`CasNode::phon_schema`] to publish/register the schema side.
 #[derive(Debug, Clone, Facet)]
 #[repr(u8)]
 pub enum CasNode {
@@ -248,11 +251,30 @@ pub enum CasNode {
     CacheRecord(CacheRecordNode),
 }
 
+#[derive(Debug, Clone)]
+pub struct CasNodePhonSchema {
+    pub root: phon::schema_contract::SchemaId,
+    pub schemas: Vec<phon::schema_contract::Schema>,
+}
+
 impl CasNode {
+    /// Return the PHON schema closure for CAS nodes.
+    ///
+    /// Node payloads intentionally do not inline this schema. Persisted node
+    /// bytes are `[CAS_NODE_VERSION][phon payload]`, with this schema closure
+    /// published/registered separately by code that needs schema exchange.
+    pub fn phon_schema() -> Result<CasNodePhonSchema, phon::derive::DeriveError> {
+        let derived = phon::derive::of::<Self>()?;
+        Ok(CasNodePhonSchema {
+            root: derived.root,
+            schemas: derived.schemas,
+        })
+    }
+
     /// Serialize to bytes with version prefix.
-    /// Format: `[CAS_NODE_VERSION: u32 LE][postcard payload]`
+    /// Format: `[CAS_NODE_VERSION: u32 LE][phon payload]`
     pub fn to_bytes(&self) -> Vec<u8> {
-        let payload = facet_postcard::to_vec(self).expect("CasNode serialization should not fail");
+        let payload = phon::api::encode(self).expect("CasNode PHON encoding should not fail");
         let mut bytes = Vec::with_capacity(4 + payload.len());
         bytes.extend_from_slice(&CAS_NODE_VERSION.to_le_bytes());
         bytes.extend_from_slice(&payload);
@@ -268,7 +290,7 @@ impl CasNode {
         if version != CAS_NODE_VERSION {
             return Err(CasNodeError::UnknownVersion(version));
         }
-        facet_postcard::from_slice(&bytes[4..]).map_err(CasNodeError::Postcard)
+        phon::api::decode(&bytes[4..]).map_err(CasNodeError::Phon)
     }
 
     /// Serialize and compute the node hash (blake3 of the complete serialized bytes).
@@ -283,7 +305,7 @@ impl CasNode {
 pub enum CasNodeError {
     TooShort,
     UnknownVersion(u32),
-    Postcard(facet_postcard::DeserializeError),
+    Phon(phon::api::Error),
 }
 
 impl std::fmt::Display for CasNodeError {
@@ -297,7 +319,7 @@ impl std::fmt::Display for CasNodeError {
                 f,
                 "unknown CAS node version: {v} (expected {CAS_NODE_VERSION})"
             ),
-            CasNodeError::Postcard(e) => write!(f, "postcard deserialization failed: {e}"),
+            CasNodeError::Phon(e) => write!(f, "PHON deserialization failed: {e}"),
         }
     }
 }
@@ -677,4 +699,45 @@ pub trait Store {
     /// directory nodes, manifests, and other node payloads.
     /// Capped at MAX_MISSING_NODES_BATCH hashes per call.
     async fn list_missing_nodes(&self, hashes: Vec<NodeHash>) -> Vec<NodeHash>;
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{
+        Blake3Hash, CAS_NODE_VERSION, CacheInputKeyDigest, CacheRecordBody, CacheRecordNode,
+        CacheRecordValue, CasNode,
+    };
+
+    #[test]
+    fn cas_node_bytes_are_versioned_phon_payloads() {
+        let node = CasNode::CacheRecord(CacheRecordNode {
+            namespace: "function-output-v1".to_string(),
+            input_key: CacheInputKeyDigest(Blake3Hash::from_bytes(b"key")),
+            body: CacheRecordBody::Value(CacheRecordValue::String("cached".to_string())),
+            read_witness: None,
+        });
+
+        let (bytes, hash) = node.to_bytes_and_hash();
+        assert_eq!(&bytes[..4], &CAS_NODE_VERSION.to_le_bytes());
+        assert_eq!(hash.0, Blake3Hash::from_bytes(&bytes));
+
+        let decoded = CasNode::from_bytes(&bytes).expect("PHON node decodes");
+        let CasNode::CacheRecord(record) = decoded else {
+            panic!("expected cache record node");
+        };
+        assert_eq!(record.namespace, "function-output-v1");
+        assert!(matches!(
+            record.body,
+            CacheRecordBody::Value(CacheRecordValue::String(ref value)) if value == "cached"
+        ));
+    }
+
+    #[test]
+    fn cas_node_phon_schema_is_available_separately() {
+        let schema = CasNode::phon_schema().expect("CasNode PHON schema derives");
+        assert!(
+            schema.schemas.iter().any(|entry| entry.id == schema.root),
+            "schema closure should include the CasNode root schema"
+        );
+    }
 }

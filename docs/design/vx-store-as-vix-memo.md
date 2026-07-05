@@ -53,13 +53,13 @@ classes:
 - chunks: raw bytes, `blake3(raw_bytes)`, max 4 MB
   (`crates/vx-services/src/store.rs:37-44`,
   `crates/vx-services/src/store.rs:157-160`);
-- nodes: version-prefixed `facet-postcard` `CasNode` bytes,
-  `blake3(node_bytes)`, max 16 MB (`crates/vx-services/src/store.rs:27-31`,
-  `crates/vx-services/src/store.rs:239-279`,
-  `crates/vx-services/src/store.rs:657-667`).
+- nodes: version-prefixed PHON `CasNode` bytes with schemas stored separately,
+  `blake3(node_bytes)`, max 16 MB (`crates/vx-services/src/store.rs:27-32`,
+  `crates/vx-services/src/store.rs:243-305`,
+  `crates/vx-services/src/store.rs:680-689`).
 
 The service API is `put/get/has/list_missing` for both chunks and nodes
-(`crates/vx-services/src/store.rs:626-679`). `vx-store` validates both hash
+(`crates/vx-services/src/store.rs:655-701`). `vx-store` validates both hash
 equality and node structure on writes (`crates/vx-store/src/service.rs:15-54`,
 `crates/vx-store/src/service.rs:131-176`). The `list_missing_*` calls and
 `put_*` early returns are already dedup hooks: clients can avoid uploading

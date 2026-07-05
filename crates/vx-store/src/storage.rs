@@ -2,7 +2,7 @@
 //!
 //! Two object types:
 //! - **Chunks**: Raw bytes (≤4MB), stored at `chunks/blake3/{xx}/{hash}`
-//! - **Nodes**: Versioned postcard-encoded structures, stored at `nodes/blake3/{xx}/{hash}`
+//! - **Nodes**: Versioned PHON-encoded structures, stored at `nodes/blake3/{xx}/{hash}`
 
 use std::io;
 

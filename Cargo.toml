@@ -22,9 +22,9 @@ vx-fskit-types = { path = "crates/vx-fskit-types" }
 facet = { git = "https://github.com/facet-rs/facet", package = "facet", features = ["jiff02", "camino"] }
 facet-error = { git = "https://github.com/facet-rs/facet", package = "facet-error" }
 facet-json = { git = "https://github.com/facet-rs/facet", package = "facet-json" }
-facet-postcard = { git = "https://github.com/facet-rs/facet", package = "facet-postcard", features = ["jiff02", "camino"] }
 facet-styx = { git = "https://github.com/facet-rs/facet", package = "facet-styx" }
 margin = { git = "https://github.com/facet-rs/facet", package = "margin" }
+phon = { git = "https://github.com/facet-rs/facet", package = "phon" }
 
 
 # cmdline parsing

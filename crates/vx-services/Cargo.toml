@@ -14,9 +14,9 @@ rustdoc-args = ["--html-in-header", "arborium-header.html"]
 [dependencies]
 blake3.workspace = true
 facet.workspace = true
-facet-postcard.workspace = true
 fastcdc.workspace = true
 margin.workspace = true
+phon.workspace = true
 
 vox.workspace = true
 vox-types.workspace = true
