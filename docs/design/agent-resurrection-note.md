@@ -684,3 +684,18 @@ vix-semantic-cutoff lands — the integration is pinned, not vague).
 IMPEDANCE FINDING: facet version skew (open repo rc.5 vs vixen
 pinned rc.4) — vix ValueBundle stays a runtime carrier, can't derive
 vixen's Facet; real integration wants facet version alignment.
+
+**SPIKE A CLOSED (2026-07-05, verified 3/3 my run):** the comparator
+IS VIX SOURCE — fn solve__memo_verify_premise(old,new) = monotone_safe
+gates && new.req.subset(old.req). Narrowing edit → MemoSemanticHit=1,
+ZERO kernel invocations; widening → recompute; differential oracle
+green throughout. The adjudication's entailment-transport rule runs
+as five lines of language code. Remaining tail: #2455 merge → bridge
+switches vix dep to git source (TODO line pinned in bridge Cargo.toml)
+→ single Facet instance → ValueBundle derives vixen's Facet.
+FLOOR RULE (3rd bite of the same class — funeral/vix-wire,
+2449/vix-wire, 2455/vix-daemon): ANY facet PR touching shared vix
+enums/traits/events MUST include `cargo clippy --workspace
+--all-targets -- -D warnings --allow deprecated` in its floor.
+Package-scoped floors keep missing workspace consumers. Put this
+line in every future implementation brief.
