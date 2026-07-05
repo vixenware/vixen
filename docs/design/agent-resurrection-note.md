@@ -699,3 +699,21 @@ enums/traits/events MUST include `cargo clippy --workspace
 --all-targets -- -D warnings --allow deprecated` in its floor.
 Package-scoped floors keep missing workspace consumers. Put this
 line in every future implementation brief.
+
+**BLAKE3 IS THE STORE HASH (Amos, 2026-07-05): "I never picked
+sha-256, I always chose blake3."** vix's ValueStore using SHA-256 is
+DRIFT, not a choice — correct it. Consequences: (1) migrate vix store
+IDENTITY to BLAKE3 matching vx-store's EXACT scheme (chunk/tree/domain
+params) so a vix value IS a vx-store object by digest → "memo is the
+cache" (Amos's thesis: fetch/build results cache by being memoized
+invocations, not a separate cache) is FREE. Lane: vix-blake3-store
+(0ff978c3). (2) The SHA-256 incremental-append accumulator branch
+(incremental-content-hashing) is OBSOLETE — BLAKE3 is natively
+tree/incremental + ~7x faster; ABANDON it, do not merge. (3) fetch
+CHECKSUM verification stays SHA-256 (crates.io external contract; not
+our store identity). (4) vx-store recon: docs/design/vx-store-as-vix-
+memo.md — vx-store = file-backed BLAKE3 CAS; open vix owns identity/
+memo/verify + a persistence trait, Vixen backs it with vx-store +
+claim/index namespaces. DOCTRINE: I framed BLAKE3-vs-SHA256 as an open
+fork; it was drift from Amos's standing choice — check what Amos chose
+before presenting a "decision."
