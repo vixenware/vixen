@@ -144,7 +144,29 @@ pub fn read_cached_index_file(cache: &Path, relative: &Path) -> Result<Option<St
             .wrap_err_with(|| format!("reading cached index file {}", path.display()))
             .map(Some);
     }
-    read_cargo_sparse_cache(relative)
+    if let Some(content) = read_cargo_sparse_cache(relative)? {
+        return Ok(Some(content));
+    }
+    read_committed_fixture(relative)
+}
+
+/// Falls back to a repo-committed snapshot under `crates/rodin-survey/fixtures/sparse-index/`
+/// for crates whose sparse-index row is neither in the workspace cache nor Cargo's local
+/// sparse-index cache (e.g. `async-graphql`, fetched once and pinned so forensics/taxonomy
+/// generators reproduce offline).
+fn read_committed_fixture(relative: &Path) -> Result<Option<String>> {
+    let Some(name) = relative.file_name().and_then(|name| name.to_str()) else {
+        return Ok(None);
+    };
+    let path = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+        .join("fixtures/sparse-index")
+        .join(format!("{name}.jsonl"));
+    if !path.exists() {
+        return Ok(None);
+    }
+    fs::read_to_string(&path)
+        .wrap_err_with(|| format!("reading committed fixture {}", path.display()))
+        .map(Some)
 }
 
 fn read_cargo_sparse_cache(relative: &Path) -> Result<Option<String>> {
