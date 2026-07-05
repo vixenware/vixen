@@ -156,7 +156,7 @@ pub struct BridgeTraceEvent {
     pub detail: String,
 }
 
-#[derive(Clone, Debug, Eq, PartialEq)]
+#[derive(Clone, Debug, Eq, Facet, PartialEq)]
 pub struct CapabilityRun {
     pub output: SolveOutputValue,
     pub projection: KernelProjection,
