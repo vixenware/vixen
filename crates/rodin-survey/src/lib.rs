@@ -105,13 +105,11 @@ pub fn fetch_closure(
 
 pub fn fetch_index_file(cache: &Path, name: &str) -> Result<String> {
     let relative = index_path_for(name);
-    let path = cache.join(&relative);
-    if path.exists() {
-        return fs::read_to_string(&path)
-            .wrap_err_with(|| format!("reading cached index file {}", path.display()));
+    if let Some(content) = read_cached_index_file(cache, &relative)? {
+        return Ok(content);
     }
 
-    if let Some(parent) = path.parent() {
+    if let Some(parent) = cache.join(&relative).parent() {
         fs::create_dir_all(parent)
             .wrap_err_with(|| format!("creating cache parent {}", parent.display()))?;
     }
@@ -130,9 +128,53 @@ pub fn fetch_index_file(cache: &Path, name: &str) -> Result<String> {
         );
     }
 
-    fs::write(&path, &output.stdout)
-        .wrap_err_with(|| format!("writing cached index file {}", path.display()))?;
+    fs::write(cache.join(&relative), &output.stdout).wrap_err_with(|| {
+        format!(
+            "writing cached index file {}",
+            cache.join(&relative).display()
+        )
+    })?;
     String::from_utf8(output.stdout).wrap_err_with(|| format!("index file {url} was not UTF-8"))
+}
+
+pub fn read_cached_index_file(cache: &Path, relative: &Path) -> Result<Option<String>> {
+    let path = cache.join(relative);
+    if path.exists() {
+        return fs::read_to_string(&path)
+            .wrap_err_with(|| format!("reading cached index file {}", path.display()))
+            .map(Some);
+    }
+    read_cargo_sparse_cache(relative)
+}
+
+fn read_cargo_sparse_cache(relative: &Path) -> Result<Option<String>> {
+    let Some(home) = std::env::var_os("HOME") else {
+        return Ok(None);
+    };
+    let path = PathBuf::from(home)
+        .join(".cargo/registry/index/index.crates.io-1949cf8c6b5b557f/.cache")
+        .join(relative);
+    if !path.exists() {
+        return Ok(None);
+    }
+    let bytes = fs::read(&path)
+        .wrap_err_with(|| format!("reading Cargo sparse cache file {}", path.display()))?;
+    Ok(Some(decode_cargo_sparse_cache(&bytes)?))
+}
+
+fn decode_cargo_sparse_cache(bytes: &[u8]) -> Result<String> {
+    let mut rows = Vec::new();
+    for part in bytes.split(|byte| *byte == 0) {
+        if part.first() != Some(&b'{') {
+            continue;
+        }
+        rows.push(
+            std::str::from_utf8(part)
+                .wrap_err("Cargo sparse cache row was not UTF-8")?
+                .to_owned(),
+        );
+    }
+    Ok(rows.join("\n"))
 }
 
 pub fn parse_entries(content: &str, expected_name: &str) -> Result<Vec<IndexEntry>> {
@@ -184,4 +226,24 @@ pub fn sorted_non_yanked_entries(crate_data: &CrateData) -> Result<Vec<(Version,
 pub fn sorted_non_yanked_versions(crate_data: &CrateData) -> Result<Vec<Version>> {
     sorted_non_yanked_entries(crate_data)
         .map(|entries| entries.into_iter().map(|(version, _)| version).collect())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn cargo_sparse_cache_decoder_keeps_only_json_rows() {
+        let mut bytes = Vec::new();
+        bytes.extend_from_slice(b"\x03\x02\0etag: \"demo\"\0");
+        bytes.extend_from_slice(b"1.0.0\0{\"name\":\"demo\",\"vers\":\"1.0.0\"}\0");
+        bytes.extend_from_slice(b"1.0.1\0{\"name\":\"demo\",\"vers\":\"1.0.1\"}");
+
+        let decoded = decode_cargo_sparse_cache(&bytes).unwrap();
+
+        assert_eq!(
+            decoded,
+            "{\"name\":\"demo\",\"vers\":\"1.0.0\"}\n{\"name\":\"demo\",\"vers\":\"1.0.1\"}"
+        );
+    }
 }
