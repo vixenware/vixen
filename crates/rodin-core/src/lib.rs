@@ -725,6 +725,102 @@ struct Solver<'a> {
     next_hypothesis: u32,
     steps: Vec<SolveStep>,
     trace: Vec<String>,
+    #[cfg(feature = "perf-diagnostics")]
+    diagnostics: SolverDiagnostics,
+}
+
+#[cfg(feature = "perf-diagnostics")]
+#[derive(Clone, Debug, Default)]
+struct SolverDiagnostics {
+    decision_by_pkg: BTreeMap<String, usize>,
+    decision_candidates_by_pkg: BTreeMap<String, usize>,
+    conflict_by_decision_pkg: BTreeMap<String, usize>,
+    conflict_support_by_edge: BTreeMap<String, usize>,
+    learned_by_region: BTreeMap<String, usize>,
+    learned_by_support: BTreeMap<String, usize>,
+    exclusion_scans: usize,
+    exclusion_prunes: usize,
+    exclusion_conflicts: usize,
+    learned_point_versions: usize,
+    learned_widened_versions: usize,
+    widened_facts: usize,
+}
+
+#[cfg(feature = "perf-diagnostics")]
+impl SolverDiagnostics {
+    fn record_decision(&mut self, pkg: &str, candidate_count: usize) {
+        *self.decision_by_pkg.entry(pkg.to_owned()).or_default() += 1;
+        *self
+            .decision_candidates_by_pkg
+            .entry(pkg.to_owned())
+            .or_default() += candidate_count;
+    }
+
+    fn record_conflict(&mut self, index: &CompiledIndex, conflict: &Conflict) {
+        let decision_pkg = conflict
+            .decision
+            .as_ref()
+            .and_then(|hypothesis| index.name(hypothesis.pkg))
+            .unwrap_or("<root>")
+            .to_owned();
+        *self
+            .conflict_by_decision_pkg
+            .entry(decision_pkg)
+            .or_default() += 1;
+        for edge in support_from_premises(index, &conflict.premises) {
+            let label = format!("{}->{}", edge.parent, edge.dep);
+            *self.conflict_support_by_edge.entry(label).or_default() += 1;
+        }
+    }
+
+    fn record_learn(
+        &mut self,
+        index: &CompiledIndex,
+        region: &Region,
+        support: &BTreeSet<EdgeKey>,
+        point_versions: usize,
+        widened_versions: usize,
+    ) {
+        *self
+            .learned_by_region
+            .entry(display_region(index, region))
+            .or_default() += 1;
+        *self
+            .learned_by_support
+            .entry(display_support(support))
+            .or_default() += 1;
+        self.learned_point_versions += point_versions;
+        self.learned_widened_versions += widened_versions;
+        if widened_versions > point_versions {
+            self.widened_facts += 1;
+        }
+    }
+
+    fn emit_snapshot(&self, decisions: usize, conflicts: usize, learned: usize) {
+        let duplicate_regions = self
+            .learned_by_region
+            .values()
+            .filter(|count| **count > 1)
+            .count();
+        tracing::info!(
+            target: "rodin_perf_diag",
+            decisions,
+            conflicts,
+            learned,
+            exclusion_scans = self.exclusion_scans,
+            exclusion_prunes = self.exclusion_prunes,
+            exclusion_conflicts = self.exclusion_conflicts,
+            widened_facts = self.widened_facts,
+            learned_point_versions = self.learned_point_versions,
+            learned_widened_versions = self.learned_widened_versions,
+            duplicate_regions,
+            decision_top = %top_counts(&self.decision_by_pkg, 8),
+            conflict_top = %top_counts(&self.conflict_by_decision_pkg, 8),
+            support_top = %top_counts(&self.conflict_support_by_edge, 8),
+            learned_region_top = %top_counts(&self.learned_by_region, 5),
+            "rodin perf diagnostic snapshot"
+        );
+    }
 }
 
 impl CompiledIndex {
@@ -1475,6 +1571,8 @@ impl<'a> Solver<'a> {
             next_hypothesis: 0,
             steps: Vec::new(),
             trace: Vec::new(),
+            #[cfg(feature = "perf-diagnostics")]
+            diagnostics: SolverDiagnostics::default(),
         }
     }
 
@@ -1644,6 +1742,9 @@ impl<'a> Solver<'a> {
             self.next_hypothesis += 1;
             self.decisions += 1;
             self.manifests_read += 1;
+            #[cfg(feature = "perf-diagnostics")]
+            self.diagnostics
+                .record_decision(self.index.name(pkg).unwrap_or_default(), candidate_count);
             if self.decisions.is_multiple_of(1000) {
                 tracing::info!(
                     decisions = self.decisions,
@@ -1654,6 +1755,25 @@ impl<'a> Solver<'a> {
                     %version,
                     "rodin solve progress"
                 );
+            }
+            #[cfg(feature = "perf-diagnostics")]
+            if self.decisions.is_multiple_of(perf_diag_interval()) {
+                self.diagnostics
+                    .emit_snapshot(self.decisions, self.conflicts, self.learned.len());
+            }
+            #[cfg(feature = "perf-diagnostics")]
+            if let Some(limit) = perf_diag_decision_limit()
+                && self.decisions >= limit
+            {
+                self.diagnostics
+                    .emit_snapshot(self.decisions, self.conflicts, self.learned.len());
+                tracing::warn!(
+                    target: "rodin_perf_diag",
+                    decisions = self.decisions,
+                    conflicts = self.conflicts,
+                    "rodin perf diagnostic decision limit reached"
+                );
+                return Err(());
             }
             self.trace.push(format!(
                 "expand {} {} (highest remaining of {candidate_count} candidates) - reads 1 manifest",
@@ -1745,6 +1865,10 @@ impl<'a> Solver<'a> {
     fn apply_exclusions(&mut self, state: &mut State) -> Result<(), Conflict> {
         let learned = self.learned.clone();
         for (ix, fact) in learned.iter().enumerate() {
+            #[cfg(feature = "perf-diagnostics")]
+            {
+                self.diagnostics.exclusion_scans += 1;
+            }
             let premise = Premise::Exclusion(ExclusionId(ix as u32));
             let mut unsatisfied = Vec::new();
             let mut disjoint = false;
@@ -1773,6 +1897,10 @@ impl<'a> Solver<'a> {
                         .and_then(|d| d.selected.as_ref())
                         .is_some()
                 }) {
+                    #[cfg(feature = "perf-diagnostics")]
+                    {
+                        self.diagnostics.exclusion_conflicts += 1;
+                    }
                     return Err(Conflict {
                         premises: vec![premise],
                         selected: selected_versions(state),
@@ -1790,6 +1918,10 @@ impl<'a> Solver<'a> {
                         .map(|domain| domain.allowed.clone())
                         .unwrap_or_else(VersionSet::universe);
                     let next = current.intersect(&excluded.complement(&current));
+                    #[cfg(feature = "perf-diagnostics")]
+                    if next != current {
+                        self.diagnostics.exclusion_prunes += 1;
+                    }
                     self.intersect_domain(state, pkg, next, premise)?;
                 }
             }
@@ -2030,6 +2162,8 @@ impl<'a> Solver<'a> {
     }
 
     fn learn(&mut self, conflict: Conflict) {
+        #[cfg(feature = "perf-diagnostics")]
+        self.diagnostics.record_conflict(self.index, &conflict);
         let mut premises = conflict.premises;
         if let Some(hypothesis) = &conflict.decision {
             premises.push(Premise::Hypothesis(hypothesis.id));
@@ -2093,6 +2227,14 @@ impl<'a> Solver<'a> {
             point_versions,
             widened_versions
         ));
+        #[cfg(feature = "perf-diagnostics")]
+        self.diagnostics.record_learn(
+            self.index,
+            &region,
+            &support,
+            point_versions,
+            widened_versions,
+        );
         self.steps.push(SolveStep::Learn {
             region: record_region(self.index, &region),
             support_edges: support_edge_ids(self.index, &support),
@@ -2346,6 +2488,38 @@ fn display_support(support: &BTreeSet<EdgeKey>) -> String {
         .map(|edge| format!("{}->{} edge", edge.parent, edge.dep))
         .collect::<Vec<_>>()
         .join(", ")
+}
+
+#[cfg(feature = "perf-diagnostics")]
+fn top_counts(counts: &BTreeMap<String, usize>, limit: usize) -> String {
+    let mut rows = counts.iter().collect::<Vec<_>>();
+    rows.sort_by(|(left_key, left_count), (right_key, right_count)| {
+        right_count
+            .cmp(left_count)
+            .then_with(|| left_key.cmp(right_key))
+    });
+    rows.into_iter()
+        .take(limit)
+        .map(|(key, count)| format!("{key}:{count}"))
+        .collect::<Vec<_>>()
+        .join(", ")
+}
+
+#[cfg(feature = "perf-diagnostics")]
+fn perf_diag_interval() -> usize {
+    std::env::var("RODIN_DIAG_EVERY")
+        .ok()
+        .and_then(|value| value.parse().ok())
+        .filter(|value| *value > 0)
+        .unwrap_or(1000)
+}
+
+#[cfg(feature = "perf-diagnostics")]
+fn perf_diag_decision_limit() -> Option<usize> {
+    std::env::var("RODIN_DIAG_DECISION_LIMIT")
+        .ok()
+        .and_then(|value| value.parse().ok())
+        .filter(|value| *value > 0)
 }
 
 fn package_id(source: &str, name: &str) -> String {

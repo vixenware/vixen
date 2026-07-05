@@ -19,6 +19,9 @@ tar = { version = "0.4.46", default-features = false }
 tracing.workspace = true
 tracing-subscriber.workspace = true
 
+[features]
+perf-diagnostics = []
+
 [dev-dependencies]
 pretty_assertions = "1.4.1"
 

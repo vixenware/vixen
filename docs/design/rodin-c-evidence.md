@@ -3494,3 +3494,84 @@ Verification completed for the code path changes:
 |---|---|
 | `cargo nextest run -p rodin-core -p rodin-facts` | 34/34 passed |
 | `cargo clippy -p rodin-core -p rodin-facts -- -D warnings` | passed |
+
+## Solver performance diagnosis: lock-union search pathology
+
+Round 8 exposed a faithful lock-union/dev solve case with 12,912 indexed edges that did not complete promptly. This pass added feature-gated solver attribution under `rodin-core/perf-diagnostics` only; no decision-ordering, restart, learning, or extraction behavior changed.
+
+The diagnostic invocation was:
+
+```text
+RODIN_DIAG_EVERY=1000 RODIN_DIAG_DECISION_LIMIT=18000 RUST_LOG=info,rodin_perf_diag=info stax record -- ./target/release/rodin-cargo-evidence
+```
+
+The run was stopped after the last emitted checkpoint at 13,000 decisions because profiler interval volume made progress past that checkpoint too slow for a useful 18,000-row sample. The earlier Round 8 uncapped stop remains the source for the observed 18,000 decisions / 9,392 conflicts / `derive_more@2` row; this diagnostic row is partial and is not extrapolated.
+
+| checkpoint | decisions | conflicts | learned | learned scans | learned prunes | learned conflicts | widened facts | point versions | widened versions |
+|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|
+| 1k | 1,000 | 503 | 503 | 619,562 | 252 | 0 | 503 | 503 | 5,468 |
+| 5k | 5,000 | 2,593 | 2,593 | 16,554,384 | 1,297 | 0 | 2,593 | 2,593 | 26,368 |
+| 10k | 10,000 | 5,208 | 5,208 | 66,741,048 | 2,604 | 0 | 5,208 | 5,208 | 52,518 |
+| 13k | 13,000 | 6,778 | 6,778 | 113,020,458 | 3,390 | 0 | 6,778 | 6,778 | 68,218 |
+
+At 13k, decision attribution was:
+
+| rank | domain | decisions |
+|---:|---|---:|
+| 1 | `digest@0.11` | 6,779 |
+| 2 | `derive_more@2` | 3,390 |
+| 3 | `data-encoding@2` | 1,695 |
+| 4 | `dashmap@6` | 565 |
+| 5 | `crypto-common@0.1` | 283 |
+| 6 | `crc32fast@1` | 142 |
+| 7 | `cpufeatures@0.2` | 71 |
+| 8 | `compact_str@0.9` | 24 |
+
+Conflict attribution was even narrower:
+
+| class | top rows |
+|---|---|
+| decision package for conflict | `digest@0.11`: 6,778 |
+| support edges | `anstream@1->proptest@1`, `anstyle-parse@1->proptest@1`, `camino@1->proptest@1`, `compact_str@0.9->proptest@1`, `console@0.15->proptest@1`, `const-oid@0.10->proptest@1`, `ctutils@0.4->proptest@1`, `dibs@0.2->proptest@1`: 6,777 each |
+| learned-region duplicates | 1 duplicated region, repeated 6,777 times |
+
+The repeated learned region is a large multi-domain region centered on `proptest@1 [1.9.0,1.9.1)` plus many support parents (`anstream@1`, `anstyle-parse@1`, `camino@1`, `compact_str@0.9`, `console@0.15`, `const-oid@0.10`, `ctutils@0.4`, `dibs@0.2`, `facet-json@0.50`, `facet-reflect@0.50`, `phon-engine@0.2`, `styx-format@5`, `toml_edit@0.22`, `winnow@0.5`, and others). Widening fires on every learned fact in this sample, but the widened fact still carries enough package support that it almost never becomes unit early: 6,778 learned facts produced 113,020,458 learned-fact scans and only 3,390 pruning events by 13k.
+
+The implementation hot path matches the attribution. The live `stax` samples during the run put most active time under `rodin_core::solve` / `Solver::search`, with `Solver::propagate` and learned-fact handling dominating. Leaf samples were led by `Solver::propagate`, allocation/free/memmove, `String::clone`, `BTreeMap::clone`, `Vec<Interval>::clone`, and `EdgeStabilityWitness` clone/drop. The directly visible code path clones the full learned-fact vector on every exclusion pass, then scans every fact:
+
+```text
+fn apply_exclusions(&mut self, state: &mut State) -> Result<(), Conflict> {
+    let learned = self.learned.clone();
+    for (ix, fact) in learned.iter().enumerate() {
+        ...
+    }
+}
+```
+
+and the search strategy chooses the lexicographically earliest active unresolved domain with more than one candidate:
+
+```text
+.filter(|(_, domain)| domain.active && domain.selected.is_none())
+.filter(|(pkg, _)| self.candidates(state, **pkg).len() > 1)
+.min_by_key(|(pkg, _)| self.index.name(**pkg).unwrap_or_default().to_owned())
+```
+
+That explains the geometric decision split (`digest` about half the decisions, `derive_more` about a quarter, `data-encoding` about an eighth): the solver is depth-first over a stable lexical domain order, trying candidates high-to-low, without activity-based variable selection or restarts.
+
+Diagnosis:
+
+- Primary class: decision heuristic / restart policy. The pathological branch is not random package fanout; it is deterministic lexical depth-first search walking a broad decision tree while conflicts repeatedly identify the same late support shape.
+- Secondary class: learning-rate / learned-region usefulness. Learned facts are being minted and widened, but they are too support-wide to prune before the same branch shape is rediscovered. Duplicate-region suppression or subsumption would be a mechanical memory/time fix, but not a complete search fix.
+- Mechanical implementation cost: learned-fact propagation should stop cloning the entire learned vector on every pass, and proof/witness payloads should be separated from the compact runtime exclusion data when scanning. This is a direct CPU/allocation reduction and does not decide solver strategy.
+- Extraction over-width is not the primary explanation for this trace. The lock-union graph is large, but the attribution narrows to repeated `proptest@1` support through a small set of parents plus lexical decision order.
+
+No search heuristic, restart policy, or learned-region semantic change was implemented in this pass.
+
+Verification for the diagnostic instrumentation:
+
+| command | result |
+|---|---|
+| `cargo check -p rodin-core --features perf-diagnostics` | passed |
+| `cargo nextest run -p rodin-core -p rodin-facts` | 34/34 passed |
+| `cargo clippy -p rodin-core -p rodin-facts -- -D warnings` | passed |
+| `cargo clippy -p rodin-core --features perf-diagnostics -- -D warnings` | passed |
