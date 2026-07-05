@@ -222,36 +222,27 @@ entirely `cfg(target_os = "linux")`-gated. Entry point: `sandbox::run()`
 `secmem_proc::harden_process()`. CLI contract:
 
 ```
-landlock-exec --vfs-root <PATH> --write-dir <PATH> -- <program> [args...]
+landlock-exec --read-root <PATH> --write-root <PATH> --exec-root <PATH> -- <program> [args...]
 ```
 
-Policy expressiveness is currently two hardcoded buckets, not an arbitrary
-per-path allow-list: `vfs_root` → read-only (`AccessFs::from_read`, which
-also grants execute), `write_dir` → read-write (`AccessFs::from_all`), plus
-best-effort read-only grants for `/tmp` (also read-write), `/usr`, `/lib`,
-`/lib64`, `/etc` (`sandbox.rs:130-169`). Network is denied by omission — no
-`Bind`/`Connect` rules are ever added, and the seccomp filter explicitly
-denies `accept4` (`sandbox.rs:194-239`). Ruleset is applied via
-`restrict_self()` and verified `RulesetStatus::FullyEnforced` before exec
-(`sandbox.rs:172-183`), and the target binary is confirmed ELF+PIE via
-`magic` before exec (`sandbox.rs:244-273`), then launched via
-`Command::new(&program).exec()` (276).
+Policy expressiveness is now the same declared-root generator shape as
+`seatbelt-exec`: read roots get read-only `PathBeneath` rules, write roots
+get read/write rules, and exec roots get read/execute rules. File/device
+roots are narrowed to file-compatible access rights before rule emission.
+The ruleset targets Landlock ABI V4 with `CompatLevel::HardRequirement`, so
+kernels without V4 filesystem and TCP rights fail during setup instead of
+silently degrading. TCP bind/connect are denied by declaring
+`AccessNet::{BindTcp, ConnectTcp}` and adding no `NetPort` allowances; the
+seccomp-bpf layer remains as defense in depth for server-side
+`accept`/`accept4`/`listen`. Landlock still does not confine arbitrary
+non-TCP networking.
 
-**macOS has no enforcement equivalent at all yet.** Every seatbelt/sandbox
-mention on macOS in this repo is aspirational doc-comment language describing
-intended future architecture, not implemented code:
-`crates/vx-services/src/runner.rs:63` ("Sandbox confinement — the seatbelt
-profile derived from these mounts/outputs — and caching join next") and
-`crates/vx-vfsd/src/vfs.rs:23-24` ("The sandbox (seatbelt on macOS,
-seccomp/landlock on Linux) restricts the subprocess to only access its
-prefix."). No `sandbox-exec`, `sandbox_init`, Endpoint Security client, `.sb`
-profile, or equivalent exists anywhere in the tree. The only macOS sandbox
-artifact present is `apps/mac/xcode/VixenFS/VixenFS.entitlements`'s
-`com.apple.security.app-sandbox = true` — that's the **FSKit extension's
-own** App Sandbox containment (a macOS system-extension requirement), not a
-mechanism the daemon could use to confine an arbitrary *child* process it
-launches. `docs/` has no sandbox/mount/exec design doc at all (`find docs
--iname "*sandbox*"` etc. all empty) — this doc is the first.
+**macOS now has a seatbelt mechanism with the same declared-root shape.**
+`crates/seatbelt-exec` generates a deny-default profile from declared read
+roots, write roots, and toolchain/exec roots, with its audit trail in
+`docs/design/seatbelt-strict-profile.md`. That gives macOS and Linux matching
+policy-compiler inputs, but the substrate launcher still needs to feed its
+mount table into either wrapper.
 
 **Windows has no explicit sandbox mechanism found either** — no AppContainer,
 job-object, or restricted-token code turned up in this pass. This is a gap to
@@ -296,15 +287,13 @@ the input a sandbox policy compiler needs: for each declared mount, emit a
 read-only Landlock `PathBeneath` rule (Linux) rooted at that mount's path; on
 macOS, the equivalent would be a generated seatbelt profile (still to build,
 see gaps) scoping file reads to the same paths; output/write directories
-compile to read-write rules the same way `landlock-exec` already treats
-`write_dir` today. The ceiling law becomes literal: *the set of paths the
+compile to read-write rules the same way `landlock-exec` treats declared
+write roots today. The ceiling law becomes literal: *the set of paths the
 sandbox permits is derived from, and can never exceed, the set of paths the
 VFS declared* — one generator, not two policies that could drift apart. This
-is the "role declarations become the sandbox policy" move Amos named: today
-`landlock-exec`'s policy is hand-built from two CLI paths
-(`--vfs-root`/`--write-dir`); the integration work is generalizing that to
-compile from an arbitrary `Vec<ExecMount>` plus an output/write list, one
-Landlock rule per declared mount instead of one blanket read-only root.
+is the "role declarations become the sandbox policy" move Amos named: the
+Linux wrapper now compiles from arbitrary read/write/exec root lists, one
+Landlock rule per declared root instead of one blanket read-only root.
 
 **report(events), join → Outcome, with *observed* not declared read-sets.**
 This is where §2's existing-but-unwired mechanism becomes load-bearing
@@ -375,8 +364,8 @@ platform API.
 | Read observation (CAS-level, path/identity granularity) | Done, unwired (`tracked_observations` exists, no caller) | Done, unwired (same) | Done, unwired (same) |
 | Read observation (OS-native, second channel) | N/A (no OS-native read-notify surface found) | N/A (FUSE has no equivalent notify channel) | Received, parsed, **discarded** (`windows.rs:365-368`) — smallest fix in this table |
 | Byte-range observation granularity | Not implemented (path/identity only) | Not implemented | Not implemented |
-| Sandbox enforcement mechanism | **Missing entirely** — doc comments only, no seatbelt/`sandbox_init`/Endpoint Security code anywhere | Done (`landlock-exec`: Landlock + seccomp-bpf) | **Missing entirely** — no AppContainer/job-object/restricted-token code found |
-| Policy compiled from declared mounts | N/A until macOS mechanism exists | Not yet generalized — `landlock-exec` takes 2 hardcoded paths (`--vfs-root`/`--write-dir`), needs to take arbitrary `Vec<ExecMount>` | N/A until Windows mechanism exists |
+| Sandbox enforcement mechanism | Done (`seatbelt-exec`: generated deny-default sandbox profile) | Done (`landlock-exec`: Landlock + seccomp-bpf) | **Missing entirely** — no AppContainer/job-object/restricted-token code found |
+| Policy compiled from declared mounts | Done for `seatbelt-exec` read/write/toolchain root lists; substrate still needs to pass its mount table into this generator | Done for `landlock-exec` read/write/exec root lists; substrate still needs to pass its mount table into this generator | N/A until Windows mechanism exists |
 | Mount-table + sandbox-policy composition (single declaration → both primitives) | Missing | Missing (mechanism exists, not driven by mount declarations) | Missing |
 | `ExecResult`/`Outcome` observed-read-set field | Missing on all platforms — `runner.rs:84-98` has only a write-set | | |
 | Actual subprocess launching in `vx-services` | Missing on all platforms — `orchestrator.rs`/`runner.rs`/`daemon.rs` are RPC shells, no `Command::new` anywhere | | |
@@ -384,14 +373,13 @@ platform API.
 
 Adapter work, by component (not by time):
 
-1. **Generalize `landlock-exec`'s policy compiler** from two CLI paths to an
-   arbitrary `Vec<ExecMount>` (+ output/write paths), one `PathBeneath` rule
-   per declared mount. Smallest, best-understood piece — the mechanism
-   exists, only the input shape needs to widen.
-2. **Build the macOS enforcement mechanism from zero** — seatbelt
-   (`sandbox_init`/`.sb` profile) generated from the same declared-mount
-   input as (1), or investigate Endpoint Security as an alternative
-   enforcement point. Currently nothing to extend; this is new surface.
+1. **Wire substrate mount declarations into `landlock-exec`'s policy
+   compiler.** The wrapper now accepts arbitrary read/write/exec root lists;
+   the remaining integration step is feeding it the real mount table and
+   output roots from the substrate launcher.
+2. **Wire substrate mount declarations into `seatbelt-exec`'s policy
+   compiler.** The macOS wrapper now accepts declared roots; the remaining
+   integration step is the same launcher handoff as Linux.
 3. **Build the Windows enforcement mechanism from zero** — AppContainer or
    restricted-token launch scoped to the same declared-mount input.
    Currently nothing to extend either.
