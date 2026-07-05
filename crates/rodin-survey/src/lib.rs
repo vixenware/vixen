@@ -356,10 +356,177 @@ fn split_cfg_args(inner: &str) -> Vec<String> {
     }
     args
 }
+/// The set of `cfg` predicates active for a target triple.
+///
+/// rustc is the oracle for which cfgs a target has — `rustc --print cfg
+/// --target <triple>` emits the exact set, so we never hand-maintain a table
+/// that drifts from the compiler. A dependency's `[target.'…'.dependencies]`
+/// expression is evaluated against this set to decide whether the dependency is
+/// consumed on that target. This is the per-context resolver-v2 replacement for
+/// the fixed-target [`target_matches_round`].
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct TargetCfg {
+    triple: String,
+    flags: BTreeSet<String>,
+    key_values: BTreeSet<(String, String)>,
+}
+
+impl TargetCfg {
+    /// Build the cfg set for `triple` by asking rustc (the oracle).
+    ///
+    /// Requires the target to be known to the active toolchain (no target std
+    /// needed — `--print cfg` only reads the target spec).
+    pub fn from_rustc(triple: &str) -> Result<Self> {
+        let output = Command::new("rustc")
+            .args(["--print", "cfg", "--target", triple])
+            .output()
+            .wrap_err("running `rustc --print cfg`")?;
+        if !output.status.success() {
+            bail!(
+                "rustc --print cfg --target {triple} failed: {}",
+                String::from_utf8_lossy(&output.stderr).trim()
+            );
+        }
+        let text = String::from_utf8(output.stdout).wrap_err("decoding rustc cfg output")?;
+        Ok(Self::from_rustc_output(triple, &text))
+    }
+
+    /// Parse the `key="value"` / bare-flag lines rustc emits.
+    #[must_use]
+    pub fn from_rustc_output(triple: &str, text: &str) -> Self {
+        let mut flags = BTreeSet::new();
+        let mut key_values = BTreeSet::new();
+        for line in text.lines() {
+            let line = line.trim();
+            if line.is_empty() {
+                continue;
+            }
+            if let Some((key, value)) = line.split_once('=') {
+                let value = value.trim().trim_matches('"').to_owned();
+                key_values.insert((key.trim().to_owned(), value));
+            } else {
+                flags.insert(line.to_owned());
+            }
+        }
+        Self {
+            triple: triple.to_owned(),
+            flags,
+            key_values,
+        }
+    }
+
+    /// Construct explicitly (deterministic tests, no toolchain dependency).
+    #[must_use]
+    pub fn from_parts(
+        triple: impl Into<String>,
+        flags: impl IntoIterator<Item = &'static str>,
+        key_values: impl IntoIterator<Item = (&'static str, &'static str)>,
+    ) -> Self {
+        Self {
+            triple: triple.into(),
+            flags: flags.into_iter().map(str::to_owned).collect(),
+            key_values: key_values
+                .into_iter()
+                .map(|(key, value)| (key.to_owned(), value.to_owned()))
+                .collect(),
+        }
+    }
+
+    #[must_use]
+    pub fn triple(&self) -> &str {
+        &self.triple
+    }
+
+    /// Does a dependency's `target` field match this target?
+    ///
+    /// The field is either a literal triple (`x86_64-pc-windows-msvc`) or a
+    /// `cfg(...)` expression.
+    #[must_use]
+    pub fn matches_target_field(&self, target: &str) -> bool {
+        let target = target.trim().trim_matches('"').trim_matches('\'');
+        if let Some(cfg) = target.strip_prefix("cfg(").and_then(|t| t.strip_suffix(')')) {
+            self.eval_cfg(cfg)
+        } else {
+            target == self.triple
+        }
+    }
+
+    fn eval_cfg(&self, expr: &str) -> bool {
+        let expr = expr.trim();
+        if let Some(inner) = expr.strip_prefix("all(").and_then(|t| t.strip_suffix(')')) {
+            return split_cfg_args(inner).iter().all(|arg| self.eval_cfg(arg));
+        }
+        if let Some(inner) = expr.strip_prefix("any(").and_then(|t| t.strip_suffix(')')) {
+            return split_cfg_args(inner).iter().any(|arg| self.eval_cfg(arg));
+        }
+        if let Some(inner) = expr.strip_prefix("not(").and_then(|t| t.strip_suffix(')')) {
+            return !self.eval_cfg(inner);
+        }
+        if let Some((key, value)) = expr.split_once('=') {
+            let key = key.trim();
+            let value = value.trim().trim_matches('"').trim_matches('\'');
+            return self.key_values.contains(&(key.to_owned(), value.to_owned()));
+        }
+        self.flags.contains(expr.trim())
+    }
+}
 
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn darwin_cfg() -> TargetCfg {
+        // A representative slice of `rustc --print cfg --target aarch64-apple-darwin`.
+        TargetCfg::from_parts(
+            "aarch64-apple-darwin",
+            ["unix", "debug_assertions"],
+            [
+                ("target_arch", "aarch64"),
+                ("target_os", "macos"),
+                ("target_family", "unix"),
+                ("target_endian", "little"),
+                ("target_pointer_width", "64"),
+                ("target_vendor", "apple"),
+                ("target_env", ""),
+            ],
+        )
+    }
+
+    #[test]
+    fn target_cfg_parses_rustc_output_and_evaluates_expressions() {
+        let text = "debug_assertions\ntarget_arch=\"aarch64\"\ntarget_os=\"macos\"\nunix\n";
+        let cfg = TargetCfg::from_rustc_output("aarch64-apple-darwin", text);
+        assert!(cfg.matches_target_field("cfg(unix)"));
+        assert!(cfg.matches_target_field("cfg(target_arch = \"aarch64\")"));
+        assert!(!cfg.matches_target_field("cfg(target_os = \"linux\")"));
+        assert!(cfg.matches_target_field("aarch64-apple-darwin"));
+        assert!(!cfg.matches_target_field("x86_64-pc-windows-msvc"));
+    }
+
+    #[test]
+    fn target_cfg_evaluates_nested_boolean_expressions() {
+        let cfg = darwin_cfg();
+        assert!(cfg.matches_target_field("cfg(any(windows, unix))"));
+        assert!(!cfg.matches_target_field("cfg(all(unix, windows))"));
+        assert!(cfg.matches_target_field("cfg(not(windows))"));
+        assert!(cfg.matches_target_field(
+            "cfg(all(target_os = \"macos\", target_arch = \"aarch64\"))"
+        ));
+        assert!(!cfg.matches_target_field("cfg(windows)"));
+    }
+
+    #[test]
+    fn target_cfg_from_rustc_matches_the_compiler_for_a_builtin_triple() {
+        // `--print cfg --target` reads only the (builtin) target spec, so this is
+        // host-independent: linux cfgs regardless of where the test runs.
+        let cfg = TargetCfg::from_rustc("x86_64-unknown-linux-gnu")
+            .expect("rustc knows the linux triple");
+        assert!(cfg.matches_target_field("cfg(unix)"));
+        assert!(cfg.matches_target_field("cfg(target_os = \"linux\")"));
+        assert!(cfg.matches_target_field("cfg(target_arch = \"x86_64\")"));
+        assert!(!cfg.matches_target_field("cfg(windows)"));
+        assert!(!cfg.matches_target_field("cfg(target_os = \"macos\")"));
+    }
 
     #[test]
     fn cargo_sparse_cache_decoder_keeps_only_json_rows() {
