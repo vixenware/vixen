@@ -125,3 +125,39 @@ store pressure across the board.
 META: three position-doc claims about our own code were falsified by
 design agents in one day (lazy VSIDS, trail/watch existence, flesh
 tier). Rule reaffirmed: cite code, not memory, when banking.
+
+## FLESH-TIER SPIKE B: MEASURED RESULT (2026-07-05, stax profiled)
+
+Bench (interpreter lane, Lane::Interp): naive-copy 15.3ms, reuse
+14.6ms (~5% faster), Rust Vec 8us. Viability bar NOT met on first cut.
+BUT — Amos asked "did it use stax?" It hadn't; neither had I; and my
+asserted diagnosis ("~1800x = interpreter-dispatch signature") was
+FALSIFIED by the actual profile:
+
+  stax top --sort self: sha2::sha256::compress256 = 327ms / 381ms
+  = 86% OF ALL CPU IS SHA-256 HASHING during intern_flesh_word ->
+  intern_value_bytes_children (recursive) -> alloc_array_words.
+
+The bottleneck is CONTENT-ADDRESSED INTERNING, not dispatch, not copy.
+Reuse barely helped because reuse eliminates the COPY, but the value
+still crosses an intern boundary and gets FULLY RE-HASHED. A CDCL
+trail grows monotonically and is interned each step -> each intern
+re-hashes the whole O(N) structure -> O(N^2) hashing. Copy was never
+the cost; per-intern full-tree sha256 is.
+
+CONSEQUENCE (reframes the bet AND my proposed next step):
+1. The flesh tier v1 attacked the WRONG AXIS (copies). The real cost
+   is content-addressing every intermediate.
+2. My proposed "run it on the JIT lane" would ALSO be sha256-bound —
+   the JIT removes dispatch, but interning-per-step hashes regardless.
+   So the JIT bench alone would NOT have revealed or fixed this.
+3. THE ACTUAL FIX DIRECTIONS: (a) keep the solve interior FLESH and
+   UN-INTERNED across the whole inner loop (the pure-kernel design's
+   "flesh, JIT'd, untraced" — intern once at the demand boundary, not
+   every op); (b) INCREMENTAL/MERKLE hashing so pushing one element
+   updates the digest in O(1)/O(log N), not O(N) re-hash; (c) both.
+   Flesh-must-not-intern-in-the-hot-loop is the load-bearing one.
+CORRECTNESS WIN STANDS: reuse is UNOBSERVABLE (oracle green) — value
+semantics preserved. That safety property is done regardless of perf.
+DOCTRINE NOTE: measure, don't guess. My "interpreter signature"
+assertion was wrong; stax showed hashing. Amos's question caught it.
