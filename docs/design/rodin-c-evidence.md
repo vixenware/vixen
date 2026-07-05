@@ -4457,3 +4457,33 @@ Consumed read-set fields:
 Stable versions certified by the observed read set: 1.0.0, 1.0.1, 1.0.2.
 
 The middle `demo-app` fixture row differs cosmetically in dependency feature/default-feature metadata, so the existing `EdgeSignature` declared-structure lane cannot include it. The conflict's observed version-requirement read set does not consume those cosmetic fields, so read-set stability verifies the full three-version range.
+
+## Round 11 — Real crates.io neighborhood R2 demonstration
+
+Round 11 runs the same declared-structure versus observed-read-set widening comparison on a committed real sparse-index snapshot. The fixture rows live under `crates/rodin-core/fixtures/r2-real-sparse-index/`; tests and report generation parse those rows offline with the `rodin-survey` sparse-index row types and do not hit the network.
+
+| source | scenario | neighborhood versions | declared versions pruned | read-set versions pruned | declared added prunes | read-set added prunes |
+|---|---|---:|---:|---:|---:|---:|
+| synthetic Round 10 | cosmetic-dependency-feature-diff | 3 | 2 | 3 | 1 | 2 |
+| real Round 11 | reqwest-0.13-hyper-target-cfg-diff | 5 | 2 | 5 | 1 | 4 |
+
+Chosen neighborhood: `reqwest` versions 0.13.0, 0.13.1, 0.13.2, 0.13.3, 0.13.4. Edge: `reqwest@0.13 -> hyper@1`. Snapshot: `r2-real-fixture:9079e92712ee717965f051a5c8173dae5977eadeaa0214ca9c8f09e4bf2ae7e8`. Read-set digest: `7a91f329b86e411eecfd3373861474c5658b5fe1c253536fbbf607c8682b7ec7`.
+
+Consumed read-set fields:
+
+- `deps[hyper].actual`
+- `deps[hyper].kind`
+- `deps[hyper].optional`
+- `deps[hyper].req`
+
+Cosmetic fields that differed while the consumed set held:
+
+- `deps[hyper].target`: `cfg(not(target_arch = "wasm32"))` on reqwest 0.13.0-0.13.2, then `cfg(not(all(target_arch = "wasm32", any(target_os = "unknown", target_os = "none"))))` on 0.13.3-0.13.4
+- `cksum`, `pubtime`, and `rust_version` differ between the committed sparse-index rows, but none are resolver-consumed by this conflict
+- Several unrelated target-gated dependency rows change at the same reqwest 0.13.3 boundary; the observed support edge remains `reqwest@0.13 -> hyper@1`
+
+Declared-structure stable versions: 0.13.3, 0.13.4.
+
+Observed-read-set stable versions: 0.13.0, 0.13.1, 0.13.2, 0.13.3, 0.13.4.
+
+The real-data gap is smaller than an idealized all-cosmetic patch run but still fires on committed crates.io rows: declared `EdgeSignature` equality stops at the target-cfg split, while the conflict's observed read set only consumes `actual`, `kind`, `optional`, and `req`.
