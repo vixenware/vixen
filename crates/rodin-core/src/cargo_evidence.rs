@@ -277,10 +277,10 @@ struct LockDep {
 #[must_use]
 pub fn render_cargo_evidence_markdown(report: &CargoEvidenceReport) -> String {
     let mut out = String::new();
-    out.push_str("## Round 8: Per-row Cargo oracle convergence\n\n");
+    out.push_str("## Round 9: Per-row Cargo oracle verdict table\n\n");
     let _ = writeln!(
         out,
-        "Source snapshot: `{}` Cargo.lock plus local Cargo registry source/cache artifacts. The production extractor is offline-only, reads local Cargo.toml files and `.crate` archives directly, indexes cached registry alternatives for locked package names, and models Cargo-compatible coexisting domains keyed by package name and compatibility class. The fresh-lock oracle is test-only: it runs Cargo offline in a throwaway workspace copy and never feeds Rodin's solve path.\n",
+        "Source snapshot: `{}` Cargo.lock plus local Cargo registry source/cache artifacts. The production extractor is offline-only, reads local Cargo.toml files and `.crate` archives directly, indexes cached registry alternatives for locked package names, and models Cargo-compatible coexisting domains keyed by package name and compatibility class. The fresh-lock oracle is test-only: it runs Cargo offline in a throwaway workspace copy and never feeds Rodin's solve path. Every divergence row below carries exactly one verdict and, for accepted divergences, exactly one policy rule.\n",
         report.workspace
     );
 
@@ -525,14 +525,26 @@ fn render_accepted_divergence_policies(out: &mut String, report: &CargoEvidenceR
 
 fn accepted_policy_rule(policy: &str) -> &'static str {
     match policy {
-        "lockfile-free deterministic solve" => {
-            "Rodin does not preserve a historical or fresh Cargo.lock choice when multiple cached versions satisfy the active ranges; it selects by its deterministic domain/order policy."
+        "lockfile-free version choice" => {
+            "Rodin does not preserve a historical or fresh Cargo.lock version when multiple cached versions satisfy the active ranges; it selects the highest version in the package domain under the canonical order."
         }
         "offline snapshot boundary" => {
             "Rodin only resolves packages present in the offline lock/cache snapshot and does not synthesize missing registry artifacts or unversioned lock edges."
         }
-        "alternate satisfying graph" => {
-            "Rodin accepts a different satisfying dependency graph when the selected versions and activated edges are internally justified and the only mismatch is Cargo's resolver tie-break."
+        "fixed-target inactive target edge" => {
+            "The fixed-target runtime projection evaluates target-conditional edges for aarch64-apple-darwin and does not select packages reachable only through inactive target predicates."
+        }
+        "fixed-target inactive dev edge" => {
+            "The fixed-target runtime projection keeps dev-dependencies active only for workspace members; packages reachable only through non-workspace dev edges are outside that projection."
+        }
+        "lockfile-free graph membership" => {
+            "Rodin treats Cargo.lock as an oracle, not as a root set; a locked package class is absent when the extracted manifest closure does not require that domain."
+        }
+        "manifest-closure extra selection" => {
+            "Rodin solves the extracted manifest closure over the offline cache, so it may select an internally justified cached package domain that Cargo's lockfile did not retain."
+        }
+        "historical-lock superseded by fresh oracle" => {
+            "A historical Cargo.lock row is accepted when the fresh Cargo oracle selects the same package domain and version as Rodin."
         }
         _ => "Policy text is carried in the divergence row.",
     }
@@ -1444,22 +1456,58 @@ fn verdict_for_divergence(
     }
     if classification.contains("fresh-lock oracle selects Rodin's version")
         || classification.contains("fresh-lock oracle includes Rodin's selected domain")
+    {
+        return (
+            CargoDivergenceVerdict::LegitimateTieBreakDifference,
+            Some("historical-lock superseded by fresh oracle".to_owned()),
+        );
+    }
+    if classification.contains("target-conditional dependency projection is inactive") {
+        return (
+            CargoDivergenceVerdict::LegitimateTieBreakDifference,
+            Some("fixed-target inactive target edge".to_owned()),
+        );
+    }
+    if classification.contains("dev-dependency projection is inactive") {
+        return (
+            CargoDivergenceVerdict::LegitimateTieBreakDifference,
+            Some("fixed-target inactive dev edge".to_owned()),
+        );
+    }
+    if classification.contains("locked package class was not reached")
+        || classification.contains("build-dependency projection is inactive")
+        || classification.contains("feature/optional dependency projection is inactive")
+        || classification.contains("reached only through Cargo.lock exact-edge fallback")
+    {
+        return (
+            CargoDivergenceVerdict::LegitimateTieBreakDifference,
+            Some("lockfile-free graph membership".to_owned()),
+        );
+    }
+    if classification.contains("selected from cached registry universe but absent from Cargo.lock")
+    {
+        return (
+            CargoDivergenceVerdict::LegitimateTieBreakDifference,
+            Some("manifest-closure extra selection".to_owned()),
+        );
+    }
+    if classification.contains("same package compatibility class selected a different version")
         || matches!(kind, CargoDivergenceKind::VersionMismatch)
     {
         return (
             CargoDivergenceVerdict::LegitimateTieBreakDifference,
-            Some("lockfile-free deterministic solve".to_owned()),
+            Some("lockfile-free version choice".to_owned()),
         );
     }
     if matches!(kind, CargoDivergenceKind::ExtraInRodin) {
         return (
             CargoDivergenceVerdict::LegitimateTieBreakDifference,
-            Some("alternate satisfying graph".to_owned()),
+            Some("manifest-closure extra selection".to_owned()),
         );
     }
     (
         CargoDivergenceVerdict::LegitimateTieBreakDifference,
-        Some("alternate satisfying graph".to_owned()),
+        Some("lockfile-free graph membership".to_owned()),
     )
 }
 
@@ -2361,6 +2409,50 @@ mod tests {
             .as_deref(),
             Some("wasm-browser-tests")
         );
+    }
+
+    #[test]
+    fn divergence_verdicts_have_specific_accepted_policies() {
+        let cases = [
+            (
+                CargoDivergenceKind::MissingInRodin,
+                "target-conditional dependency projection is inactive in this round",
+                Some("fixed-target inactive target edge"),
+            ),
+            (
+                CargoDivergenceKind::MissingInRodin,
+                "dev-dependency projection is inactive in this round",
+                Some("fixed-target inactive dev edge"),
+            ),
+            (
+                CargoDivergenceKind::MissingInRodin,
+                "locked package class was not reached under the extracted root/range/feature projection",
+                Some("lockfile-free graph membership"),
+            ),
+            (
+                CargoDivergenceKind::ExtraInRodin,
+                "selected from cached registry universe but absent from Cargo.lock",
+                Some("manifest-closure extra selection"),
+            ),
+            (
+                CargoDivergenceKind::VersionMismatch,
+                "same package compatibility class selected a different version from Cargo.lock",
+                Some("lockfile-free version choice"),
+            ),
+            (
+                CargoDivergenceKind::VersionMismatch,
+                "fresh-lock oracle selects Rodin's version; historical lock divergence vindicated",
+                Some("historical-lock superseded by fresh oracle"),
+            ),
+        ];
+        for (kind, classification, expected_policy) in cases {
+            let (verdict, policy) = verdict_for_divergence(kind, classification);
+            assert_eq!(
+                verdict,
+                CargoDivergenceVerdict::LegitimateTieBreakDifference
+            );
+            assert_eq!(policy.as_deref(), expected_policy);
+        }
     }
 
     #[test]

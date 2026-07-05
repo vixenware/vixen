@@ -3608,3 +3608,835 @@ Final oracle recheck from regenerated `output/rodin-cargo-evidence.json`:
 The fixed-target warm counterfactual dropped root dependency `copypatch`; warm/cold selected sets remained equal, with warm 235 decisions / 0 conflicts versus cold 238 decisions / 2 conflicts.
 
 The remaining lock-oracle divergences are the already-classified model/extraction rows in the regenerated artifact; this performance pass did not change Cargo interpretation policy.
+
+## Round 9: Per-row Cargo oracle verdict table
+
+Source snapshot: `/Users/amos/oss/facet-cc` Cargo.lock plus local Cargo registry source/cache artifacts. The production extractor is offline-only, reads local Cargo.toml files and `.crate` archives directly, indexes cached registry alternatives for locked package names, and models Cargo-compatible coexisting domains keyed by package name and compatibility class. The fresh-lock oracle is test-only: it runs Cargo offline in a throwaway workspace copy and never feeds Rodin's solve path. Every divergence row below carries exactly one verdict and, for accepted divergences, exactly one policy rule.
+
+### Fresh-lock oracle
+
+| attempted | solved | lock packages | unique names | wall ms | message |
+|---|---|---:|---:|---:|---|
+| true | true | 892 | 813 | 1108 | cargo generate-lockfile --offline succeeded in throwaway copy |
+
+### Oracle matrix
+
+| projection | oracle | exact matches | compared | match rate | divergences | decisions | conflicts | wall ms |
+|---|---|---:|---:|---:|---:|---:|---:|---:|
+| fixed-target runtime | HistoricalLock | 790 | 892 | 88.57% | 128 | 238 | 2 | 1532 |
+| fixed-target runtime | FreshLock | 795 | 892 | 89.13% | 122 | 238 | 2 | 1532 |
+| lock-union dev-included | HistoricalLock | 848 | 892 | 95.07% | 111 | 457 | 69 | 3419 |
+| lock-union dev-included | FreshLock | 853 | 892 | 95.63% | 105 | 457 | 69 | 3419 |
+
+### Accepted divergences
+
+| policy | Rodin rule |
+|---|---|
+| fixed-target inactive dev edge | The fixed-target runtime projection keeps dev-dependencies active only for workspace members; packages reachable only through non-workspace dev edges are outside that projection. |
+| fixed-target inactive target edge | The fixed-target runtime projection evaluates target-conditional edges for aarch64-apple-darwin and does not select packages reachable only through inactive target predicates. |
+| historical-lock superseded by fresh oracle | A historical Cargo.lock row is accepted when the fresh Cargo oracle selects the same package domain and version as Rodin. |
+| lockfile-free graph membership | Rodin treats Cargo.lock as an oracle, not as a root set; a locked package class is absent when the extracted manifest closure does not require that domain. |
+| lockfile-free version choice | Rodin does not preserve a historical or fresh Cargo.lock version when multiple cached versions satisfy the active ranges; it selects the highest version in the package domain under the canonical order. |
+| manifest-closure extra selection | Rodin solves the extracted manifest closure over the offline cache, so it may select an internally justified cached package domain that Cargo's lockfile did not retain. |
+
+### Projection: fixed-target runtime
+
+Product-default projection: target-conditionals are evaluated against `aarch64-apple-darwin`, build dependencies are active for the host, and dev dependencies are active only for workspace members.
+
+#### Extraction
+
+- historical lock package entries: 892
+- historical lock unique package names: 813
+- workspace roots: 144
+- indexed package names: 1247
+- indexed package versions: 2255
+- indexed dependency edges: 8280
+- extraction/modeling gaps: 8737
+
+#### Solve numbers
+
+| solved | decisions | conflicts | restarts | learned facts | learned scans | learned prunes | subsumed | replaced | point versions | widened versions | widening factor | wall ms |
+|---|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|
+| true | 238 | 2 | 0 | 2 | 273 | 0 | 0 | 0 | 2 | 2 | 1.000 | 1532 |
+
+
+Solve trace tail:
+
+- `expand zerocopy@0.8 0.8.52 (highest remaining of 12 candidates) - reads 1 manifest`
+- `domain zerocopy-derive@0.8 becomes active`
+- `zerocopy-derive@0.8: [0.8.27,0.8.28) U [0.8.31,0.8.32) U [0.8.33,0.8.34) U [0.8.38,0.8.41) U [0.8.42,0.8.43) U [0.8.48,0.8.51) U [0.8.52,0.8.53) ∩ [0.8.52,0.8.53) = [0.8.52,0.8.53)`
+- `force zerocopy-derive@0.8 0.8.52 (only candidate after propagation)`
+- `expand zerofrom@0.1 0.1.8 (highest remaining of 3 candidates) - reads 1 manifest`
+- `domain zerofrom-derive@0.1 becomes active`
+- `zerofrom-derive@0.1: [0.1.4,0.1.8) ∩ [0.1.6,0.2.0) = [0.1.6,0.1.8)`
+- `expand zerofrom-derive@0.1 0.1.7 (highest remaining of 2 candidates) - reads 1 manifest`
+- `expand zeroize@1 1.9.0 (highest remaining of 3 candidates) - reads 1 manifest`
+- `expand zmij@1 1.0.21 (highest remaining of 7 candidates) - reads 1 manifest`
+- `solution: addr2line@0.25 0.25.1, adler2@2 2.0.1, ahash@0.7 0.7.8, ahash@0.8 0.8.12, aho-corasick@1 1.1.4, aligned-vec@0.6 0.6.4, alloc-no-stdlib@2 2.0.4, alloc-stdlib@0.2 0.2.4, allocator-api2@0.2 0.2.21, anstream@0.6 0....`
+- `summary: manifests read 238, candidate observations 741, conflicts 2, widened versions killed 2 vs 2 point versions`
+
+#### HistoricalLock oracle
+
+- exact locked-domain matches: 790/892 (88.57%)
+- divergences: 128
+
+| divergence kind | count |
+|---|---:|
+| MissingInRodin | 96 |
+| ExtraInRodin | 26 |
+| VersionMismatch | 6 |
+
+| classification | count |
+|---|---:|
+| dev-dependency projection is inactive in this round | 9 |
+| fresh-lock oracle includes Rodin's selected domain; historical extra-selection vindicated | 1 |
+| fresh-lock oracle selects Rodin's version; historical lock divergence vindicated | 4 |
+| locked package class was not reached under the extracted root/range/feature projection | 24 |
+| same package compatibility class selected a different version from Cargo.lock | 2 |
+| selected from cached registry universe but absent from Cargo.lock | 25 |
+| target-conditional dependency projection is inactive in this round | 63 |
+
+| verdict | count |
+|---|---:|
+| LegitimateTieBreakDifference | 128 |
+
+| kind | package | Cargo.lock | Rodin | verdict | classification | accepted policy |
+|---|---|---|---|---|---|---|
+| MissingInRodin | `android_system_properties@0.1` | `0.1.5` | `-` | LegitimateTieBreakDifference | target-conditional dependency projection is inactive in this round | fixed-target inactive target edge |
+| MissingInRodin | `anstyle-wincon@3` | `3.0.11` | `-` | LegitimateTieBreakDifference | target-conditional dependency projection is inactive in this round | fixed-target inactive target edge |
+| MissingInRodin | `arborium-sysroot@2` | `2.18.1` | `-` | LegitimateTieBreakDifference | target-conditional dependency projection is inactive in this round | fixed-target inactive target edge |
+| VersionMismatch | `arrayvec@0.7` | `0.7.7` | `0.7.8` | LegitimateTieBreakDifference | fresh-lock oracle selects Rodin's version; historical lock divergence vindicated | historical-lock superseded by fresh oracle |
+| MissingInRodin | `atomic@0.6` | `0.6.1` | `-` | LegitimateTieBreakDifference | locked package class was not reached under the extracted root/range/feature projection | lockfile-free graph membership |
+| MissingInRodin | `aws-lc-rs@1` | `1.17.0` | `-` | LegitimateTieBreakDifference | dev-dependency projection is inactive in this round | fixed-target inactive dev edge |
+| MissingInRodin | `aws-lc-sys@0.41` | `0.41.0` | `-` | LegitimateTieBreakDifference | locked package class was not reached under the extracted root/range/feature projection | lockfile-free graph membership |
+| MissingInRodin | `bitvec@1` | `1.1.1` | `-` | LegitimateTieBreakDifference | locked package class was not reached under the extracted root/range/feature projection | lockfile-free graph membership |
+| MissingInRodin | `bolero-afl@0.13` | `0.13.0` | `-` | LegitimateTieBreakDifference | target-conditional dependency projection is inactive in this round | fixed-target inactive target edge |
+| MissingInRodin | `bolero-honggfuzz@0.13` | `0.13.0` | `-` | LegitimateTieBreakDifference | target-conditional dependency projection is inactive in this round | fixed-target inactive target edge |
+| MissingInRodin | `bolero-kani@0.13` | `0.13.0` | `-` | LegitimateTieBreakDifference | target-conditional dependency projection is inactive in this round | fixed-target inactive target edge |
+| MissingInRodin | `bolero-libfuzzer@0.13` | `0.13.0` | `-` | LegitimateTieBreakDifference | target-conditional dependency projection is inactive in this round | fixed-target inactive target edge |
+| MissingInRodin | `bs58@0.5` | `0.5.1` | `-` | LegitimateTieBreakDifference | locked package class was not reached under the extracted root/range/feature projection | lockfile-free graph membership |
+| MissingInRodin | `cmake@0.1` | `0.1.58` | `-` | LegitimateTieBreakDifference | locked package class was not reached under the extracted root/range/feature projection | lockfile-free graph membership |
+| VersionMismatch | `color-backtrace@0.7` | `0.7.2` | `0.7.3` | LegitimateTieBreakDifference | same package compatibility class selected a different version from Cargo.lock | lockfile-free version choice |
+| MissingInRodin | `crossterm_winapi@0.9` | `0.9.1` | `-` | LegitimateTieBreakDifference | target-conditional dependency projection is inactive in this round | fixed-target inactive target edge |
+| MissingInRodin | `dlmalloc@0.2` | `0.2.14` | `-` | LegitimateTieBreakDifference | target-conditional dependency projection is inactive in this round | fixed-target inactive target edge |
+| MissingInRodin | `dunce@1` | `1.0.5` | `-` | LegitimateTieBreakDifference | locked package class was not reached under the extracted root/range/feature projection | lockfile-free graph membership |
+| MissingInRodin | `embedded-io@0.6` | `0.6.1` | `-` | LegitimateTieBreakDifference | locked package class was not reached under the extracted root/range/feature projection | lockfile-free graph membership |
+| MissingInRodin | `encode_unicode@1` | `1.0.0` | `-` | LegitimateTieBreakDifference | target-conditional dependency projection is inactive in this round | fixed-target inactive target edge |
+| MissingInRodin | `fs_extra@1` | `1.3.0` | `-` | LegitimateTieBreakDifference | dev-dependency projection is inactive in this round | fixed-target inactive dev edge |
+| MissingInRodin | `fsevent-sys@4` | `4.1.0` | `-` | LegitimateTieBreakDifference | target-conditional dependency projection is inactive in this round | fixed-target inactive target edge |
+| MissingInRodin | `funty@2` | `2.0.0` | `-` | LegitimateTieBreakDifference | locked package class was not reached under the extracted root/range/feature projection | lockfile-free graph membership |
+| MissingInRodin | `hermit-abi@0.5` | `0.5.2` | `-` | LegitimateTieBreakDifference | target-conditional dependency projection is inactive in this round | fixed-target inactive target edge |
+| MissingInRodin | `hyper-named-pipe@0.1` | `0.1.0` | `-` | LegitimateTieBreakDifference | target-conditional dependency projection is inactive in this round | fixed-target inactive target edge |
+| MissingInRodin | `iana-time-zone-haiku@0.1` | `0.1.2` | `-` | LegitimateTieBreakDifference | target-conditional dependency projection is inactive in this round | fixed-target inactive target edge |
+| MissingInRodin | `icu_normalizer_data@2` | `2.0.0` | `-` | LegitimateTieBreakDifference | locked package class was not reached under the extracted root/range/feature projection | lockfile-free graph membership |
+| MissingInRodin | `inotify@0.11` | `0.11.2` | `-` | LegitimateTieBreakDifference | target-conditional dependency projection is inactive in this round | fixed-target inactive target edge |
+| MissingInRodin | `inotify-sys@0.1` | `0.1.5` | `-` | LegitimateTieBreakDifference | locked package class was not reached under the extracted root/range/feature projection | lockfile-free graph membership |
+| VersionMismatch | `jiff@0.2` | `0.2.29` | `0.2.31` | LegitimateTieBreakDifference | same package compatibility class selected a different version from Cargo.lock | lockfile-free version choice |
+| MissingInRodin | `jiff-tzdb-platform@0.1` | `0.1.3` | `-` | LegitimateTieBreakDifference | target-conditional dependency projection is inactive in this round | fixed-target inactive target edge |
+| MissingInRodin | `jobserver@0.1` | `0.1.34` | `-` | LegitimateTieBreakDifference | locked package class was not reached under the extracted root/range/feature projection | lockfile-free graph membership |
+| MissingInRodin | `libredox@0.1` | `0.1.17` | `-` | LegitimateTieBreakDifference | target-conditional dependency projection is inactive in this round | fixed-target inactive target edge |
+| MissingInRodin | `linux-raw-sys@0.4` | `0.4.15` | `-` | LegitimateTieBreakDifference | target-conditional dependency projection is inactive in this round | fixed-target inactive target edge |
+| MissingInRodin | `linux-raw-sys@0.12` | `0.12.1` | `-` | LegitimateTieBreakDifference | target-conditional dependency projection is inactive in this round | fixed-target inactive target edge |
+| MissingInRodin | `notify@8` | `8.2.0` | `-` | LegitimateTieBreakDifference | locked package class was not reached under the extracted root/range/feature projection | lockfile-free graph membership |
+| MissingInRodin | `once_cell_polyfill@1` | `1.70.2` | `-` | LegitimateTieBreakDifference | target-conditional dependency projection is inactive in this round | fixed-target inactive target edge |
+| MissingInRodin | `openssl-probe@0.2` | `0.2.1` | `-` | LegitimateTieBreakDifference | target-conditional dependency projection is inactive in this round | fixed-target inactive target edge |
+| MissingInRodin | `r-efi@5` | `5.3.0` | `-` | LegitimateTieBreakDifference | target-conditional dependency projection is inactive in this round | fixed-target inactive target edge |
+| MissingInRodin | `r-efi@6` | `6.0.0` | `-` | LegitimateTieBreakDifference | target-conditional dependency projection is inactive in this round | fixed-target inactive target edge |
+| MissingInRodin | `radium@0.7` | `0.7.0` | `-` | LegitimateTieBreakDifference | locked package class was not reached under the extracted root/range/feature projection | lockfile-free graph membership |
+| MissingInRodin | `redox_syscall@0.5` | `0.5.18` | `-` | LegitimateTieBreakDifference | target-conditional dependency projection is inactive in this round | fixed-target inactive target edge |
+| MissingInRodin | `redox_users@0.5` | `0.5.2` | `-` | LegitimateTieBreakDifference | target-conditional dependency projection is inactive in this round | fixed-target inactive target edge |
+| MissingInRodin | `ring@0.17` | `0.17.14` | `-` | LegitimateTieBreakDifference | dev-dependency projection is inactive in this round | fixed-target inactive dev edge |
+| MissingInRodin | `ruint@1` | `1.18.0` | `-` | LegitimateTieBreakDifference | locked package class was not reached under the extracted root/range/feature projection | lockfile-free graph membership |
+| MissingInRodin | `ruint-macro@1` | `1.2.1` | `-` | LegitimateTieBreakDifference | locked package class was not reached under the extracted root/range/feature projection | lockfile-free graph membership |
+| VersionMismatch | `rustc-hash@2` | `2.1.2` | `2.1.3` | LegitimateTieBreakDifference | fresh-lock oracle selects Rodin's version; historical lock divergence vindicated | historical-lock superseded by fresh oracle |
+| MissingInRodin | `rustls@0.23` | `0.23.41` | `-` | LegitimateTieBreakDifference | dev-dependency projection is inactive in this round | fixed-target inactive dev edge |
+| MissingInRodin | `rustls-webpki@0.103` | `0.103.13` | `-` | LegitimateTieBreakDifference | dev-dependency projection is inactive in this round | fixed-target inactive dev edge |
+| MissingInRodin | `schannel@0.1` | `0.1.29` | `-` | LegitimateTieBreakDifference | target-conditional dependency projection is inactive in this round | fixed-target inactive target edge |
+| MissingInRodin | `schemars@0.9` | `0.9.0` | `-` | LegitimateTieBreakDifference | dev-dependency projection is inactive in this round | fixed-target inactive dev edge |
+| MissingInRodin | `schemars@1` | `1.2.1` | `-` | LegitimateTieBreakDifference | dev-dependency projection is inactive in this round | fixed-target inactive dev edge |
+| MissingInRodin | `simd-adler32@0.3` | `0.3.9` | `-` | LegitimateTieBreakDifference | locked package class was not reached under the extracted root/range/feature projection | lockfile-free graph membership |
+| VersionMismatch | `terminal-light@1` | `1.8.0` | `1.9.0` | LegitimateTieBreakDifference | fresh-lock oracle selects Rodin's version; historical lock divergence vindicated | historical-lock superseded by fresh oracle |
+| VersionMismatch | `time@0.3` | `0.3.51` | `0.3.53` | LegitimateTieBreakDifference | fresh-lock oracle selects Rodin's version; historical lock divergence vindicated | historical-lock superseded by fresh oracle |
+| MissingInRodin | `time-macros@0.2` | `0.2.30` | `-` | LegitimateTieBreakDifference | dev-dependency projection is inactive in this round | fixed-target inactive dev edge |
+| MissingInRodin | `untrusted@0.9` | `0.9.0` | `-` | LegitimateTieBreakDifference | dev-dependency projection is inactive in this round | fixed-target inactive dev edge |
+| MissingInRodin | `utf16_iter@1` | `1.0.5` | `-` | LegitimateTieBreakDifference | locked package class was not reached under the extracted root/range/feature projection | lockfile-free graph membership |
+| MissingInRodin | `valuable@0.1` | `0.1.1` | `-` | LegitimateTieBreakDifference | target-conditional dependency projection is inactive in this round | fixed-target inactive target edge |
+| MissingInRodin | `wasi@0.11` | `0.11.1+wasi-snapshot-preview1` | `-` | LegitimateTieBreakDifference | target-conditional dependency projection is inactive in this round | fixed-target inactive target edge |
+| MissingInRodin | `wasi@0.14` | `0.14.7+wasi-0.2.4` | `-` | LegitimateTieBreakDifference | target-conditional dependency projection is inactive in this round | fixed-target inactive target edge |
+| MissingInRodin | `wasip2@1` | `1.0.4+wasi-0.2.12` | `-` | LegitimateTieBreakDifference | target-conditional dependency projection is inactive in this round | fixed-target inactive target edge |
+| MissingInRodin | `wasite@1` | `1.0.2` | `-` | LegitimateTieBreakDifference | target-conditional dependency projection is inactive in this round | fixed-target inactive target edge |
+| MissingInRodin | `wasm-bindgen-futures@0.4` | `0.4.76` | `-` | LegitimateTieBreakDifference | target-conditional dependency projection is inactive in this round | fixed-target inactive target edge |
+| MissingInRodin | `wasmtimer@0.4` | `0.4.3` | `-` | LegitimateTieBreakDifference | target-conditional dependency projection is inactive in this round | fixed-target inactive target edge |
+| MissingInRodin | `web-sys@0.3` | `0.3.103` | `-` | LegitimateTieBreakDifference | target-conditional dependency projection is inactive in this round | fixed-target inactive target edge |
+| MissingInRodin | `winapi@0.3` | `0.3.9` | `-` | LegitimateTieBreakDifference | target-conditional dependency projection is inactive in this round | fixed-target inactive target edge |
+| MissingInRodin | `winapi-i686-pc-windows-gnu@0.4` | `0.4.0` | `-` | LegitimateTieBreakDifference | target-conditional dependency projection is inactive in this round | fixed-target inactive target edge |
+| MissingInRodin | `winapi-util@0.1` | `0.1.11` | `-` | LegitimateTieBreakDifference | target-conditional dependency projection is inactive in this round | fixed-target inactive target edge |
+| MissingInRodin | `winapi-x86_64-pc-windows-gnu@0.4` | `0.4.0` | `-` | LegitimateTieBreakDifference | target-conditional dependency projection is inactive in this round | fixed-target inactive target edge |
+| MissingInRodin | `windows-core@0.62` | `0.62.2` | `-` | LegitimateTieBreakDifference | target-conditional dependency projection is inactive in this round | fixed-target inactive target edge |
+| MissingInRodin | `windows-implement@0.60` | `0.60.2` | `-` | LegitimateTieBreakDifference | locked package class was not reached under the extracted root/range/feature projection | lockfile-free graph membership |
+| MissingInRodin | `windows-interface@0.59` | `0.59.3` | `-` | LegitimateTieBreakDifference | locked package class was not reached under the extracted root/range/feature projection | lockfile-free graph membership |
+| MissingInRodin | `windows-link@0.2` | `0.2.1` | `-` | LegitimateTieBreakDifference | target-conditional dependency projection is inactive in this round | fixed-target inactive target edge |
+| MissingInRodin | `windows-result@0.4` | `0.4.1` | `-` | LegitimateTieBreakDifference | locked package class was not reached under the extracted root/range/feature projection | lockfile-free graph membership |
+| MissingInRodin | `windows-strings@0.5` | `0.5.1` | `-` | LegitimateTieBreakDifference | locked package class was not reached under the extracted root/range/feature projection | lockfile-free graph membership |
+| MissingInRodin | `windows-sys@0.52` | `0.52.0` | `-` | LegitimateTieBreakDifference | target-conditional dependency projection is inactive in this round | fixed-target inactive target edge |
+| MissingInRodin | `windows-sys@0.59` | `0.59.0` | `-` | LegitimateTieBreakDifference | target-conditional dependency projection is inactive in this round | fixed-target inactive target edge |
+| MissingInRodin | `windows-sys@0.60` | `0.60.2` | `-` | LegitimateTieBreakDifference | target-conditional dependency projection is inactive in this round | fixed-target inactive target edge |
+| MissingInRodin | `windows-sys@0.61` | `0.61.2` | `-` | LegitimateTieBreakDifference | target-conditional dependency projection is inactive in this round | fixed-target inactive target edge |
+| MissingInRodin | `windows-targets@0.52` | `0.52.6` | `-` | LegitimateTieBreakDifference | target-conditional dependency projection is inactive in this round | fixed-target inactive target edge |
+| MissingInRodin | `windows-targets@0.53` | `0.53.5` | `-` | LegitimateTieBreakDifference | target-conditional dependency projection is inactive in this round | fixed-target inactive target edge |
+| MissingInRodin | `windows_aarch64_gnullvm@0.52` | `0.52.6` | `-` | LegitimateTieBreakDifference | target-conditional dependency projection is inactive in this round | fixed-target inactive target edge |
+| MissingInRodin | `windows_aarch64_gnullvm@0.53` | `0.53.1` | `-` | LegitimateTieBreakDifference | target-conditional dependency projection is inactive in this round | fixed-target inactive target edge |
+| MissingInRodin | `windows_aarch64_msvc@0.52` | `0.52.6` | `-` | LegitimateTieBreakDifference | target-conditional dependency projection is inactive in this round | fixed-target inactive target edge |
+| MissingInRodin | `windows_aarch64_msvc@0.53` | `0.53.1` | `-` | LegitimateTieBreakDifference | target-conditional dependency projection is inactive in this round | fixed-target inactive target edge |
+| MissingInRodin | `windows_i686_gnu@0.52` | `0.52.6` | `-` | LegitimateTieBreakDifference | target-conditional dependency projection is inactive in this round | fixed-target inactive target edge |
+| MissingInRodin | `windows_i686_gnu@0.53` | `0.53.1` | `-` | LegitimateTieBreakDifference | target-conditional dependency projection is inactive in this round | fixed-target inactive target edge |
+| MissingInRodin | `windows_i686_gnullvm@0.52` | `0.52.6` | `-` | LegitimateTieBreakDifference | target-conditional dependency projection is inactive in this round | fixed-target inactive target edge |
+| MissingInRodin | `windows_i686_gnullvm@0.53` | `0.53.1` | `-` | LegitimateTieBreakDifference | target-conditional dependency projection is inactive in this round | fixed-target inactive target edge |
+| MissingInRodin | `windows_i686_msvc@0.52` | `0.52.6` | `-` | LegitimateTieBreakDifference | target-conditional dependency projection is inactive in this round | fixed-target inactive target edge |
+| MissingInRodin | `windows_i686_msvc@0.53` | `0.53.1` | `-` | LegitimateTieBreakDifference | target-conditional dependency projection is inactive in this round | fixed-target inactive target edge |
+| MissingInRodin | `windows_x86_64_gnu@0.52` | `0.52.6` | `-` | LegitimateTieBreakDifference | target-conditional dependency projection is inactive in this round | fixed-target inactive target edge |
+| MissingInRodin | `windows_x86_64_gnu@0.53` | `0.53.1` | `-` | LegitimateTieBreakDifference | target-conditional dependency projection is inactive in this round | fixed-target inactive target edge |
+| MissingInRodin | `windows_x86_64_gnullvm@0.52` | `0.52.6` | `-` | LegitimateTieBreakDifference | target-conditional dependency projection is inactive in this round | fixed-target inactive target edge |
+| MissingInRodin | `windows_x86_64_gnullvm@0.53` | `0.53.1` | `-` | LegitimateTieBreakDifference | target-conditional dependency projection is inactive in this round | fixed-target inactive target edge |
+| MissingInRodin | `windows_x86_64_msvc@0.52` | `0.52.6` | `-` | LegitimateTieBreakDifference | target-conditional dependency projection is inactive in this round | fixed-target inactive target edge |
+| MissingInRodin | `windows_x86_64_msvc@0.53` | `0.53.1` | `-` | LegitimateTieBreakDifference | target-conditional dependency projection is inactive in this round | fixed-target inactive target edge |
+| MissingInRodin | `winsafe@0.0.19` | `0.0.19` | `-` | LegitimateTieBreakDifference | target-conditional dependency projection is inactive in this round | fixed-target inactive target edge |
+| MissingInRodin | `wit-bindgen@0.57` | `0.57.1` | `-` | LegitimateTieBreakDifference | locked package class was not reached under the extracted root/range/feature projection | lockfile-free graph membership |
+| MissingInRodin | `wyz@0.5` | `0.5.1` | `-` | LegitimateTieBreakDifference | locked package class was not reached under the extracted root/range/feature projection | lockfile-free graph membership |
+| MissingInRodin | `xterm-query@0.5` | `0.5.2` | `-` | LegitimateTieBreakDifference | locked package class was not reached under the extracted root/range/feature projection | lockfile-free graph membership |
+| ExtraInRodin | `anstream@0.6` | `` | `0.6.21` | LegitimateTieBreakDifference | selected from cached registry universe but absent from Cargo.lock | manifest-closure extra selection |
+| ExtraInRodin | `anstyle-parse@0.2` | `` | `0.2.7` | LegitimateTieBreakDifference | selected from cached registry universe but absent from Cargo.lock | manifest-closure extra selection |
+| ExtraInRodin | `bit-vec@0.9` | `` | `0.9.1` | LegitimateTieBreakDifference | selected from cached registry universe but absent from Cargo.lock | manifest-closure extra selection |
+| ExtraInRodin | `clap@3` | `` | `3.2.25` | LegitimateTieBreakDifference | selected from cached registry universe but absent from Cargo.lock | manifest-closure extra selection |
+| ExtraInRodin | `clap_lex@0.2` | `` | `0.2.4` | LegitimateTieBreakDifference | selected from cached registry universe but absent from Cargo.lock | manifest-closure extra selection |
+| ExtraInRodin | `const-oid@0.9` | `` | `0.9.6` | LegitimateTieBreakDifference | selected from cached registry universe but absent from Cargo.lock | manifest-closure extra selection |
+| ExtraInRodin | `crossterm@0.28` | `` | `0.28.1` | LegitimateTieBreakDifference | selected from cached registry universe but absent from Cargo.lock | manifest-closure extra selection |
+| ExtraInRodin | `futures@0.1` | `` | `0.1.31` | LegitimateTieBreakDifference | selected from cached registry universe but absent from Cargo.lock | manifest-closure extra selection |
+| ExtraInRodin | `jiff@0.1` | `` | `0.1.29` | LegitimateTieBreakDifference | selected from cached registry universe but absent from Cargo.lock | manifest-closure extra selection |
+| ExtraInRodin | `mio@0.8` | `` | `0.8.11` | LegitimateTieBreakDifference | selected from cached registry universe but absent from Cargo.lock | manifest-closure extra selection |
+| ExtraInRodin | `notify@9` | `` | `9.0.0-rc.4` | LegitimateTieBreakDifference | selected from cached registry universe but absent from Cargo.lock | manifest-closure extra selection |
+| ExtraInRodin | `phf@0.12` | `` | `0.12.1` | LegitimateTieBreakDifference | selected from cached registry universe but absent from Cargo.lock | manifest-closure extra selection |
+| ExtraInRodin | `phf_generator@0.12` | `` | `0.12.1` | LegitimateTieBreakDifference | selected from cached registry universe but absent from Cargo.lock | manifest-closure extra selection |
+| ExtraInRodin | `phf_macros@0.12` | `` | `0.12.1` | LegitimateTieBreakDifference | selected from cached registry universe but absent from Cargo.lock | manifest-closure extra selection |
+| ExtraInRodin | `phf_shared@0.12` | `` | `0.12.1` | LegitimateTieBreakDifference | selected from cached registry universe but absent from Cargo.lock | manifest-closure extra selection |
+| ExtraInRodin | `rustls@0.24` | `` | `0.24.0-dev.0` | LegitimateTieBreakDifference | selected from cached registry universe but absent from Cargo.lock | manifest-closure extra selection |
+| ExtraInRodin | `schemars@0.8` | `` | `0.8.22` | LegitimateTieBreakDifference | selected from cached registry universe but absent from Cargo.lock | manifest-closure extra selection |
+| ExtraInRodin | `signal-hook@0.4` | `` | `0.4.4` | LegitimateTieBreakDifference | selected from cached registry universe but absent from Cargo.lock | manifest-closure extra selection |
+| ExtraInRodin | `spin@0.10` | `` | `0.10.0` | LegitimateTieBreakDifference | selected from cached registry universe but absent from Cargo.lock | manifest-closure extra selection |
+| ExtraInRodin | `strsim@0.10` | `` | `0.10.0` | LegitimateTieBreakDifference | selected from cached registry universe but absent from Cargo.lock | manifest-closure extra selection |
+| ExtraInRodin | `tokio-tungstenite@0.28` | `` | `0.28.0` | LegitimateTieBreakDifference | selected from cached registry universe but absent from Cargo.lock | manifest-closure extra selection |
+| ExtraInRodin | `tungstenite@0.28` | `` | `0.28.0` | LegitimateTieBreakDifference | selected from cached registry universe but absent from Cargo.lock | manifest-closure extra selection |
+| ExtraInRodin | `unicode-width@0.1` | `` | `0.1.14` | LegitimateTieBreakDifference | selected from cached registry universe but absent from Cargo.lock | manifest-closure extra selection |
+| ExtraInRodin | `uuid@0.8` | `` | `0.8.2` | LegitimateTieBreakDifference | selected from cached registry universe but absent from Cargo.lock | manifest-closure extra selection |
+| ExtraInRodin | `webpki-roots@0.26` | `` | `0.26.11` | LegitimateTieBreakDifference | selected from cached registry universe but absent from Cargo.lock | manifest-closure extra selection |
+| ExtraInRodin | `xterm-query@0.6` | `` | `0.6.0` | LegitimateTieBreakDifference | fresh-lock oracle includes Rodin's selected domain; historical extra-selection vindicated | historical-lock superseded by fresh oracle |
+
+#### FreshLock oracle
+
+- exact locked-domain matches: 795/892 (89.13%)
+- divergences: 122
+
+| divergence kind | count |
+|---|---:|
+| MissingInRodin | 95 |
+| ExtraInRodin | 25 |
+| VersionMismatch | 2 |
+
+| classification | count |
+|---|---:|
+| dev-dependency projection is inactive in this round | 9 |
+| locked package class was not reached under the extracted root/range/feature projection | 23 |
+| same package compatibility class selected a different version from Cargo.lock | 2 |
+| selected from cached registry universe but absent from Cargo.lock | 25 |
+| target-conditional dependency projection is inactive in this round | 63 |
+
+| verdict | count |
+|---|---:|
+| LegitimateTieBreakDifference | 122 |
+
+| kind | package | Cargo.lock | Rodin | verdict | classification | accepted policy |
+|---|---|---|---|---|---|---|
+| MissingInRodin | `android_system_properties@0.1` | `0.1.5` | `-` | LegitimateTieBreakDifference | target-conditional dependency projection is inactive in this round | fixed-target inactive target edge |
+| MissingInRodin | `anstyle-wincon@3` | `3.0.11` | `-` | LegitimateTieBreakDifference | target-conditional dependency projection is inactive in this round | fixed-target inactive target edge |
+| MissingInRodin | `arborium-sysroot@2` | `2.18.1` | `-` | LegitimateTieBreakDifference | target-conditional dependency projection is inactive in this round | fixed-target inactive target edge |
+| MissingInRodin | `atomic@0.6` | `0.6.1` | `-` | LegitimateTieBreakDifference | locked package class was not reached under the extracted root/range/feature projection | lockfile-free graph membership |
+| MissingInRodin | `aws-lc-rs@1` | `1.17.0` | `-` | LegitimateTieBreakDifference | dev-dependency projection is inactive in this round | fixed-target inactive dev edge |
+| MissingInRodin | `aws-lc-sys@0.41` | `0.41.0` | `-` | LegitimateTieBreakDifference | locked package class was not reached under the extracted root/range/feature projection | lockfile-free graph membership |
+| MissingInRodin | `bitvec@1` | `1.1.1` | `-` | LegitimateTieBreakDifference | locked package class was not reached under the extracted root/range/feature projection | lockfile-free graph membership |
+| MissingInRodin | `bolero-afl@0.13` | `0.13.0` | `-` | LegitimateTieBreakDifference | target-conditional dependency projection is inactive in this round | fixed-target inactive target edge |
+| MissingInRodin | `bolero-honggfuzz@0.13` | `0.13.0` | `-` | LegitimateTieBreakDifference | target-conditional dependency projection is inactive in this round | fixed-target inactive target edge |
+| MissingInRodin | `bolero-kani@0.13` | `0.13.0` | `-` | LegitimateTieBreakDifference | target-conditional dependency projection is inactive in this round | fixed-target inactive target edge |
+| MissingInRodin | `bolero-libfuzzer@0.13` | `0.13.0` | `-` | LegitimateTieBreakDifference | target-conditional dependency projection is inactive in this round | fixed-target inactive target edge |
+| MissingInRodin | `bs58@0.5` | `0.5.1` | `-` | LegitimateTieBreakDifference | locked package class was not reached under the extracted root/range/feature projection | lockfile-free graph membership |
+| MissingInRodin | `cmake@0.1` | `0.1.58` | `-` | LegitimateTieBreakDifference | locked package class was not reached under the extracted root/range/feature projection | lockfile-free graph membership |
+| VersionMismatch | `color-backtrace@0.7` | `0.7.2` | `0.7.3` | LegitimateTieBreakDifference | same package compatibility class selected a different version from Cargo.lock | lockfile-free version choice |
+| MissingInRodin | `crossterm_winapi@0.9` | `0.9.1` | `-` | LegitimateTieBreakDifference | target-conditional dependency projection is inactive in this round | fixed-target inactive target edge |
+| MissingInRodin | `dlmalloc@0.2` | `0.2.14` | `-` | LegitimateTieBreakDifference | target-conditional dependency projection is inactive in this round | fixed-target inactive target edge |
+| MissingInRodin | `dunce@1` | `1.0.5` | `-` | LegitimateTieBreakDifference | locked package class was not reached under the extracted root/range/feature projection | lockfile-free graph membership |
+| MissingInRodin | `embedded-io@0.6` | `0.6.1` | `-` | LegitimateTieBreakDifference | locked package class was not reached under the extracted root/range/feature projection | lockfile-free graph membership |
+| MissingInRodin | `encode_unicode@1` | `1.0.0` | `-` | LegitimateTieBreakDifference | target-conditional dependency projection is inactive in this round | fixed-target inactive target edge |
+| MissingInRodin | `fs_extra@1` | `1.3.0` | `-` | LegitimateTieBreakDifference | dev-dependency projection is inactive in this round | fixed-target inactive dev edge |
+| MissingInRodin | `fsevent-sys@4` | `4.1.0` | `-` | LegitimateTieBreakDifference | target-conditional dependency projection is inactive in this round | fixed-target inactive target edge |
+| MissingInRodin | `funty@2` | `2.0.0` | `-` | LegitimateTieBreakDifference | locked package class was not reached under the extracted root/range/feature projection | lockfile-free graph membership |
+| MissingInRodin | `hermit-abi@0.5` | `0.5.2` | `-` | LegitimateTieBreakDifference | target-conditional dependency projection is inactive in this round | fixed-target inactive target edge |
+| MissingInRodin | `hyper-named-pipe@0.1` | `0.1.0` | `-` | LegitimateTieBreakDifference | target-conditional dependency projection is inactive in this round | fixed-target inactive target edge |
+| MissingInRodin | `iana-time-zone-haiku@0.1` | `0.1.2` | `-` | LegitimateTieBreakDifference | target-conditional dependency projection is inactive in this round | fixed-target inactive target edge |
+| MissingInRodin | `icu_normalizer_data@2` | `2.0.0` | `-` | LegitimateTieBreakDifference | locked package class was not reached under the extracted root/range/feature projection | lockfile-free graph membership |
+| MissingInRodin | `inotify@0.11` | `0.11.2` | `-` | LegitimateTieBreakDifference | target-conditional dependency projection is inactive in this round | fixed-target inactive target edge |
+| MissingInRodin | `inotify-sys@0.1` | `0.1.5` | `-` | LegitimateTieBreakDifference | locked package class was not reached under the extracted root/range/feature projection | lockfile-free graph membership |
+| VersionMismatch | `jiff@0.2` | `0.2.29` | `0.2.31` | LegitimateTieBreakDifference | same package compatibility class selected a different version from Cargo.lock | lockfile-free version choice |
+| MissingInRodin | `jiff-tzdb-platform@0.1` | `0.1.3` | `-` | LegitimateTieBreakDifference | target-conditional dependency projection is inactive in this round | fixed-target inactive target edge |
+| MissingInRodin | `jobserver@0.1` | `0.1.34` | `-` | LegitimateTieBreakDifference | locked package class was not reached under the extracted root/range/feature projection | lockfile-free graph membership |
+| MissingInRodin | `libredox@0.1` | `0.1.17` | `-` | LegitimateTieBreakDifference | target-conditional dependency projection is inactive in this round | fixed-target inactive target edge |
+| MissingInRodin | `linux-raw-sys@0.4` | `0.4.15` | `-` | LegitimateTieBreakDifference | target-conditional dependency projection is inactive in this round | fixed-target inactive target edge |
+| MissingInRodin | `linux-raw-sys@0.12` | `0.12.1` | `-` | LegitimateTieBreakDifference | target-conditional dependency projection is inactive in this round | fixed-target inactive target edge |
+| MissingInRodin | `notify@8` | `8.2.0` | `-` | LegitimateTieBreakDifference | locked package class was not reached under the extracted root/range/feature projection | lockfile-free graph membership |
+| MissingInRodin | `once_cell_polyfill@1` | `1.70.2` | `-` | LegitimateTieBreakDifference | target-conditional dependency projection is inactive in this round | fixed-target inactive target edge |
+| MissingInRodin | `openssl-probe@0.2` | `0.2.1` | `-` | LegitimateTieBreakDifference | target-conditional dependency projection is inactive in this round | fixed-target inactive target edge |
+| MissingInRodin | `r-efi@5` | `5.3.0` | `-` | LegitimateTieBreakDifference | target-conditional dependency projection is inactive in this round | fixed-target inactive target edge |
+| MissingInRodin | `r-efi@6` | `6.0.0` | `-` | LegitimateTieBreakDifference | target-conditional dependency projection is inactive in this round | fixed-target inactive target edge |
+| MissingInRodin | `radium@0.7` | `0.7.0` | `-` | LegitimateTieBreakDifference | locked package class was not reached under the extracted root/range/feature projection | lockfile-free graph membership |
+| MissingInRodin | `redox_syscall@0.5` | `0.5.18` | `-` | LegitimateTieBreakDifference | target-conditional dependency projection is inactive in this round | fixed-target inactive target edge |
+| MissingInRodin | `redox_users@0.5` | `0.5.2` | `-` | LegitimateTieBreakDifference | target-conditional dependency projection is inactive in this round | fixed-target inactive target edge |
+| MissingInRodin | `ring@0.17` | `0.17.14` | `-` | LegitimateTieBreakDifference | dev-dependency projection is inactive in this round | fixed-target inactive dev edge |
+| MissingInRodin | `ruint@1` | `1.18.0` | `-` | LegitimateTieBreakDifference | locked package class was not reached under the extracted root/range/feature projection | lockfile-free graph membership |
+| MissingInRodin | `ruint-macro@1` | `1.2.1` | `-` | LegitimateTieBreakDifference | locked package class was not reached under the extracted root/range/feature projection | lockfile-free graph membership |
+| MissingInRodin | `rustls@0.23` | `0.23.41` | `-` | LegitimateTieBreakDifference | dev-dependency projection is inactive in this round | fixed-target inactive dev edge |
+| MissingInRodin | `rustls-webpki@0.103` | `0.103.13` | `-` | LegitimateTieBreakDifference | dev-dependency projection is inactive in this round | fixed-target inactive dev edge |
+| MissingInRodin | `schannel@0.1` | `0.1.29` | `-` | LegitimateTieBreakDifference | target-conditional dependency projection is inactive in this round | fixed-target inactive target edge |
+| MissingInRodin | `schemars@0.9` | `0.9.0` | `-` | LegitimateTieBreakDifference | dev-dependency projection is inactive in this round | fixed-target inactive dev edge |
+| MissingInRodin | `schemars@1` | `1.2.1` | `-` | LegitimateTieBreakDifference | dev-dependency projection is inactive in this round | fixed-target inactive dev edge |
+| MissingInRodin | `simd-adler32@0.3` | `0.3.9` | `-` | LegitimateTieBreakDifference | locked package class was not reached under the extracted root/range/feature projection | lockfile-free graph membership |
+| MissingInRodin | `time-macros@0.2` | `0.2.31` | `-` | LegitimateTieBreakDifference | dev-dependency projection is inactive in this round | fixed-target inactive dev edge |
+| MissingInRodin | `untrusted@0.9` | `0.9.0` | `-` | LegitimateTieBreakDifference | dev-dependency projection is inactive in this round | fixed-target inactive dev edge |
+| MissingInRodin | `utf16_iter@1` | `1.0.5` | `-` | LegitimateTieBreakDifference | locked package class was not reached under the extracted root/range/feature projection | lockfile-free graph membership |
+| MissingInRodin | `valuable@0.1` | `0.1.1` | `-` | LegitimateTieBreakDifference | target-conditional dependency projection is inactive in this round | fixed-target inactive target edge |
+| MissingInRodin | `wasi@0.11` | `0.11.1+wasi-snapshot-preview1` | `-` | LegitimateTieBreakDifference | target-conditional dependency projection is inactive in this round | fixed-target inactive target edge |
+| MissingInRodin | `wasi@0.14` | `0.14.7+wasi-0.2.4` | `-` | LegitimateTieBreakDifference | target-conditional dependency projection is inactive in this round | fixed-target inactive target edge |
+| MissingInRodin | `wasip2@1` | `1.0.4+wasi-0.2.12` | `-` | LegitimateTieBreakDifference | target-conditional dependency projection is inactive in this round | fixed-target inactive target edge |
+| MissingInRodin | `wasite@1` | `1.0.2` | `-` | LegitimateTieBreakDifference | target-conditional dependency projection is inactive in this round | fixed-target inactive target edge |
+| MissingInRodin | `wasm-bindgen-futures@0.4` | `0.4.76` | `-` | LegitimateTieBreakDifference | target-conditional dependency projection is inactive in this round | fixed-target inactive target edge |
+| MissingInRodin | `wasmtimer@0.4` | `0.4.3` | `-` | LegitimateTieBreakDifference | target-conditional dependency projection is inactive in this round | fixed-target inactive target edge |
+| MissingInRodin | `web-sys@0.3` | `0.3.103` | `-` | LegitimateTieBreakDifference | target-conditional dependency projection is inactive in this round | fixed-target inactive target edge |
+| MissingInRodin | `winapi@0.3` | `0.3.9` | `-` | LegitimateTieBreakDifference | target-conditional dependency projection is inactive in this round | fixed-target inactive target edge |
+| MissingInRodin | `winapi-i686-pc-windows-gnu@0.4` | `0.4.0` | `-` | LegitimateTieBreakDifference | target-conditional dependency projection is inactive in this round | fixed-target inactive target edge |
+| MissingInRodin | `winapi-util@0.1` | `0.1.11` | `-` | LegitimateTieBreakDifference | target-conditional dependency projection is inactive in this round | fixed-target inactive target edge |
+| MissingInRodin | `winapi-x86_64-pc-windows-gnu@0.4` | `0.4.0` | `-` | LegitimateTieBreakDifference | target-conditional dependency projection is inactive in this round | fixed-target inactive target edge |
+| MissingInRodin | `windows-core@0.62` | `0.62.2` | `-` | LegitimateTieBreakDifference | target-conditional dependency projection is inactive in this round | fixed-target inactive target edge |
+| MissingInRodin | `windows-implement@0.60` | `0.60.2` | `-` | LegitimateTieBreakDifference | locked package class was not reached under the extracted root/range/feature projection | lockfile-free graph membership |
+| MissingInRodin | `windows-interface@0.59` | `0.59.3` | `-` | LegitimateTieBreakDifference | locked package class was not reached under the extracted root/range/feature projection | lockfile-free graph membership |
+| MissingInRodin | `windows-link@0.2` | `0.2.1` | `-` | LegitimateTieBreakDifference | target-conditional dependency projection is inactive in this round | fixed-target inactive target edge |
+| MissingInRodin | `windows-result@0.4` | `0.4.1` | `-` | LegitimateTieBreakDifference | locked package class was not reached under the extracted root/range/feature projection | lockfile-free graph membership |
+| MissingInRodin | `windows-strings@0.5` | `0.5.1` | `-` | LegitimateTieBreakDifference | locked package class was not reached under the extracted root/range/feature projection | lockfile-free graph membership |
+| MissingInRodin | `windows-sys@0.52` | `0.52.0` | `-` | LegitimateTieBreakDifference | target-conditional dependency projection is inactive in this round | fixed-target inactive target edge |
+| MissingInRodin | `windows-sys@0.59` | `0.59.0` | `-` | LegitimateTieBreakDifference | target-conditional dependency projection is inactive in this round | fixed-target inactive target edge |
+| MissingInRodin | `windows-sys@0.60` | `0.60.2` | `-` | LegitimateTieBreakDifference | target-conditional dependency projection is inactive in this round | fixed-target inactive target edge |
+| MissingInRodin | `windows-sys@0.61` | `0.61.2` | `-` | LegitimateTieBreakDifference | target-conditional dependency projection is inactive in this round | fixed-target inactive target edge |
+| MissingInRodin | `windows-targets@0.52` | `0.52.6` | `-` | LegitimateTieBreakDifference | target-conditional dependency projection is inactive in this round | fixed-target inactive target edge |
+| MissingInRodin | `windows-targets@0.53` | `0.53.5` | `-` | LegitimateTieBreakDifference | target-conditional dependency projection is inactive in this round | fixed-target inactive target edge |
+| MissingInRodin | `windows_aarch64_gnullvm@0.52` | `0.52.6` | `-` | LegitimateTieBreakDifference | target-conditional dependency projection is inactive in this round | fixed-target inactive target edge |
+| MissingInRodin | `windows_aarch64_gnullvm@0.53` | `0.53.1` | `-` | LegitimateTieBreakDifference | target-conditional dependency projection is inactive in this round | fixed-target inactive target edge |
+| MissingInRodin | `windows_aarch64_msvc@0.52` | `0.52.6` | `-` | LegitimateTieBreakDifference | target-conditional dependency projection is inactive in this round | fixed-target inactive target edge |
+| MissingInRodin | `windows_aarch64_msvc@0.53` | `0.53.1` | `-` | LegitimateTieBreakDifference | target-conditional dependency projection is inactive in this round | fixed-target inactive target edge |
+| MissingInRodin | `windows_i686_gnu@0.52` | `0.52.6` | `-` | LegitimateTieBreakDifference | target-conditional dependency projection is inactive in this round | fixed-target inactive target edge |
+| MissingInRodin | `windows_i686_gnu@0.53` | `0.53.1` | `-` | LegitimateTieBreakDifference | target-conditional dependency projection is inactive in this round | fixed-target inactive target edge |
+| MissingInRodin | `windows_i686_gnullvm@0.52` | `0.52.6` | `-` | LegitimateTieBreakDifference | target-conditional dependency projection is inactive in this round | fixed-target inactive target edge |
+| MissingInRodin | `windows_i686_gnullvm@0.53` | `0.53.1` | `-` | LegitimateTieBreakDifference | target-conditional dependency projection is inactive in this round | fixed-target inactive target edge |
+| MissingInRodin | `windows_i686_msvc@0.52` | `0.52.6` | `-` | LegitimateTieBreakDifference | target-conditional dependency projection is inactive in this round | fixed-target inactive target edge |
+| MissingInRodin | `windows_i686_msvc@0.53` | `0.53.1` | `-` | LegitimateTieBreakDifference | target-conditional dependency projection is inactive in this round | fixed-target inactive target edge |
+| MissingInRodin | `windows_x86_64_gnu@0.52` | `0.52.6` | `-` | LegitimateTieBreakDifference | target-conditional dependency projection is inactive in this round | fixed-target inactive target edge |
+| MissingInRodin | `windows_x86_64_gnu@0.53` | `0.53.1` | `-` | LegitimateTieBreakDifference | target-conditional dependency projection is inactive in this round | fixed-target inactive target edge |
+| MissingInRodin | `windows_x86_64_gnullvm@0.52` | `0.52.6` | `-` | LegitimateTieBreakDifference | target-conditional dependency projection is inactive in this round | fixed-target inactive target edge |
+| MissingInRodin | `windows_x86_64_gnullvm@0.53` | `0.53.1` | `-` | LegitimateTieBreakDifference | target-conditional dependency projection is inactive in this round | fixed-target inactive target edge |
+| MissingInRodin | `windows_x86_64_msvc@0.52` | `0.52.6` | `-` | LegitimateTieBreakDifference | target-conditional dependency projection is inactive in this round | fixed-target inactive target edge |
+| MissingInRodin | `windows_x86_64_msvc@0.53` | `0.53.1` | `-` | LegitimateTieBreakDifference | target-conditional dependency projection is inactive in this round | fixed-target inactive target edge |
+| MissingInRodin | `winsafe@0.0.19` | `0.0.19` | `-` | LegitimateTieBreakDifference | target-conditional dependency projection is inactive in this round | fixed-target inactive target edge |
+| MissingInRodin | `wit-bindgen@0.57` | `0.57.1` | `-` | LegitimateTieBreakDifference | locked package class was not reached under the extracted root/range/feature projection | lockfile-free graph membership |
+| MissingInRodin | `wyz@0.5` | `0.5.1` | `-` | LegitimateTieBreakDifference | locked package class was not reached under the extracted root/range/feature projection | lockfile-free graph membership |
+| ExtraInRodin | `anstream@0.6` | `` | `0.6.21` | LegitimateTieBreakDifference | selected from cached registry universe but absent from Cargo.lock | manifest-closure extra selection |
+| ExtraInRodin | `anstyle-parse@0.2` | `` | `0.2.7` | LegitimateTieBreakDifference | selected from cached registry universe but absent from Cargo.lock | manifest-closure extra selection |
+| ExtraInRodin | `bit-vec@0.9` | `` | `0.9.1` | LegitimateTieBreakDifference | selected from cached registry universe but absent from Cargo.lock | manifest-closure extra selection |
+| ExtraInRodin | `clap@3` | `` | `3.2.25` | LegitimateTieBreakDifference | selected from cached registry universe but absent from Cargo.lock | manifest-closure extra selection |
+| ExtraInRodin | `clap_lex@0.2` | `` | `0.2.4` | LegitimateTieBreakDifference | selected from cached registry universe but absent from Cargo.lock | manifest-closure extra selection |
+| ExtraInRodin | `const-oid@0.9` | `` | `0.9.6` | LegitimateTieBreakDifference | selected from cached registry universe but absent from Cargo.lock | manifest-closure extra selection |
+| ExtraInRodin | `crossterm@0.28` | `` | `0.28.1` | LegitimateTieBreakDifference | selected from cached registry universe but absent from Cargo.lock | manifest-closure extra selection |
+| ExtraInRodin | `futures@0.1` | `` | `0.1.31` | LegitimateTieBreakDifference | selected from cached registry universe but absent from Cargo.lock | manifest-closure extra selection |
+| ExtraInRodin | `jiff@0.1` | `` | `0.1.29` | LegitimateTieBreakDifference | selected from cached registry universe but absent from Cargo.lock | manifest-closure extra selection |
+| ExtraInRodin | `mio@0.8` | `` | `0.8.11` | LegitimateTieBreakDifference | selected from cached registry universe but absent from Cargo.lock | manifest-closure extra selection |
+| ExtraInRodin | `notify@9` | `` | `9.0.0-rc.4` | LegitimateTieBreakDifference | selected from cached registry universe but absent from Cargo.lock | manifest-closure extra selection |
+| ExtraInRodin | `phf@0.12` | `` | `0.12.1` | LegitimateTieBreakDifference | selected from cached registry universe but absent from Cargo.lock | manifest-closure extra selection |
+| ExtraInRodin | `phf_generator@0.12` | `` | `0.12.1` | LegitimateTieBreakDifference | selected from cached registry universe but absent from Cargo.lock | manifest-closure extra selection |
+| ExtraInRodin | `phf_macros@0.12` | `` | `0.12.1` | LegitimateTieBreakDifference | selected from cached registry universe but absent from Cargo.lock | manifest-closure extra selection |
+| ExtraInRodin | `phf_shared@0.12` | `` | `0.12.1` | LegitimateTieBreakDifference | selected from cached registry universe but absent from Cargo.lock | manifest-closure extra selection |
+| ExtraInRodin | `rustls@0.24` | `` | `0.24.0-dev.0` | LegitimateTieBreakDifference | selected from cached registry universe but absent from Cargo.lock | manifest-closure extra selection |
+| ExtraInRodin | `schemars@0.8` | `` | `0.8.22` | LegitimateTieBreakDifference | selected from cached registry universe but absent from Cargo.lock | manifest-closure extra selection |
+| ExtraInRodin | `signal-hook@0.4` | `` | `0.4.4` | LegitimateTieBreakDifference | selected from cached registry universe but absent from Cargo.lock | manifest-closure extra selection |
+| ExtraInRodin | `spin@0.10` | `` | `0.10.0` | LegitimateTieBreakDifference | selected from cached registry universe but absent from Cargo.lock | manifest-closure extra selection |
+| ExtraInRodin | `strsim@0.10` | `` | `0.10.0` | LegitimateTieBreakDifference | selected from cached registry universe but absent from Cargo.lock | manifest-closure extra selection |
+| ExtraInRodin | `tokio-tungstenite@0.28` | `` | `0.28.0` | LegitimateTieBreakDifference | selected from cached registry universe but absent from Cargo.lock | manifest-closure extra selection |
+| ExtraInRodin | `tungstenite@0.28` | `` | `0.28.0` | LegitimateTieBreakDifference | selected from cached registry universe but absent from Cargo.lock | manifest-closure extra selection |
+| ExtraInRodin | `unicode-width@0.1` | `` | `0.1.14` | LegitimateTieBreakDifference | selected from cached registry universe but absent from Cargo.lock | manifest-closure extra selection |
+| ExtraInRodin | `uuid@0.8` | `` | `0.8.2` | LegitimateTieBreakDifference | selected from cached registry universe but absent from Cargo.lock | manifest-closure extra selection |
+| ExtraInRodin | `webpki-roots@0.26` | `` | `0.26.11` | LegitimateTieBreakDifference | selected from cached registry universe but absent from Cargo.lock | manifest-closure extra selection |
+
+
+#### Warm counterfactual
+
+Dropped root dependency `copypatch`. Warm/cold selected sets equal: `true`.
+
+| warm decisions | cold decisions | decision delta | warm conflicts | cold conflicts | conflict delta | warm facts used | scoped out |
+|---:|---:|---:|---:|---:|---:|---:|---:|
+| 235 | 238 | 3 | 0 | 2 | 2 | 2 | 0 |
+
+| added | removed | changed |
+|---:|---:|---:|
+| 0 | 0 | 0 |
+
+
+#### Extraction and modeling gap samples
+
+| gap kind | count |
+|---|---:|
+| DependencyOutsideLockUniverse | 1970 |
+| TargetConditionalDependency | 1148 |
+| DevDependency | 5619 |
+
+| kind | package | detail |
+|---|---|---|
+| DevDependency | `addr2line@0.16.0` | backtrace |
+| DevDependency | `addr2line@0.16.0` | clap |
+| DependencyOutsideLockUniverse | `addr2line@0.16.0` | compiler_builtins |
+| DependencyOutsideLockUniverse | `addr2line@0.16.0` | cpp_demangle |
+| DevDependency | `addr2line@0.16.0` | findshlibs |
+| DevDependency | `addr2line@0.16.0` | memmap |
+| DependencyOutsideLockUniverse | `addr2line@0.16.0` | rustc-std-workspace-alloc |
+| DependencyOutsideLockUniverse | `addr2line@0.16.0` | rustc-std-workspace-core |
+| DevDependency | `addr2line@0.16.0` | rustc-test |
+| DevDependency | `addr2line@0.16.0` | typed-arena |
+| DevDependency | `addr2line@0.21.0` | backtrace |
+| DevDependency | `addr2line@0.21.0` | clap |
+| DependencyOutsideLockUniverse | `addr2line@0.21.0` | compiler_builtins |
+| DependencyOutsideLockUniverse | `addr2line@0.21.0` | cpp_demangle |
+| DevDependency | `addr2line@0.21.0` | findshlibs |
+| DevDependency | `addr2line@0.21.0` | libtest-mimic |
+| DependencyOutsideLockUniverse | `addr2line@0.21.0` | rustc-std-workspace-alloc |
+| DependencyOutsideLockUniverse | `addr2line@0.21.0` | rustc-std-workspace-core |
+| DevDependency | `addr2line@0.21.0` | typed-arena |
+| DevDependency | `addr2line@0.24.2` | backtrace |
+| DependencyOutsideLockUniverse | `addr2line@0.24.2` | compiler_builtins |
+| DependencyOutsideLockUniverse | `addr2line@0.24.2` | cpp_demangle |
+| DevDependency | `addr2line@0.24.2` | findshlibs |
+| DevDependency | `addr2line@0.24.2` | libtest-mimic |
+| DependencyOutsideLockUniverse | `addr2line@0.24.2` | rustc-std-workspace-alloc |
+| DependencyOutsideLockUniverse | `addr2line@0.24.2` | rustc-std-workspace-core |
+| DependencyOutsideLockUniverse | `addr2line@0.24.2` | typed-arena |
+| DevDependency | `addr2line@0.25.1` | backtrace |
+| DependencyOutsideLockUniverse | `addr2line@0.25.1` | cpp_demangle |
+| DevDependency | `addr2line@0.25.1` | criterion |
+| DevDependency | `addr2line@0.25.1` | findshlibs |
+| DevDependency | `addr2line@0.25.1` | libtest-mimic |
+| DependencyOutsideLockUniverse | `addr2line@0.25.1` | rustc-std-workspace-alloc |
+| DependencyOutsideLockUniverse | `addr2line@0.25.1` | rustc-std-workspace-core |
+| DependencyOutsideLockUniverse | `addr2line@0.25.1` | typed-arena |
+| DevDependency | `addr2line@0.26.0` | backtrace |
+| DependencyOutsideLockUniverse | `addr2line@0.26.0` | cpp_demangle |
+| DevDependency | `addr2line@0.26.0` | criterion |
+| DevDependency | `addr2line@0.26.0` | findshlibs |
+| DevDependency | `addr2line@0.26.0` | libtest-mimic |
+| DependencyOutsideLockUniverse | `addr2line@0.26.0` | rustc-std-workspace-alloc |
+| DependencyOutsideLockUniverse | `addr2line@0.26.0` | rustc-std-workspace-core |
+| DependencyOutsideLockUniverse | `addr2line@0.26.0` | typed-arena |
+| DevDependency | `addr2line@0.26.1` | backtrace |
+| DependencyOutsideLockUniverse | `addr2line@0.26.1` | cpp_demangle |
+| DevDependency | `addr2line@0.26.1` | criterion |
+| DevDependency | `addr2line@0.26.1` | findshlibs |
+| DevDependency | `addr2line@0.26.1` | libtest-mimic |
+| DependencyOutsideLockUniverse | `addr2line@0.26.1` | rustc-std-workspace-alloc |
+| DependencyOutsideLockUniverse | `addr2line@0.26.1` | rustc-std-workspace-core |
+| DependencyOutsideLockUniverse | `addr2line@0.26.1` | typed-arena |
+| DependencyOutsideLockUniverse | `adler2@2.0.0` | compiler_builtins |
+| DevDependency | `adler2@2.0.0` | criterion |
+| DependencyOutsideLockUniverse | `adler2@2.0.0` | rustc-std-workspace-core |
+| DependencyOutsideLockUniverse | `adler2@2.0.1` | rustc-std-workspace-core |
+| DependencyOutsideLockUniverse | `ahash@0.3.8` | const-random |
+| DevDependency | `ahash@0.3.8` | criterion |
+| DevDependency | `ahash@0.3.8` | fnv |
+| DevDependency | `ahash@0.3.8` | fxhash |
+| DevDependency | `ahash@0.3.8` | hex |
+
+8677 additional extraction/modeling gaps omitted from this table; the JSON artifact carries the full set.
+
+
+### Projection: lock-union dev-included
+
+Lock-comparison projection: target-conditional dependency edges are unioned and dev dependencies are included so Rodin is compared against Cargo.lock's target-independent, dev-inclusive snapshot shape.
+
+#### Extraction
+
+- historical lock package entries: 892
+- historical lock unique package names: 813
+- workspace roots: 144
+- indexed package names: 1247
+- indexed package versions: 2255
+- indexed dependency edges: 12912
+- extraction/modeling gaps: 3982
+
+#### Solve numbers
+
+| solved | decisions | conflicts | restarts | learned facts | learned scans | learned prunes | subsumed | replaced | point versions | widened versions | widening factor | wall ms |
+|---|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|
+| true | 457 | 69 | 1 | 24 | 13331 | 39 | 42 | 3 | 24 | 274 | 11.417 | 3419 |
+
+
+Solve trace tail:
+
+- `domain zerocopy-derive@0.8 becomes active`
+- `zerocopy-derive@0.8: [0.8.27,0.8.28) U [0.8.31,0.8.32) U [0.8.33,0.8.34) U [0.8.38,0.8.41) U [0.8.42,0.8.43) U [0.8.48,0.8.51) U [0.8.52,0.8.53) ∩ [0.8.52,0.8.53) = [0.8.52,0.8.53)`
+- `force itertools@0.11 0.11.0 (only candidate after propagation)`
+- `force zerocopy-derive@0.8 0.8.52 (only candidate after propagation)`
+- `expand zerofrom@0.1 0.1.8 (highest remaining of 3 candidates) - reads 1 manifest`
+- `domain zerofrom-derive@0.1 becomes active`
+- `zerofrom-derive@0.1: [0.1.4,0.1.8) ∩ [0.1.6,0.2.0) = [0.1.6,0.1.8)`
+- `expand zerofrom-derive@0.1 0.1.7 (highest remaining of 2 candidates) - reads 1 manifest`
+- `expand zeroize@1 1.9.0 (highest remaining of 3 candidates) - reads 1 manifest`
+- `expand zmij@1 1.0.21 (highest remaining of 7 candidates) - reads 1 manifest`
+- `solution: addr2line@0.25 0.25.1, adler2@2 2.0.1, ahash@0.7 0.7.8, ahash@0.8 0.8.12, aho-corasick@1 1.1.4, aligned-vec@0.6 0.6.4, alloc-no-stdlib@2 2.0.4, alloc-stdlib@0.2 0.2.4, allocator-api2@0.2 0.2.21, android_system_...`
+- `summary: manifests read 457, candidate observations 1209, conflicts 69, widened versions killed 274 vs 24 point versions`
+
+#### HistoricalLock oracle
+
+- exact locked-domain matches: 848/892 (95.07%)
+- divergences: 111
+
+| divergence kind | count |
+|---|---:|
+| MissingInRodin | 33 |
+| ExtraInRodin | 67 |
+| VersionMismatch | 11 |
+
+| classification | count |
+|---|---:|
+| fresh-lock oracle includes Rodin's selected domain; historical extra-selection vindicated | 1 |
+| fresh-lock oracle selects Rodin's version; historical lock divergence vindicated | 4 |
+| locked package class was not reached under the extracted root/range/feature projection | 33 |
+| same package compatibility class selected a different version from Cargo.lock | 7 |
+| selected from cached registry universe but absent from Cargo.lock | 66 |
+
+| verdict | count |
+|---|---:|
+| LegitimateTieBreakDifference | 111 |
+
+| kind | package | Cargo.lock | Rodin | verdict | classification | accepted policy |
+|---|---|---|---|---|---|---|
+| VersionMismatch | `arrayvec@0.7` | `0.7.7` | `0.7.8` | LegitimateTieBreakDifference | fresh-lock oracle selects Rodin's version; historical lock divergence vindicated | historical-lock superseded by fresh oracle |
+| MissingInRodin | `atomic@0.6` | `0.6.1` | `-` | LegitimateTieBreakDifference | locked package class was not reached under the extracted root/range/feature projection | lockfile-free graph membership |
+| MissingInRodin | `aws-lc-sys@0.41` | `0.41.0` | `-` | LegitimateTieBreakDifference | locked package class was not reached under the extracted root/range/feature projection | lockfile-free graph membership |
+| MissingInRodin | `bitvec@1` | `1.1.1` | `-` | LegitimateTieBreakDifference | locked package class was not reached under the extracted root/range/feature projection | lockfile-free graph membership |
+| MissingInRodin | `bs58@0.5` | `0.5.1` | `-` | LegitimateTieBreakDifference | locked package class was not reached under the extracted root/range/feature projection | lockfile-free graph membership |
+| VersionMismatch | `clap@4` | `4.6.1` | `4.5.60` | LegitimateTieBreakDifference | same package compatibility class selected a different version from Cargo.lock | lockfile-free version choice |
+| VersionMismatch | `clap_builder@4` | `4.6.0` | `4.5.60` | LegitimateTieBreakDifference | same package compatibility class selected a different version from Cargo.lock | lockfile-free version choice |
+| VersionMismatch | `clap_derive@4` | `4.6.1` | `4.5.55` | LegitimateTieBreakDifference | same package compatibility class selected a different version from Cargo.lock | lockfile-free version choice |
+| MissingInRodin | `cmake@0.1` | `0.1.58` | `-` | LegitimateTieBreakDifference | locked package class was not reached under the extracted root/range/feature projection | lockfile-free graph membership |
+| VersionMismatch | `color-backtrace@0.7` | `0.7.2` | `0.7.3` | LegitimateTieBreakDifference | same package compatibility class selected a different version from Cargo.lock | lockfile-free version choice |
+| MissingInRodin | `dunce@1` | `1.0.5` | `-` | LegitimateTieBreakDifference | locked package class was not reached under the extracted root/range/feature projection | lockfile-free graph membership |
+| MissingInRodin | `embedded-io@0.6` | `0.6.1` | `-` | LegitimateTieBreakDifference | locked package class was not reached under the extracted root/range/feature projection | lockfile-free graph membership |
+| MissingInRodin | `fsevent-sys@4` | `4.1.0` | `-` | LegitimateTieBreakDifference | locked package class was not reached under the extracted root/range/feature projection | lockfile-free graph membership |
+| MissingInRodin | `funty@2` | `2.0.0` | `-` | LegitimateTieBreakDifference | locked package class was not reached under the extracted root/range/feature projection | lockfile-free graph membership |
+| MissingInRodin | `icu_normalizer_data@2` | `2.0.0` | `-` | LegitimateTieBreakDifference | locked package class was not reached under the extracted root/range/feature projection | lockfile-free graph membership |
+| VersionMismatch | `iddqd@0.4` | `0.4.5` | `0.4.1` | LegitimateTieBreakDifference | same package compatibility class selected a different version from Cargo.lock | lockfile-free version choice |
+| VersionMismatch | `jiff@0.2` | `0.2.29` | `0.2.31` | LegitimateTieBreakDifference | same package compatibility class selected a different version from Cargo.lock | lockfile-free version choice |
+| MissingInRodin | `jobserver@0.1` | `0.1.34` | `-` | LegitimateTieBreakDifference | locked package class was not reached under the extracted root/range/feature projection | lockfile-free graph membership |
+| MissingInRodin | `notify@8` | `8.2.0` | `-` | LegitimateTieBreakDifference | locked package class was not reached under the extracted root/range/feature projection | lockfile-free graph membership |
+| MissingInRodin | `radium@0.7` | `0.7.0` | `-` | LegitimateTieBreakDifference | locked package class was not reached under the extracted root/range/feature projection | lockfile-free graph membership |
+| MissingInRodin | `ruint@1` | `1.18.0` | `-` | LegitimateTieBreakDifference | locked package class was not reached under the extracted root/range/feature projection | lockfile-free graph membership |
+| MissingInRodin | `ruint-macro@1` | `1.2.1` | `-` | LegitimateTieBreakDifference | locked package class was not reached under the extracted root/range/feature projection | lockfile-free graph membership |
+| VersionMismatch | `rustc-hash@2` | `2.1.2` | `2.1.3` | LegitimateTieBreakDifference | fresh-lock oracle selects Rodin's version; historical lock divergence vindicated | historical-lock superseded by fresh oracle |
+| MissingInRodin | `rustls@0.23` | `0.23.41` | `-` | LegitimateTieBreakDifference | locked package class was not reached under the extracted root/range/feature projection | lockfile-free graph membership |
+| MissingInRodin | `schemars@1` | `1.2.1` | `-` | LegitimateTieBreakDifference | locked package class was not reached under the extracted root/range/feature projection | lockfile-free graph membership |
+| MissingInRodin | `simd-adler32@0.3` | `0.3.9` | `-` | LegitimateTieBreakDifference | locked package class was not reached under the extracted root/range/feature projection | lockfile-free graph membership |
+| VersionMismatch | `terminal-light@1` | `1.8.0` | `1.9.0` | LegitimateTieBreakDifference | fresh-lock oracle selects Rodin's version; historical lock divergence vindicated | historical-lock superseded by fresh oracle |
+| VersionMismatch | `time@0.3` | `0.3.51` | `0.3.53` | LegitimateTieBreakDifference | fresh-lock oracle selects Rodin's version; historical lock divergence vindicated | historical-lock superseded by fresh oracle |
+| MissingInRodin | `time-macros@0.2` | `0.2.30` | `-` | LegitimateTieBreakDifference | locked package class was not reached under the extracted root/range/feature projection | lockfile-free graph membership |
+| VersionMismatch | `trybuild@1` | `1.0.117` | `1.0.115` | LegitimateTieBreakDifference | same package compatibility class selected a different version from Cargo.lock | lockfile-free version choice |
+| MissingInRodin | `utf16_iter@1` | `1.0.5` | `-` | LegitimateTieBreakDifference | locked package class was not reached under the extracted root/range/feature projection | lockfile-free graph membership |
+| MissingInRodin | `valuable@0.1` | `0.1.1` | `-` | LegitimateTieBreakDifference | locked package class was not reached under the extracted root/range/feature projection | lockfile-free graph membership |
+| MissingInRodin | `windows-sys@0.60` | `0.60.2` | `-` | LegitimateTieBreakDifference | locked package class was not reached under the extracted root/range/feature projection | lockfile-free graph membership |
+| MissingInRodin | `windows-targets@0.53` | `0.53.5` | `-` | LegitimateTieBreakDifference | locked package class was not reached under the extracted root/range/feature projection | lockfile-free graph membership |
+| MissingInRodin | `windows_aarch64_gnullvm@0.53` | `0.53.1` | `-` | LegitimateTieBreakDifference | locked package class was not reached under the extracted root/range/feature projection | lockfile-free graph membership |
+| MissingInRodin | `windows_aarch64_msvc@0.53` | `0.53.1` | `-` | LegitimateTieBreakDifference | locked package class was not reached under the extracted root/range/feature projection | lockfile-free graph membership |
+| MissingInRodin | `windows_i686_gnu@0.53` | `0.53.1` | `-` | LegitimateTieBreakDifference | locked package class was not reached under the extracted root/range/feature projection | lockfile-free graph membership |
+| MissingInRodin | `windows_i686_gnullvm@0.53` | `0.53.1` | `-` | LegitimateTieBreakDifference | locked package class was not reached under the extracted root/range/feature projection | lockfile-free graph membership |
+| MissingInRodin | `windows_i686_msvc@0.53` | `0.53.1` | `-` | LegitimateTieBreakDifference | locked package class was not reached under the extracted root/range/feature projection | lockfile-free graph membership |
+| MissingInRodin | `windows_x86_64_gnu@0.53` | `0.53.1` | `-` | LegitimateTieBreakDifference | locked package class was not reached under the extracted root/range/feature projection | lockfile-free graph membership |
+| MissingInRodin | `windows_x86_64_gnullvm@0.53` | `0.53.1` | `-` | LegitimateTieBreakDifference | locked package class was not reached under the extracted root/range/feature projection | lockfile-free graph membership |
+| MissingInRodin | `windows_x86_64_msvc@0.53` | `0.53.1` | `-` | LegitimateTieBreakDifference | locked package class was not reached under the extracted root/range/feature projection | lockfile-free graph membership |
+| MissingInRodin | `wyz@0.5` | `0.5.1` | `-` | LegitimateTieBreakDifference | locked package class was not reached under the extracted root/range/feature projection | lockfile-free graph membership |
+| MissingInRodin | `xterm-query@0.5` | `0.5.2` | `-` | LegitimateTieBreakDifference | locked package class was not reached under the extracted root/range/feature projection | lockfile-free graph membership |
+| ExtraInRodin | `anstream@0.6` | `` | `0.6.21` | LegitimateTieBreakDifference | selected from cached registry universe but absent from Cargo.lock | manifest-closure extra selection |
+| ExtraInRodin | `anstyle-parse@0.2` | `` | `0.2.7` | LegitimateTieBreakDifference | selected from cached registry universe but absent from Cargo.lock | manifest-closure extra selection |
+| ExtraInRodin | `bincode@2` | `` | `2.0.1` | LegitimateTieBreakDifference | selected from cached registry universe but absent from Cargo.lock | manifest-closure extra selection |
+| ExtraInRodin | `bit-vec@0.9` | `` | `0.9.1` | LegitimateTieBreakDifference | selected from cached registry universe but absent from Cargo.lock | manifest-closure extra selection |
+| ExtraInRodin | `clap@3` | `` | `3.2.25` | LegitimateTieBreakDifference | selected from cached registry universe but absent from Cargo.lock | manifest-closure extra selection |
+| ExtraInRodin | `clap_lex@0.2` | `` | `0.2.4` | LegitimateTieBreakDifference | selected from cached registry universe but absent from Cargo.lock | manifest-closure extra selection |
+| ExtraInRodin | `console@0.15` | `` | `0.15.11` | LegitimateTieBreakDifference | selected from cached registry universe but absent from Cargo.lock | manifest-closure extra selection |
+| ExtraInRodin | `const-oid@0.9` | `` | `0.9.6` | LegitimateTieBreakDifference | selected from cached registry universe but absent from Cargo.lock | manifest-closure extra selection |
+| ExtraInRodin | `crossterm@0.28` | `` | `0.28.1` | LegitimateTieBreakDifference | selected from cached registry universe but absent from Cargo.lock | manifest-closure extra selection |
+| ExtraInRodin | `env_logger@0.10` | `` | `0.10.2` | LegitimateTieBreakDifference | selected from cached registry universe but absent from Cargo.lock | manifest-closure extra selection |
+| ExtraInRodin | `futures@0.1` | `` | `0.1.31` | LegitimateTieBreakDifference | selected from cached registry universe but absent from Cargo.lock | manifest-closure extra selection |
+| ExtraInRodin | `getrandom@0.1` | `` | `0.1.16` | LegitimateTieBreakDifference | selected from cached registry universe but absent from Cargo.lock | manifest-closure extra selection |
+| ExtraInRodin | `h2@0.3` | `` | `0.3.27` | LegitimateTieBreakDifference | selected from cached registry universe but absent from Cargo.lock | manifest-closure extra selection |
+| ExtraInRodin | `hash32@0.3` | `` | `0.3.1` | LegitimateTieBreakDifference | selected from cached registry universe but absent from Cargo.lock | manifest-closure extra selection |
+| ExtraInRodin | `heapless@0.9` | `` | `0.9.2` | LegitimateTieBreakDifference | selected from cached registry universe but absent from Cargo.lock | manifest-closure extra selection |
+| ExtraInRodin | `http-body@0.4` | `` | `0.4.6` | LegitimateTieBreakDifference | selected from cached registry universe but absent from Cargo.lock | manifest-closure extra selection |
+| ExtraInRodin | `http@0.2` | `` | `0.2.12` | LegitimateTieBreakDifference | selected from cached registry universe but absent from Cargo.lock | manifest-closure extra selection |
+| ExtraInRodin | `hyper@0.14` | `` | `0.14.32` | LegitimateTieBreakDifference | selected from cached registry universe but absent from Cargo.lock | manifest-closure extra selection |
+| ExtraInRodin | `itertools@0.10` | `` | `0.10.5` | LegitimateTieBreakDifference | selected from cached registry universe but absent from Cargo.lock | manifest-closure extra selection |
+| ExtraInRodin | `itertools@0.11` | `` | `0.11.0` | LegitimateTieBreakDifference | selected from cached registry universe but absent from Cargo.lock | manifest-closure extra selection |
+| ExtraInRodin | `jiff@0.1` | `` | `0.1.29` | LegitimateTieBreakDifference | selected from cached registry universe but absent from Cargo.lock | manifest-closure extra selection |
+| ExtraInRodin | `mio@0.8` | `` | `0.8.11` | LegitimateTieBreakDifference | selected from cached registry universe but absent from Cargo.lock | manifest-closure extra selection |
+| ExtraInRodin | `notify@9` | `` | `9.0.0-rc.4` | LegitimateTieBreakDifference | selected from cached registry universe but absent from Cargo.lock | manifest-closure extra selection |
+| ExtraInRodin | `phf@0.12` | `` | `0.12.1` | LegitimateTieBreakDifference | selected from cached registry universe but absent from Cargo.lock | manifest-closure extra selection |
+| ExtraInRodin | `phf_generator@0.12` | `` | `0.12.1` | LegitimateTieBreakDifference | selected from cached registry universe but absent from Cargo.lock | manifest-closure extra selection |
+| ExtraInRodin | `phf_macros@0.12` | `` | `0.12.1` | LegitimateTieBreakDifference | selected from cached registry universe but absent from Cargo.lock | manifest-closure extra selection |
+| ExtraInRodin | `phf_shared@0.12` | `` | `0.12.1` | LegitimateTieBreakDifference | selected from cached registry universe but absent from Cargo.lock | manifest-closure extra selection |
+| ExtraInRodin | `quickcheck@0.9` | `` | `0.9.2` | LegitimateTieBreakDifference | selected from cached registry universe but absent from Cargo.lock | manifest-closure extra selection |
+| ExtraInRodin | `rand@0.3` | `` | `0.3.23` | LegitimateTieBreakDifference | selected from cached registry universe but absent from Cargo.lock | manifest-closure extra selection |
+| ExtraInRodin | `rand@0.4` | `` | `0.4.6` | LegitimateTieBreakDifference | selected from cached registry universe but absent from Cargo.lock | manifest-closure extra selection |
+| ExtraInRodin | `rand@0.7` | `` | `0.7.3` | LegitimateTieBreakDifference | selected from cached registry universe but absent from Cargo.lock | manifest-closure extra selection |
+| ExtraInRodin | `rand_chacha@0.2` | `` | `0.2.2` | LegitimateTieBreakDifference | selected from cached registry universe but absent from Cargo.lock | manifest-closure extra selection |
+| ExtraInRodin | `rand_core@0.3` | `` | `0.3.1` | LegitimateTieBreakDifference | selected from cached registry universe but absent from Cargo.lock | manifest-closure extra selection |
+| ExtraInRodin | `rand_core@0.4` | `` | `0.4.2` | LegitimateTieBreakDifference | selected from cached registry universe but absent from Cargo.lock | manifest-closure extra selection |
+| ExtraInRodin | `rand_core@0.5` | `` | `0.5.1` | LegitimateTieBreakDifference | selected from cached registry universe but absent from Cargo.lock | manifest-closure extra selection |
+| ExtraInRodin | `rustls-pemfile@1` | `` | `1.0.4` | LegitimateTieBreakDifference | selected from cached registry universe but absent from Cargo.lock | manifest-closure extra selection |
+| ExtraInRodin | `rustls-webpki@0.101` | `` | `0.101.7` | LegitimateTieBreakDifference | selected from cached registry universe but absent from Cargo.lock | manifest-closure extra selection |
+| ExtraInRodin | `rustls@0.21` | `` | `0.21.12` | LegitimateTieBreakDifference | selected from cached registry universe but absent from Cargo.lock | manifest-closure extra selection |
+| ExtraInRodin | `rustls@0.24` | `` | `0.24.0-dev.0` | LegitimateTieBreakDifference | selected from cached registry universe but absent from Cargo.lock | manifest-closure extra selection |
+| ExtraInRodin | `schemars@0.8` | `` | `0.8.22` | LegitimateTieBreakDifference | selected from cached registry universe but absent from Cargo.lock | manifest-closure extra selection |
+| ExtraInRodin | `sha1@0.11` | `` | `0.11.0` | LegitimateTieBreakDifference | selected from cached registry universe but absent from Cargo.lock | manifest-closure extra selection |
+| ExtraInRodin | `shlex@1` | `` | `1.3.0` | LegitimateTieBreakDifference | selected from cached registry universe but absent from Cargo.lock | manifest-closure extra selection |
+| ExtraInRodin | `signal-hook@0.4` | `` | `0.4.4` | LegitimateTieBreakDifference | selected from cached registry universe but absent from Cargo.lock | manifest-closure extra selection |
+| ExtraInRodin | `smol_str@0.2` | `` | `0.2.2` | LegitimateTieBreakDifference | selected from cached registry universe but absent from Cargo.lock | manifest-closure extra selection |
+| ExtraInRodin | `socket2@0.5` | `` | `0.5.10` | LegitimateTieBreakDifference | selected from cached registry universe but absent from Cargo.lock | manifest-closure extra selection |
+| ExtraInRodin | `spin@0.10` | `` | `0.10.0` | LegitimateTieBreakDifference | selected from cached registry universe but absent from Cargo.lock | manifest-closure extra selection |
+| ExtraInRodin | `strsim@0.10` | `` | `0.10.0` | LegitimateTieBreakDifference | selected from cached registry universe but absent from Cargo.lock | manifest-closure extra selection |
+| ExtraInRodin | `tokio-rustls@0.24` | `` | `0.24.1` | LegitimateTieBreakDifference | selected from cached registry universe but absent from Cargo.lock | manifest-closure extra selection |
+| ExtraInRodin | `tokio-tungstenite@0.28` | `` | `0.28.0` | LegitimateTieBreakDifference | selected from cached registry universe but absent from Cargo.lock | manifest-closure extra selection |
+| ExtraInRodin | `toml@0.5` | `` | `0.5.11` | LegitimateTieBreakDifference | selected from cached registry universe but absent from Cargo.lock | manifest-closure extra selection |
+| ExtraInRodin | `toml@0.9` | `` | `0.9.12+spec-1.1.0` | LegitimateTieBreakDifference | selected from cached registry universe but absent from Cargo.lock | manifest-closure extra selection |
+| ExtraInRodin | `toml_datetime@0.7` | `` | `0.7.5+spec-1.1.0` | LegitimateTieBreakDifference | selected from cached registry universe but absent from Cargo.lock | manifest-closure extra selection |
+| ExtraInRodin | `tungstenite@0.28` | `` | `0.28.0` | LegitimateTieBreakDifference | selected from cached registry universe but absent from Cargo.lock | manifest-closure extra selection |
+| ExtraInRodin | `unicode-width@0.1` | `` | `0.1.14` | LegitimateTieBreakDifference | selected from cached registry universe but absent from Cargo.lock | manifest-closure extra selection |
+| ExtraInRodin | `untrusted@0.7` | `` | `0.7.1` | LegitimateTieBreakDifference | selected from cached registry universe but absent from Cargo.lock | manifest-closure extra selection |
+| ExtraInRodin | `uuid@0.8` | `` | `0.8.2` | LegitimateTieBreakDifference | selected from cached registry universe but absent from Cargo.lock | manifest-closure extra selection |
+| ExtraInRodin | `webpki-roots@0.26` | `` | `0.26.11` | LegitimateTieBreakDifference | selected from cached registry universe but absent from Cargo.lock | manifest-closure extra selection |
+| ExtraInRodin | `windows-sys@0.48` | `` | `0.48.0` | LegitimateTieBreakDifference | selected from cached registry universe but absent from Cargo.lock | manifest-closure extra selection |
+| ExtraInRodin | `windows-targets@0.48` | `` | `0.48.5` | LegitimateTieBreakDifference | selected from cached registry universe but absent from Cargo.lock | manifest-closure extra selection |
+| ExtraInRodin | `windows_aarch64_gnullvm@0.48` | `` | `0.48.5` | LegitimateTieBreakDifference | selected from cached registry universe but absent from Cargo.lock | manifest-closure extra selection |
+| ExtraInRodin | `windows_aarch64_msvc@0.48` | `` | `0.48.5` | LegitimateTieBreakDifference | selected from cached registry universe but absent from Cargo.lock | manifest-closure extra selection |
+| ExtraInRodin | `windows_i686_gnu@0.48` | `` | `0.48.5` | LegitimateTieBreakDifference | selected from cached registry universe but absent from Cargo.lock | manifest-closure extra selection |
+| ExtraInRodin | `windows_i686_msvc@0.48` | `` | `0.48.5` | LegitimateTieBreakDifference | selected from cached registry universe but absent from Cargo.lock | manifest-closure extra selection |
+| ExtraInRodin | `windows_x86_64_gnu@0.48` | `` | `0.48.5` | LegitimateTieBreakDifference | selected from cached registry universe but absent from Cargo.lock | manifest-closure extra selection |
+| ExtraInRodin | `windows_x86_64_gnullvm@0.48` | `` | `0.48.5` | LegitimateTieBreakDifference | selected from cached registry universe but absent from Cargo.lock | manifest-closure extra selection |
+| ExtraInRodin | `windows_x86_64_msvc@0.48` | `` | `0.48.5` | LegitimateTieBreakDifference | selected from cached registry universe but absent from Cargo.lock | manifest-closure extra selection |
+| ExtraInRodin | `xterm-query@0.6` | `` | `0.6.0` | LegitimateTieBreakDifference | fresh-lock oracle includes Rodin's selected domain; historical extra-selection vindicated | historical-lock superseded by fresh oracle |
+
+#### FreshLock oracle
+
+- exact locked-domain matches: 853/892 (95.63%)
+- divergences: 105
+
+| divergence kind | count |
+|---|---:|
+| MissingInRodin | 32 |
+| ExtraInRodin | 66 |
+| VersionMismatch | 7 |
+
+| classification | count |
+|---|---:|
+| locked package class was not reached under the extracted root/range/feature projection | 32 |
+| same package compatibility class selected a different version from Cargo.lock | 7 |
+| selected from cached registry universe but absent from Cargo.lock | 66 |
+
+| verdict | count |
+|---|---:|
+| LegitimateTieBreakDifference | 105 |
+
+| kind | package | Cargo.lock | Rodin | verdict | classification | accepted policy |
+|---|---|---|---|---|---|---|
+| MissingInRodin | `atomic@0.6` | `0.6.1` | `-` | LegitimateTieBreakDifference | locked package class was not reached under the extracted root/range/feature projection | lockfile-free graph membership |
+| MissingInRodin | `aws-lc-sys@0.41` | `0.41.0` | `-` | LegitimateTieBreakDifference | locked package class was not reached under the extracted root/range/feature projection | lockfile-free graph membership |
+| MissingInRodin | `bitvec@1` | `1.1.1` | `-` | LegitimateTieBreakDifference | locked package class was not reached under the extracted root/range/feature projection | lockfile-free graph membership |
+| MissingInRodin | `bs58@0.5` | `0.5.1` | `-` | LegitimateTieBreakDifference | locked package class was not reached under the extracted root/range/feature projection | lockfile-free graph membership |
+| VersionMismatch | `clap@4` | `4.6.1` | `4.5.60` | LegitimateTieBreakDifference | same package compatibility class selected a different version from Cargo.lock | lockfile-free version choice |
+| VersionMismatch | `clap_builder@4` | `4.6.0` | `4.5.60` | LegitimateTieBreakDifference | same package compatibility class selected a different version from Cargo.lock | lockfile-free version choice |
+| VersionMismatch | `clap_derive@4` | `4.6.1` | `4.5.55` | LegitimateTieBreakDifference | same package compatibility class selected a different version from Cargo.lock | lockfile-free version choice |
+| MissingInRodin | `cmake@0.1` | `0.1.58` | `-` | LegitimateTieBreakDifference | locked package class was not reached under the extracted root/range/feature projection | lockfile-free graph membership |
+| VersionMismatch | `color-backtrace@0.7` | `0.7.2` | `0.7.3` | LegitimateTieBreakDifference | same package compatibility class selected a different version from Cargo.lock | lockfile-free version choice |
+| MissingInRodin | `dunce@1` | `1.0.5` | `-` | LegitimateTieBreakDifference | locked package class was not reached under the extracted root/range/feature projection | lockfile-free graph membership |
+| MissingInRodin | `embedded-io@0.6` | `0.6.1` | `-` | LegitimateTieBreakDifference | locked package class was not reached under the extracted root/range/feature projection | lockfile-free graph membership |
+| MissingInRodin | `fsevent-sys@4` | `4.1.0` | `-` | LegitimateTieBreakDifference | locked package class was not reached under the extracted root/range/feature projection | lockfile-free graph membership |
+| MissingInRodin | `funty@2` | `2.0.0` | `-` | LegitimateTieBreakDifference | locked package class was not reached under the extracted root/range/feature projection | lockfile-free graph membership |
+| MissingInRodin | `icu_normalizer_data@2` | `2.0.0` | `-` | LegitimateTieBreakDifference | locked package class was not reached under the extracted root/range/feature projection | lockfile-free graph membership |
+| VersionMismatch | `iddqd@0.4` | `0.4.5` | `0.4.1` | LegitimateTieBreakDifference | same package compatibility class selected a different version from Cargo.lock | lockfile-free version choice |
+| VersionMismatch | `jiff@0.2` | `0.2.29` | `0.2.31` | LegitimateTieBreakDifference | same package compatibility class selected a different version from Cargo.lock | lockfile-free version choice |
+| MissingInRodin | `jobserver@0.1` | `0.1.34` | `-` | LegitimateTieBreakDifference | locked package class was not reached under the extracted root/range/feature projection | lockfile-free graph membership |
+| MissingInRodin | `notify@8` | `8.2.0` | `-` | LegitimateTieBreakDifference | locked package class was not reached under the extracted root/range/feature projection | lockfile-free graph membership |
+| MissingInRodin | `radium@0.7` | `0.7.0` | `-` | LegitimateTieBreakDifference | locked package class was not reached under the extracted root/range/feature projection | lockfile-free graph membership |
+| MissingInRodin | `ruint@1` | `1.18.0` | `-` | LegitimateTieBreakDifference | locked package class was not reached under the extracted root/range/feature projection | lockfile-free graph membership |
+| MissingInRodin | `ruint-macro@1` | `1.2.1` | `-` | LegitimateTieBreakDifference | locked package class was not reached under the extracted root/range/feature projection | lockfile-free graph membership |
+| MissingInRodin | `rustls@0.23` | `0.23.41` | `-` | LegitimateTieBreakDifference | locked package class was not reached under the extracted root/range/feature projection | lockfile-free graph membership |
+| MissingInRodin | `schemars@1` | `1.2.1` | `-` | LegitimateTieBreakDifference | locked package class was not reached under the extracted root/range/feature projection | lockfile-free graph membership |
+| MissingInRodin | `simd-adler32@0.3` | `0.3.9` | `-` | LegitimateTieBreakDifference | locked package class was not reached under the extracted root/range/feature projection | lockfile-free graph membership |
+| MissingInRodin | `time-macros@0.2` | `0.2.31` | `-` | LegitimateTieBreakDifference | locked package class was not reached under the extracted root/range/feature projection | lockfile-free graph membership |
+| VersionMismatch | `trybuild@1` | `1.0.117` | `1.0.115` | LegitimateTieBreakDifference | same package compatibility class selected a different version from Cargo.lock | lockfile-free version choice |
+| MissingInRodin | `utf16_iter@1` | `1.0.5` | `-` | LegitimateTieBreakDifference | locked package class was not reached under the extracted root/range/feature projection | lockfile-free graph membership |
+| MissingInRodin | `valuable@0.1` | `0.1.1` | `-` | LegitimateTieBreakDifference | locked package class was not reached under the extracted root/range/feature projection | lockfile-free graph membership |
+| MissingInRodin | `windows-sys@0.60` | `0.60.2` | `-` | LegitimateTieBreakDifference | locked package class was not reached under the extracted root/range/feature projection | lockfile-free graph membership |
+| MissingInRodin | `windows-targets@0.53` | `0.53.5` | `-` | LegitimateTieBreakDifference | locked package class was not reached under the extracted root/range/feature projection | lockfile-free graph membership |
+| MissingInRodin | `windows_aarch64_gnullvm@0.53` | `0.53.1` | `-` | LegitimateTieBreakDifference | locked package class was not reached under the extracted root/range/feature projection | lockfile-free graph membership |
+| MissingInRodin | `windows_aarch64_msvc@0.53` | `0.53.1` | `-` | LegitimateTieBreakDifference | locked package class was not reached under the extracted root/range/feature projection | lockfile-free graph membership |
+| MissingInRodin | `windows_i686_gnu@0.53` | `0.53.1` | `-` | LegitimateTieBreakDifference | locked package class was not reached under the extracted root/range/feature projection | lockfile-free graph membership |
+| MissingInRodin | `windows_i686_gnullvm@0.53` | `0.53.1` | `-` | LegitimateTieBreakDifference | locked package class was not reached under the extracted root/range/feature projection | lockfile-free graph membership |
+| MissingInRodin | `windows_i686_msvc@0.53` | `0.53.1` | `-` | LegitimateTieBreakDifference | locked package class was not reached under the extracted root/range/feature projection | lockfile-free graph membership |
+| MissingInRodin | `windows_x86_64_gnu@0.53` | `0.53.1` | `-` | LegitimateTieBreakDifference | locked package class was not reached under the extracted root/range/feature projection | lockfile-free graph membership |
+| MissingInRodin | `windows_x86_64_gnullvm@0.53` | `0.53.1` | `-` | LegitimateTieBreakDifference | locked package class was not reached under the extracted root/range/feature projection | lockfile-free graph membership |
+| MissingInRodin | `windows_x86_64_msvc@0.53` | `0.53.1` | `-` | LegitimateTieBreakDifference | locked package class was not reached under the extracted root/range/feature projection | lockfile-free graph membership |
+| MissingInRodin | `wyz@0.5` | `0.5.1` | `-` | LegitimateTieBreakDifference | locked package class was not reached under the extracted root/range/feature projection | lockfile-free graph membership |
+| ExtraInRodin | `anstream@0.6` | `` | `0.6.21` | LegitimateTieBreakDifference | selected from cached registry universe but absent from Cargo.lock | manifest-closure extra selection |
+| ExtraInRodin | `anstyle-parse@0.2` | `` | `0.2.7` | LegitimateTieBreakDifference | selected from cached registry universe but absent from Cargo.lock | manifest-closure extra selection |
+| ExtraInRodin | `bincode@2` | `` | `2.0.1` | LegitimateTieBreakDifference | selected from cached registry universe but absent from Cargo.lock | manifest-closure extra selection |
+| ExtraInRodin | `bit-vec@0.9` | `` | `0.9.1` | LegitimateTieBreakDifference | selected from cached registry universe but absent from Cargo.lock | manifest-closure extra selection |
+| ExtraInRodin | `clap@3` | `` | `3.2.25` | LegitimateTieBreakDifference | selected from cached registry universe but absent from Cargo.lock | manifest-closure extra selection |
+| ExtraInRodin | `clap_lex@0.2` | `` | `0.2.4` | LegitimateTieBreakDifference | selected from cached registry universe but absent from Cargo.lock | manifest-closure extra selection |
+| ExtraInRodin | `console@0.15` | `` | `0.15.11` | LegitimateTieBreakDifference | selected from cached registry universe but absent from Cargo.lock | manifest-closure extra selection |
+| ExtraInRodin | `const-oid@0.9` | `` | `0.9.6` | LegitimateTieBreakDifference | selected from cached registry universe but absent from Cargo.lock | manifest-closure extra selection |
+| ExtraInRodin | `crossterm@0.28` | `` | `0.28.1` | LegitimateTieBreakDifference | selected from cached registry universe but absent from Cargo.lock | manifest-closure extra selection |
+| ExtraInRodin | `env_logger@0.10` | `` | `0.10.2` | LegitimateTieBreakDifference | selected from cached registry universe but absent from Cargo.lock | manifest-closure extra selection |
+| ExtraInRodin | `futures@0.1` | `` | `0.1.31` | LegitimateTieBreakDifference | selected from cached registry universe but absent from Cargo.lock | manifest-closure extra selection |
+| ExtraInRodin | `getrandom@0.1` | `` | `0.1.16` | LegitimateTieBreakDifference | selected from cached registry universe but absent from Cargo.lock | manifest-closure extra selection |
+| ExtraInRodin | `h2@0.3` | `` | `0.3.27` | LegitimateTieBreakDifference | selected from cached registry universe but absent from Cargo.lock | manifest-closure extra selection |
+| ExtraInRodin | `hash32@0.3` | `` | `0.3.1` | LegitimateTieBreakDifference | selected from cached registry universe but absent from Cargo.lock | manifest-closure extra selection |
+| ExtraInRodin | `heapless@0.9` | `` | `0.9.2` | LegitimateTieBreakDifference | selected from cached registry universe but absent from Cargo.lock | manifest-closure extra selection |
+| ExtraInRodin | `http-body@0.4` | `` | `0.4.6` | LegitimateTieBreakDifference | selected from cached registry universe but absent from Cargo.lock | manifest-closure extra selection |
+| ExtraInRodin | `http@0.2` | `` | `0.2.12` | LegitimateTieBreakDifference | selected from cached registry universe but absent from Cargo.lock | manifest-closure extra selection |
+| ExtraInRodin | `hyper@0.14` | `` | `0.14.32` | LegitimateTieBreakDifference | selected from cached registry universe but absent from Cargo.lock | manifest-closure extra selection |
+| ExtraInRodin | `itertools@0.10` | `` | `0.10.5` | LegitimateTieBreakDifference | selected from cached registry universe but absent from Cargo.lock | manifest-closure extra selection |
+| ExtraInRodin | `itertools@0.11` | `` | `0.11.0` | LegitimateTieBreakDifference | selected from cached registry universe but absent from Cargo.lock | manifest-closure extra selection |
+| ExtraInRodin | `jiff@0.1` | `` | `0.1.29` | LegitimateTieBreakDifference | selected from cached registry universe but absent from Cargo.lock | manifest-closure extra selection |
+| ExtraInRodin | `mio@0.8` | `` | `0.8.11` | LegitimateTieBreakDifference | selected from cached registry universe but absent from Cargo.lock | manifest-closure extra selection |
+| ExtraInRodin | `notify@9` | `` | `9.0.0-rc.4` | LegitimateTieBreakDifference | selected from cached registry universe but absent from Cargo.lock | manifest-closure extra selection |
+| ExtraInRodin | `phf@0.12` | `` | `0.12.1` | LegitimateTieBreakDifference | selected from cached registry universe but absent from Cargo.lock | manifest-closure extra selection |
+| ExtraInRodin | `phf_generator@0.12` | `` | `0.12.1` | LegitimateTieBreakDifference | selected from cached registry universe but absent from Cargo.lock | manifest-closure extra selection |
+| ExtraInRodin | `phf_macros@0.12` | `` | `0.12.1` | LegitimateTieBreakDifference | selected from cached registry universe but absent from Cargo.lock | manifest-closure extra selection |
+| ExtraInRodin | `phf_shared@0.12` | `` | `0.12.1` | LegitimateTieBreakDifference | selected from cached registry universe but absent from Cargo.lock | manifest-closure extra selection |
+| ExtraInRodin | `quickcheck@0.9` | `` | `0.9.2` | LegitimateTieBreakDifference | selected from cached registry universe but absent from Cargo.lock | manifest-closure extra selection |
+| ExtraInRodin | `rand@0.3` | `` | `0.3.23` | LegitimateTieBreakDifference | selected from cached registry universe but absent from Cargo.lock | manifest-closure extra selection |
+| ExtraInRodin | `rand@0.4` | `` | `0.4.6` | LegitimateTieBreakDifference | selected from cached registry universe but absent from Cargo.lock | manifest-closure extra selection |
+| ExtraInRodin | `rand@0.7` | `` | `0.7.3` | LegitimateTieBreakDifference | selected from cached registry universe but absent from Cargo.lock | manifest-closure extra selection |
+| ExtraInRodin | `rand_chacha@0.2` | `` | `0.2.2` | LegitimateTieBreakDifference | selected from cached registry universe but absent from Cargo.lock | manifest-closure extra selection |
+| ExtraInRodin | `rand_core@0.3` | `` | `0.3.1` | LegitimateTieBreakDifference | selected from cached registry universe but absent from Cargo.lock | manifest-closure extra selection |
+| ExtraInRodin | `rand_core@0.4` | `` | `0.4.2` | LegitimateTieBreakDifference | selected from cached registry universe but absent from Cargo.lock | manifest-closure extra selection |
+| ExtraInRodin | `rand_core@0.5` | `` | `0.5.1` | LegitimateTieBreakDifference | selected from cached registry universe but absent from Cargo.lock | manifest-closure extra selection |
+| ExtraInRodin | `rustls-pemfile@1` | `` | `1.0.4` | LegitimateTieBreakDifference | selected from cached registry universe but absent from Cargo.lock | manifest-closure extra selection |
+| ExtraInRodin | `rustls-webpki@0.101` | `` | `0.101.7` | LegitimateTieBreakDifference | selected from cached registry universe but absent from Cargo.lock | manifest-closure extra selection |
+| ExtraInRodin | `rustls@0.21` | `` | `0.21.12` | LegitimateTieBreakDifference | selected from cached registry universe but absent from Cargo.lock | manifest-closure extra selection |
+| ExtraInRodin | `rustls@0.24` | `` | `0.24.0-dev.0` | LegitimateTieBreakDifference | selected from cached registry universe but absent from Cargo.lock | manifest-closure extra selection |
+| ExtraInRodin | `schemars@0.8` | `` | `0.8.22` | LegitimateTieBreakDifference | selected from cached registry universe but absent from Cargo.lock | manifest-closure extra selection |
+| ExtraInRodin | `sha1@0.11` | `` | `0.11.0` | LegitimateTieBreakDifference | selected from cached registry universe but absent from Cargo.lock | manifest-closure extra selection |
+| ExtraInRodin | `shlex@1` | `` | `1.3.0` | LegitimateTieBreakDifference | selected from cached registry universe but absent from Cargo.lock | manifest-closure extra selection |
+| ExtraInRodin | `signal-hook@0.4` | `` | `0.4.4` | LegitimateTieBreakDifference | selected from cached registry universe but absent from Cargo.lock | manifest-closure extra selection |
+| ExtraInRodin | `smol_str@0.2` | `` | `0.2.2` | LegitimateTieBreakDifference | selected from cached registry universe but absent from Cargo.lock | manifest-closure extra selection |
+| ExtraInRodin | `socket2@0.5` | `` | `0.5.10` | LegitimateTieBreakDifference | selected from cached registry universe but absent from Cargo.lock | manifest-closure extra selection |
+| ExtraInRodin | `spin@0.10` | `` | `0.10.0` | LegitimateTieBreakDifference | selected from cached registry universe but absent from Cargo.lock | manifest-closure extra selection |
+| ExtraInRodin | `strsim@0.10` | `` | `0.10.0` | LegitimateTieBreakDifference | selected from cached registry universe but absent from Cargo.lock | manifest-closure extra selection |
+| ExtraInRodin | `tokio-rustls@0.24` | `` | `0.24.1` | LegitimateTieBreakDifference | selected from cached registry universe but absent from Cargo.lock | manifest-closure extra selection |
+| ExtraInRodin | `tokio-tungstenite@0.28` | `` | `0.28.0` | LegitimateTieBreakDifference | selected from cached registry universe but absent from Cargo.lock | manifest-closure extra selection |
+| ExtraInRodin | `toml@0.5` | `` | `0.5.11` | LegitimateTieBreakDifference | selected from cached registry universe but absent from Cargo.lock | manifest-closure extra selection |
+| ExtraInRodin | `toml@0.9` | `` | `0.9.12+spec-1.1.0` | LegitimateTieBreakDifference | selected from cached registry universe but absent from Cargo.lock | manifest-closure extra selection |
+| ExtraInRodin | `toml_datetime@0.7` | `` | `0.7.5+spec-1.1.0` | LegitimateTieBreakDifference | selected from cached registry universe but absent from Cargo.lock | manifest-closure extra selection |
+| ExtraInRodin | `tungstenite@0.28` | `` | `0.28.0` | LegitimateTieBreakDifference | selected from cached registry universe but absent from Cargo.lock | manifest-closure extra selection |
+| ExtraInRodin | `unicode-width@0.1` | `` | `0.1.14` | LegitimateTieBreakDifference | selected from cached registry universe but absent from Cargo.lock | manifest-closure extra selection |
+| ExtraInRodin | `untrusted@0.7` | `` | `0.7.1` | LegitimateTieBreakDifference | selected from cached registry universe but absent from Cargo.lock | manifest-closure extra selection |
+| ExtraInRodin | `uuid@0.8` | `` | `0.8.2` | LegitimateTieBreakDifference | selected from cached registry universe but absent from Cargo.lock | manifest-closure extra selection |
+| ExtraInRodin | `webpki-roots@0.26` | `` | `0.26.11` | LegitimateTieBreakDifference | selected from cached registry universe but absent from Cargo.lock | manifest-closure extra selection |
+| ExtraInRodin | `windows-sys@0.48` | `` | `0.48.0` | LegitimateTieBreakDifference | selected from cached registry universe but absent from Cargo.lock | manifest-closure extra selection |
+| ExtraInRodin | `windows-targets@0.48` | `` | `0.48.5` | LegitimateTieBreakDifference | selected from cached registry universe but absent from Cargo.lock | manifest-closure extra selection |
+| ExtraInRodin | `windows_aarch64_gnullvm@0.48` | `` | `0.48.5` | LegitimateTieBreakDifference | selected from cached registry universe but absent from Cargo.lock | manifest-closure extra selection |
+| ExtraInRodin | `windows_aarch64_msvc@0.48` | `` | `0.48.5` | LegitimateTieBreakDifference | selected from cached registry universe but absent from Cargo.lock | manifest-closure extra selection |
+| ExtraInRodin | `windows_i686_gnu@0.48` | `` | `0.48.5` | LegitimateTieBreakDifference | selected from cached registry universe but absent from Cargo.lock | manifest-closure extra selection |
+| ExtraInRodin | `windows_i686_msvc@0.48` | `` | `0.48.5` | LegitimateTieBreakDifference | selected from cached registry universe but absent from Cargo.lock | manifest-closure extra selection |
+| ExtraInRodin | `windows_x86_64_gnu@0.48` | `` | `0.48.5` | LegitimateTieBreakDifference | selected from cached registry universe but absent from Cargo.lock | manifest-closure extra selection |
+| ExtraInRodin | `windows_x86_64_gnullvm@0.48` | `` | `0.48.5` | LegitimateTieBreakDifference | selected from cached registry universe but absent from Cargo.lock | manifest-closure extra selection |
+| ExtraInRodin | `windows_x86_64_msvc@0.48` | `` | `0.48.5` | LegitimateTieBreakDifference | selected from cached registry universe but absent from Cargo.lock | manifest-closure extra selection |
+
+
+#### Extraction and modeling gap samples
+
+| gap kind | count |
+|---|---:|
+| DependencyOutsideLockUniverse | 3982 |
+
+| kind | package | detail |
+|---|---|---|
+| DependencyOutsideLockUniverse | `addr2line@0.16.0` | compiler_builtins |
+| DependencyOutsideLockUniverse | `addr2line@0.16.0` | cpp_demangle |
+| DependencyOutsideLockUniverse | `addr2line@0.16.0` | findshlibs |
+| DependencyOutsideLockUniverse | `addr2line@0.16.0` | memmap |
+| DependencyOutsideLockUniverse | `addr2line@0.16.0` | rustc-std-workspace-alloc |
+| DependencyOutsideLockUniverse | `addr2line@0.16.0` | rustc-std-workspace-core |
+| DependencyOutsideLockUniverse | `addr2line@0.16.0` | rustc-test |
+| DependencyOutsideLockUniverse | `addr2line@0.16.0` | typed-arena |
+| DependencyOutsideLockUniverse | `addr2line@0.21.0` | compiler_builtins |
+| DependencyOutsideLockUniverse | `addr2line@0.21.0` | cpp_demangle |
+| DependencyOutsideLockUniverse | `addr2line@0.21.0` | findshlibs |
+| DependencyOutsideLockUniverse | `addr2line@0.21.0` | rustc-std-workspace-alloc |
+| DependencyOutsideLockUniverse | `addr2line@0.21.0` | rustc-std-workspace-core |
+| DependencyOutsideLockUniverse | `addr2line@0.21.0` | typed-arena |
+| DependencyOutsideLockUniverse | `addr2line@0.24.2` | compiler_builtins |
+| DependencyOutsideLockUniverse | `addr2line@0.24.2` | cpp_demangle |
+| DependencyOutsideLockUniverse | `addr2line@0.24.2` | findshlibs |
+| DependencyOutsideLockUniverse | `addr2line@0.24.2` | rustc-std-workspace-alloc |
+| DependencyOutsideLockUniverse | `addr2line@0.24.2` | rustc-std-workspace-core |
+| DependencyOutsideLockUniverse | `addr2line@0.24.2` | typed-arena |
+| DependencyOutsideLockUniverse | `addr2line@0.25.1` | cpp_demangle |
+| DependencyOutsideLockUniverse | `addr2line@0.25.1` | criterion |
+| DependencyOutsideLockUniverse | `addr2line@0.25.1` | findshlibs |
+| DependencyOutsideLockUniverse | `addr2line@0.25.1` | rustc-std-workspace-alloc |
+| DependencyOutsideLockUniverse | `addr2line@0.25.1` | rustc-std-workspace-core |
+| DependencyOutsideLockUniverse | `addr2line@0.25.1` | typed-arena |
+| DependencyOutsideLockUniverse | `addr2line@0.26.0` | cpp_demangle |
+| DependencyOutsideLockUniverse | `addr2line@0.26.0` | criterion |
+| DependencyOutsideLockUniverse | `addr2line@0.26.0` | findshlibs |
+| DependencyOutsideLockUniverse | `addr2line@0.26.0` | rustc-std-workspace-alloc |
+| DependencyOutsideLockUniverse | `addr2line@0.26.0` | rustc-std-workspace-core |
+| DependencyOutsideLockUniverse | `addr2line@0.26.0` | typed-arena |
+| DependencyOutsideLockUniverse | `addr2line@0.26.1` | cpp_demangle |
+| DependencyOutsideLockUniverse | `addr2line@0.26.1` | criterion |
+| DependencyOutsideLockUniverse | `addr2line@0.26.1` | findshlibs |
+| DependencyOutsideLockUniverse | `addr2line@0.26.1` | rustc-std-workspace-alloc |
+| DependencyOutsideLockUniverse | `addr2line@0.26.1` | rustc-std-workspace-core |
+| DependencyOutsideLockUniverse | `addr2line@0.26.1` | typed-arena |
+| DependencyOutsideLockUniverse | `adler2@2.0.0` | compiler_builtins |
+| DependencyOutsideLockUniverse | `adler2@2.0.0` | criterion |
+| DependencyOutsideLockUniverse | `adler2@2.0.0` | rustc-std-workspace-core |
+| DependencyOutsideLockUniverse | `adler2@2.0.1` | rustc-std-workspace-core |
+| DependencyOutsideLockUniverse | `ahash@0.3.8` | const-random |
+| DependencyOutsideLockUniverse | `ahash@0.3.8` | criterion |
+| DependencyOutsideLockUniverse | `ahash@0.3.8` | fxhash |
+| DependencyOutsideLockUniverse | `ahash@0.3.8` | no-panic |
+| DependencyOutsideLockUniverse | `ahash@0.7.8` | const-random |
+| DependencyOutsideLockUniverse | `ahash@0.7.8` | const-random |
+| DependencyOutsideLockUniverse | `ahash@0.7.8` | criterion |
+| DependencyOutsideLockUniverse | `ahash@0.7.8` | fxhash |
+| DependencyOutsideLockUniverse | `ahash@0.7.8` | no-panic |
+| DependencyOutsideLockUniverse | `ahash@0.8.12` | const-random |
+| DependencyOutsideLockUniverse | `ahash@0.8.12` | criterion |
+| DependencyOutsideLockUniverse | `ahash@0.8.12` | fxhash |
+| DependencyOutsideLockUniverse | `ahash@0.8.12` | no-panic |
+| DependencyOutsideLockUniverse | `ahash@0.8.12` | pcg-mwc |
+| DependencyOutsideLockUniverse | `aho-corasick@0.6.10` | csv |
+| DependencyOutsideLockUniverse | `aho-corasick@0.6.10` | docopt |
+| DependencyOutsideLockUniverse | `aho-corasick@0.6.10` | memmap |
+| DependencyOutsideLockUniverse | `aho-corasick@1.0.2` | doc-comment |
+
+3922 additional extraction/modeling gaps omitted from this table; the JSON artifact carries the full set.
