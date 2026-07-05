@@ -15,6 +15,7 @@ use rodin_facts::{
 use semver::{Version, VersionReq};
 
 pub mod cargo_evidence;
+mod lock_emit;
 
 pub use cargo_evidence::{
     CargoDivergence, CargoDivergenceKind, CargoEvidenceReport, CargoExtractionGap,
@@ -22,6 +23,7 @@ pub use cargo_evidence::{
     CargoWarmCounterfactual, append_cargo_evidence_round, render_cargo_evidence_markdown,
     run_cargo_evidence, run_facet_cc_evidence,
 };
+pub use lock_emit::{LockDependency, LockPackageRow, emit_lock};
 
 const CRATES_IO: &str = "crates.io";
 const FEATURE_SCOPES: &[&str] = &["normal", "build", "dev"];
@@ -363,6 +365,7 @@ pub struct SolveResult {
     pub selected: BTreeMap<String, Version>,
     pub selected_derivations: Vec<SelectionDerivation>,
     pub enabled_features: BTreeMap<String, BTreeSet<String>>,
+    pub lock_packages: Vec<LockPackageRow>,
     pub decisions: usize,
     pub conflicts: usize,
     pub restarts: usize,
@@ -682,9 +685,17 @@ pub struct CompiledIndex {
 struct Manifest {
     deps: Vec<DepLine>,
     features: BTreeMap<String, Vec<String>>,
+    lock: PackageLockMetadata,
     yanked: bool,
     snapshot_id: String,
     row_digest: String,
+}
+
+#[derive(Clone, Debug, Default, Eq, PartialEq)]
+pub struct PackageLockMetadata {
+    pub source: Option<String>,
+    pub checksum: Option<String>,
+    pub dependency_entries: Option<Vec<String>>,
 }
 
 #[derive(Clone, Debug, Eq, PartialEq)]
@@ -1014,6 +1025,13 @@ impl CompiledIndex {
                     Manifest {
                         deps,
                         features: merged_features(entry),
+                        lock: PackageLockMetadata {
+                            source: Some(
+                                "registry+https://github.com/rust-lang/crates.io-index".to_owned(),
+                            ),
+                            checksum: None,
+                            dependency_entries: None,
+                        },
                         yanked: entry.yanked,
                         snapshot_id: "rodin-survey-cache".to_owned(),
                         row_digest: digest_str(&canonical_sparse_entry(entry)),
@@ -1118,6 +1136,23 @@ impl CompiledIndex {
         deps: Vec<SyntheticDep>,
         features: BTreeMap<String, Vec<String>>,
     ) {
+        self.add_package_version_with_lock_metadata(
+            name,
+            version,
+            deps,
+            features,
+            PackageLockMetadata::default(),
+        );
+    }
+
+    pub fn add_package_version_with_lock_metadata(
+        &mut self,
+        name: impl Into<String>,
+        version: Version,
+        deps: Vec<SyntheticDep>,
+        features: BTreeMap<String, Vec<String>>,
+        lock: PackageLockMetadata,
+    ) {
         let name = name.into().to_ascii_lowercase();
         let pkg = self.intern_package_version(&name, &version);
         let mut lines = Vec::new();
@@ -1146,6 +1181,7 @@ impl CompiledIndex {
             Manifest {
                 deps: lines,
                 features,
+                lock,
                 yanked: false,
                 snapshot_id: "synthetic".to_owned(),
                 row_digest: String::new(),
@@ -2818,16 +2854,18 @@ impl<'a> Solver<'a> {
         let selected_derivations =
             selection_derivations(self.index, &state, &selected, &self.learned);
         let mut enabled_features: BTreeMap<String, BTreeSet<String>> = BTreeMap::new();
-        for (pkg, feat) in state.features {
-            if let (Some(name), Some(feature)) =
-                (self.index.name(pkg), self.index.features.resolve_str(feat))
-            {
+        for (pkg, feat) in &state.features {
+            if let (Some(name), Some(feature)) = (
+                self.index.name(*pkg),
+                self.index.features.resolve_str(*feat),
+            ) {
                 enabled_features
                     .entry(name.to_owned())
                     .or_default()
                     .insert(feature.to_owned());
             }
         }
+        let lock_packages = lock_emit::build_lock_packages(self.index, &selected, &state.features);
         let final_domains: BTreeMap<String, FinalDomain> = state
             .domains
             .iter()
@@ -2871,6 +2909,7 @@ impl<'a> Solver<'a> {
             selected,
             selected_derivations,
             enabled_features,
+            lock_packages,
             decisions: self.decisions,
             conflicts: self.conflicts,
             restarts: self.restarts,

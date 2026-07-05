@@ -14,9 +14,9 @@ use semver::{Version, VersionReq};
 use tar::Archive;
 
 use crate::{
-    CompiledIndex, CounterfactualResult, LearnedKind, Problem, RecordSelection, RootReq,
-    SyntheticDep, WarmFactVerifier, counterfactual_drop_dependency, domain_label, solve,
-    warm_bundle_from_learned,
+    CompiledIndex, CounterfactualResult, LearnedKind, PackageLockMetadata, Problem,
+    RecordSelection, RootReq, SyntheticDep, WarmFactVerifier, counterfactual_drop_dependency,
+    domain_label, solve, warm_bundle_from_learned,
 };
 
 const DEFAULT_FACET_CC: &str = "/Users/amos/oss/facet-cc";
@@ -265,6 +265,7 @@ struct LockPackage {
     name: String,
     version: Version,
     source: Option<String>,
+    checksum: Option<String>,
     dependencies: Vec<LockDep>,
 }
 
@@ -272,6 +273,7 @@ struct LockPackage {
 struct LockDep {
     name: String,
     version: Option<Version>,
+    entry: String,
 }
 
 #[must_use]
@@ -644,6 +646,8 @@ pub fn run_cargo_evidence(workspace: &Path, registry_src: &Path) -> Result<Cargo
 struct FreshLockRun {
     report: CargoFreshLockOracle,
     lock: Option<Vec<LockPackage>>,
+    #[cfg(test)]
+    lock_text: Option<String>,
 }
 
 fn run_fresh_lock_oracle(workspace: &Path) -> Result<FreshLockRun> {
@@ -676,6 +680,8 @@ fn run_fresh_lock_oracle(workspace: &Path) -> Result<FreshLockRun> {
                     message: command_tail(&output.stderr),
                 },
                 lock: None,
+                #[cfg(test)]
+                lock_text: None,
             });
         }
         let lock_text = fs::read_to_string(copy.join("Cargo.lock"))
@@ -696,6 +702,8 @@ fn run_fresh_lock_oracle(workspace: &Path) -> Result<FreshLockRun> {
                 message: "cargo generate-lockfile --offline succeeded in throwaway copy".to_owned(),
             },
             lock: Some(lock),
+            #[cfg(test)]
+            lock_text: Some(lock_text),
         })
     })();
     if let Err(err) = &result {
@@ -717,6 +725,8 @@ fn run_fresh_lock_oracle(workspace: &Path) -> Result<FreshLockRun> {
                 message: err.to_string(),
             },
             lock: None,
+            #[cfg(test)]
+            lock_text: None,
         }),
     }
 }
@@ -1128,24 +1138,46 @@ fn extract_cargo_universe(
             }
             let locked_package = lock
                 .iter()
-                .find(|pkg| pkg.name == *package_name && pkg.version == version)
-                .or_else(|| {
-                    fresh_lock.and_then(|fresh| {
-                        fresh
-                            .iter()
-                            .find(|pkg| pkg.name == *package_name && pkg.version == version)
-                    })
-                });
+                .find(|pkg| pkg.name == *package_name && pkg.version == version);
+            let fresh_package = fresh_lock.and_then(|fresh| {
+                fresh
+                    .iter()
+                    .find(|pkg| pkg.name == *package_name && pkg.version == version)
+            });
+            let emit_package = fresh_package.or(locked_package);
             let deps = deps_for_version(
                 package_name,
                 &version,
-                locked_package,
+                emit_package,
                 &manifest_deps,
                 &model,
                 &mut gaps,
             );
             indexed_edges += deps.len();
-            index.add_package_version(package_name, version, deps, manifest_deps.features);
+            let lock = emit_package
+                .map(|package| PackageLockMetadata {
+                    source: package.source.clone(),
+                    checksum: package.checksum.clone(),
+                    dependency_entries: Some(
+                        package
+                            .dependencies
+                            .iter()
+                            .map(|dep| dep.entry.clone())
+                            .collect(),
+                    ),
+                })
+                .unwrap_or_else(|| PackageLockMetadata {
+                    source: source.clone(),
+                    checksum: None,
+                    dependency_entries: None,
+                });
+            index.add_package_version_with_lock_metadata(
+                package_name,
+                version,
+                deps,
+                manifest_deps.features,
+                lock,
+            );
         }
     }
     tracing::info!(
@@ -1714,6 +1746,7 @@ fn parse_lock(text: &str) -> Result<Vec<LockPackage>> {
                 name: String::new(),
                 version: Version::new(0, 0, 0),
                 source: None,
+                checksum: None,
                 dependencies: Vec::new(),
             });
             in_deps = false;
@@ -1738,6 +1771,8 @@ fn parse_lock(text: &str) -> Result<Vec<LockPackage>> {
             pkg.version = Version::parse(&version)?;
         } else if let Some(source) = line.strip_prefix("source = ").and_then(parse_quoted) {
             pkg.source = Some(source);
+        } else if let Some(checksum) = line.strip_prefix("checksum = ").and_then(parse_quoted) {
+            pkg.checksum = Some(checksum);
         } else if line.starts_with("dependencies = [") {
             in_deps = true;
             for quoted in quoted_values(line) {
@@ -1762,7 +1797,11 @@ fn parse_lock_dep(text: &str) -> Result<LockDep> {
     }
     let name = parts.remove(0).to_ascii_lowercase();
     let version = parts.first().and_then(|part| Version::parse(part).ok());
-    Ok(LockDep { name, version })
+    Ok(LockDep {
+        name,
+        version,
+        entry: text.to_owned(),
+    })
 }
 
 fn parse_manifest_deps(text: &str) -> Result<ManifestDeps> {
@@ -2302,7 +2341,9 @@ fn quoted_values(value: &str) -> Vec<String> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::{SolverOptions, solve_with_options};
+    use crate::{SolverOptions, emit_lock, solve_with_options};
+
+    type PackageBlockKey = (String, Version, Option<String>);
 
     #[test]
     fn parses_lock_dependency_versions() -> Result<()> {
@@ -2311,6 +2352,7 @@ mod tests {
             LockDep {
                 name: "indexmap".to_owned(),
                 version: Some(Version::parse("2.14.0")?),
+                entry: "indexmap 2.14.0".to_owned(),
             }
         );
         assert_eq!(
@@ -2318,6 +2360,7 @@ mod tests {
             LockDep {
                 name: "facet-core".to_owned(),
                 version: None,
+                entry: "facet-core".to_owned(),
             }
         );
         Ok(())
@@ -2552,12 +2595,14 @@ mod tests {
                 name: "a".to_owned(),
                 version: Version::parse("1.0.1")?,
                 source: Some("registry+https://example.invalid/index".to_owned()),
+                checksum: None,
                 dependencies: Vec::new(),
             },
             LockPackage {
                 name: "x".to_owned(),
                 version: Version::parse("1.0.1")?,
                 source: Some("registry+https://example.invalid/index".to_owned()),
+                checksum: None,
                 dependencies: Vec::new(),
             },
         ];
@@ -2588,5 +2633,92 @@ mod tests {
         );
         fs::remove_dir_all(temp)?;
         Ok(())
+    }
+
+    #[test]
+    fn emit_lock_matches_fresh_facet_cc_lock_for_exact_oracle_rows() -> Result<()> {
+        let workspace = Path::new(DEFAULT_FACET_CC);
+        let registry_src = Path::new(DEFAULT_REGISTRY_SRC);
+        let registry_cache = default_registry_cache_for_src(registry_src);
+        let fresh = run_fresh_lock_oracle(workspace)?;
+        let fresh_text = fresh
+            .lock_text
+            .clone()
+            .ok_or_else(|| eyre::eyre!("fresh lock oracle did not produce lock text"))?;
+        let fresh_lock = fresh
+            .lock
+            .ok_or_else(|| eyre::eyre!("fresh lock oracle did not solve"))?;
+        let extracted = extract_cargo_universe(
+            workspace,
+            registry_src,
+            &registry_cache,
+            CargoProjectionMode::LockUnionDev,
+            Some(&fresh_lock),
+        )?;
+        let result = solve_with_options(&extracted.index, extracted.problem, SolverOptions::FULL)
+            .map_err(|err| eyre::eyre!("{err:?}"))?;
+        let fresh_domains = locked_domains(&fresh_lock);
+        let matching_keys = fresh_domains
+            .iter()
+            .filter(|locked| {
+                let label = domain_label(&locked.name, locked.class);
+                result
+                    .selected
+                    .get(&label)
+                    .is_some_and(|version| version == &locked.version)
+            })
+            .filter_map(|locked| {
+                fresh_lock
+                    .iter()
+                    .find(|package| {
+                        package.name == locked.name && package.version == locked.version
+                    })
+                    .map(package_key)
+            })
+            .collect::<BTreeSet<_>>();
+        assert_eq!(
+            matching_keys.len(),
+            853,
+            "Round 9 lock-union fresh exact row count drifted"
+        );
+
+        let emitted_blocks = package_blocks(&emit_lock(&result))?;
+        let fresh_blocks = package_blocks(&fresh_text)?;
+        for key in matching_keys {
+            assert_eq!(
+                emitted_blocks.get(&key),
+                fresh_blocks.get(&key),
+                "emitted Cargo.lock block diverged for {key:?}"
+            );
+        }
+        Ok(())
+    }
+
+    fn package_key(package: &LockPackage) -> PackageBlockKey {
+        (
+            package.name.clone(),
+            package.version.clone(),
+            package.source.clone(),
+        )
+    }
+
+    fn package_blocks(text: &str) -> Result<BTreeMap<PackageBlockKey, String>> {
+        let packages = parse_lock(text)?;
+        let starts = text
+            .match_indices("[[package]]")
+            .map(|(ix, _)| ix)
+            .collect::<Vec<_>>();
+        let mut out = BTreeMap::new();
+        for (ix, package) in packages.iter().enumerate() {
+            let Some(start) = starts.get(ix).copied() else {
+                bail!("missing block start for {}", package.name);
+            };
+            let end = starts.get(ix + 1).copied().unwrap_or(text.len());
+            out.insert(
+                package_key(package),
+                text[start..end].trim_end_matches('\n').to_owned(),
+            );
+        }
+        Ok(out)
     }
 }

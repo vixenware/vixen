@@ -138,6 +138,33 @@ G. **Events + explain.** Rodin's event vocabulary (region claimed/refuted,
    fact learned/widened, incumbent improved) and the four-layer explain
    (witness/join/pruning/exclusion → demand-chain diagnostics).
 
+## RULING (2026-07-05): Cargo.lock-shaped emit bridge
+
+Rodin now emits the build-side resolved-manifest artifact directly:
+`SolveResult` carries deterministic lock rows, and
+`rodin_core::emit_lock(&SolveResult)` renders Cargo.lock format v4 with
+Cargo's header, package field order, source/checksum when known, and direct
+dependency entries. The open `crate.vix` consumer already accepts this
+subset as data (`version`, `[[package]]`, `name`, `version`, optional
+`source`, and `dependencies`), so the architectural round-trip is now:
+
+```text
+resolve with Rodin -> emit_lock -> crate.vix build-from-lockfile -> run
+```
+
+Two pins cover the bridge. The schema pin reconstructs the open
+`mini_app -> alpha_lib -> core_lib` plus `mini_app -> formatting_lib`
+fixture as a real `SolveResult` and pins the emitted bytes. The oracle pin
+uses the facet-cc fresh-lock evidence workspace: for the lock-union
+projection's 853/892 exact Rodin-vs-Cargo rows, each emitted package block is
+byte-identical to Cargo's fresh `Cargo.lock`; documented accepted-divergence
+rows remain outside that byte-for-byte assertion.
+
+What remains for the live round-trip is wiring, not design: pass the emitted
+lock string/tree into the open `crate.vix` build-from-lockfile entry point,
+locate package source trees with the open fixture/source convention, and route
+the produced build/run demand through the existing vix execution surface.
+
 ## Sources
 
 March verbatim record: march-solver-recovered-verbatim.md (quotes, dragons).
