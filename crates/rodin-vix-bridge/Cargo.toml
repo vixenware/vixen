@@ -14,7 +14,9 @@ facet-json.workspace = true
 rodin-core = { path = "../rodin-core" }
 rodin-facts = { path = "../rodin-facts" }
 semver.workspace = true
-vix = { path = "/Users/amos/oss/facet/vix" }
+# TODO(PR #2455 merged): switch to the unified facet git source:
+# vix = { git = "https://github.com/facet-rs/facet", package = "vix" }
+vix = { path = "/Users/amos/.paseo/worktrees/1t3lgrd0/vix-semantic-cutoff/vix" }
 
 [lints]
 workspace = true

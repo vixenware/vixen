@@ -16,12 +16,42 @@ use rodin_facts::{
     DerivationId, DerivationStore, Premise, Region, RuleKind, VersionSet, WidenCert, WidenEvidence,
 };
 use semver::{Version, VersionReq};
-use vix::machine::{StoreValue, ValueBundle};
+use vix::machine::{DriveEvent, Machine, MachineArg, NamedArg, StoreValue, ValueBundle};
 
 pub const CAPABILITY_SCHEMA: &str = "rodin.kernel.capability.v0";
 pub const PREMISE_BUNDLE_SCHEMA: &str = "rodin.premise_bundle.v0";
 pub const LEARNED_FACT_SCHEMA: &str = "rodin.learned_no_good.v0";
 pub const SOLVE_OUTPUT_SCHEMA: &str = "rodin.solve_output.v0";
+pub const RODIN_SOLVE_COMPARATOR: &str =
+    "old.monotone_safe && new.monotone_safe && new.req.subset(old.req)";
+
+const RODIN_MACHINE_SOURCE: &str = r#"
+use vix::{Version, VersionSet};
+
+struct RodinPremise {
+    req: VersionSet,
+    monotone_safe: Bool,
+}
+
+pub fn premise(req: VersionSet, monotone_safe: Bool) -> RodinPremise {
+    RodinPremise { req: req, monotone_safe: monotone_safe }
+}
+
+fn solve_kernel(req: VersionSet) -> Int {
+    match req.contains(version("1.0.0")) {
+        true => 1,
+        false => 0,
+    }
+}
+
+pub fn solve(premise: RodinPremise) -> Int {
+    solve_kernel(premise.req)
+}
+
+fn solve__memo_verify_premise(old: RodinPremise, new: RodinPremise) -> Bool {
+    old.monotone_safe && new.monotone_safe && new.req.subset(old.req)
+}
+"#;
 
 #[derive(Clone, Debug, Eq, Facet, PartialEq)]
 pub struct RodinKernelCapabilityValue {
@@ -147,38 +177,56 @@ pub struct SemanticCutoffComparison {
 #[derive(Clone, Debug, Eq, Facet, PartialEq)]
 pub struct WarmDemoReport {
     pub first_kernel_invocations: u64,
-    pub repeated_same_bytes_additional_invocations: u64,
-    pub narrowed_byte_cutoff_additional_invocations: u64,
-    pub future_semantic_cutoff_additional_invocations: u64,
+    pub repeated_same_req_memo_hits: u64,
+    pub repeated_same_req_additional_kernel_invocations: u64,
+    pub narrowed_semantic_hits: u64,
+    pub narrowed_additional_kernel_invocations: u64,
+    pub widened_semantic_hits: u64,
+    pub widened_additional_kernel_invocations: u64,
     pub comparison: SemanticCutoffComparison,
 }
 
-#[derive(Clone, Debug, Default)]
 pub struct RodinMachine {
+    semantic: Machine,
     store: RodinStore,
-    memo: BTreeMap<String, CapabilityRun>,
+    exact_memo: BTreeMap<String, CapabilityRun>,
+    runs: Vec<(PremiseBundleValue, CapabilityRun)>,
     trace: Vec<BridgeTraceEvent>,
     kernel_invocations: u64,
 }
 
 impl RodinMachine {
-    #[must_use]
-    pub fn new() -> Self {
-        Self::default()
+    pub fn new() -> Result<Self> {
+        Ok(Self {
+            semantic: Machine::load(RODIN_MACHINE_SOURCE)
+                .map_err(|err| eyre::eyre!("loading Rodin vix machine: {err}"))?,
+            store: RodinStore::default(),
+            exact_memo: BTreeMap::new(),
+            runs: Vec::new(),
+            trace: Vec::new(),
+            kernel_invocations: 0,
+        })
     }
 
     pub fn demand_solve(&mut self, bundle: &PremiseBundleValue) -> Result<CapabilityRun> {
         let premise_ref = self.store.put_facet(PREMISE_BUNDLE_SCHEMA, bundle)?;
+        let exact_identity = premise_ref.content_identity.clone();
         self.trace.push(BridgeTraceEvent {
             kind: "demanded".to_owned(),
-            key: premise_ref.content_identity.clone(),
-            detail: "rodin solve premise bundle".to_owned(),
+            key: exact_identity.clone(),
+            detail: "rodin solve premise bundle via vix VersionSet".to_owned(),
         });
-        if let Some(hit) = self.memo.get(&premise_ref.content_identity).cloned() {
+        let semantic = self.demand_semantic_solve(bundle)?;
+        if semantic.exact_hits > 0 {
+            let hit = self
+                .exact_memo
+                .get(&exact_identity)
+                .cloned()
+                .ok_or_else(|| eyre::eyre!("vix exact memo hit without bridge output"))?;
             self.trace.push(BridgeTraceEvent {
                 kind: "memo-hit".to_owned(),
-                key: premise_ref.content_identity,
-                detail: "byte cutoff reused solve output".to_owned(),
+                key: exact_identity,
+                detail: "vix exact memo reused solve output".to_owned(),
             });
             return Ok(CapabilityRun {
                 trace: self.trace.clone(),
@@ -186,12 +234,45 @@ impl RodinMachine {
                 ..hit
             });
         }
+        if semantic.semantic_hits > 0 {
+            let hit = self
+                .runs
+                .iter()
+                .find(|(old, _)| {
+                    compare_for_semantic_cutoff(old, bundle)
+                        .is_ok_and(|cmp| cmp.semantic_hit_candidate)
+                })
+                .map(|(_, run)| run.clone())
+                .ok_or_else(|| eyre::eyre!("vix semantic hit without compatible bridge output"))?;
+            let reused = self.reuse_run_for_premise(hit, premise_ref)?;
+            self.exact_memo.insert(
+                reused.output.premise_bundle.content_identity.clone(),
+                reused.clone(),
+            );
+            self.runs.push((bundle.clone(), reused.clone()));
+            self.trace.push(BridgeTraceEvent {
+                kind: "semantic-hit".to_owned(),
+                key: reused.output.premise_bundle.content_identity.clone(),
+                detail: format!(
+                    "vix MemoSemanticHit verified {} comparator(s); spawned {} solve node(s)",
+                    semantic.verified, semantic.spawned
+                ),
+            });
+            return Ok(CapabilityRun {
+                trace: self.trace.clone(),
+                store: self.store.bundle(reused.store.root),
+                ..reused
+            });
+        }
 
         self.kernel_invocations += 1;
         self.trace.push(BridgeTraceEvent {
             kind: "spawned".to_owned(),
             key: premise_ref.content_identity.clone(),
-            detail: "rodin-core solve capability invocation".to_owned(),
+            detail: format!(
+                "rodin-core solve capability invocation after vix spawned {} solve node(s)",
+                semantic.spawned
+            ),
         });
         let mut run = RodinKernelCapability::acquire().exec(
             bundle,
@@ -206,10 +287,11 @@ impl RodinMachine {
         });
         run.trace = self.trace.clone();
         run.store = self.store.bundle(run.store.root);
-        self.memo.insert(
+        self.exact_memo.insert(
             run.output.premise_bundle.content_identity.clone(),
             run.clone(),
         );
+        self.runs.push((bundle.clone(), run.clone()));
         Ok(run)
     }
 
@@ -217,6 +299,76 @@ impl RodinMachine {
     pub fn kernel_invocations(&self) -> u64 {
         self.kernel_invocations
     }
+
+    #[must_use]
+    pub fn semantic_trace(&self) -> &[DriveEvent] {
+        self.semantic.trace()
+    }
+
+    fn demand_semantic_solve(&mut self, bundle: &PremiseBundleValue) -> Result<SemanticDemand> {
+        let premise = semantic_premise(bundle)?;
+        let premise_handle = self
+            .semantic
+            .call(
+                "premise",
+                &[
+                    NamedArg {
+                        name: "req".to_owned(),
+                        value: MachineArg::String(premise.req),
+                    },
+                    NamedArg {
+                        name: "monotone_safe".to_owned(),
+                        value: MachineArg::Bool(premise.monotone_safe),
+                    },
+                ],
+            )
+            .map_err(|err| eyre::eyre!("building RodinPremise in vix: {err}"))?;
+        self.semantic.clear_trace();
+        let _ = self
+            .semantic
+            .call(
+                "solve",
+                &[NamedArg {
+                    name: "premise".to_owned(),
+                    value: MachineArg::Handle(premise_handle),
+                }],
+            )
+            .map_err(|err| eyre::eyre!("demanding Rodin vix solve: {err}"))?;
+        Ok(SemanticDemand {
+            exact_hits: memo_hit_count(&self.semantic, "solve") as u64,
+            semantic_hits: memo_semantic_hit_count(&self.semantic, "solve") as u64,
+            verified: semantic_verified_count(&self.semantic, "solve")
+                .into_iter()
+                .sum::<usize>() as u64,
+            spawned: spawned_count(&self.semantic, "solve") as u64,
+        })
+    }
+
+    fn reuse_run_for_premise(
+        &mut self,
+        mut run: CapabilityRun,
+        premise_ref: StoredValueRef,
+    ) -> Result<CapabilityRun> {
+        run.output.premise_bundle = premise_ref;
+        let output_ref = self.store.put_facet(SOLVE_OUTPUT_SCHEMA, &run.output)?;
+        run.store = self.store.bundle(output_ref.handle);
+        run.trace = self.trace.clone();
+        Ok(run)
+    }
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+struct SemanticPremise {
+    req: String,
+    monotone_safe: bool,
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+struct SemanticDemand {
+    exact_hits: u64,
+    semantic_hits: u64,
+    verified: u64,
+    spawned: u64,
 }
 
 #[derive(Clone, Debug)]
@@ -326,27 +478,36 @@ pub fn compare_for_semantic_cutoff(
 pub fn run_warm_demo() -> Result<WarmDemoReport> {
     let base = buried_pin_bundle("*");
     let narrowed = buried_pin_bundle(">=1.0.0, <1.0.3");
-    let mut machine = RodinMachine::new();
+    let mut machine = RodinMachine::new()?;
 
     machine.demand_solve(&base)?;
     let first_kernel_invocations = machine.kernel_invocations();
 
     machine.demand_solve(&base)?;
     let after_same_bytes = machine.kernel_invocations();
+    let repeated_same_req_memo_hits = memo_hit_count(&machine.semantic, "solve") as u64;
 
     machine.demand_solve(&narrowed)?;
     let after_narrowed = machine.kernel_invocations();
+    let narrowed_semantic_hits = memo_semantic_hit_count(&machine.semantic, "solve") as u64;
+
+    let mut widened_machine = RodinMachine::new()?;
+    widened_machine.demand_solve(&narrowed)?;
+    let before_widened = widened_machine.kernel_invocations();
+    widened_machine.demand_solve(&base)?;
+    let after_widened = widened_machine.kernel_invocations();
+    let widened_semantic_hits = memo_semantic_hit_count(&widened_machine.semantic, "solve") as u64;
 
     let comparison = compare_for_semantic_cutoff(&base, &narrowed)?;
     Ok(WarmDemoReport {
         first_kernel_invocations,
-        repeated_same_bytes_additional_invocations: after_same_bytes - first_kernel_invocations,
-        narrowed_byte_cutoff_additional_invocations: after_narrowed - after_same_bytes,
-        future_semantic_cutoff_additional_invocations: if comparison.semantic_hit_candidate {
-            0
-        } else {
-            1
-        },
+        repeated_same_req_memo_hits,
+        repeated_same_req_additional_kernel_invocations: after_same_bytes
+            - first_kernel_invocations,
+        narrowed_semantic_hits,
+        narrowed_additional_kernel_invocations: after_narrowed - after_same_bytes,
+        widened_semantic_hits,
+        widened_additional_kernel_invocations: after_widened - before_widened,
         comparison,
     })
 }
@@ -499,6 +660,39 @@ fn fixture_problem(bundle: &PremiseBundleValue) -> Result<(CompiledIndex, Proble
         .collect();
     problem.learned_kind = learned_kind(&bundle.learned_kind)?;
     Ok((index, problem))
+}
+
+fn semantic_premise(bundle: &PremiseBundleValue) -> Result<SemanticPremise> {
+    let roots = roots_by_name(bundle);
+    let root = roots
+        .get("a")
+        .ok_or_else(|| eyre::eyre!("buried-pin semantic premise requires root `a`"))?;
+    Ok(SemanticPremise {
+        req: root.req.clone(),
+        monotone_safe: monotone_safe_requirement_bundle(bundle),
+    })
+}
+
+fn monotone_safe_requirement_bundle(bundle: &PremiseBundleValue) -> bool {
+    if bundle.fixture != "buried-pin"
+        || bundle.learned_kind != "plain"
+        || !bundle.decrees.is_empty()
+    {
+        return false;
+    }
+    let roots = roots_by_name(bundle);
+    let Some(a) = roots.get("a") else {
+        return false;
+    };
+    let Some(x) = roots.get("x") else {
+        return false;
+    };
+    roots.len() == 2
+        && a.features.is_empty()
+        && a.default_features
+        && x.req == "*"
+        && x.features.is_empty()
+        && x.default_features
 }
 
 fn root_req(root: &RootRequirementValue) -> RootReq {
@@ -670,6 +864,49 @@ fn version_req_set(req: &str) -> Result<VersionSet> {
     Ok(VersionSet::from_req(&parsed))
 }
 
+fn spawned_count(machine: &Machine, name: &str) -> usize {
+    let hash = machine.fn_hash(name).expect("function hash");
+    machine
+        .trace()
+        .iter()
+        .filter(|event| matches!(event, DriveEvent::Spawned { fn_hash } if *fn_hash == hash))
+        .count()
+}
+
+fn memo_hit_count(machine: &Machine, name: &str) -> usize {
+    let hash = machine.fn_hash(name).expect("function hash");
+    machine
+        .trace()
+        .iter()
+        .filter(|event| matches!(event, DriveEvent::MemoHit { fn_hash } if *fn_hash == hash))
+        .count()
+}
+
+fn memo_semantic_hit_count(machine: &Machine, name: &str) -> usize {
+    let hash = machine.fn_hash(name).expect("function hash");
+    machine
+        .trace()
+        .iter()
+        .filter(|event| {
+            matches!(event, DriveEvent::MemoSemanticHit { fn_hash, .. } if *fn_hash == hash)
+        })
+        .count()
+}
+
+fn semantic_verified_count(machine: &Machine, name: &str) -> Vec<usize> {
+    let hash = machine.fn_hash(name).expect("function hash");
+    machine
+        .trace()
+        .iter()
+        .filter_map(|event| match event {
+            DriveEvent::MemoSemanticHit { fn_hash, verified } if *fn_hash == hash => {
+                Some(*verified)
+            }
+            _ => None,
+        })
+        .collect()
+}
+
 #[derive(Clone, Debug, Default)]
 struct RodinStore {
     values: Vec<StoreValue>,
@@ -704,6 +941,7 @@ impl RodinStore {
             schema: schema.to_owned(),
             bytes,
             content_hash: hex_to_bytes(&identity)?,
+            taint: None,
         });
         self.by_content.insert(key, handle);
         Ok(StoredValueRef {
@@ -759,7 +997,7 @@ mod tests {
         let bundle = buried_pin_bundle("*");
         let direct = direct_kernel_projection(&bundle)?;
 
-        let mut machine = RodinMachine::new();
+        let mut machine = RodinMachine::new()?;
         let via_machine = machine.demand_solve(&bundle)?;
 
         assert_eq!(via_machine.projection.selected, direct.selected);
@@ -785,7 +1023,7 @@ mod tests {
     #[test]
     fn learned_fact_store_values_dedupe_by_content() -> Result<()> {
         let bundle = buried_pin_bundle("*");
-        let mut machine = RodinMachine::new();
+        let mut machine = RodinMachine::new()?;
         let first = machine.demand_solve(&bundle)?;
         let second = machine.demand_solve(&bundle)?;
 
@@ -795,19 +1033,22 @@ mod tests {
             second
                 .trace
                 .iter()
-                .any(|event| event.kind == "memo-hit" && event.detail.contains("byte cutoff"))
+                .any(|event| event.kind == "memo-hit" && event.detail.contains("vix exact memo"))
         );
         Ok(())
     }
 
     #[test]
-    fn warm_demo_pins_byte_cutoff_baseline_and_semantic_seam() -> Result<()> {
+    fn warm_demo_asserts_semantic_hit_for_req_narrowing() -> Result<()> {
         let report = run_warm_demo()?;
 
         assert_eq!(report.first_kernel_invocations, 1);
-        assert_eq!(report.repeated_same_bytes_additional_invocations, 0);
-        assert_eq!(report.narrowed_byte_cutoff_additional_invocations, 1);
-        assert_eq!(report.future_semantic_cutoff_additional_invocations, 0);
+        assert_eq!(report.repeated_same_req_memo_hits, 1);
+        assert_eq!(report.repeated_same_req_additional_kernel_invocations, 0);
+        assert_eq!(report.narrowed_semantic_hits, 1);
+        assert_eq!(report.narrowed_additional_kernel_invocations, 0);
+        assert_eq!(report.widened_semantic_hits, 0);
+        assert_eq!(report.widened_additional_kernel_invocations, 1);
         assert!(!report.comparison.byte_equal);
         assert!(report.comparison.monotone_safe);
         assert!(report.comparison.equivalent_on_fixture_universe);
