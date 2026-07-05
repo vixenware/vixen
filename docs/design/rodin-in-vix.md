@@ -96,3 +96,32 @@ Spike B's first falsifiable measurement. Break-even slowdown
 recomputed from taxonomy data: ~4.8x. The one genuine language gap:
 VersionSet/Region as declared value kinds — ALREADY IN FLIGHT on the
 open side (vix-semantic-cutoff branch builds VersionSet now).
+
+## Correction #3 (from vix/docs/reuse-analysis.md, open side)
+
+The "solve interior is FLESH" granularity story above used
+vocabulary, not shipped mechanism: the in-repo flesh/spine terms
+refer to fleet code-shipping, and ValueStore has NO refcount or
+ownership tracking today — the frame-local-vs-interned value split
+DOES NOT EXIST YET. The reuse design therefore has a prerequisite:
+build the FLESH TIER — mutable, frame-local, pre-intern aggregate
+buffers that become immutable StoreEntry values only when crossing
+a demand boundary (return/capture/demand/trace); uniqueness lives on
+the unhashed flesh header and is DISCARDED at intern (unlike taint,
+which is content-derived and folds into identity — the distinction
+matters and is now documented). Reuse can never touch interned
+values: dedupe means shared by construction.
+Chosen reuse design: HYBRID — static last-use analysis in lower.rs
+(at the existing Layout pass, zero annotations) marks candidate
+sites; only those sites emit a dynamic refcount-check stencil
+(mutate-vs-copy, reusing weavy's multi-successor guard mechanism).
+SPIKE B LADDER (now concrete): flesh tier → reuse stencils →
+transcribe rodin-pure-kernel.md's propagate/learn pseudocode →
+benchmark vs rodin-core (naive / reuse / Rust-Vec ceiling; the
+branch-clone O(1)-vs-O(|state|) claim is measurement #1).
+Note the flesh tier is independently valuable: every vix program
+currently interns aggregates eagerly; frame-local construction cuts
+store pressure across the board.
+META: three position-doc claims about our own code were falsified by
+design agents in one day (lazy VSIDS, trail/watch existence, flesh
+tier). Rule reaffirmed: cite code, not memory, when banking.
