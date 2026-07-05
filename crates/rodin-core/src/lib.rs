@@ -341,6 +341,9 @@ pub struct Problem {
     pub exclusions: Vec<FeatureExclusion>,
     pub warm_facts: VerifiedWarmFacts,
     pub learned_kind: LearnedKind,
+    /// The resolver-v2 context (target + dev membership). Defaults to
+    /// [`ResolveContext::unconstrained`], reproducing pre-context behavior.
+    pub context: ResolveContext,
 }
 
 impl Problem {
@@ -352,7 +355,15 @@ impl Problem {
             exclusions: Vec::new(),
             warm_facts: VerifiedWarmFacts::new(),
             learned_kind: LearnedKind::Plain,
+            context: ResolveContext::unconstrained(),
         }
+    }
+
+    /// Resolve under a specific [`ResolveContext`].
+    #[must_use]
+    pub fn with_context(mut self, context: ResolveContext) -> Self {
+        self.context = context;
+        self
     }
 }
 
@@ -729,6 +740,86 @@ struct CompiledClause {
     id: ClauseId,
     antecedents: Vec<Guard>,
     consequent: Consequent,
+    /// Set on clauses derived from a dependency edge; `None` clauses (local
+    /// feature enables) are always active. The gate keeps the compiled `Index`
+    /// target-agnostic so one fact base serves every [`ResolveContext`].
+    gate: Option<DepGate>,
+}
+
+/// The consumption condition of a dependency edge, evaluated per-context at solve
+/// time rather than baked at ingestion.
+#[derive(Clone, Debug, Eq, PartialEq)]
+struct DepGate {
+    kind: String,
+    target: Option<String>,
+    parent: String,
+}
+
+/// A resolver-v2 resolution context: a build target plus which workspace members
+/// carry their dev-dependencies. Handed to [`solve`] via [`Problem`]; the same
+/// compiled `Index` is resolved once per context, sharing all facts.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct ResolveContext {
+    /// The build target. `None` is *unconstrained* — every target-conditional
+    /// edge is consumed (reproduces the pre-context behavior; no rustc needed).
+    pub target: Option<rodin_survey::TargetCfg>,
+    /// Members whose dev-dependencies are consumed. Empty means "no workspace
+    /// restriction" — all dev edges consumed (unconstrained).
+    pub workspace_members: BTreeSet<String>,
+    /// Whether dev-dependencies are consumed at all (building tests/examples).
+    pub include_dev: bool,
+}
+
+impl Default for ResolveContext {
+    fn default() -> Self {
+        Self::unconstrained()
+    }
+}
+
+impl ResolveContext {
+    /// Consume every edge regardless of target or kind — the pre-resolver-v2
+    /// behavior, used when no context is supplied.
+    #[must_use]
+    pub fn unconstrained() -> Self {
+        Self {
+            target: None,
+            workspace_members: BTreeSet::new(),
+            include_dev: true,
+        }
+    }
+
+    /// Resolve for a specific build target, dev-dependencies excluded by default.
+    #[must_use]
+    pub fn for_target(target: rodin_survey::TargetCfg) -> Self {
+        Self {
+            target: Some(target),
+            workspace_members: BTreeSet::new(),
+            include_dev: false,
+        }
+    }
+
+    /// Restrict dev-dependency consumption to these workspace members.
+    #[must_use]
+    pub fn with_members(mut self, members: impl IntoIterator<Item = String>) -> Self {
+        self.workspace_members = members.into_iter().collect();
+        self.include_dev = true;
+        self
+    }
+
+    fn consumes(&self, gate: &DepGate) -> bool {
+        if gate.kind == "dev" {
+            let member_ok =
+                self.workspace_members.is_empty() || self.workspace_members.contains(&gate.parent);
+            if !(self.include_dev && member_ok) {
+                return false;
+            }
+        }
+        match (&self.target, gate.target.as_deref()) {
+            (_, None) => true,
+            (None, Some(_)) => true,
+            (Some(cfg), Some(target)) => cfg.matches_target_field(target),
+        }
+    }
 }
 
 #[derive(Clone, Debug, Eq, PartialEq)]
@@ -782,6 +873,7 @@ struct Solver<'a> {
     index: &'a CompiledIndex,
     options: SolverOptions,
     problem_kind: LearnedKind,
+    context: ResolveContext,
     feature_exclusions: Vec<(PkgIx, FeatIx, FeatIx)>,
     exclusions: ExclusionStore,
     derivations: DerivationStore,
@@ -1255,15 +1347,18 @@ impl CompiledIndex {
                     dep: self.name(dep_pkg).unwrap_or_default().to_owned(),
                 };
                 if !dep.optional {
-                    self.push_clause(
+                    let gate = self.dep_gate(pkg, dep);
+                    self.push_gated_clause(
                         vec![Guard::InGraph(pkg), Guard::Selected(pkg, version.clone())],
                         Consequent::InGraph(dep_pkg),
                         Some(support.clone()),
+                        gate.clone(),
                     );
-                    self.push_clause(
+                    self.push_gated_clause(
                         vec![Guard::InGraph(pkg), Guard::Selected(pkg, version.clone())],
                         Consequent::VersionSet(dep_pkg, req.clone()),
                         Some(support.clone()),
+                        gate,
                     );
                     self.push_dependency_feature_clauses(pkg, &version, dep, dep_pkg, &support);
                 }
@@ -1302,6 +1397,14 @@ impl CompiledIndex {
         Ok(())
     }
 
+    fn dep_gate(&self, pkg: PkgIx, dep: &DepLine) -> Option<DepGate> {
+        Some(DepGate {
+            kind: dep.kind.clone(),
+            target: dep.target.clone(),
+            parent: self.base_name(pkg).unwrap_or_default().to_owned(),
+        })
+    }
+
     fn push_dependency_feature_clauses(
         &mut self,
         pkg: PkgIx,
@@ -1311,20 +1414,23 @@ impl CompiledIndex {
         support: &EdgeKey,
     ) {
         let scope = dep.kind.as_str();
+        let gate = self.dep_gate(pkg, dep);
         if dep.default_features {
             let default = self.intern_feature(&scoped_feature_name(scope, "default"));
-            self.push_clause(
+            self.push_gated_clause(
                 vec![Guard::InGraph(pkg), Guard::Selected(pkg, version.clone())],
                 Consequent::Feature(dep_pkg, default),
                 Some(support.clone()),
+                gate.clone(),
             );
         }
         for feature in &dep.features {
             let feat = self.intern_feature(&scoped_feature_name(scope, feature));
-            self.push_clause(
+            self.push_gated_clause(
                 vec![Guard::InGraph(pkg), Guard::Selected(pkg, version.clone())],
                 Consequent::Feature(dep_pkg, feat),
                 Some(support.clone()),
+                gate.clone(),
             );
         }
     }
@@ -1350,21 +1456,24 @@ impl CompiledIndex {
                 parent: self.name(pkg).unwrap_or_default().to_owned(),
                 dep: self.name(dep_pkg).unwrap_or_default().to_owned(),
             };
-            self.push_clause(
+            let gate = self.dep_gate(pkg, &dep);
+            self.push_gated_clause(
                 vec![
                     Guard::Feature(pkg, feat),
                     Guard::Selected(pkg, version.clone()),
                 ],
                 Consequent::InGraph(dep_pkg),
                 Some(support.clone()),
+                gate.clone(),
             );
-            self.push_clause(
+            self.push_gated_clause(
                 vec![
                     Guard::Feature(pkg, feat),
                     Guard::Selected(pkg, version.clone()),
                 ],
                 Consequent::VersionSet(dep_pkg, req),
                 Some(support.clone()),
+                gate,
             );
             self.push_dependency_feature_clauses(pkg, version, &dep, dep_pkg, &support);
         } else if let Some((dep_name, dep_feature)) = enable.split_once("?/") {
@@ -1380,7 +1489,8 @@ impl CompiledIndex {
                 parent: self.name(pkg).unwrap_or_default().to_owned(),
                 dep: self.name(dep_pkg).unwrap_or_default().to_owned(),
             };
-            self.push_clause(
+            let gate = self.dep_gate(pkg, &dep);
+            self.push_gated_clause(
                 vec![
                     Guard::Feature(pkg, feat),
                     Guard::Selected(pkg, version.clone()),
@@ -1388,6 +1498,7 @@ impl CompiledIndex {
                 ],
                 Consequent::Feature(dep_pkg, dep_feat),
                 Some(support),
+                gate,
             );
         } else if let Some((dep_name, dep_feature)) = enable.split_once('/') {
             let Some(dep) = self.dependency_line(pkg, version, scope, dep_name) else {
@@ -1402,29 +1513,33 @@ impl CompiledIndex {
                 parent: self.name(pkg).unwrap_or_default().to_owned(),
                 dep: self.name(dep_pkg).unwrap_or_default().to_owned(),
             };
-            self.push_clause(
+            let gate = self.dep_gate(pkg, &dep);
+            self.push_gated_clause(
                 vec![
                     Guard::Feature(pkg, feat),
                     Guard::Selected(pkg, version.clone()),
                 ],
                 Consequent::InGraph(dep_pkg),
                 Some(support.clone()),
+                gate.clone(),
             );
-            self.push_clause(
+            self.push_gated_clause(
                 vec![
                     Guard::Feature(pkg, feat),
                     Guard::Selected(pkg, version.clone()),
                 ],
                 Consequent::VersionSet(dep_pkg, req),
                 Some(support.clone()),
+                gate.clone(),
             );
-            self.push_clause(
+            self.push_gated_clause(
                 vec![
                     Guard::Feature(pkg, feat),
                     Guard::Selected(pkg, version.clone()),
                 ],
                 Consequent::Feature(dep_pkg, dep_feat),
                 Some(support),
+                gate,
             );
         } else {
             let local_feat = self.intern_feature(&scoped_feature_name(scope, enable));
@@ -1464,6 +1579,16 @@ impl CompiledIndex {
         consequent: Consequent,
         support: Option<EdgeKey>,
     ) {
+        self.push_gated_clause(antecedents, consequent, support, None);
+    }
+
+    fn push_gated_clause(
+        &mut self,
+        antecedents: Vec<Guard>,
+        consequent: Consequent,
+        support: Option<EdgeKey>,
+        gate: Option<DepGate>,
+    ) {
         let clause = Clause {
             antecedents: antecedents
                 .iter()
@@ -1479,6 +1604,7 @@ impl CompiledIndex {
             id,
             antecedents,
             consequent,
+            gate,
         });
     }
 
@@ -1879,7 +2005,7 @@ fn solve_with_options(
     problem: Problem,
     options: SolverOptions,
 ) -> std::result::Result<SolveResult, Box<SolveError>> {
-    let mut solver = Solver::new(index, problem.learned_kind, options);
+    let mut solver = Solver::new(index, problem.learned_kind, options, problem.context.clone());
     for fact in &problem.warm_facts.facts {
         solver.install_warm_fact(fact.clone());
     }
@@ -1906,7 +2032,12 @@ fn solve_with_options(
 }
 
 impl<'a> Solver<'a> {
-    fn new(index: &'a CompiledIndex, problem_kind: LearnedKind, options: SolverOptions) -> Self {
+    fn new(
+        index: &'a CompiledIndex,
+        problem_kind: LearnedKind,
+        options: SolverOptions,
+        context: ResolveContext,
+    ) -> Self {
         let mut derivations = DerivationStore::new();
         for id in (0..index.clauses.len()).map(|ix| ClauseId(ix as u32)) {
             derivations.note_clause(id);
@@ -1915,6 +2046,7 @@ impl<'a> Solver<'a> {
             index,
             options,
             problem_kind,
+            context,
             feature_exclusions: Vec::new(),
             exclusions: ExclusionStore::new(),
             derivations,
@@ -2191,6 +2323,9 @@ impl<'a> Solver<'a> {
             self.force_singletons(state)?;
             for clause in &self.index.compiled {
                 if state.applied_clauses.contains(&clause.id) {
+                    continue;
+                }
+                if !self.clause_active(clause) {
                     continue;
                 }
                 if clause
@@ -2519,6 +2654,15 @@ impl<'a> Solver<'a> {
         if state.features.insert((pkg, feat)) {
             state.feature_reasons.insert((pkg, feat), reasons);
         }
+    }
+
+    /// A dependency-edge clause is inert unless its edge is consumed in the
+    /// active [`ResolveContext`]; non-edge clauses (no gate) are always active.
+    fn clause_active(&self, clause: &CompiledClause) -> bool {
+        clause
+            .gate
+            .as_ref()
+            .is_none_or(|gate| self.context.consumes(gate))
     }
 
     fn guard_true(&self, state: &State, guard: &Guard) -> bool {
@@ -2969,6 +3113,9 @@ impl<'a> Solver<'a> {
 
     fn assert_solution(&self, state: &State) {
         for clause in &self.index.compiled {
+            if !self.clause_active(clause) {
+                continue;
+            }
             if clause
                 .antecedents
                 .iter()
@@ -5816,6 +5963,95 @@ mod tests {
         .map_err(|err| eyre::eyre!("{err:?}"))?;
 
         assert!(result.enabled_features["addon@1"].contains("extra"));
+        Ok(())
+    }
+
+    fn linux_cfg() -> rodin_survey::TargetCfg {
+        rodin_survey::TargetCfg::from_parts(
+            "x86_64-unknown-linux-gnu",
+            ["unix"],
+            [("target_os", "linux"), ("target_family", "unix")],
+        )
+    }
+
+    #[test]
+    fn target_conditional_dependency_is_gated_by_the_solve_context() -> Result<()> {
+        let mut index = CompiledIndex::empty();
+        index.add_package_version("winapi", v(1, 0, 0), Vec::new(), BTreeMap::new());
+        index.add_package_version("nixlib", v(1, 0, 0), Vec::new(), BTreeMap::new());
+        index.add_package_version(
+            "app",
+            v(1, 0, 0),
+            vec![
+                SyntheticDep::normal("winapi", "=1.0.0").target("cfg(windows)"),
+                SyntheticDep::normal("nixlib", "=1.0.0").target("cfg(unix)"),
+            ],
+            BTreeMap::new(),
+        );
+        index.finish_synthetic()?;
+
+        // One compiled Index, resolved for a linux target: the unix edge is
+        // consumed, the windows edge is not.
+        let linux = solve(
+            &index,
+            Problem::new(vec![RootReq::new("app", "*")])
+                .with_context(ResolveContext::for_target(linux_cfg())),
+        )
+        .map_err(|err| eyre::eyre!("{err:?}"))?;
+        assert!(
+            linux.selected.contains_key("nixlib@1"),
+            "unix dep should be consumed on linux: {:?}",
+            linux.selected.keys().collect::<Vec<_>>()
+        );
+        assert!(
+            !linux.selected.contains_key("winapi@1"),
+            "windows dep should be gated out on linux",
+        );
+
+        // The unconstrained context (default) consumes both — same fact base.
+        let both = solve(&index, Problem::new(vec![RootReq::new("app", "*")]))
+            .map_err(|err| eyre::eyre!("{err:?}"))?;
+        assert!(both.selected.contains_key("winapi@1"));
+        assert!(both.selected.contains_key("nixlib@1"));
+        Ok(())
+    }
+
+    #[test]
+    fn build_and_normal_dependency_features_do_not_unify() -> Result<()> {
+        let mut index = CompiledIndex::empty();
+        index.add_package_version(
+            "shared",
+            v(1, 0, 0),
+            Vec::new(),
+            BTreeMap::from([
+                ("std".to_owned(), Vec::new()),
+                ("extra".to_owned(), Vec::new()),
+            ]),
+        );
+        // app depends on shared twice: normal (feature std) and build (feature extra).
+        index.add_package_version(
+            "app",
+            v(1, 0, 0),
+            vec![
+                SyntheticDep::normal("shared", "=1.0.0").feature("std"),
+                SyntheticDep::normal("shared", "=1.0.0").kind("build").feature("extra"),
+            ],
+            BTreeMap::new(),
+        );
+        index.finish_synthetic()?;
+
+        let result = solve(&index, Problem::new(vec![RootReq::new("app", "*")]))
+            .map_err(|err| eyre::eyre!("{err:?}"))?;
+        let feats = &result.enabled_features["shared@1"];
+        // Normal edge enables the unscoped feature; build edge enables it in the
+        // build: scope. Neither leaks into the other's namespace.
+        assert!(feats.contains("std"), "normal edge enables std: {feats:?}");
+        assert!(
+            feats.contains("build:extra"),
+            "build edge enables extra in build scope: {feats:?}"
+        );
+        assert!(!feats.contains("extra"), "build feature must not unify into normal scope");
+        assert!(!feats.contains("build:std"), "normal feature must not leak into build scope");
         Ok(())
     }
 
