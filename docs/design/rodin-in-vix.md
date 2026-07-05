@@ -72,3 +72,27 @@ the migration is differentially checked against.
    warm-solve envelope → kernel migrates too; Rust core remains
    oracle. Gap brutal → capability split stands, reuse analysis
    lands anyway as a general language feature.
+
+## Corrections (2026-07-05, from rodin-pure-kernel.md, verified in code)
+
+The position above misdescribed the kernel in two ways — both flagged
+by the pure-kernel design pass and verified by direct code read:
+1. There IS no trail / watch-list machinery (grep: zero matches).
+   rodin-core is CSP-style domain narrowing over VersionSets with
+   region conflict learning, and State is ALREADY clone-per-branch
+   (lib.rs:2098). The kernel is far closer to functional than this
+   doc feared: the port is representation-only for State; Solver's
+   &mut fields are uniquely-owned per solve() (reuse-safe by
+   construction); Derivation/Clause/Exclusion stores are ALREADY
+   append-only; VersionSet/Region are ALREADY pure.
+2. VSIDS decay is an EAGER full-map scan per conflict (lib.rs:2808),
+   not the lazy-multiplier trick — i.e. today's Rust leaves a known
+   optimization on the table that the functional port can take.
+Also sharpened: content-address dedupe covers only identical-region
+duplicates; subset-containment subsumption remains real work.
+Persistent structures make branch-clone O(1) vs today's O(|state|)
+deep clone — the port may be FASTER on the branchiest path; this is
+Spike B's first falsifiable measurement. Break-even slowdown
+recomputed from taxonomy data: ~4.8x. The one genuine language gap:
+VersionSet/Region as declared value kinds — ALREADY IN FLIGHT on the
+open side (vix-semantic-cutoff branch builds VersionSet now).
