@@ -1,0 +1,125 @@
+- generic [ref=f2e3]:
+  - banner [ref=f2e4]:
+    - generic [ref=f2e5]: vixen
+    - generic [ref=f2e6]: demand, observed
+    - textbox "vixd websocket address" [ref=f2e8]: ws://127.0.0.1:4177
+  - main [ref=f2e9]:
+    - generic [ref=f2e13]:
+      - generic [ref=f2e15]:
+        - generic [ref=f2e16]: "1"
+        - generic [ref=f2e17]: "2"
+        - generic [ref=f2e18]: "3"
+        - generic [ref=f2e19]: "4"
+        - generic [ref=f2e20]: "5"
+        - generic [ref=f2e21]: "6"
+        - generic [ref=f2e22]: "7"
+        - generic [ref=f2e23]: "8"
+        - generic [ref=f2e24]: "9"
+        - generic [ref=f2e25]: "10"
+        - generic [ref=f2e26]: "11"
+        - generic [ref=f2e27]: "12"
+        - generic [ref=f2e28]: "13"
+        - generic [ref=f2e29]: "14"
+        - generic [ref=f2e30]: "15"
+        - generic [ref=f2e31]: "16"
+        - generic [ref=f2e32]: "17"
+        - generic [ref=f2e33]: "18"
+        - generic [ref=f2e34]: "19"
+        - generic [ref=f2e35]: "20"
+        - generic [ref=f2e36]: "21"
+        - generic [ref=f2e37]: "22"
+        - generic [ref=f2e38]: "23"
+        - generic [ref=f2e39]: "24"
+        - generic [ref=f2e40]: "25"
+        - generic [ref=f2e41]: "26"
+        - generic [ref=f2e42]: "27"
+        - generic [ref=f2e43]: "28"
+        - generic [ref=f2e44]: "29"
+        - generic [ref=f2e45]: "30"
+        - generic [ref=f2e46]: "31"
+        - generic [ref=f2e47]: "32"
+        - generic [ref=f2e48]: "33"
+        - generic [ref=f2e49]: "34"
+        - generic [ref=f2e50]: "35"
+        - generic [ref=f2e51]: "36"
+        - generic [ref=f2e52]: "37"
+        - generic [ref=f2e53]: "38"
+        - generic [ref=f2e54]: "39"
+        - generic [ref=f2e55]: "40"
+        - generic [ref=f2e56]: "41"
+        - generic [ref=f2e57]: "42"
+        - generic [ref=f2e58]: "43"
+        - generic [ref=f2e59]: "44"
+        - generic [ref=f2e60]: "45"
+        - generic [ref=f2e61]: "46"
+        - generic [ref=f2e62]: "47"
+        - generic [ref=f2e63]: "48"
+        - generic [ref=f2e64]: "49"
+        - generic [ref=f2e65]: "50"
+        - generic [ref=f2e66]: "51"
+        - generic [ref=f2e67]: "52"
+      - textbox [ref=f2e68]:
+        - generic [ref=f2e69]: // lua.vix — Lua 5.4 for any target the fleet can serve.
+        - generic [ref=f2e71]: "use vix::{Tree, Path, Target};"
+        - generic [ref=f2e72]: "use caps::{Cc, Ar};"
+        - generic [ref=f2e74]: "/// Lua's sources, pinned by content. `fetch` is pure: the checksum IS the identity;"
+        - generic [ref=f2e75]: /// the URL is only a hint about where satisfying bytes may be found.
+        - generic [ref=f2e76]: "fn sources() -> Tree {"
+        - generic [ref=f2e77]: let tar = fetch(
+        - generic [ref=f2e78]: "url: \"https://www.lua.org/ftp/lua-5.4.8.tar.gz\","
+        - generic [ref=f2e79]: "sha256: \"4f18ddae154e9f5d79f21e9a6ba48e5b5f5b2e6ab5e2c4a1e0d3b7f1b7de00d1\","
+        - generic [ref=f2e80]: );
+        - generic [ref=f2e81]: extract(tar) / p"lua-5.4.8/src"
+        - generic [ref=f2e82]: "}"
+        - generic [ref=f2e84]: "/// One translation unit -> one object file, wherever `cc` lives."
+        - generic [ref=f2e85]: "/// `-I {src}` mounts the whole tree for header probes; `{src / unit}` cuts"
+        - generic [ref=f2e86]: /// the single unit out of it. (The oracle caught the original sketch
+        - generic [ref=f2e87]: /// compiling a unit WITHOUT its headers — a file cut from its tree loses
+        - generic [ref=f2e88]: /// its neighbors.)
+        - generic [ref=f2e89]: "fn object(cc: Cc, src: Tree, unit: Path, defines: [Flag]) -> Tree {"
+        - generic [ref=f2e90]: "cc! {"
+        - generic [ref=f2e91]: "-O2 -Wall {defines}"
+        - generic [ref=f2e92]: "-I {src}"
+        - generic [ref=f2e93]: "-c {src / unit}"
+        - generic [ref=f2e94]: "-o {unit.with_ext(\"o\")}"
+        - generic [ref=f2e95]: "}"
+        - generic [ref=f2e96]: "}"
+        - generic [ref=f2e98]: /// The interpreter, one target at a time.
+        - generic [ref=f2e99]: "pub fn lua(target: Target) -> Tree {"
+        - generic [ref=f2e100]: let cc = Cc::acquire(target);
+        - generic [ref=f2e101]: let ar = Ar::acquire(target);
+        - generic [ref=f2e102]: let src = sources();
+        - generic [ref=f2e104]: "let defines = match target.os {"
+        - generic [ref=f2e105]: Linux => [-DLUA_USE_LINUX],
+        - generic [ref=f2e106]: Macos => [-DLUA_USE_MACOSX],
+        - generic [ref=f2e107]: _ => [],
+        - generic [ref=f2e108]: "};"
+        - generic [ref=f2e110]: let units = src.glob("*.c")
+        - generic [ref=f2e111]: .filter(|u| u != p"lua.c" && u != p"luac.c" && u != p"onelua.c");
+        - generic [ref=f2e113]: "let objs: Tree = units.map(|u| object(cc, src, u, defines)).collect();"
+        - generic [ref=f2e115]: // The TREE splices (anchoring mount); bare relative paths would dangle.
+        - generic [ref=f2e116]: "let lib = ar! { rcs liblua.a {objs} };"
+        - generic [ref=f2e117]: let main = object(cc, src, p"lua.c", defines);
+        - generic [ref=f2e118]: "cc! { -o lua {main / p\"lua.o\"} {lib / p\"liblua.a\"} -lm }"
+        - generic [ref=f2e119]: "}"
+    - generic [ref=f2e121]:
+      - generic [ref=f2e122]:
+        - generic [ref=f2e123]:
+          - text: entry
+          - textbox "entry" [ref=f2e124]: lua
+        - generic [ref=f2e125]:
+          - button "trace" [ref=f2e126] [cursor=pointer]
+          - button "lanes" [ref=f2e127] [cursor=pointer]
+          - button "resolve" [ref=f2e128] [cursor=pointer]
+        - generic [ref=f2e129]:
+          - checkbox "all" [ref=f2e130]
+          - text: all
+        - generic [ref=f2e131]:
+          - checkbox "step" [ref=f2e132]
+          - text: step
+        - button "demand" [ref=f2e133]
+        - generic [ref=f2e134]: idle
+      - paragraph [ref=f2e136]:
+        - text: Run
+        - code [ref=f2e137]: vixd
+        - text: locally, then demand an entry point. Every memo miss/hit, spawn, exec serving class and observation streams here as it happens — in step mode, one demand event per step.

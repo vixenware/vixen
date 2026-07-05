@@ -1,0 +1,125 @@
+- generic [ref=e3]:
+  - banner [ref=e4]:
+    - generic [ref=e5]: vixen
+    - generic [ref=e6]: demand, observed
+    - textbox "vixd websocket address" [ref=e8]: ws://127.0.0.1:4177
+  - main [ref=e9]:
+    - generic [ref=e13]:
+      - generic [ref=e15]:
+        - generic [ref=e16]: "1"
+        - generic [ref=e17]: "2"
+        - generic [ref=e18]: "3"
+        - generic [ref=e19]: "4"
+        - generic [ref=e20]: "5"
+        - generic [ref=e21]: "6"
+        - generic [ref=e22]: "7"
+        - generic [ref=e23]: "8"
+        - generic [ref=e24]: "9"
+        - generic [ref=e25]: "10"
+        - generic [ref=e26]: "11"
+        - generic [ref=e27]: "12"
+        - generic [ref=e28]: "13"
+        - generic [ref=e29]: "14"
+        - generic [ref=e30]: "15"
+        - generic [ref=e31]: "16"
+        - generic [ref=e32]: "17"
+        - generic [ref=e33]: "18"
+        - generic [ref=e34]: "19"
+        - generic [ref=e35]: "20"
+        - generic [ref=e36]: "21"
+        - generic [ref=e37]: "22"
+        - generic [ref=e38]: "23"
+        - generic [ref=e39]: "24"
+        - generic [ref=e40]: "25"
+        - generic [ref=e41]: "26"
+        - generic [ref=e42]: "27"
+        - generic [ref=e43]: "28"
+        - generic [ref=e44]: "29"
+        - generic [ref=e45]: "30"
+        - generic [ref=e46]: "31"
+        - generic [ref=e47]: "32"
+        - generic [ref=e48]: "33"
+        - generic [ref=e49]: "34"
+        - generic [ref=e50]: "35"
+        - generic [ref=e51]: "36"
+        - generic [ref=e52]: "37"
+        - generic [ref=e53]: "38"
+        - generic [ref=e54]: "39"
+        - generic [ref=e55]: "40"
+        - generic [ref=e56]: "41"
+        - generic [ref=e57]: "42"
+        - generic [ref=e58]: "43"
+        - generic [ref=e59]: "44"
+        - generic [ref=e60]: "45"
+        - generic [ref=e61]: "46"
+        - generic [ref=e62]: "47"
+        - generic [ref=e63]: "48"
+        - generic [ref=e64]: "49"
+        - generic [ref=e65]: "50"
+        - generic [ref=e66]: "51"
+        - generic [ref=e67]: "52"
+      - textbox [ref=e68]:
+        - generic [ref=e69]: // lua.vix — Lua 5.4 for any target the fleet can serve.
+        - generic [ref=e71]: "use vix::{Tree, Path, Target};"
+        - generic [ref=e72]: "use caps::{Cc, Ar};"
+        - generic [ref=e74]: "/// Lua's sources, pinned by content. `fetch` is pure: the checksum IS the identity;"
+        - generic [ref=e75]: /// the URL is only a hint about where satisfying bytes may be found.
+        - generic [ref=e76]: "fn sources() -> Tree {"
+        - generic [ref=e77]: let tar = fetch(
+        - generic [ref=e78]: "url: \"https://www.lua.org/ftp/lua-5.4.8.tar.gz\","
+        - generic [ref=e79]: "sha256: \"4f18ddae154e9f5d79f21e9a6ba48e5b5f5b2e6ab5e2c4a1e0d3b7f1b7de00d1\","
+        - generic [ref=e80]: );
+        - generic [ref=e81]: extract(tar) / p"lua-5.4.8/src"
+        - generic [ref=e82]: "}"
+        - generic [ref=e84]: "/// One translation unit -> one object file, wherever `cc` lives."
+        - generic [ref=e85]: "/// `-I {src}` mounts the whole tree for header probes; `{src / unit}` cuts"
+        - generic [ref=e86]: /// the single unit out of it. (The oracle caught the original sketch
+        - generic [ref=e87]: /// compiling a unit WITHOUT its headers — a file cut from its tree loses
+        - generic [ref=e88]: /// its neighbors.)
+        - generic [ref=e89]: "fn object(cc: Cc, src: Tree, unit: Path, defines: [Flag]) -> Tree {"
+        - generic [ref=e90]: "cc! {"
+        - generic [ref=e91]: "-O2 -Wall {defines}"
+        - generic [ref=e92]: "-I {src}"
+        - generic [ref=e93]: "-c {src / unit}"
+        - generic [ref=e94]: "-o {unit.with_ext(\"o\")}"
+        - generic [ref=e95]: "}"
+        - generic [ref=e96]: "}"
+        - generic [ref=e98]: /// The interpreter, one target at a time.
+        - generic [ref=e99]: "pub fn lua(target: Target) -> Tree {"
+        - generic [ref=e100]: let cc = Cc::acquire(target);
+        - generic [ref=e101]: let ar = Ar::acquire(target);
+        - generic [ref=e102]: let src = sources();
+        - generic [ref=e104]: "let defines = match target.os {"
+        - generic [ref=e105]: Linux => [-DLUA_USE_LINUX],
+        - generic [ref=e106]: Macos => [-DLUA_USE_MACOSX],
+        - generic [ref=e107]: _ => [],
+        - generic [ref=e108]: "};"
+        - generic [ref=e110]: let units = src.glob("*.c")
+        - generic [ref=e111]: .filter(|u| u != p"lua.c" && u != p"luac.c" && u != p"onelua.c");
+        - generic [ref=e113]: "let objs: Tree = units.map(|u| object(cc, src, u, defines)).collect();"
+        - generic [ref=e115]: // The TREE splices (anchoring mount); bare relative paths would dangle.
+        - generic [ref=e116]: "let lib = ar! { rcs liblua.a {objs} };"
+        - generic [ref=e117]: let main = object(cc, src, p"lua.c", defines);
+        - generic [ref=e118]: "cc! { -o lua {main / p\"lua.o\"} {lib / p\"liblua.a\"} -lm }"
+        - generic [ref=e119]: "}"
+    - generic [ref=e121]:
+      - generic [ref=e122]:
+        - generic [ref=e123]:
+          - text: entry
+          - textbox "entry" [ref=e124]: lua
+        - generic [ref=e125]:
+          - button "trace" [ref=e126] [cursor=pointer]
+          - button "lanes" [ref=e127] [cursor=pointer]
+          - button "resolve" [ref=e128] [cursor=pointer]
+        - generic [ref=e129]:
+          - checkbox "all" [ref=e130]
+          - text: all
+        - generic [ref=e131]:
+          - checkbox "step" [ref=e132]
+          - text: step
+        - button "demand" [ref=e133]
+        - generic [ref=e134]: idle
+      - paragraph [ref=e136]:
+        - text: Run
+        - code [ref=e137]: vixd
+        - text: locally, then demand an entry point. Every memo miss/hit, spawn, exec serving class and observation streams here as it happens — in step mode, one demand event per step.

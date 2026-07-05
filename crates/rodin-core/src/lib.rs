@@ -1089,19 +1089,9 @@ impl CompiledIndex {
             for (version, entry) in rodin_survey::sorted_non_yanked_entries(crate_data)? {
                 let pkg = out.intern_package_version(&crate_data.name, &version);
                 let mut deps = Vec::new();
-                let workspace_members = BTreeSet::new();
+                // Ingest the full universe (every kind and target); the solve-time
+                // ResolveContext decides which edges are consumed per resolution.
                 for dep in &entry.deps {
-                    if !rodin_survey::fixed_target_runtime_dependency_is_consumed(
-                        &crate_data.name,
-                        &dep.kind,
-                        dep.target.as_deref(),
-                        &workspace_members,
-                    ) {
-                        continue;
-                    }
-                    if dep.kind != "normal" {
-                        continue;
-                    }
                     let actual = rodin_survey::actual_dep_name(dep);
                     let mut features = dep.features.clone();
                     features.sort();
@@ -4685,7 +4675,8 @@ pub fn run_r2_real_demonstration() -> Result<R2RealReport> {
     let mut problem = Problem::new(vec![
         RootReq::new("reqwest", ">=0.13.0, <0.14.0"),
         RootReq::new("hyper", "*"),
-    ]);
+    ])
+    .with_context(ResolveContext::for_target(rodin_survey::TargetCfg::round_target()));
     problem.decrees.push(Decree::new("hyper", "=1.0.0"));
 
     let declared = learned_from_solve(solve_with_options(
@@ -6649,11 +6640,15 @@ mod tests {
                 v(0, 13, 4)
             ]
         );
+        // reqwest declares hyper on two dependency lines (the wasm / non-wasm
+        // target split), so the full universe surfaces both and the read-set
+        // disambiguates them `deps[hyper#0]` / `deps[hyper#1]`. The req field is
+        // still consumed on each; the target field on neither.
         assert!(
             report
                 .consumed_fields
                 .iter()
-                .any(|field| field == "deps[hyper].req")
+                .any(|field| field.starts_with("deps[hyper") && field.ends_with("].req"))
         );
         assert!(
             !report

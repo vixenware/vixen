@@ -415,6 +415,26 @@ impl TargetCfg {
         }
     }
 
+    /// The fixed calibration target ([`ROUND_TARGET_TRIPLE`],
+    /// aarch64-apple-darwin) as a `TargetCfg`, matching the cfg values the
+    /// legacy [`target_matches_round`] hardcoded. Deterministic, no rustc.
+    #[must_use]
+    pub fn round_target() -> Self {
+        Self::from_parts(
+            ROUND_TARGET_TRIPLE,
+            ["unix"],
+            [
+                ("target_arch", "aarch64"),
+                ("target_endian", "little"),
+                ("target_env", ""),
+                ("target_family", "unix"),
+                ("target_os", "macos"),
+                ("target_pointer_width", "64"),
+                ("target_vendor", "apple"),
+            ],
+        )
+    }
+
     /// Construct explicitly (deterministic tests, no toolchain dependency).
     #[must_use]
     pub fn from_parts(

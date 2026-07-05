@@ -1,0 +1,205 @@
+I treated the embedded Rodin measurements as input data, not as independently verified measurements. The external claims below are cited; where I did not find prior art for the exact Rodin use case, I say so.
+
+Bottom line
+
+The strongest path is not “better hashing.” It is to move from row-level equality to proof-premise dependency tracking, then add two conservative semantic reuse rules:
+
+First, index each learned fact by the exact dependency edges, feature-map entries, target/kind guards, exclusions, pins, and version-universe facts its proof replay actually reads. This is the per-edge analogue of dependency tracking in incremental computation.
+
+Second, classify edits on those support premises as unchanged, strengthening, weakening, or incomparable. Unchanged and strengthening edits preserve old learned no-goods. Weakening and incomparable edits require either invalidation or a checked residual fact.
+
+Directions (c) and (f) are the same underlying idea: incremental SAT clause reuse under formula extension/retraction. Directions (a) and (e) overlap: semver interval algebra is the concrete domain; the lattice framing is the generalization.
+
+(a) Semver-aware fact lifting
+
+Prior art exists for semver/range algebra, but I did not find checkable evidence that production package resolvers use that algebra specifically to skip re-deriving learned conflicts after metadata edits. The closest prior art is range-set machinery used during solving. Cargo’s dependency syntax is defined as semver requirement ranges; for example, Cargo’s caret examples include 1.2.3 := >=1.2.3, <2.0.0 and 0.2.3 := >=0.2.3, <0.3.0, which matters because ^0.x.y patch bumps are genuine lower-bound narrowings, not cosmetic changes.   The npm semver package exposes Range.intersects and subset(subRange, superRange) operations, and represents ranges as unions of comparator sets, which is close to Rodin’s VersionSet model.   PubGrub-style solvers also represent incompatibilities as version-set terms rather than just single-version assignments; the PubGrub guide describes Range/Ranges and positive/negative Terms over package versions.   PyPA’s current public SpecifierSet API exposes membership testing, while its current documentation describes an unreleased VersionRange API with interval-set operations including intersection, union, complement, and membership tests; I would treat that as evidence of ecosystem direction, not as deployed prior art.  
+
+The strongest Rodin technique is an exact symmetric-difference test on the fact’s proof-relevant version region. For an edge e = P -> Y whose requirement changes from O to N, compute:
+
+delta = (O \ N) ∪ (N \ O)
+
+Then check whether the proof ever reasons about Y versions inside delta. A minimal safe test is:
+
+RegionProjection(fact, Y) ∩ delta = ∅
+
+but that is not enough for all proofs. A fact may derive a conflict from an empty intersection between two requirements without explicitly storing Y in the final no-good region. The safer implementation is to instrument the proof DAG so every interval operation records its consumed VersionSet operands. Then a requirement edit is harmless for that proof node when replacing O with N leaves the relevant interval operation unchanged, for example:
+
+O ∩ UsedSet == N ∩ UsedSet
+
+or, for a disjointness proof:
+
+is_empty(O ∩ OtherOperand) == is_empty(N ∩ OtherOperand)
+
+This is cheaper than full re-solving because it is proof replay plus interval arithmetic, not CDCL search. Its cost is roughly proportional to the number of interval operands in the fact’s proof support, not to the number of versions in the package universe.
+
+The soundness condition is exact interval semantics. The taxonomy’s probe-set classifier is useful for measurement, but it is not adequate as a proof rule. Rodin should use its own VersionSet::from_req algebra, including prerelease and Cargo caret semantics, and it should reject a lifted fact unless replay under the edited interval succeeds or the equality/intersection lemma is mechanically checked.
+
+A falsifier from the embedded data is async-graphql 7.0.1 -> 7.0.2, where base64 changes from ^0.13.0 to ^0.21.0. A fact whose conflict concerns base64 < 0.14 intersects the dropped side of the requirement; treating this as an unrelated bump would be unsound. Another falsifier is any prerelease requirement where syntactic similarity hides exact-match or caret-prerelease behavior; probe sampling can misclassify these unless the same semver parser used by the resolver proves equality.
+
+(b) Per-edge validity instead of per-row
+
+This is the most direct win for Rodin’s measured problem. The relevant prior art is dependency tracking in incremental computation, incremental view maintenance, Datalog materialization, and build systems. Differential dataflow maintains computations by propagating collections of differences through a dataflow graph rather than recomputing all outputs.   Incremental Datalog work describes the same basic shape: retain computational state, apply an input delta, and update outputs, while acknowledging that recomputation can be better when the delta’s impact is large.   Self-adjusting computation gives the sharper soundness lesson: the system must track data/control dependencies and propagate changes through exactly those dependencies; correctness is tied to dependence tracking.   Incremental build systems make the same trade: correctness depends on knowing the declared inputs of a computation, while incrementality comes from reusing prior outputs when those inputs have not changed.  
+
+The Rodin implementation should use premise-keyed facts rather than row-keyed facts. A fact should carry a support set such as:
+
+DepEdge(parent_pkg, parent_version_block, edge_name_or_id, target_pkg, kind, target_cfg, req, optional, default_features, feature_list)
+
+plus separate keys for feature-map implications, optional dependency gates, target/kind activation, pins, exclusions, yanked-version policy if relevant, and any package-version universe facts used by VersionSet::from_intervals.
+
+Precompute edge histories for each package. Instead of “manifest row block,” build stable blocks per dependency edge and per feature-map implication. A fact’s validity interval is then the intersection of the stable intervals of its support keys, not the stable interval of the whole row. For update propagation, maintain an inverted index:
+
+PremiseKey -> FactIds
+
+When a new package version arrives, diff it into changed premise keys, then only reconsider facts indexed by those keys. The expected update cost is approximately:
+
+O(number_of_changed_premises + sum(fanout(changed_premise)))
+
+and the validation cost per affected fact is:
+
+O(size_of_fact_support * interval_operation_cost)
+
+This matches the observed locality in the embedded data: if most real breaks touch one edge, invalidating facts keyed to every edge in the row is avoidable.
+
+The soundness condition is conservative support recording. Over-recording support only loses reuse. Under-recording support is unsound. The support set must be generated by instrumentation of every metadata read during proof replay, not by a hand-written approximation. In particular, Cargo optional dependencies and feature maps must be first-class support premises. Cargo documents that optional dependencies are not built by default and create implicit features unless overridden; it also documents weak dependency feature syntax such as package?/feature, which only enables a dependency feature if something else enables that optional dependency.   Cargo resolver version 2 also treats target-specific dependencies, build dependencies, proc-macros, and dev dependencies differently for feature unification, so target/kind context cannot be collapsed into a bare dependency name.  
+
+A falsifier from the embedded data is the optional-dependency plus feature-map co-occurrence pattern. If a fact’s support records only deps[foo].req but the proof also depends on whether feature bar enables dep:foo, then a feature-map-only change can invalidate the fact even though the edge row appears stable. Another falsifier is the async-graphql-parser/graphql-parser rename pattern: simultaneous remove/add is not the same edge unless Rodin has an explicit, proved rename equivalence.
+
+(c) Monotonicity / one-sided-change arguments
+
+The monotonicity argument is sound, but only when phrased as semantic entailment, not as a row-level edit label.
+
+For a learned no-good region R, define soundness as:
+
+Sol(M) ∩ R = ∅
+
+where M is the manifest-derived constraint system. If the edited manifest M' is stronger than M, meaning:
+
+Sol(M') ⊆ Sol(M)
+
+then the fact remains sound:
+
+Sol(M') ∩ R ⊆ Sol(M) ∩ R = ∅
+
+That proof does not depend on Boolean CNF specifically. It transfers to Rodin’s region algebra as long as Region denotes a set of assignments and manifest edits are interpreted as set inclusion over satisfying assignments.
+
+In Boolean SAT terms, this is the standard monotonicity of logical consequence: if F ⊨ C, then F ∧ G ⊨ C. CDCL learned clauses are intended to be redundant consequences of the current formula; proof systems such as RUP/DRAT are built around checking that learned clauses are redundant additions.   Incremental SAT APIs exploit related structure by reusing solver state and learned clauses across related calls under assumptions; PySAT explicitly describes assumption-based incremental solving as keeping learned clauses across calls, and Z3 exposes incremental solving through solver contexts with push/pop.  
+
+For requirements, the exact rule is:
+
+If an existing edge’s requirement changes from O to N and N ⊆ O, then the new edge constraint is stronger. In a finite known-version encoding, P=v -> Y ∈ O can be represented by forbidding Y versions outside O; narrowing to N adds forbiddances for Y ∈ O \ N. In Rodin’s interval representation, the same fact is expressed by relation inclusion: the allowed parent/child assignment relation for N is a subset of the relation for O.
+
+Required dependency addition is also strengthening when it is unconditional under the same target/kind context: it adds a new implication constraint. Dependency removal is weakening. Requirement widening is weakening. An incompatible bump is neither globally strengthening nor globally weakening unless the old and new accepted sets happen to be ordered by subset.
+
+Optional dependency addition is not automatically strengthening. It is strengthening only under assignments where its feature gate is active, or where a feature-map/default-feature change makes it active. Cargo’s feature documentation makes optional dependencies conditional, and weak dependency features conditional on the dependency being enabled elsewhere.   Therefore the edit classifier must operate on guarded constraints:
+
+guard -> dependency_requirement
+
+not on unguarded dependency rows.
+
+The strongest Rodin technique is a support-local monotonic classifier. For every premise in a fact’s support, compare old and new premise semantics:
+
+Equal: replay unchanged.
+Stronger: reuse by entailment monotonicity.
+Weaker or Incomparable: invalidate or residualize under direction (d).
+Absent: invalidate unless another premise proves an equivalent or stronger relation.
+
+The proof checker should not trust the classifier alone. It should accept a transported proof only if each old premise is either still present or is entailed by the corresponding new premise, for example by a checked VersionSet subset proof.
+
+A falsifier is a mixed break. A release can narrow one dependency and remove another. If Rodin classifies the whole version boundary as “mostly tightening” and keeps a fact whose support includes the removed edge, it is unsound. Another falsifier from the embedded data is the common ^0.x.y -> ^0.(x+1).0 pattern. Under Cargo caret semantics, those ranges are disjoint across adjacent 0.x minors; this is not a narrowing, so monotonic reuse does not apply.  
+
+(d) Fact weakening instead of invalidation
+
+This is plausible, but I found less direct prior art for the exact “shrink a learned package-version region after manifest weakening” operation.
+
+There is related SAT and truth-maintenance prior art, but it does not solve Rodin’s problem out of the box. SAT clause minimization, vivification, and learned-clause strengthening usually assume the base formula has not been weakened. Incremental SAT with activation or assumption literals handles temporary clauses by guarding them, rather than by deriving semantic residuals of arbitrary learned clauses. PySAT’s documentation notes that assumption-based solving permits reuse of learned clauses and unsat cores across calls, but also that learned clauses involving assumptions can become longer and less useful.   Froleyks and Biere’s FMCAD 2021 paper addresses a related engineering issue: avoiding activation-literal pollution in incremental SAT while keeping clauses learned under literal and clause assumptions safe to retain.   Truth-maintenance systems and ATMSs are relevant because they track justifications, assumptions, and nogoods under changing belief sets; Doyle’s TMS is explicitly about maintaining reasons for beliefs, and de Kleer’s ATMS represents reasoning by assumption sets and nogoods.   But ATMS-style systems normally tell you which derived facts lose support under axiom retraction; they do not automatically compute semver interval residuals.
+
+For Rodin, “fact weakening” should be implemented as residual proof replay. A no-good region R corresponds to forbidding all assignments in R. Weakening the fact means replacing R with a smaller region R' ⊂ R, so the solver keeps less pruning power but remains sound.
+
+Example: suppose an old proof used an edge requirement Y ∈ O to prove that assignments with Y ∈ C conflict because C ∩ O = ∅. If the requirement widens to N with O ⊂ N, the old conflict no longer applies to C ∩ (N \ O). But it still applies to:
+
+C \ N
+
+So Rodin can try to produce a residual fact over:
+
+R' = R ∩ (Y ∈ C \ N)
+
+More generally, each proof node whose premise changed should expose a residual transformer. For a widened requirement, replace “outside old allowed set” with “outside new allowed set.” For an incompatible shift, keep only the portion where the new premise still entails the old contradiction. For a removed dependency, residualization usually fails unless some other active premise supplies the same constraint.
+
+The soundness condition is strict: every residual fact must replay against the new premises. Rodin should not accept a residual produced by a syntactic edit rule unless the proof checker can verify the smaller region from the current manifest. This is where Rodin’s proof-carrying learned facts are useful; without replay, residualization is a high-risk optimization.
+
+A falsifier from the embedded data is a dependency rename, such as a simultaneous remove/add where graphql-parser is replaced by async-graphql-parser or vice versa. There is no sound residual unless Rodin has an explicit equivalence proof between the old and new package identities. Another falsifier is clap_derive =3.0.0-rc.13 -> ^3.0.0: a fact about the exact RC may have no meaningful residual over the final-release caret range.
+
+(e) Interval/lattice algebras over requirement space
+
+This is a principled formulation of (a) and (c), but it is probably not the first implementation step.
+
+The relevant prior art is abstract interpretation and lattice-based constraint reasoning. Cousot and Cousot’s abstract interpretation frames program properties as elements of complete semilattices and computes conservative approximations by order-preserving functions and fixpoints.   That maps naturally to Rodin if each manifest premise denotes a relation over assignments and the order is “stronger constraint than.” CUDF and related package-management work provide formal semantics for dependency solving and independent solution checking, but I did not find prior art that specifically models “the manifest-edit space under which a learned incompatibility remains valid” as a lattice object.  
+
+The candidate Rodin lattice is a product domain over support premises:
+
+For a requirement edge, order requirement sets by reverse inclusion:
+
+N ≤ O iff N ⊆ O
+
+because smaller accepted version sets are stronger constraints.
+
+For required edge presence:
+
+absent is weaker than present-required.
+
+For optional edges:
+
+the element is not just presence; it is a guarded implication:
+
+feature_guard ∧ target_guard ∧ kind_guard -> req
+
+For feature maps:
+
+the element is a relation over feature literals, ordered by solution-set inclusion.
+
+A fact’s validity domain is then an upward or downward closure depending on the chosen order. With “stronger means lower,” an old fact valid at manifest point m is valid for all m' ≤ m on the fact’s support. Semver-aware lifting adds non-principal cells to this domain: a weakening may still be safe outside the symmetric difference of the old/new requirement.
+
+The practical implementation should not start with a generic lattice engine. Start with concrete checked lemmas:
+
+EqualReqOnUsedRegion
+ReqSubsetStrengthening
+RequiredEdgeAdded
+GuardUnchanged
+FeatureImplicationStrengthened
+
+Then, if these rules proliferate, factor them into a lattice abstraction.
+
+The falsifier is an independence assumption between edge presence and feature-map semantics. The embedded data says optional dependency additions often co-occur with feature-map changes. Treating “optional dependency added” and “feature map changed” as independent lattice coordinates can keep a fact across a boundary where the new feature map makes the optional dependency active by default. Cargo’s optional dependency and weak-feature semantics make the guard part of the constraint, not metadata decoration.  
+
+(f) Incremental-SAT clause reuse across formula edits
+
+This is the mature adjacent field, and it largely subsumes (c). The state of the art is not “inspect arbitrary old learned clauses after deleting clauses and decide magically.” The standard pattern is to structure the formula evolution so reuse is sound: add clauses monotonically, use assumptions/push-pop for temporary context, guard removable clauses with selectors/activation literals, and keep or discard learned clauses according to those guards or proof dependencies.
+
+PySAT documents the MiniSat-style incremental assumption interface, learned-clause reuse across calls, and unsat-core extraction under assumptions.   Glucose’s incremental work refines assumption-based solving and clause database management for incremental use.   Z3 exposes incremental solving through solver contexts and push/pop, with the caveat that tactic-based solvers may solve from scratch rather than reuse state.   Recent proof work for incremental SAT focuses on making incremental and inprocessing-heavy solvers produce checkable proofs, which is relevant to Rodin’s proof-carrying fact model.  
+
+The Rodin transfer is straightforward at the proof level. Assign every manifest premise a stable premise ID and, conceptually, a selector. A learned region fact is valid under a new manifest if its proof support is still active, or each inactive support premise has a replacement that entails it. If a premise is removed or weakened, facts depending on it are either disabled, guarded, or passed to residualization.
+
+This can be implemented without lowering all intervals to Boolean CNF. The SAT analogy supplies the validity discipline; Rodin’s proof replay supplies the checker. A region fact should be treated like a learned clause with a dependency set:
+
+Fact = (nogood_region, proof_dag, support_premise_ids)
+
+On a metadata edit:
+
+1. Map old premise IDs to new premise IDs where the semantic relation is equal.
+2. Mark subset-strengthened requirements as replacements that entail the old premise.
+3. Leave added required dependencies as new constraints that do not invalidate old facts.
+4. Disable facts whose support includes removed, widened, or incomparable premises.
+5. Optionally residualize disabled facts using direction (d).
+6. Accept the fact only if replay succeeds under current premises or checked entailment replacements.
+
+The falsifier is the classic one from incremental SAT under clause deletion: keeping a learned clause whose only proof used a removed clause. In Rodin terms, if openssl 0.7.14 -> 0.8.0 removes an edge and an old learned fact depended on that edge, retaining the fact can prune a solution that is valid under the new manifest. Selector/support tracking is not an optimization detail; it is the soundness mechanism.
+
+Recommended ranking by soundness per engineering cost
+
+1. (b) Per-edge validity with instrumented support tracking. Highest expected return for the embedded data. It directly attacks the row-level over-invalidation that produces the 7.29x fineness gap. It is also conceptually simple: facts depend on proof premises, not manifest rows. The main risk is under-recorded support, so the implementation should start by making proof replay collect support automatically.
+2. (c)/(f) Monotonicity plus incremental-SAT-style premise IDs. This is the strongest formal rule. If an edit only strengthens the constraints a fact depends on, old no-goods remain valid. It handles required dependency additions and true requirement narrowings. It also gives Rodin a clean discipline for removals and widenings: support-dependent facts must be disabled unless replay or residualization proves them.
+3. (a) Semver-aware local lifting. This is lower risk than full residualization and complements monotonicity. It catches edits whose symmetric difference does not intersect the proof-used version region. The implementation should use exact VersionSet operations and proof-node annotations, not sampled probes.
+4. (d) Fact weakening/residualization. Potentially useful, especially for widenings and incompatible shifts with a surviving subregion, but higher risk and higher implementation cost. It should be accepted only through proof replay against the edited manifest.
+5. (e) General lattice over manifest-edit space. This is the cleanest abstraction, but most of its practical value is already available through the concrete rules above. It is more appropriate as a later refactor once Rodin has accumulated several checked edit lemmas.
+
+The practical sequence is: implement per-premise support and edge-key indexing first; add exact requirement subset/equality-on-used-region checks second; add monotone strengthening transport third; then experiment with residualization behind the proof checker.
