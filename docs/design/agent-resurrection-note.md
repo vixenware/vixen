@@ -618,3 +618,17 @@ unpinned laws ranked; Pin A fake≡real differential = umbrella, Pin B
 async-fake overlap witness → in unforce-exec fix lane, Pin C mount
 ceiling). STANDING RULE REAFFIRMED: questions to Amos must be
 self-contained + carry a recommendation.
+
+**FSKit LORE (Amos-direct, 2026-07-05, institutional knowledge):**
+FSKit is the most annoying of the VFS platform triple (macOS FSKit /
+Linux / Windows ProjFS). Careless use can WEDGE THE ENTIRE OS. The
+nested mount convention /Volumes/a/b (not /Volumes/a) is a DELIBERATE
+defense against that — never "simplify" it. FS operations can zombie
+processes in nearly-undiagnosable ways; subsystem is "a trash fire."
+Substrate design consequences: minimize FSKit surface, keep logic our
+side of the boundary, orchestrator must be able to abandon a
+zombied-substrate run (timeout+kill+poison) without wedging the
+demand graph. ProjFS note: callback-driven lazy materialization =
+a pending tree with observation FREE — Windows ships the demand
+substrate as an OS primitive. Observed read-sets = BARE MINIMUM bar
+(always were), all three platforms.
