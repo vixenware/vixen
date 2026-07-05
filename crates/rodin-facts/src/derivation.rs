@@ -12,7 +12,18 @@ pub struct PinRef(pub String);
 pub struct WidenCert {
     pub package: crate::PkgIx,
     pub checked: VersionSet,
-    pub manifest_hash: String,
+    pub evidence: WidenEvidence,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub enum WidenEvidence {
+    DeclaredStructure {
+        manifest_hash: String,
+    },
+    ObservedReadSet {
+        read_set_digest: String,
+        snapshot_id: String,
+    },
 }
 
 #[derive(Clone, Debug, Eq, PartialEq)]

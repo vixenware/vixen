@@ -789,10 +789,10 @@ Natural workloads use cached crates.io sparse-index rows with each requested roo
 
 | workload | shape | learned kind | cold decisions | cold conflicts | learned no-goods |
 |---|---|---|---:|---:|---:|
-| axum-default | natural | plain | 0 | 1 | 1 |
-| reqwest | natural | plain | 0 | 1 | 1 |
-| tokio-full | natural | plain | 0 | 1 | 1 |
-| clap | natural | plain | 0 | 1 | 1 |
+| axum-default | natural | plain | 7 | 0 | 0 |
+| reqwest | natural | plain | 9 | 0 | 0 |
+| tokio-full | natural | plain | 5 | 0 | 0 |
+| clap | natural | plain | 1 | 0 | 0 |
 
 ### Pressure workloads
 
@@ -801,7 +801,7 @@ Natural workloads use cached crates.io sparse-index rows with each requested roo
 | buried-pin | buried pin | plain | 3 | 1 | 1 | 0 | 2 | 1 | 1 |
 | buried-pin-two-level | buried pin, two levels deep | plain | 3 | 1 | 3 | 1 | 0 | 0 | 1 |
 | feature-triggered-pin | feature-triggered pin | feature-guarded | 3 | 1 | 3 | 1 | 0 | 0 | 1 |
-| downgrade-cascade | downgrade cascade | decree-derived | 3 | 2 | 4 | 2 | 0 | 0 | 2 |
+| downgrade-cascade | downgrade cascade | decree-derived | 3 | 2 | 2 | 0 | 1 | 2 | 2 |
 | hole-trap | hole trap | hole-aware | 3 | 1 | 1 | 0 | 2 | 1 | 1 |
 | exclusion-collision | exclusion collision | exclusion | 2 | 2 | 0 | 1 | 2 | 1 | 2 |
 | lockstep-trap | lockstep trap | family | 0 | 1 | 0 | 1 | 0 | 0 | 1 |
@@ -810,7 +810,7 @@ Natural workloads use cached crates.io sparse-index rows with each requested roo
 
 | kind | no-goods | widened share | median factor | p90 factor | max factor | point versions | widened versions |
 |---|---:|---:|---:|---:|---:|---:|---:|
-| plain | 6 | 66.666667 | 4 | 50 | 50 | 6 | 90 |
+| plain | 2 | 0 | 1 | 1 | 1 | 2 | 2 |
 | feature-guarded | 1 | 0 | 1 | 1 | 1 | 1 | 1 |
 | decree-derived | 2 | 0 | 1 | 1 | 1 | 2 | 2 |
 | hole-aware | 1 | 0 | 1 | 1 | 1 | 1 | 1 |
@@ -819,43 +819,41 @@ Natural workloads use cached crates.io sparse-index rows with each requested roo
 
 ### Round 3 aggregate
 
-- learned no-goods: 13
-- point-versions excluded: 13
-- widened-versions excluded: 98
-- aggregate widening factor: 7.538462
-- pressure decisions saved by warm facts: 5
-- pressure conflicts saved by warm facts: 3
+- learned no-goods: 9
+- point-versions excluded: 9
+- widened-versions excluded: 10
+- aggregate widening factor: 1.111111
+- pressure decisions saved by warm facts: 7
+- pressure conflicts saved by warm facts: 5
 
 ### Round 3 verdict
 
-Derivation-support widening pays in this round: it expands exclusion coverage by 7.538462x and the perturbed pressure re-solves save 5 decisions and 3 conflicts. The effect is not uniform by kind, so the useful design signal is the per-kind table rather than a single global rescue story.
+Derivation-support widening pays in this round: it expands exclusion coverage by 1.111111x and the perturbed pressure re-solves save 7 decisions and 5 conflicts. The effect is not uniform by kind, so the useful design signal is the per-kind table rather than a single global rescue story.
 
 ### Appendix: downgrade-cascade full trace
 
 This trace is emitted by the round-3 solver run for the pressure scenario, not reconstructed by hand.
 
 1. demand client [-inf,+inf)
-2. domain client becomes active
-3. decree tokio-like [1.0.0,2.0.0)
-4. domain tokio-like becomes active
-5. tokio-like: [1.0.0,1.0.1) U [2.0.0,2.0.1) U [3.0.0,3.0.1) ∩ [1.0.0,2.0.0) = [1.0.0,1.0.1)
-6. force tokio-like 1.0.0 (only candidate after propagation)
-7. force client 1.0.0 (only candidate after propagation)
-8. domain codec becomes active
-9. codec: [1.0.0,1.0.1) U [2.0.0,2.0.1) U [3.0.0,3.0.1) ∩ [3.0.0,4.0.0) = [3.0.0,3.0.1)
-10. domain web becomes active
-11. force codec 3.0.0 (only candidate after propagation)
-12. expand web 3.0.0 (highest remaining of 3 candidates) - reads 1 manifest
-13. tokio-like: [1.0.0,1.0.1) ∩ [3.0.0,4.0.0) = empty -> conflict
-14. learn: tokio-like [1.0.0,1.0.1); web [3.0.0,3.0.1) dead; support: web->tokio-like edge; widened 1->1 versions
-15. expand web 2.0.0 (highest remaining of 3 candidates) - reads 1 manifest
-16. codec: [3.0.0,3.0.1) ∩ [1.0.0,1.0.1) = empty -> conflict
-17. learn: codec [3.0.0,3.0.1); web [2.0.0,2.0.1); client [1.0.0,1.0.1) dead; support: client->codec edge, web->codec edge; widened 1->1 versions
-18. expand web 1.0.0 (highest remaining of 3 candidates) - reads 1 manifest
-19. solution: client 1.0.0, codec 3.0.0, tokio-like 1.0.0, web 1.0.0
+2. domain client@1 becomes active
+3. decree tokio-like [1.0.0,1.0.1)
+4. domain tokio-like@1 becomes active
+5. tokio-like@1: [1.0.0,1.0.3) ∩ [1.0.0,1.0.1) = [1.0.0,1.0.1)
+6. force tokio-like@1 1.0.0 (only candidate after propagation)
+7. force client@1 1.0.0 (only candidate after propagation)
+8. domain codec@1 becomes active
+9. codec@1: [1.0.0,1.0.3) ∩ [1.0.2,1.0.3) = [1.0.2,1.0.3)
+10. domain web@1 becomes active
+11. force codec@1 1.0.2 (only candidate after propagation)
+12. expand web@1 1.0.2 (highest remaining of 3 candidates) - reads 1 manifest
+13. tokio-like@1: [1.0.0,1.0.1) ∩ [1.0.2,1.0.3) = empty -> conflict
+14. learn: tokio-like@1 [1.0.0,1.0.1); web@1 [1.0.2,1.0.3) dead; support: web@1->tokio-like@1 edge; widened 1->1 versions
+15. expand web@1 1.0.1 (highest remaining of 3 candidates) - reads 1 manifest
+16. codec@1: [1.0.2,1.0.3) ∩ [1.0.0,1.0.1) = empty -> conflict
+17. learn: codec@1 [1.0.2,1.0.3); web@1 [1.0.1,1.0.2); client@1 [1.0.0,1.0.1) dead; support: client@1->codec@1 edge, web@1->codec@1 edge; widened 1->1 versions
+18. expand web@1 1.0.0 (highest remaining of 3 candidates) - reads 1 manifest
+19. solution: client@1 1.0.0, codec@1 1.0.2, tokio-like@1 1.0.0, web@1 1.0.0
 20. summary: manifests read 3, candidate observations 3, conflicts 2, widened versions killed 2 vs 2 point versions
-
-
 ## Round 4: real-world Cargo.lock evidence
 
 Source snapshot: `/Users/amos/oss/facet-cc` Cargo.lock plus local Cargo registry cache. The extractor is offline-only, indexes cached registry alternatives for locked package names, and encodes the Cargo.lock snapshot as decrees to the representative locked version for each package name. Rodin models one selected version per package name; Cargo.lock entries with multiple coexisting versions are classified rather than hidden.
@@ -4440,3 +4438,22 @@ Solve trace tail:
 | DependencyOutsideLockUniverse | `aho-corasick@1.0.2` | doc-comment |
 
 3922 additional extraction/modeling gaps omitted from this table; the JSON artifact carries the full set.
+
+## Round 10 — R2 read-set stability demonstration
+
+Round 10 is the explicit R2 crown-jewel demonstration: the same offline sparse-index fixture is solved twice, once with declared-structure widening and once with observed read-set widening. The fixture rows live under `crates/rodin-core/fixtures/r2-sparse-index/` and are parsed with `facet-json` through the `rodin-survey` sparse-index row types, so this round never hits the network.
+
+| scenario | edge | declared versions pruned | read-set versions pruned | declared added prunes | read-set added prunes | read-set digest | snapshot |
+|---|---|---:|---:|---:|---:|---|---|
+| cosmetic-dependency-feature-diff | demo-app@1 -> demo-core@1 | 2 | 3 | 1 | 2 | `00e6deacf6201af11a16486943af4edd0fea2951f987d7e4ff89f5b2107ecb91` | `r2-fixture:a2791b8383c755469d39bd70d6ee8299604f22134e8742859146be9302f3134f` |
+
+Consumed read-set fields:
+
+- `deps[demo-core].actual`
+- `deps[demo-core].kind`
+- `deps[demo-core].optional`
+- `deps[demo-core].req`
+
+Stable versions certified by the observed read set: 1.0.0, 1.0.1, 1.0.2.
+
+The middle `demo-app` fixture row differs cosmetically in dependency feature/default-feature metadata, so the existing `EdgeSignature` declared-structure lane cannot include it. The conflict's observed version-requirement read set does not consume those cosmetic fields, so read-set stability verifies the full three-version range.

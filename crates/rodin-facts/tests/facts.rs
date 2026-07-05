@@ -5,6 +5,7 @@ use rodin_facts::{
     Assignment, Atom, Clause, ClauseId, ClauseStore, Derivation, DerivationId, DerivationStore,
     Exclusion, ExclusionId, ExclusionStore, FeatIx, Interval, PackageInterner, PinRef, PkgId,
     PkgIx, Premise, Region, ReplayError, RuleKind, SourceInterner, SourceIx, VersionSet, WidenCert,
+    WidenEvidence,
 };
 use semver::{Version, VersionReq};
 
@@ -268,7 +269,9 @@ fn derivation_replay_accepts_well_formed_dag() {
             certificate: WidenCert {
                 package: PkgIx(0),
                 checked: range((1, 0, 0), (2, 0, 0)),
-                manifest_hash: "abc".to_owned(),
+                evidence: WidenEvidence::DeclaredStructure {
+                    manifest_hash: "abc".to_owned(),
+                },
             },
         },
     });

@@ -1,0 +1,3 @@
+{"name":"demo-app","vers":"1.0.0","deps":[{"name":"demo-core","req":"=1.0.0","features":[],"optional":false,"default_features":true,"target":null,"kind":"normal","registry":null,"package":null}],"features":{},"features2":null,"yanked":false}
+{"name":"demo-app","vers":"1.0.1","deps":[{"name":"demo-core","req":"=1.0.0","features":["cosmetic"],"optional":false,"default_features":false,"target":null,"kind":"normal","registry":null,"package":null}],"features":{},"features2":null,"yanked":false}
+{"name":"demo-app","vers":"1.0.2","deps":[{"name":"demo-core","req":"=1.0.0","features":[],"optional":false,"default_features":true,"target":null,"kind":"normal","registry":null,"package":null}],"features":{},"features2":null,"yanked":false}

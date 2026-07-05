@@ -9,7 +9,7 @@ use std::collections::BTreeSet;
 pub use clause::{Atom, Clause, ClauseId, ClauseStore};
 pub use derivation::{
     Derivation, DerivationId, DerivationStore, PinRef, Premise, ReplayError, ReplayReport,
-    RuleKind, WidenCert,
+    RuleKind, WidenCert, WidenEvidence,
 };
 pub use exclusion::{Exclusion, ExclusionId, ExclusionStore};
 pub use interner::{

@@ -2576,6 +2576,7 @@ mod tests {
                 subsume_learned: true,
                 activity_ordering: false,
                 restarts: false,
+                read_set_widening: false,
             },
         )
         .map_err(|err| eyre::eyre!("{err:?}"))?;

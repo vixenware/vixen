@@ -10,7 +10,7 @@ use rodin_facts::{
     Assignment, Atom, Clause, ClauseId, ClauseStore, CompatClass, Derivation, DerivationId,
     DerivationStore, Exclusion, ExclusionId, ExclusionStore, FeatIx, FeatureInterner,
     PackageInterner, PinRef, PkgId, PkgIx, Premise, Region, RuleKind, SourceInterner, SourceIx,
-    VersionSet,
+    VersionSet, WidenEvidence,
 };
 use semver::{Version, VersionReq};
 
@@ -58,6 +58,21 @@ pub struct EdgeSignature {
     pub default_features: bool,
     pub target: Option<String>,
     pub kind: String,
+}
+
+#[derive(Clone, Debug, Eq, Ord, PartialEq, PartialOrd)]
+pub struct FieldPath(pub String);
+
+#[derive(Clone, Debug, Eq, Ord, PartialEq, PartialOrd)]
+pub struct ReadSetField {
+    pub path: FieldPath,
+    pub value: String,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct ReadSet {
+    pub version: Version,
+    pub fields: BTreeSet<ReadSetField>,
 }
 
 #[derive(Clone, Debug, Eq, PartialEq)]
@@ -276,6 +291,7 @@ pub struct WidenWitness {
     pub point_terms: Vec<PointTermWitness>,
     pub widened_terms: Vec<WidenedTermWitness>,
     pub edge_stability: Vec<EdgeStabilityWitness>,
+    pub read_set_stability: Vec<ReadSetStabilityWitness>,
 }
 
 #[derive(Clone, Debug, Eq, PartialEq)]
@@ -297,6 +313,17 @@ pub struct EdgeStabilityWitness {
     pub selected_version: Version,
     pub stable_versions: Vec<Version>,
     pub selected_state: Vec<EdgeSignature>,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct ReadSetStabilityWitness {
+    pub parent: String,
+    pub dep: String,
+    pub selected_version: Version,
+    pub stable_versions: Vec<Version>,
+    pub selected_read_set: ReadSet,
+    pub read_set_digest: String,
+    pub snapshot_id: String,
 }
 
 pub struct WarmFactVerifier {
@@ -656,6 +683,8 @@ struct Manifest {
     deps: Vec<DepLine>,
     features: BTreeMap<String, Vec<String>>,
     yanked: bool,
+    snapshot_id: String,
+    row_digest: String,
 }
 
 #[derive(Clone, Debug, Eq, PartialEq)]
@@ -669,6 +698,17 @@ struct DepLine {
     target: Option<String>,
     kind: String,
     class_hint: Option<CompatClass>,
+}
+
+#[derive(Clone, Copy, Debug, Eq, Ord, PartialEq, PartialOrd)]
+enum ReadFieldKind {
+    Actual,
+    Req,
+    Optional,
+    Kind,
+    Features,
+    DefaultFeatures,
+    Target,
 }
 
 #[derive(Clone, Debug)]
@@ -762,6 +802,7 @@ struct SolverOptions {
     subsume_learned: bool,
     activity_ordering: bool,
     restarts: bool,
+    read_set_widening: bool,
 }
 
 impl SolverOptions {
@@ -770,6 +811,7 @@ impl SolverOptions {
         subsume_learned: true,
         activity_ordering: true,
         restarts: true,
+        read_set_widening: false,
     };
 
     const LEGACY: Self = Self {
@@ -777,6 +819,7 @@ impl SolverOptions {
         subsume_learned: false,
         activity_ordering: false,
         restarts: false,
+        read_set_widening: false,
     };
 
     const FIX1: Self = Self {
@@ -784,6 +827,7 @@ impl SolverOptions {
         subsume_learned: false,
         activity_ordering: false,
         restarts: false,
+        read_set_widening: false,
     };
 
     const FIX2: Self = Self {
@@ -791,6 +835,12 @@ impl SolverOptions {
         subsume_learned: true,
         activity_ordering: false,
         restarts: false,
+        read_set_widening: false,
+    };
+
+    const R2_READ_SET: Self = Self {
+        read_set_widening: true,
+        ..Self::FULL
     };
 }
 
@@ -965,6 +1015,8 @@ impl CompiledIndex {
                         deps,
                         features: merged_features(entry),
                         yanked: entry.yanked,
+                        snapshot_id: "rodin-survey-cache".to_owned(),
+                        row_digest: digest_str(&canonical_sparse_entry(entry)),
                     },
                 );
                 out.versions.entry(pkg).or_default().push(version.clone());
@@ -1095,6 +1147,8 @@ impl CompiledIndex {
                 deps: lines,
                 features,
                 yanked: false,
+                snapshot_id: "synthetic".to_owned(),
+                row_digest: String::new(),
             },
         );
     }
@@ -1459,6 +1513,158 @@ impl CompiledIndex {
         (region, point, widened)
     }
 
+    fn read_set_widen_region(
+        &self,
+        selected: &BTreeMap<PkgIx, Version>,
+        premises: &[Premise],
+        point_region: &Region,
+    ) -> Option<(Region, usize, usize, WidenWitness)> {
+        let observed = self.read_fields_from_premises(premises);
+        if observed.is_empty() {
+            return None;
+        }
+        let support: BTreeSet<_> = observed.keys().cloned().collect();
+        let mut region = point_region.clone();
+        let point = 1_usize;
+        let mut widened = 1_usize;
+        let mut read_set_stability = Vec::new();
+        for (edge, fields) in observed {
+            let parent_pkg = self.package(&edge.parent)?;
+            let selected_version = selected.get(&parent_pkg)?;
+            let selected_read_set = self.edge_read_set(&edge, selected_version, &fields)?;
+            let selected_digest = digest_read_set(&selected_read_set);
+            let mut stable_versions = Vec::new();
+            for version in self.versions(parent_pkg) {
+                if self
+                    .edge_read_set(&edge, version, &fields)
+                    .is_some_and(|read_set| read_set.fields == selected_read_set.fields)
+                {
+                    stable_versions.push(version.clone());
+                }
+            }
+            if stable_versions.is_empty() {
+                continue;
+            }
+            widened = widened.saturating_mul(stable_versions.len());
+            region
+                .versions
+                .insert(parent_pkg, version_set_from_points(&stable_versions));
+            let snapshot_id = self
+                .manifest_for_edge(&edge, selected_version)
+                .map(|manifest| manifest.snapshot_id.clone())
+                .unwrap_or_else(|| "unknown".to_owned());
+            read_set_stability.push(ReadSetStabilityWitness {
+                parent: edge.parent,
+                dep: edge.dep,
+                selected_version: selected_version.clone(),
+                stable_versions,
+                selected_read_set,
+                read_set_digest: selected_digest,
+                snapshot_id,
+            });
+        }
+        if read_set_stability.is_empty() {
+            return None;
+        }
+        let witness = build_read_set_widen_witness(
+            self,
+            selected,
+            &support,
+            point_region,
+            &region,
+            read_set_stability,
+        );
+        Some((region, point, widened, witness))
+    }
+
+    fn read_fields_from_premises(
+        &self,
+        premises: &[Premise],
+    ) -> BTreeMap<EdgeKey, BTreeSet<ReadFieldKind>> {
+        let mut observed: BTreeMap<EdgeKey, BTreeSet<ReadFieldKind>> = BTreeMap::new();
+        for premise in premises {
+            let Premise::Clause(id) = premise else {
+                continue;
+            };
+            let Some(edge) = self.clause_support.get(id).cloned() else {
+                continue;
+            };
+            let Some(clause) = self.compiled.iter().find(|clause| clause.id == *id) else {
+                continue;
+            };
+            let fields = observed.entry(edge).or_default();
+            fields.extend([
+                ReadFieldKind::Actual,
+                ReadFieldKind::Req,
+                ReadFieldKind::Optional,
+                ReadFieldKind::Kind,
+            ]);
+            if matches!(clause.consequent, Consequent::Feature(_, _)) {
+                fields.extend([
+                    ReadFieldKind::Features,
+                    ReadFieldKind::DefaultFeatures,
+                    ReadFieldKind::Target,
+                ]);
+            }
+        }
+        observed
+    }
+
+    fn edge_read_set(
+        &self,
+        edge: &EdgeKey,
+        version: &Version,
+        fields: &BTreeSet<ReadFieldKind>,
+    ) -> Option<ReadSet> {
+        let manifest = self.manifest_for_edge(edge, version)?;
+        let dep_actual = self
+            .package(&edge.dep)
+            .and_then(|pkg| self.base_name(pkg))
+            .unwrap_or(&edge.dep);
+        let matching: Vec<_> = manifest
+            .deps
+            .iter()
+            .filter(|line| line.actual == dep_actual)
+            .collect();
+        if matching.is_empty() {
+            return None;
+        }
+        let mut out = BTreeSet::new();
+        for (ix, line) in matching.iter().enumerate() {
+            let stem = if matching.len() == 1 {
+                format!("deps[{dep_actual}]")
+            } else {
+                format!("deps[{dep_actual}#{ix}]")
+            };
+            for field in fields {
+                let (name, value) = match field {
+                    ReadFieldKind::Actual => ("actual", line.actual.clone()),
+                    ReadFieldKind::Req => ("req", line.req.clone()),
+                    ReadFieldKind::Optional => ("optional", line.optional.to_string()),
+                    ReadFieldKind::Kind => ("kind", line.kind.clone()),
+                    ReadFieldKind::Features => ("features", format!("{:?}", line.features)),
+                    ReadFieldKind::DefaultFeatures => {
+                        ("default_features", line.default_features.to_string())
+                    }
+                    ReadFieldKind::Target => ("target", format!("{:?}", line.target)),
+                };
+                out.insert(ReadSetField {
+                    path: FieldPath(format!("{stem}.{name}")),
+                    value,
+                });
+            }
+        }
+        Some(ReadSet {
+            version: version.clone(),
+            fields: out,
+        })
+    }
+
+    fn manifest_for_edge(&self, edge: &EdgeKey, version: &Version) -> Option<&Manifest> {
+        let pkg = self.package(&edge.parent)?;
+        self.manifests.get(&(pkg, version.clone()))
+    }
+
     fn support_packages(&self, support: &BTreeSet<EdgeKey>) -> BTreeSet<PkgIx> {
         support
             .iter()
@@ -1480,10 +1686,12 @@ impl CompiledIndex {
         for ((pkg, version), manifest) in &self.manifests {
             let _ = write!(
                 canonical,
-                "manifest:{}@{}:yanked={}:",
+                "manifest:{}@{}:yanked={}:snapshot={}:row={}:",
                 self.name(*pkg).unwrap_or("<unknown>"),
                 version,
-                manifest.yanked
+                manifest.yanked,
+                manifest.snapshot_id,
+                manifest.row_digest
             );
             for dep in &manifest.deps {
                 let _ = write!(
@@ -2367,16 +2575,42 @@ impl<'a> Solver<'a> {
         let (region, point_versions, widened_versions) =
             self.index
                 .widen_region(&conflict.selected, &support, &region);
+        let read_set_widen = self
+            .options
+            .read_set_widening
+            .then(|| {
+                self.index
+                    .read_set_widen_region(&conflict.selected, &premises, &point_region)
+            })
+            .flatten();
+        let (region, point_versions, widened_versions, read_set_witness) =
+            if let Some((read_set_region, read_set_point, read_set_wide, witness)) = read_set_widen
+            {
+                if read_set_wide > widened_versions {
+                    (
+                        read_set_region,
+                        read_set_point,
+                        read_set_wide,
+                        Some(witness),
+                    )
+                } else {
+                    (region, point_versions, widened_versions, None)
+                }
+            } else {
+                (region, point_versions, widened_versions, None)
+            };
         let mut derivation = conflict_derivation;
         let mut widen_witness = None;
         if widened_versions > point_versions {
-            let witness = build_widen_witness(
-                self.index,
-                &conflict.selected,
-                &support,
-                &point_region,
-                &region,
-            );
+            let witness = read_set_witness.unwrap_or_else(|| {
+                build_widen_witness(
+                    self.index,
+                    &conflict.selected,
+                    &support,
+                    &point_region,
+                    &region,
+                )
+            });
             derivation = self.derivations.append(Derivation {
                 premises: vec![Premise::Derived(conflict_derivation)],
                 rule: RuleKind::Widen {
@@ -2888,6 +3122,65 @@ fn digest_str(input: &str) -> String {
     blake3::hash(input.as_bytes()).to_hex().to_string()
 }
 
+fn digest_read_set(read_set: &ReadSet) -> String {
+    let mut out = format!("version:{}\n", read_set.version);
+    for field in &read_set.fields {
+        let _ = writeln!(out, "{}={}", field.path.0, field.value);
+    }
+    digest_str(&out)
+}
+
+fn read_set_field_kinds(read_set: &ReadSet) -> BTreeSet<ReadFieldKind> {
+    read_set
+        .fields
+        .iter()
+        .filter_map(|field| {
+            let (_, name) = field.path.0.rsplit_once('.')?;
+            match name {
+                "actual" => Some(ReadFieldKind::Actual),
+                "req" => Some(ReadFieldKind::Req),
+                "optional" => Some(ReadFieldKind::Optional),
+                "kind" => Some(ReadFieldKind::Kind),
+                "features" => Some(ReadFieldKind::Features),
+                "default_features" => Some(ReadFieldKind::DefaultFeatures),
+                "target" => Some(ReadFieldKind::Target),
+                _ => None,
+            }
+        })
+        .collect()
+}
+
+fn canonical_sparse_entry(entry: &rodin_survey::IndexEntry) -> String {
+    let mut out = format!(
+        "name:{}\nvers:{}\nyanked:{}\n",
+        entry.name, entry.vers, entry.yanked
+    );
+    for dep in &entry.deps {
+        let _ = writeln!(
+            out,
+            "dep:{}|{}|{:?}|{}|{}|{:?}|{}|{:?}|{:?}",
+            dep.name,
+            dep.req,
+            dep.features,
+            dep.optional,
+            dep.default_features,
+            dep.target,
+            dep.kind,
+            dep.registry,
+            dep.package
+        );
+    }
+    for (feature, enables) in &entry.features {
+        let _ = writeln!(out, "feature:{feature}={enables:?}");
+    }
+    if let Some(features2) = &entry.features2 {
+        for (feature, enables) in features2 {
+            let _ = writeln!(out, "feature2:{feature}={enables:?}");
+        }
+    }
+    out
+}
+
 fn proof_node_id(node: &ProofNode) -> ProofNodeId {
     ProofNodeId(digest_str(&canonical_proof_node(node)))
 }
@@ -2992,6 +3285,21 @@ fn canonical_widen_witness(witness: &WidenWitness) -> String {
                 state.target,
                 state.kind
             );
+        }
+        out.push('\n');
+    }
+    for edge in &witness.read_set_stability {
+        let _ = write!(
+            out,
+            "read-set-stable:{}->{}@{}:{}:{}:",
+            edge.parent, edge.dep, edge.selected_version, edge.snapshot_id, edge.read_set_digest
+        );
+        for version in &edge.stable_versions {
+            let _ = write!(out, "{version},");
+        }
+        out.push(':');
+        for field in &edge.selected_read_set.fields {
+            let _ = write!(out, "{}={};", field.path.0, field.value);
         }
         out.push('\n');
     }
@@ -3328,9 +3636,15 @@ fn widen_cert_from_witness(
     witness: &WidenWitness,
 ) -> rodin_facts::WidenCert {
     let package = witness
-        .edge_stability
+        .read_set_stability
         .first()
         .and_then(|edge| index.package(&edge.parent))
+        .or_else(|| {
+            witness
+                .edge_stability
+                .first()
+                .and_then(|edge| index.package(&edge.parent))
+        })
         .or_else(|| {
             witness
                 .point_terms
@@ -3339,14 +3653,30 @@ fn widen_cert_from_witness(
         })
         .unwrap_or(PkgIx(0));
     let checked = witness
-        .edge_stability
+        .read_set_stability
         .first()
         .map(|edge| version_set_from_points(&edge.stable_versions))
+        .or_else(|| {
+            witness
+                .edge_stability
+                .first()
+                .map(|edge| version_set_from_points(&edge.stable_versions))
+        })
         .unwrap_or_else(VersionSet::empty);
+    let evidence = if let Some(edge) = witness.read_set_stability.first() {
+        WidenEvidence::ObservedReadSet {
+            read_set_digest: edge.read_set_digest.clone(),
+            snapshot_id: edge.snapshot_id.clone(),
+        }
+    } else {
+        WidenEvidence::DeclaredStructure {
+            manifest_hash: digest_str(&canonical_widen_witness(witness)),
+        }
+    };
     rodin_facts::WidenCert {
         package,
         checked,
-        manifest_hash: digest_str(&canonical_widen_witness(witness)),
+        evidence,
     }
 }
 
@@ -3379,6 +3709,40 @@ fn verify_widen_witness(
             .iter()
             .filter(|version| {
                 index.edge_state(&edge.parent, version, &edge.dep) == edge.selected_state
+            })
+            .cloned()
+            .collect();
+        if actual != edge.stable_versions {
+            return false;
+        }
+    }
+    for edge in &witness.read_set_stability {
+        let key = EdgeKey {
+            parent: edge.parent.clone(),
+            dep: edge.dep.clone(),
+        };
+        let fields = read_set_field_kinds(&edge.selected_read_set);
+        if fields.is_empty() {
+            return false;
+        }
+        let Some(selected) = index.edge_read_set(&key, &edge.selected_version, &fields) else {
+            return false;
+        };
+        if selected.fields != edge.selected_read_set.fields
+            || digest_read_set(&selected) != edge.read_set_digest
+        {
+            return false;
+        }
+        let Some(parent) = index.package(&edge.parent) else {
+            return false;
+        };
+        let actual: Vec<_> = index
+            .versions(parent)
+            .iter()
+            .filter(|version| {
+                index
+                    .edge_read_set(&key, version, &fields)
+                    .is_some_and(|read_set| read_set.fields == edge.selected_read_set.fields)
             })
             .cloned()
             .collect();
@@ -3471,7 +3835,21 @@ fn build_widen_witness(
         point_terms,
         widened_terms,
         edge_stability,
+        read_set_stability: Vec::new(),
     }
+}
+
+fn build_read_set_widen_witness(
+    index: &CompiledIndex,
+    selected: &BTreeMap<PkgIx, Version>,
+    support: &BTreeSet<EdgeKey>,
+    point_region: &Region,
+    widened_region: &Region,
+    read_set_stability: Vec<ReadSetStabilityWitness>,
+) -> WidenWitness {
+    let mut witness = build_widen_witness(index, selected, support, point_region, widened_region);
+    witness.read_set_stability = read_set_stability;
+    witness
 }
 
 #[derive(Eq, PartialEq)]
@@ -3744,6 +4122,58 @@ pub struct Round3Report {
     pub pressure: Vec<ScenarioResult>,
 }
 
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct R2DemoReport {
+    pub scenario: String,
+    pub edge: String,
+    pub declared_versions_pruned: usize,
+    pub read_set_versions_pruned: usize,
+    pub declared_added_prunes: usize,
+    pub read_set_added_prunes: usize,
+    pub read_set_digest: String,
+    pub snapshot_id: String,
+    pub stable_versions: Vec<Version>,
+    pub consumed_fields: Vec<String>,
+}
+
+impl R2DemoReport {
+    #[must_use]
+    pub fn render(&self) -> String {
+        let mut out = String::new();
+        out.push_str("## Round 10 — R2 read-set stability demonstration\n\n");
+        out.push_str("Round 10 is the explicit R2 crown-jewel demonstration: the same offline sparse-index fixture is solved twice, once with declared-structure widening and once with observed read-set widening. The fixture rows live under `crates/rodin-core/fixtures/r2-sparse-index/` and are parsed with `facet-json` through the `rodin-survey` sparse-index row types, so this round never hits the network.\n\n");
+        out.push_str("| scenario | edge | declared versions pruned | read-set versions pruned | declared added prunes | read-set added prunes | read-set digest | snapshot |\n");
+        out.push_str("|---|---|---:|---:|---:|---:|---|---|\n");
+        out.push_str(&format!(
+            "| {} | {} | {} | {} | {} | {} | `{}` | `{}` |\n\n",
+            self.scenario,
+            self.edge,
+            self.declared_versions_pruned,
+            self.read_set_versions_pruned,
+            self.declared_added_prunes,
+            self.read_set_added_prunes,
+            self.read_set_digest,
+            self.snapshot_id
+        ));
+        out.push_str("Consumed read-set fields:\n\n");
+        for field in &self.consumed_fields {
+            out.push_str("- `");
+            out.push_str(field);
+            out.push_str("`\n");
+        }
+        out.push_str("\nStable versions certified by the observed read set: ");
+        for (ix, version) in self.stable_versions.iter().enumerate() {
+            if ix > 0 {
+                out.push_str(", ");
+            }
+            out.push_str(&version.to_string());
+        }
+        out.push_str(".\n\n");
+        out.push_str("The middle `demo-app` fixture row differs cosmetically in dependency feature/default-feature metadata, so the existing `EdgeSignature` declared-structure lane cannot include it. The conflict's observed version-requirement read set does not consume those cosmetic fields, so read-set stability verifies the full three-version range.\n");
+        out
+    }
+}
+
 impl Round3Report {
     #[must_use]
     pub fn render(&self) -> String {
@@ -3845,15 +4275,143 @@ impl Round3Report {
 
 pub fn append_round3_report(path: &Path) -> Result<Round3Report> {
     let report = run_round3()?;
+    let r2 = run_r2_demonstration()?;
     let existing =
         fs::read_to_string(path).wrap_err_with(|| format!("reading {}", path.display()))?;
-    let base = existing
-        .find("\n## Round 3\n")
-        .map_or(existing.as_str(), |ix| &existing[..ix])
-        .trim_end();
-    fs::write(path, format!("{base}\n\n{}", report.render()))
-        .wrap_err_with(|| format!("writing {}", path.display()))?;
+    let round3_marker = "\n## Round 3\n";
+    let Some(round3_start) = existing.find(round3_marker) else {
+        fs::write(path, format!("{}\n{}", existing.trim_end(), r2.render()))
+            .wrap_err_with(|| format!("writing {}", path.display()))?;
+        return Ok(report);
+    };
+    let round3_body_start = round3_start + 1;
+    let tail_start = existing[round3_body_start + "## Round 3\n".len()..]
+        .find("\n## Round ")
+        .map(|offset| round3_body_start + "## Round 3\n".len() + offset);
+    let base = existing[..round3_start].trim_end();
+    let tail = tail_start
+        .map(|ix| &existing[ix..])
+        .unwrap_or_default()
+        .trim_start();
+    let r2_marker = "\n## Round 10";
+    let tail_without_r2 = tail
+        .find(r2_marker)
+        .map_or(tail, |ix| tail[..ix].trim_end());
+    fs::write(
+        path,
+        format!(
+            "{base}\n\n{}\n{}\n\n{}",
+            report.render().trim_end(),
+            tail_without_r2.trim_end(),
+            r2.render()
+        ),
+    )
+    .wrap_err_with(|| format!("writing {}", path.display()))?;
     Ok(report)
+}
+
+pub fn run_r2_demonstration() -> Result<R2DemoReport> {
+    let crates = r2_demo_sparse_snapshot()?;
+    let mut index = CompiledIndex::from_sparse(&crates)?;
+    let snapshot_id = r2_demo_snapshot_id();
+    for manifest in index.manifests.values_mut() {
+        manifest.snapshot_id.clone_from(&snapshot_id);
+    }
+    let mut problem = Problem::new(vec![
+        RootReq::new("demo-app", "*"),
+        RootReq::new("demo-core", "*"),
+    ]);
+    problem.decrees.push(Decree::new("demo-core", "=1.0.2"));
+    let declared = learned_from_solve(solve_with_options(
+        &index,
+        problem.clone(),
+        SolverOptions::FULL,
+    ))?;
+    let read_set = learned_from_solve(solve_with_options(
+        &index,
+        problem,
+        SolverOptions::R2_READ_SET,
+    ))?;
+    let declared_fact = first_widened_fact(&declared)
+        .ok_or_else(|| eyre::eyre!("R2 declared run did not learn a widened fact"))?;
+    let read_set_fact = first_widened_fact(&read_set)
+        .ok_or_else(|| eyre::eyre!("R2 read-set run did not learn a widened fact"))?;
+    let witness = read_set_fact
+        .widen_witness
+        .as_ref()
+        .ok_or_else(|| eyre::eyre!("R2 read-set fact has no widen witness"))?;
+    let read_set_edge = witness
+        .read_set_stability
+        .first()
+        .ok_or_else(|| eyre::eyre!("R2 read-set witness has no observed stability"))?;
+    Ok(R2DemoReport {
+        scenario: "cosmetic-dependency-feature-diff".to_owned(),
+        edge: format!("{} -> {}", read_set_edge.parent, read_set_edge.dep),
+        declared_versions_pruned: declared_fact.widened_versions,
+        read_set_versions_pruned: read_set_fact.widened_versions,
+        declared_added_prunes: declared_fact
+            .widened_versions
+            .saturating_sub(declared_fact.point_versions),
+        read_set_added_prunes: read_set_fact
+            .widened_versions
+            .saturating_sub(read_set_fact.point_versions),
+        read_set_digest: read_set_edge.read_set_digest.clone(),
+        snapshot_id: read_set_edge.snapshot_id.clone(),
+        stable_versions: read_set_edge.stable_versions.clone(),
+        consumed_fields: read_set_edge
+            .selected_read_set
+            .fields
+            .iter()
+            .map(|field| field.path.0.clone())
+            .collect(),
+    })
+}
+
+fn first_widened_fact(learned: &[LearnedNoGood]) -> Option<&LearnedNoGood> {
+    learned
+        .iter()
+        .find(|fact| fact.active && fact.widened_versions > fact.point_versions)
+}
+
+fn learned_from_solve(
+    result: std::result::Result<SolveResult, Box<SolveError>>,
+) -> Result<Vec<LearnedNoGood>> {
+    match result {
+        Ok(result) => Ok(result.learned),
+        Err(err) => match *err {
+            SolveError::NoSolution { learned, .. } => Ok(learned),
+        },
+    }
+}
+
+fn r2_demo_sparse_snapshot() -> Result<BTreeMap<String, rodin_survey::CrateData>> {
+    let mut crates = BTreeMap::new();
+    for (name, content) in [
+        (
+            "demo-app",
+            include_str!("../fixtures/r2-sparse-index/demo-app.jsonl"),
+        ),
+        (
+            "demo-core",
+            include_str!("../fixtures/r2-sparse-index/demo-core.jsonl"),
+        ),
+    ] {
+        crates.insert(
+            name.to_owned(),
+            rodin_survey::CrateData {
+                name: name.to_owned(),
+                entries: rodin_survey::parse_entries(content, name)?,
+            },
+        );
+    }
+    Ok(crates)
+}
+
+fn r2_demo_snapshot_id() -> String {
+    let mut content = String::new();
+    content.push_str(include_str!("../fixtures/r2-sparse-index/demo-app.jsonl"));
+    content.push_str(include_str!("../fixtures/r2-sparse-index/demo-core.jsonl"));
+    format!("r2-fixture:{}", digest_str(&content))
 }
 
 pub fn run_round3() -> Result<Round3Report> {
@@ -5526,6 +6084,81 @@ mod tests {
         assert!(widened.versions[&x].contains(&rung(1)));
         assert!(widened.versions[&x].contains(&rung(2)));
         assert!(!widened.versions[&x].contains(&rung(3)));
+        Ok(())
+    }
+
+    #[test]
+    fn r2_read_set_stability_beats_declared_structure_on_cosmetic_fixture() -> Result<()> {
+        let report = run_r2_demonstration()?;
+
+        assert_eq!(report.edge, "demo-app@1 -> demo-core@1");
+        assert_eq!(report.declared_versions_pruned, 2);
+        assert_eq!(report.read_set_versions_pruned, 3);
+        assert_eq!(report.declared_added_prunes, 1);
+        assert_eq!(report.read_set_added_prunes, 2);
+        assert_eq!(
+            report.stable_versions,
+            vec![v(1, 0, 0), v(1, 0, 1), v(1, 0, 2)]
+        );
+        assert!(
+            report
+                .consumed_fields
+                .iter()
+                .any(|field| field == "deps[demo-core].req")
+        );
+        assert!(
+            !report
+                .consumed_fields
+                .iter()
+                .any(|field| field.contains("features"))
+        );
+        Ok(())
+    }
+
+    #[test]
+    fn observed_read_set_widen_certificate_replays() -> Result<()> {
+        let crates = r2_demo_sparse_snapshot()?;
+        let index = CompiledIndex::from_sparse(&crates)?;
+        let mut problem = Problem::new(vec![
+            RootReq::new("demo-app", "*"),
+            RootReq::new("demo-core", "*"),
+        ]);
+        problem.decrees.push(Decree::new("demo-core", "=1.0.2"));
+        let (learned, derivations) =
+            match solve_with_options(&index, problem, SolverOptions::R2_READ_SET) {
+                Ok(result) => (result.learned, result.derivations),
+                Err(err) => match *err {
+                    SolveError::NoSolution {
+                        learned,
+                        derivations,
+                        ..
+                    } => (learned, derivations),
+                },
+            };
+        let fact = first_widened_fact(&learned).expect("widened R2 fact");
+        let read_set_witness = fact
+            .widen_witness
+            .as_ref()
+            .expect("widen witness")
+            .read_set_stability
+            .first()
+            .expect("read-set witness");
+        assert_eq!(read_set_witness.stable_versions.len(), 3);
+        let Some(Derivation {
+            rule: RuleKind::Widen { certificate },
+            ..
+        }) = derivations.get(fact.derivation)
+        else {
+            panic!("widen fact must point at a widen derivation");
+        };
+        assert!(matches!(
+            &certificate.evidence,
+            WidenEvidence::ObservedReadSet { .. }
+        ));
+
+        let bundle = warm_bundle_from_learned(&index, &learned, &derivations)?;
+        let verified = WarmFactVerifier::for_index(&index).verify(&index, &bundle);
+        assert!(verified.rejected.is_empty(), "{:?}", verified.rejected);
         Ok(())
     }
 
