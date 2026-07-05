@@ -2973,6 +2973,14 @@ fn display_req(req: &str) -> String {
     )
 }
 
+fn display_versions(versions: &[Version]) -> String {
+    versions
+        .iter()
+        .map(ToString::to_string)
+        .collect::<Vec<_>>()
+        .join(", ")
+}
+
 fn display_version_set(set: &VersionSet) -> String {
     if set.is_empty() {
         return "empty".to_owned();
@@ -4136,6 +4144,24 @@ pub struct R2DemoReport {
     pub consumed_fields: Vec<String>,
 }
 
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct R2RealReport {
+    pub scenario: String,
+    pub crate_name: String,
+    pub edge: String,
+    pub neighborhood_versions: Vec<Version>,
+    pub declared_versions_pruned: usize,
+    pub read_set_versions_pruned: usize,
+    pub declared_added_prunes: usize,
+    pub read_set_added_prunes: usize,
+    pub declared_stable_versions: Vec<Version>,
+    pub read_set_stable_versions: Vec<Version>,
+    pub read_set_digest: String,
+    pub snapshot_id: String,
+    pub consumed_fields: Vec<String>,
+    pub cosmetic_fields: Vec<String>,
+}
+
 impl R2DemoReport {
     #[must_use]
     pub fn render(&self) -> String {
@@ -4170,6 +4196,62 @@ impl R2DemoReport {
         }
         out.push_str(".\n\n");
         out.push_str("The middle `demo-app` fixture row differs cosmetically in dependency feature/default-feature metadata, so the existing `EdgeSignature` declared-structure lane cannot include it. The conflict's observed version-requirement read set does not consume those cosmetic fields, so read-set stability verifies the full three-version range.\n");
+        out
+    }
+}
+
+impl R2RealReport {
+    #[must_use]
+    pub fn render(&self, synthetic: &R2DemoReport) -> String {
+        let mut out = String::new();
+        out.push_str("## Round 11 — Real crates.io neighborhood R2 demonstration\n\n");
+        out.push_str("Round 11 runs the same declared-structure versus observed-read-set widening comparison on a committed real sparse-index snapshot. The fixture rows live under `crates/rodin-core/fixtures/r2-real-sparse-index/`; tests and report generation parse those rows offline with the `rodin-survey` sparse-index row types and do not hit the network.\n\n");
+        out.push_str("| source | scenario | neighborhood versions | declared versions pruned | read-set versions pruned | declared added prunes | read-set added prunes |\n");
+        out.push_str("|---|---|---:|---:|---:|---:|---:|\n");
+        out.push_str(&format!(
+            "| synthetic Round 10 | {} | {} | {} | {} | {} | {} |\n",
+            synthetic.scenario,
+            synthetic.stable_versions.len(),
+            synthetic.declared_versions_pruned,
+            synthetic.read_set_versions_pruned,
+            synthetic.declared_added_prunes,
+            synthetic.read_set_added_prunes
+        ));
+        out.push_str(&format!(
+            "| real Round 11 | {} | {} | {} | {} | {} | {} |\n\n",
+            self.scenario,
+            self.neighborhood_versions.len(),
+            self.declared_versions_pruned,
+            self.read_set_versions_pruned,
+            self.declared_added_prunes,
+            self.read_set_added_prunes
+        ));
+        out.push_str(&format!(
+            "Chosen neighborhood: `{}` versions {}. Edge: `{}`. Snapshot: `{}`. Read-set digest: `{}`.\n\n",
+            self.crate_name,
+            display_versions(&self.neighborhood_versions),
+            self.edge,
+            self.snapshot_id,
+            self.read_set_digest
+        ));
+        out.push_str("Consumed read-set fields:\n\n");
+        for field in &self.consumed_fields {
+            out.push_str("- `");
+            out.push_str(field);
+            out.push_str("`\n");
+        }
+        out.push_str("\nCosmetic fields that differed while the consumed set held:\n\n");
+        for field in &self.cosmetic_fields {
+            out.push_str("- ");
+            out.push_str(field);
+            out.push('\n');
+        }
+        out.push_str("\nDeclared-structure stable versions: ");
+        out.push_str(&display_versions(&self.declared_stable_versions));
+        out.push_str(".\n\nObserved-read-set stable versions: ");
+        out.push_str(&display_versions(&self.read_set_stable_versions));
+        out.push_str(".\n\n");
+        out.push_str("The real-data gap is smaller than an idealized all-cosmetic patch run but still fires on committed crates.io rows: declared `EdgeSignature` equality stops at the target-cfg split, while the conflict's observed read set only consumes `actual`, `kind`, `optional`, and `req`.\n");
         out
     }
 }
@@ -4276,11 +4358,13 @@ impl Round3Report {
 pub fn append_round3_report(path: &Path) -> Result<Round3Report> {
     let report = run_round3()?;
     let r2 = run_r2_demonstration()?;
+    let r2_real = run_r2_real_demonstration()?;
+    let r2_reports = format!("{}\n\n{}", r2.render().trim_end(), r2_real.render(&r2));
     let existing =
         fs::read_to_string(path).wrap_err_with(|| format!("reading {}", path.display()))?;
     let round3_marker = "\n## Round 3\n";
     let Some(round3_start) = existing.find(round3_marker) else {
-        fs::write(path, format!("{}\n{}", existing.trim_end(), r2.render()))
+        fs::write(path, format!("{}\n{}", existing.trim_end(), r2_reports))
             .wrap_err_with(|| format!("writing {}", path.display()))?;
         return Ok(report);
     };
@@ -4303,7 +4387,7 @@ pub fn append_round3_report(path: &Path) -> Result<Round3Report> {
             "{base}\n\n{}\n{}\n\n{}",
             report.render().trim_end(),
             tail_without_r2.trim_end(),
-            r2.render()
+            r2_reports
         ),
     )
     .wrap_err_with(|| format!("writing {}", path.display()))?;
@@ -4367,6 +4451,87 @@ pub fn run_r2_demonstration() -> Result<R2DemoReport> {
     })
 }
 
+pub fn run_r2_real_demonstration() -> Result<R2RealReport> {
+    let crates = r2_real_sparse_snapshot()?;
+    let mut index = CompiledIndex::from_sparse(&crates)?;
+    let snapshot_id = r2_real_snapshot_id();
+    for manifest in index.manifests.values_mut() {
+        manifest.snapshot_id.clone_from(&snapshot_id);
+    }
+    let mut problem = Problem::new(vec![
+        RootReq::new("reqwest", ">=0.13.0, <0.14.0"),
+        RootReq::new("hyper", "*"),
+    ]);
+    problem.decrees.push(Decree::new("hyper", "=1.0.0"));
+
+    let declared = learned_from_solve(solve_with_options(
+        &index,
+        problem.clone(),
+        SolverOptions::FULL,
+    ))?;
+    let read_set = learned_from_solve(solve_with_options(
+        &index,
+        problem,
+        SolverOptions::R2_READ_SET,
+    ))?;
+    let declared_fact = first_widened_fact(&declared)
+        .ok_or_else(|| eyre::eyre!("R2 real declared run did not learn a widened fact"))?;
+    let read_set_fact = first_widened_fact(&read_set)
+        .ok_or_else(|| eyre::eyre!("R2 real read-set run did not learn a widened fact"))?;
+    let declared_witness = declared_fact
+        .widen_witness
+        .as_ref()
+        .ok_or_else(|| eyre::eyre!("R2 real declared fact has no widen witness"))?;
+    let declared_edge = declared_witness
+        .edge_stability
+        .first()
+        .ok_or_else(|| eyre::eyre!("R2 real declared witness has no edge stability"))?;
+    let read_set_witness = read_set_fact
+        .widen_witness
+        .as_ref()
+        .ok_or_else(|| eyre::eyre!("R2 real read-set fact has no widen witness"))?;
+    let read_set_edge = read_set_witness
+        .read_set_stability
+        .first()
+        .ok_or_else(|| eyre::eyre!("R2 real read-set witness has no observed stability"))?;
+
+    Ok(R2RealReport {
+        scenario: "reqwest-0.13-hyper-target-cfg-diff".to_owned(),
+        crate_name: "reqwest".to_owned(),
+        edge: format!("{} -> {}", read_set_edge.parent, read_set_edge.dep),
+        neighborhood_versions: vec![
+            v(0, 13, 0),
+            v(0, 13, 1),
+            v(0, 13, 2),
+            v(0, 13, 3),
+            v(0, 13, 4),
+        ],
+        declared_versions_pruned: declared_fact.widened_versions,
+        read_set_versions_pruned: read_set_fact.widened_versions,
+        declared_added_prunes: declared_fact
+            .widened_versions
+            .saturating_sub(declared_fact.point_versions),
+        read_set_added_prunes: read_set_fact
+            .widened_versions
+            .saturating_sub(read_set_fact.point_versions),
+        declared_stable_versions: declared_edge.stable_versions.clone(),
+        read_set_stable_versions: read_set_edge.stable_versions.clone(),
+        read_set_digest: read_set_edge.read_set_digest.clone(),
+        snapshot_id: read_set_edge.snapshot_id.clone(),
+        consumed_fields: read_set_edge
+            .selected_read_set
+            .fields
+            .iter()
+            .map(|field| field.path.0.clone())
+            .collect(),
+        cosmetic_fields: vec![
+            "`deps[hyper].target`: `cfg(not(target_arch = \"wasm32\"))` on reqwest 0.13.0-0.13.2, then `cfg(not(all(target_arch = \"wasm32\", any(target_os = \"unknown\", target_os = \"none\"))))` on 0.13.3-0.13.4".to_owned(),
+            "`cksum`, `pubtime`, and `rust_version` differ between the committed sparse-index rows, but none are resolver-consumed by this conflict".to_owned(),
+            "Several unrelated target-gated dependency rows change at the same reqwest 0.13.3 boundary; the observed support edge remains `reqwest@0.13 -> hyper@1`".to_owned(),
+        ],
+    })
+}
+
 fn first_widened_fact(learned: &[LearnedNoGood]) -> Option<&LearnedNoGood> {
     learned
         .iter()
@@ -4412,6 +4577,38 @@ fn r2_demo_snapshot_id() -> String {
     content.push_str(include_str!("../fixtures/r2-sparse-index/demo-app.jsonl"));
     content.push_str(include_str!("../fixtures/r2-sparse-index/demo-core.jsonl"));
     format!("r2-fixture:{}", digest_str(&content))
+}
+
+fn r2_real_sparse_snapshot() -> Result<BTreeMap<String, rodin_survey::CrateData>> {
+    let mut crates = BTreeMap::new();
+    for (name, content) in [
+        (
+            "reqwest",
+            include_str!("../fixtures/r2-real-sparse-index/reqwest.jsonl"),
+        ),
+        (
+            "hyper",
+            include_str!("../fixtures/r2-real-sparse-index/hyper.jsonl"),
+        ),
+    ] {
+        crates.insert(
+            name.to_owned(),
+            rodin_survey::CrateData {
+                name: name.to_owned(),
+                entries: rodin_survey::parse_entries(content, name)?,
+            },
+        );
+    }
+    Ok(crates)
+}
+
+fn r2_real_snapshot_id() -> String {
+    let mut content = String::new();
+    content.push_str(include_str!(
+        "../fixtures/r2-real-sparse-index/reqwest.jsonl"
+    ));
+    content.push_str(include_str!("../fixtures/r2-real-sparse-index/hyper.jsonl"));
+    format!("r2-real-fixture:{}", digest_str(&content))
 }
 
 pub fn run_round3() -> Result<Round3Report> {
@@ -6116,6 +6313,51 @@ mod tests {
     }
 
     #[test]
+    fn r2_read_set_stability_fires_on_real_crates_io_neighborhood() -> Result<()> {
+        let report = run_r2_real_demonstration()?;
+
+        assert_eq!(report.edge, "reqwest@0.13 -> hyper@1");
+        assert_eq!(report.neighborhood_versions.len(), 5);
+        assert_eq!(report.declared_versions_pruned, 2);
+        assert_eq!(report.read_set_versions_pruned, 5);
+        assert_eq!(report.declared_added_prunes, 1);
+        assert_eq!(report.read_set_added_prunes, 4);
+        assert_eq!(
+            report.declared_stable_versions,
+            vec![v(0, 13, 3), v(0, 13, 4)]
+        );
+        assert_eq!(
+            report.read_set_stable_versions,
+            vec![
+                v(0, 13, 0),
+                v(0, 13, 1),
+                v(0, 13, 2),
+                v(0, 13, 3),
+                v(0, 13, 4)
+            ]
+        );
+        assert!(
+            report
+                .consumed_fields
+                .iter()
+                .any(|field| field == "deps[hyper].req")
+        );
+        assert!(
+            !report
+                .consumed_fields
+                .iter()
+                .any(|field| field.ends_with(".target"))
+        );
+        assert!(
+            report
+                .cosmetic_fields
+                .iter()
+                .any(|field| field.contains("deps[hyper].target"))
+        );
+        Ok(())
+    }
+
+    #[test]
     fn observed_read_set_widen_certificate_replays() -> Result<()> {
         let crates = r2_demo_sparse_snapshot()?;
         let index = CompiledIndex::from_sparse(&crates)?;
@@ -6144,6 +6386,57 @@ mod tests {
             .first()
             .expect("read-set witness");
         assert_eq!(read_set_witness.stable_versions.len(), 3);
+        let Some(Derivation {
+            rule: RuleKind::Widen { certificate },
+            ..
+        }) = derivations.get(fact.derivation)
+        else {
+            panic!("widen fact must point at a widen derivation");
+        };
+        assert!(matches!(
+            &certificate.evidence,
+            WidenEvidence::ObservedReadSet { .. }
+        ));
+
+        let bundle = warm_bundle_from_learned(&index, &learned, &derivations)?;
+        let verified = WarmFactVerifier::for_index(&index).verify(&index, &bundle);
+        assert!(verified.rejected.is_empty(), "{:?}", verified.rejected);
+        Ok(())
+    }
+
+    #[test]
+    fn observed_read_set_real_widen_certificate_replays() -> Result<()> {
+        let crates = r2_real_sparse_snapshot()?;
+        let mut index = CompiledIndex::from_sparse(&crates)?;
+        let snapshot_id = r2_real_snapshot_id();
+        for manifest in index.manifests.values_mut() {
+            manifest.snapshot_id.clone_from(&snapshot_id);
+        }
+        let mut problem = Problem::new(vec![
+            RootReq::new("reqwest", ">=0.13.0, <0.14.0"),
+            RootReq::new("hyper", "*"),
+        ]);
+        problem.decrees.push(Decree::new("hyper", "=1.0.0"));
+        let (learned, derivations) =
+            match solve_with_options(&index, problem, SolverOptions::R2_READ_SET) {
+                Ok(result) => (result.learned, result.derivations),
+                Err(err) => match *err {
+                    SolveError::NoSolution {
+                        learned,
+                        derivations,
+                        ..
+                    } => (learned, derivations),
+                },
+            };
+        let fact = first_widened_fact(&learned).expect("widened real R2 fact");
+        let read_set_witness = fact
+            .widen_witness
+            .as_ref()
+            .expect("widen witness")
+            .read_set_stability
+            .first()
+            .expect("read-set witness");
+        assert_eq!(read_set_witness.stable_versions.len(), 5);
         let Some(Derivation {
             rule: RuleKind::Widen { certificate },
             ..
