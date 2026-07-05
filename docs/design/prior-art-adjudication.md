@@ -435,3 +435,29 @@ Unison/BuildXL correctly, never overclaim; (2) the positioning
 narrative (three-lineages intersection) as blog material. Remaining
 reading debts (Konat, Atria) downgraded to optional-forever. No
 further scrub rounds.
+
+## CRITICAL CORRECTION — R2 as-implemented ≠ R2 as-claimed (2026-07-05)
+
+Line-by-line code confirmation (rodin-r2-demonstration branch +
+docs/design/rodin-r2-demonstration.md): the R2 mechanism that
+survived 6/6 adversarial reports as "deeply novel" — widening
+learned incompatibilities by VERIFIED READ-SET STABILITY of
+observed metadata fetches — HAS NEVER BEEN BUILT. What IS built,
+tested, and measured (7.5x-13.4x widening) is the DECLARED-STRUCTURE
+special case: widen_region (rodin-core lib.rs:1430) compares
+EdgeSignature byte-equality across neighbor versions; WidenCert
+(rodin-facts derivation.rs:11) hashes that declared witness; grep
+for ReadSet/ReadSetStability = ZERO matches; evidence rounds 4-9 are
+offline manifest/Cargo.lock reads, no fetch, no observed read-set.
+rodin.md's "read-set stability range" phrase is a METAPHOR for the
+declared per-edge check, not literal observation.
+HONESTY CONSEQUENCE: the declared-per-edge widening is real but is
+NOT the novel claim (adjacent-version collapse by declared equality
+is PubGrub-adjacent prior art). The novel R2 is DESIGNED
+(rodin-r2-demonstration.md: fetch layer with per-decision ReadSet/
+FieldPath, stability check tolerant of out-of-read-set diffs,
+observation-tied WidenCert, the killer scenario — cosmetically
+different manifests where declared-equality CAN'T widen but
+read-set-stability CAN) but UNBUILT. Until built, do NOT claim R2's
+novel mechanism as existing — claim only declared-per-edge widening,
+which is not novel. Amos decision pending: build the demonstration.
