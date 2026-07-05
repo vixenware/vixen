@@ -10,6 +10,9 @@ use eyre::{Context, Result, bail};
 use facet::Facet;
 use flate2::read::GzDecoder;
 use rodin_facts::CompatClass;
+use rodin_survey::{
+    ROUND_TARGET_TRIPLE, fixed_target_runtime_dependency_is_consumed, target_matches_round,
+};
 use semver::{Version, VersionReq};
 use tar::Archive;
 
@@ -24,8 +27,6 @@ const DEFAULT_REGISTRY_SRC: &str =
     "/Users/amos/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f";
 const DEFAULT_REGISTRY_CACHE: &str =
     "/Users/amos/.cargo/registry/cache/index.crates.io-1949cf8c6b5b557f";
-const ROUND_TARGET_TRIPLE: &str = "aarch64-apple-darwin";
-
 #[derive(Clone, Debug, Facet, PartialEq)]
 pub struct CargoEvidenceReport {
     pub workspace: String,
@@ -64,20 +65,20 @@ impl CargoProjectionMode {
         }
     }
 
-    fn includes_target(self, target: Option<&str>) -> bool {
-        match self {
-            Self::FixedTargetRuntime => target.is_none_or(target_matches_round),
-            Self::LockUnionDev => true,
-        }
-    }
-
-    fn includes_dev_dependency(
+    fn includes_dependency(
         self,
         package_name: &str,
+        kind: DepKind,
+        target: Option<&str>,
         workspace_members: &BTreeSet<String>,
     ) -> bool {
         match self {
-            Self::FixedTargetRuntime => workspace_members.contains(package_name),
+            Self::FixedTargetRuntime => fixed_target_runtime_dependency_is_consumed(
+                package_name,
+                kind.as_str(),
+                target,
+                workspace_members,
+            ),
             Self::LockUnionDev => true,
         }
     }
@@ -604,15 +605,47 @@ fn default_registry_cache_for_src(registry_src: &Path) -> PathBuf {
 }
 
 pub fn append_cargo_evidence_round(path: &Path, report: &CargoEvidenceReport) -> Result<()> {
-    let mut existing =
+    let existing =
         fs::read_to_string(path).wrap_err_with(|| format!("reading {}", path.display()))?;
-    if !existing.ends_with('\n') {
-        existing.push('\n');
-    }
-    existing.push('\n');
-    existing.push_str(&render_cargo_evidence_markdown(report));
-    fs::write(path, existing).wrap_err_with(|| format!("writing {}", path.display()))?;
+    let existing = remove_cargo_evidence_round(&existing);
+    let rendered = render_cargo_evidence_markdown(report);
+    let insert_at = existing
+        .find("\n## Round 10")
+        .map(|ix| ix + 1)
+        .unwrap_or(existing.len());
+    let before = existing[..insert_at].trim_end();
+    let after = existing[insert_at..].trim_start();
+    let updated = if after.is_empty() {
+        format!("{before}\n\n{}", rendered.trim_end())
+    } else {
+        format!("{before}\n\n{}\n\n{after}", rendered.trim_end())
+    };
+    fs::write(path, updated).wrap_err_with(|| format!("writing {}", path.display()))?;
     Ok(())
+}
+
+fn remove_cargo_evidence_round(existing: &str) -> String {
+    let Some(start) = existing
+        .starts_with("## Round 9:")
+        .then_some(0)
+        .or_else(|| existing.find("\n## Round 9:").map(|ix| ix + 1))
+    else {
+        return existing.to_owned();
+    };
+    let after_heading = start + "## Round 9:".len();
+    let end = existing[after_heading..]
+        .find("\n## Round ")
+        .map(|ix| after_heading + ix + 1)
+        .unwrap_or(existing.len());
+    let before = existing[..start].trim_end();
+    let after = existing[end..].trim_start();
+    if before.is_empty() {
+        after.to_owned()
+    } else if after.is_empty() {
+        before.to_owned()
+    } else {
+        format!("{before}\n\n{after}")
+    }
 }
 
 pub fn run_facet_cc_evidence() -> Result<CargoEvidenceReport> {
@@ -1277,24 +1310,28 @@ impl ManifestDepBuilder<'_, '_> {
             });
             return;
         }
-        if !self.model.projection.includes_target(dep.target.as_deref()) {
-            self.gaps.push(CargoExtractionGap {
-                kind: CargoExtractionGapKind::TargetConditionalDependency,
-                package: self.package_version(),
-                detail: format!(
-                    "{} gated by {}",
-                    dep.actual,
-                    dep.target.as_deref().unwrap_or("<none>")
-                ),
-            });
-            return;
-        }
-        if dep.kind == DepKind::Dev
-            && !self
-                .model
-                .projection
-                .includes_dev_dependency(self.package_name, self.model.workspace_members)
-        {
+        if !self.model.projection.includes_dependency(
+            self.package_name,
+            dep.kind,
+            dep.target.as_deref(),
+            self.model.workspace_members,
+        ) {
+            if dep
+                .target
+                .as_deref()
+                .is_some_and(|target| !target_matches_round(target))
+            {
+                self.gaps.push(CargoExtractionGap {
+                    kind: CargoExtractionGapKind::TargetConditionalDependency,
+                    package: self.package_version(),
+                    detail: format!(
+                        "{} gated by {}",
+                        dep.actual,
+                        dep.target.as_deref().unwrap_or("<none>")
+                    ),
+                });
+                return;
+            }
             self.gaps.push(CargoExtractionGap {
                 kind: CargoExtractionGapKind::DevDependency,
                 package: self.package_version(),
@@ -1961,97 +1998,6 @@ fn target_expr_from_header(header: &str) -> Option<String> {
         .trim_matches('\'')
         .to_owned();
     (!expr.is_empty()).then_some(expr)
-}
-
-fn target_matches_round(expr: &str) -> bool {
-    let expr = expr.trim().trim_matches('"').trim_matches('\'');
-    if expr == ROUND_TARGET_TRIPLE {
-        return true;
-    }
-    if let Some(cfg) = expr
-        .strip_prefix("cfg(")
-        .and_then(|text| text.strip_suffix(')'))
-    {
-        return eval_cfg_expr(cfg);
-    }
-    false
-}
-
-fn eval_cfg_expr(expr: &str) -> bool {
-    let expr = expr.trim();
-    if let Some(inner) = expr
-        .strip_prefix("all(")
-        .and_then(|text| text.strip_suffix(')'))
-    {
-        return split_cfg_args(inner).iter().all(|arg| eval_cfg_expr(arg));
-    }
-    if let Some(inner) = expr
-        .strip_prefix("any(")
-        .and_then(|text| text.strip_suffix(')'))
-    {
-        return split_cfg_args(inner).iter().any(|arg| eval_cfg_expr(arg));
-    }
-    if let Some(inner) = expr
-        .strip_prefix("not(")
-        .and_then(|text| text.strip_suffix(')'))
-    {
-        return !eval_cfg_expr(inner);
-    }
-    if expr == "unix" {
-        return true;
-    }
-    if expr == "windows" {
-        return false;
-    }
-    if let Some((key, value)) = expr.split_once('=') {
-        let key = key.trim();
-        let value = value.trim().trim_matches('"').trim_matches('\'');
-        return match key {
-            "target_arch" => value == "aarch64",
-            "target_endian" => value == "little",
-            "target_env" => value.is_empty(),
-            "target_family" => value == "unix",
-            "target_os" => value == "macos",
-            "target_pointer_width" => value == "64",
-            "target_vendor" => value == "apple",
-            _ => false,
-        };
-    }
-    false
-}
-
-fn split_cfg_args(inner: &str) -> Vec<String> {
-    let mut args = Vec::new();
-    let mut current = String::new();
-    let mut depth = 0usize;
-    let mut in_string = false;
-    for ch in inner.chars() {
-        match ch {
-            '"' | '\'' => {
-                in_string = !in_string;
-                current.push(ch);
-            }
-            '(' if !in_string => {
-                depth += 1;
-                current.push(ch);
-            }
-            ')' if !in_string => {
-                depth = depth.saturating_sub(1);
-                current.push(ch);
-            }
-            ',' if !in_string && depth == 0 => {
-                if !current.trim().is_empty() {
-                    args.push(current.trim().to_owned());
-                }
-                current.clear();
-            }
-            _ => current.push(ch),
-        }
-    }
-    if !current.trim().is_empty() {
-        args.push(current.trim().to_owned());
-    }
-    args
 }
 
 fn dependency_section(header: &str) -> Option<ManifestSection> {

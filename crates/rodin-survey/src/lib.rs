@@ -1,3 +1,4 @@
+use std::collections::BTreeSet;
 use std::collections::{BTreeMap, VecDeque};
 use std::fs;
 use std::path::{Path, PathBuf};
@@ -11,6 +12,7 @@ pub const INDEX_BASE: &str = "https://index.crates.io";
 pub const USER_AGENT: &str = "rodin-survey/0.1.0 (https://github.com/bearcove/vx)";
 pub const CLOSURE_CAP: usize = 400;
 pub const SEEDS: &[&str] = &["axum", "tokio", "serde", "clap", "reqwest", "syn", "rand"];
+pub const ROUND_TARGET_TRIPLE: &str = "aarch64-apple-darwin";
 
 #[derive(Clone, Debug, Eq, Facet, PartialEq)]
 pub struct IndexDependency {
@@ -250,6 +252,111 @@ pub fn sorted_non_yanked_versions(crate_data: &CrateData) -> Result<Vec<Version>
         .map(|entries| entries.into_iter().map(|(version, _)| version).collect())
 }
 
+#[must_use]
+pub fn fixed_target_runtime_dependency_is_consumed(
+    package_name: &str,
+    kind: &str,
+    target: Option<&str>,
+    workspace_members: &BTreeSet<String>,
+) -> bool {
+    if kind == "dev" && !workspace_members.contains(package_name) {
+        return false;
+    }
+    target.is_none_or(target_matches_round)
+}
+
+#[must_use]
+pub fn target_matches_round(expr: &str) -> bool {
+    let expr = expr.trim().trim_matches('"').trim_matches('\'');
+    if expr == ROUND_TARGET_TRIPLE {
+        return true;
+    }
+    if let Some(cfg) = expr
+        .strip_prefix("cfg(")
+        .and_then(|text| text.strip_suffix(')'))
+    {
+        return eval_cfg_expr(cfg);
+    }
+    false
+}
+
+fn eval_cfg_expr(expr: &str) -> bool {
+    let expr = expr.trim();
+    if let Some(inner) = expr
+        .strip_prefix("all(")
+        .and_then(|text| text.strip_suffix(')'))
+    {
+        return split_cfg_args(inner).iter().all(|arg| eval_cfg_expr(arg));
+    }
+    if let Some(inner) = expr
+        .strip_prefix("any(")
+        .and_then(|text| text.strip_suffix(')'))
+    {
+        return split_cfg_args(inner).iter().any(|arg| eval_cfg_expr(arg));
+    }
+    if let Some(inner) = expr
+        .strip_prefix("not(")
+        .and_then(|text| text.strip_suffix(')'))
+    {
+        return !eval_cfg_expr(inner);
+    }
+    if expr == "unix" {
+        return true;
+    }
+    if expr == "windows" {
+        return false;
+    }
+    if let Some((key, value)) = expr.split_once('=') {
+        let key = key.trim();
+        let value = value.trim().trim_matches('"').trim_matches('\'');
+        return match key {
+            "target_arch" => value == "aarch64",
+            "target_endian" => value == "little",
+            "target_env" => value.is_empty(),
+            "target_family" => value == "unix",
+            "target_os" => value == "macos",
+            "target_pointer_width" => value == "64",
+            "target_vendor" => value == "apple",
+            _ => false,
+        };
+    }
+    false
+}
+
+fn split_cfg_args(inner: &str) -> Vec<String> {
+    let mut args = Vec::new();
+    let mut current = String::new();
+    let mut depth = 0usize;
+    let mut in_string = false;
+    for ch in inner.chars() {
+        match ch {
+            '"' | '\'' => {
+                in_string = !in_string;
+                current.push(ch);
+            }
+            '(' if !in_string => {
+                depth += 1;
+                current.push(ch);
+            }
+            ')' if !in_string => {
+                depth = depth.saturating_sub(1);
+                current.push(ch);
+            }
+            ',' if !in_string && depth == 0 => {
+                if !current.trim().is_empty() {
+                    args.push(current.trim().to_owned());
+                }
+                current.clear();
+            }
+            _ => current.push(ch),
+        }
+    }
+    if !current.trim().is_empty() {
+        args.push(current.trim().to_owned());
+    }
+    args
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -267,5 +374,30 @@ mod tests {
             decoded,
             "{\"name\":\"demo\",\"vers\":\"1.0.0\"}\n{\"name\":\"demo\",\"vers\":\"1.0.1\"}"
         );
+    }
+
+    #[test]
+    fn fixed_target_projection_keeps_workspace_dev_and_drops_false_targets() {
+        let empty = BTreeSet::new();
+        let workspace = BTreeSet::from(["member".to_owned()]);
+
+        assert!(!fixed_target_runtime_dependency_is_consumed(
+            "external", "dev", None, &empty
+        ));
+        assert!(fixed_target_runtime_dependency_is_consumed(
+            "member", "dev", None, &workspace
+        ));
+        assert!(!fixed_target_runtime_dependency_is_consumed(
+            "member",
+            "normal",
+            Some("cfg(windows)"),
+            &workspace
+        ));
+        assert!(fixed_target_runtime_dependency_is_consumed(
+            "member",
+            "normal",
+            Some("cfg(unix)"),
+            &workspace
+        ));
     }
 }

@@ -995,7 +995,16 @@ impl CompiledIndex {
             for (version, entry) in rodin_survey::sorted_non_yanked_entries(crate_data)? {
                 let pkg = out.intern_package_version(&crate_data.name, &version);
                 let mut deps = Vec::new();
+                let workspace_members = BTreeSet::new();
                 for dep in &entry.deps {
+                    if !rodin_survey::fixed_target_runtime_dependency_is_consumed(
+                        &crate_data.name,
+                        &dep.kind,
+                        dep.target.as_deref(),
+                        &workspace_members,
+                    ) {
+                        continue;
+                    }
                     if dep.kind != "normal" {
                         continue;
                     }
@@ -4403,8 +4412,16 @@ pub fn append_round3_report(path: &Path) -> Result<Round3Report> {
         fs::read_to_string(path).wrap_err_with(|| format!("reading {}", path.display()))?;
     let round3_marker = "\n## Round 3\n";
     let Some(round3_start) = existing.find(round3_marker) else {
-        fs::write(path, format!("{}\n{}", existing.trim_end(), r2_reports))
-            .wrap_err_with(|| format!("writing {}", path.display()))?;
+        fs::write(
+            path,
+            format!(
+                "{}\n\n{}\n\n{}",
+                existing.trim_end(),
+                report.render().trim_end(),
+                r2_reports
+            ),
+        )
+        .wrap_err_with(|| format!("writing {}", path.display()))?;
         return Ok(report);
     };
     let round3_body_start = round3_start + 1;
@@ -4416,10 +4433,7 @@ pub fn append_round3_report(path: &Path) -> Result<Round3Report> {
         .map(|ix| &existing[ix..])
         .unwrap_or_default()
         .trim_start();
-    let r2_marker = "\n## Round 10";
-    let tail_without_r2 = tail
-        .find(r2_marker)
-        .map_or(tail, |ix| tail[..ix].trim_end());
+    let tail_without_r2 = strip_r2_demonstration_rounds(tail);
     fs::write(
         path,
         format!(
@@ -4431,6 +4445,28 @@ pub fn append_round3_report(path: &Path) -> Result<Round3Report> {
     )
     .wrap_err_with(|| format!("writing {}", path.display()))?;
     Ok(report)
+}
+
+fn strip_r2_demonstration_rounds(tail: &str) -> String {
+    let mut sections = Vec::new();
+    let mut current = String::new();
+    for line in tail.lines() {
+        if line.starts_with("## Round ") && !current.is_empty() {
+            sections.push(std::mem::take(&mut current));
+        }
+        current.push_str(line);
+        current.push('\n');
+    }
+    if !current.is_empty() {
+        sections.push(current);
+    }
+    sections
+        .into_iter()
+        .filter(|section| {
+            !section.starts_with("## Round 10") && !section.starts_with("## Round 11")
+        })
+        .collect::<Vec<_>>()
+        .join("\n")
 }
 
 pub fn run_r2_demonstration() -> Result<R2DemoReport> {

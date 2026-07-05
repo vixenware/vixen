@@ -5,12 +5,12 @@ use std::path::Path;
 
 use eyre::{Context, Result};
 use rodin_survey::{
-    CrateData, IndexDependency, IndexEntry, index_path_for, parse_entries, read_cached_index_file,
-    sorted_non_yanked_entries, workspace_cache_dir,
+    CrateData, IndexDependency, IndexEntry, actual_dep_name,
+    fixed_target_runtime_dependency_is_consumed, index_path_for, parse_entries,
+    read_cached_index_file, sorted_non_yanked_entries, target_matches_round, workspace_cache_dir,
 };
 use semver::Version;
 
-const ROUND_TARGET_TRIPLE: &str = "aarch64-apple-darwin";
 const INVESTIGATED: &[&str] = &[
     "async-graphql",
     "clap",
@@ -251,11 +251,18 @@ fn declared_signature(entry: &IndexEntry) -> DeclaredSignature {
 }
 
 fn runtime_signature(entry: &IndexEntry) -> RuntimeSignature {
+    let workspace_members = BTreeSet::new();
     let mut deps = entry
         .deps
         .iter()
-        .filter(|dep| dep.kind != "dev")
-        .filter(|dep| dep.target.as_deref().is_none_or(target_matches_round))
+        .filter(|dep| {
+            fixed_target_runtime_dependency_is_consumed(
+                &entry.name,
+                &dep.kind,
+                dep.target.as_deref(),
+                &workspace_members,
+            )
+        })
         .map(|dep| {
             let mut features = dep.features.clone();
             features.sort();
@@ -278,11 +285,18 @@ fn runtime_signature(entry: &IndexEntry) -> RuntimeSignature {
 }
 
 fn edge_read_signature(entry: &IndexEntry) -> EdgeReadSignature {
+    let workspace_members = BTreeSet::new();
     let mut deps = entry
         .deps
         .iter()
-        .filter(|dep| dep.kind != "dev")
-        .filter(|dep| dep.target.as_deref().is_none_or(target_matches_round))
+        .filter(|dep| {
+            fixed_target_runtime_dependency_is_consumed(
+                &entry.name,
+                &dep.kind,
+                dep.target.as_deref(),
+                &workspace_members,
+            )
+        })
         .map(|dep| EdgeReadDep {
             actual: actual_dep_name(dep),
             req: dep.req.clone(),
@@ -321,10 +335,19 @@ fn count_blocks<T: Eq>(signatures: &[T]) -> usize {
 
 fn projection_artifact_fields(left: &IndexEntry, right: &IndexEntry) -> Vec<String> {
     let mut fields = BTreeSet::new();
+    let workspace_members = BTreeSet::new();
     for dep in removed_deps(left, right)
         .into_iter()
         .chain(removed_deps(right, left))
     {
+        if fixed_target_runtime_dependency_is_consumed(
+            &left.name,
+            &dep.kind,
+            dep.target.as_deref(),
+            &workspace_members,
+        ) {
+            continue;
+        }
         if dep.kind == "dev" {
             fields.insert(format!("deps[{}, kind=dev]", actual_dep_name(dep)));
         } else if dep
@@ -455,13 +478,6 @@ fn sorted_values(values: &[String]) -> Vec<String> {
     out
 }
 
-fn actual_dep_name(dep: &IndexDependency) -> String {
-    dep.package
-        .as_ref()
-        .unwrap_or(&dep.name)
-        .to_ascii_lowercase()
-}
-
 fn rule_for(classification: BreakClass) -> &'static str {
     match classification {
         BreakClass::Real => "resolver-relevant runtime metadata changed",
@@ -472,97 +488,6 @@ fn rule_for(classification: BreakClass) -> &'static str {
             "observed edge read-set would not consume this field; not a global normalization"
         }
     }
-}
-
-fn target_matches_round(expr: &str) -> bool {
-    let expr = expr.trim().trim_matches('"').trim_matches('\'');
-    if expr == ROUND_TARGET_TRIPLE {
-        return true;
-    }
-    if let Some(cfg) = expr
-        .strip_prefix("cfg(")
-        .and_then(|text| text.strip_suffix(')'))
-    {
-        return eval_cfg_expr(cfg);
-    }
-    false
-}
-
-fn eval_cfg_expr(expr: &str) -> bool {
-    let expr = expr.trim();
-    if let Some(inner) = expr
-        .strip_prefix("all(")
-        .and_then(|text| text.strip_suffix(')'))
-    {
-        return split_cfg_args(inner).iter().all(|arg| eval_cfg_expr(arg));
-    }
-    if let Some(inner) = expr
-        .strip_prefix("any(")
-        .and_then(|text| text.strip_suffix(')'))
-    {
-        return split_cfg_args(inner).iter().any(|arg| eval_cfg_expr(arg));
-    }
-    if let Some(inner) = expr
-        .strip_prefix("not(")
-        .and_then(|text| text.strip_suffix(')'))
-    {
-        return !eval_cfg_expr(inner);
-    }
-    if expr == "unix" {
-        return true;
-    }
-    if expr == "windows" {
-        return false;
-    }
-    if let Some((key, value)) = expr.split_once('=') {
-        let key = key.trim();
-        let value = value.trim().trim_matches('"').trim_matches('\'');
-        return match key {
-            "target_arch" => value == "aarch64",
-            "target_endian" => value == "little",
-            "target_env" => value.is_empty(),
-            "target_family" => value == "unix",
-            "target_os" => value == "macos",
-            "target_pointer_width" => value == "64",
-            "target_vendor" => value == "apple",
-            _ => false,
-        };
-    }
-    false
-}
-
-fn split_cfg_args(inner: &str) -> Vec<String> {
-    let mut args = Vec::new();
-    let mut current = String::new();
-    let mut depth = 0usize;
-    let mut in_string = false;
-    for ch in inner.chars() {
-        match ch {
-            '"' | '\'' => {
-                in_string = !in_string;
-                current.push(ch);
-            }
-            '(' if !in_string => {
-                depth += 1;
-                current.push(ch);
-            }
-            ')' if !in_string => {
-                depth = depth.saturating_sub(1);
-                current.push(ch);
-            }
-            ',' if !in_string && depth == 0 => {
-                if !current.trim().is_empty() {
-                    args.push(current.trim().to_owned());
-                }
-                current.clear();
-            }
-            _ => current.push(ch),
-        }
-    }
-    if !current.trim().is_empty() {
-        args.push(current.trim().to_owned());
-    }
-    args
 }
 
 fn render_report(ledgers: &[CrateLedger]) -> String {

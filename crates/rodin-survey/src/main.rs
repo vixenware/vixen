@@ -461,10 +461,19 @@ fn metadata_signature_with_skips(
     entry: &IndexEntry,
     skipped_edges: &BTreeSet<EdgeKey>,
 ) -> MetadataSignature {
+    let workspace_members = BTreeSet::new();
     let mut deps: Vec<_> = entry
         .deps
         .iter()
         .filter_map(|dep| {
+            if !rodin_survey::fixed_target_runtime_dependency_is_consumed(
+                parent,
+                &dep.kind,
+                dep.target.as_deref(),
+                &workspace_members,
+            ) {
+                return None;
+            }
             let edge = EdgeKey {
                 parent: parent.to_ascii_lowercase(),
                 dep: actual_dep_name(dep),
@@ -607,7 +616,16 @@ fn sorted_non_yanked_entries(crate_data: &CrateData) -> Result<Vec<(Version, &In
 
 fn edge_states(entry: &IndexEntry) -> BTreeMap<String, Vec<EdgeSignature>> {
     let mut states: BTreeMap<String, Vec<EdgeSignature>> = BTreeMap::new();
+    let workspace_members = BTreeSet::new();
     for dep in &entry.deps {
+        if !rodin_survey::fixed_target_runtime_dependency_is_consumed(
+            &entry.name,
+            &dep.kind,
+            dep.target.as_deref(),
+            &workspace_members,
+        ) {
+            continue;
+        }
         states
             .entry(actual_dep_name(dep))
             .or_default()
@@ -1093,8 +1111,11 @@ fn render_report(
 
     report.push_str("## Method\n\n");
     report.push_str("- Walk: start from the seed crate names, fetch each sparse-index file, parse every JSONL version row with `facet-json`, enqueue dependency names from `package` when present or `name` otherwise, and stop at the closure cap.\n");
-    report.push_str("- Measurement A: ignore yanked versions for block construction, sort remaining versions by semver order, normalize each row to resolution metadata (`deps` by name/req/features/optional/default_features/target/kind plus merged `features`/`features2` maps), and count contiguous runs of identical metadata. Yanked counts are reported separately.\n");
+    report.push_str("- Measurement A: ignore yanked versions for block construction, sort remaining versions by semver order, normalize each row to fixed-target runtime resolution metadata (`deps` by name/req/features/optional/default_features/target/kind plus merged `features`/`features2` maps, after dropping non-workspace dev dependencies and target predicates that are false for `aarch64-apple-darwin`), and count contiguous runs of identical metadata. Optional dependencies stay in the signature because they are guarded implications, not absent edges. Yanked counts are reported separately.\n");
     report.push_str("- Measurement B: choose the 20 closure members with the most non-yanked versions, collect real requirement strings targeting those packages from the fetched index rows, convert them through `rodin_facts::VersionSet::from_req`, and run 100 chained `Region::subtract` exclusions from a full version box plus a companion `Region::intersect` chain.\n\n");
+
+    report.push_str("## Projection correction note\n\n");
+    report.push_str("Projection corrected: fixed-target block and widening normalization now drop non-workspace dev dependencies and target-false dependencies, while optional dependencies remain because they are guarded implications rather than absent edges. This refines consumed metadata only; the Round 9 FreshLock selection rows stayed pinned at fixed-target 795/892 and lock-union 853/892 in this regeneration. The six-crate forensics table records the block improvement directly, including serde 159 -> 119 and the investigated aggregate 1146 -> 1080.\n\n");
 
     report.push_str("## Aggregate\n\n");
     report.push_str("| metric | value |\n|---|---:|\n");
@@ -1237,16 +1258,29 @@ fn update_report(
     let existing = if path.exists() {
         fs::read_to_string(path).wrap_err_with(|| format!("reading {}", path.display()))?
     } else {
-        let stress = stress_regions(crates)?;
-        render_report(crates, blocks, aggregate, &stress)
+        String::new()
     };
-    let base = existing
-        .find("\n## Round 2\n")
-        .map_or(existing.as_str(), |ix| &existing[..ix])
-        .trim_end();
+    let stress = stress_regions(crates)?;
+    let base = render_report(crates, blocks, aggregate, &stress);
     let round2 = render_round2(aggregate, round2);
-    fs::write(path, format!("{base}\n\n{round2}"))
-        .wrap_err_with(|| format!("writing {}", path.display()))
+    let tail = post_survey_round_tail(&existing);
+    let report = if tail.is_empty() {
+        format!("{}\n\n{}", base.trim_end(), round2.trim_end())
+    } else {
+        format!("{}\n\n{}\n\n{}", base.trim_end(), round2.trim_end(), tail)
+    };
+    fs::write(path, report).wrap_err_with(|| format!("writing {}", path.display()))
+}
+
+fn post_survey_round_tail(existing: &str) -> &str {
+    (3..=99)
+        .filter_map(|round| {
+            existing
+                .find(&format!("\n## Round {round}"))
+                .map(|ix| existing[ix..].trim_start())
+        })
+        .min_by_key(|tail| existing.len() - tail.len())
+        .unwrap_or_default()
 }
 
 fn render_round2(round1: &Aggregate, round2: &Round2) -> String {
