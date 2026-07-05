@@ -651,3 +651,13 @@ in-process fake-client hang injection only; sandbox-exec denials
 are safe (error, never wedge).
 (3) DISCIPLINE: vix-synthesis.md joins the mandatory post-compaction
 reading list (its July-3 seatbelt archaeology was lost twice).
+
+**QUEUED (Amos, 2026-07-05): appex stress-testing in a VM on
+souffle.local.** A macOS guest (Virtualization.framework — tart/UTM
+class tooling) makes REAL FSKit wedge testing safe: wedged guest =
+snapshot-restore, vs unkillable host zombie. Unlocks what the
+in-process safety rule forbids: real mounts + deliberately-hung
+providers, deadline/error-reply verification under the real FSKit
+protocol, kill_fskitd escalation drills, the full
+poison→fence→sacrifice→remount sequence. The wedge oracle, caged.
+Arrange later on souffle (Mac Studio M2, the Metal/heavy-work box).
