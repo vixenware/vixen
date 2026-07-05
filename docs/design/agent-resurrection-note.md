@@ -632,3 +632,22 @@ demand graph. ProjFS note: callback-driven lazy materialization =
 a pending tree with observation FREE — Windows ships the demand
 substrate as an OS primitive. Observed read-sets = BARE MINIMUM bar
 (always were), all three platforms.
+
+**SEATBELT + FSKIT RULINGS (2026-07-05, Amos-direct):**
+(1) ALLOWANCES ARE DETERMINISM HOLES — the governing frame for all
+sandbox work: a process that can read /tmp or /var reads undeclared
+state → cache poison. Profile must be AS STRICT AS POSSIBLE: import
+system.sb for bootstrap plumbing, then CLAW BACK file grants
+(SBPL last-match-wins), trace-driven-minimal via (debug deny) logs,
+hash-pin system.sb (Apple drift → loud re-audit trigger). No /tmp,
+no /var "if we play our cards right." Lane running (37c6508a).
+(2) vx-fskit HARDENING MANDATE: customer-critical, rock-solid bar —
+cleanups/refactors/newtypes RECOMMENDED beyond the audit's F1-F5
+(ReplyGuard-style unrepresentable-stuck-states). Historical hangs
+were mostly the culled SWIFT extension; Rust one is fresh debt.
+Lane running (a54a8b38). SAFETY RULE for both: never test with
+hangable real FSKit mounts (wedge = unkillable, zombifies killers);
+in-process fake-client hang injection only; sandbox-exec denials
+are safe (error, never wedge).
+(3) DISCIPLINE: vix-synthesis.md joins the mandatory post-compaction
+reading list (its July-3 seatbelt archaeology was lost twice).
