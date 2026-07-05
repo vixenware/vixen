@@ -571,3 +571,24 @@ fresh worktree off main). MERGE-GATE LESSON (banked in behavior):
 watch/check/merge as separate red-gated steps, never &&-chained.
 INTERRUPT LESSON (Amos): interrupts = they want the floor, NEVER
 skip verification — run it after.
+
+**THE CHECKER CHECKS — v0 EXISTS, WRITTEN IN VIX (2026-07-05, PR
+#2442, verified 216/216 + corpus green + source read personally).**
+vix/checker/checker.vix: resolve_ref, type_of, function_signature —
+VIX FUNCTIONS calling ast() on vix source, returning facts; the Rust
+harness only loads+asserts. type_of is a match on AST node kind
+written in vix (a typechecker's inference step as an ordinary vix
+expression). Corpus: 16 accept function_signature + OmittedReturnType
+reject GREEN; rest pending. WARM RE-CHECK IS FREE — the checker is
+just another module on the memo path; per-definition incrementality
+(rust-analyzer's whole architecture) obtained by writing a plain
+function in a demand-engine language. GAPS FOUND (the honest,
+valuable kind — language discovering itself by describing itself):
+(1) Bool literals are expressions but not PATTERNS — match true/false
+not expressible, blocks checker branching on Bool; (2) fuller
+expr/pattern ast() traversal needed before more type_of/diagnostics
+move into vix. Both are queued language work, demand-discovered.
+LADDER STATUS: see itself (ast, done) → check itself (checker v0,
+DONE) → build itself (crate.vix, slice 2 rebasing). The chrysalis
+sentence is now literally true: unchecked code, but not for long —
+the checker that will check checker.vix is checker.vix.
