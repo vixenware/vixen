@@ -2251,6 +2251,17 @@ dependencies = [
 ]
 
 [[package]]
+name = "rodin-fixtures"
+version = "0.1.0"
+dependencies = [
+ "eyre",
+ "pretty_assertions",
+ "rodin-core",
+ "rodin-survey",
+ "semver",
+]
+
+[[package]]
 name = "rodin-survey"
 version = "0.1.0"
 dependencies = [
