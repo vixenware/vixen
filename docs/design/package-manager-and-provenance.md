@@ -69,6 +69,19 @@ Design sketch:
   signature. Authenticode and macOS codesign both solve it by excluding the signature
   region from the signed digest; ELF has no blessed convention, so we define one
   (digest = all sections except `.note.vixen.sig`), plus a detached copy in the log.
+- **Embed the request, not just the resolution** (consequence of `vx upgrade`, Amos
+  2026-07-07): the recipe carries BOTH the pinned resolved graph and the original solve
+  request (manifest constraints, features, config). Three verbs then separate cleanly:
+  - `vx rebuild binary` — replay the pinned resolution; bit-for-bit verification.
+  - `vx upgrade binary` — re-run rodin on the same request against a newer index
+    snapshot, diff resolutions, rebuild only the delta (memo: you pay for the openssl
+    wave, not the world), stamp a new recipe referencing its predecessor — artifact
+    genealogy. `vx upgrade --only <pkg>` = minimal-change re-resolution (`cargo update
+    -p` semantics, artifact-side).
+  - `vx audit <dir>` — registry annotates content hashes with CVEs; every deployed
+    binary names its items; the fleet answer is "upgrade in place," not "hunt down the
+    repos." Patching becomes an operation on artifacts you possess — the problem distro
+    package managers exist for, dissolved.
 - **vs Nix**: a Nix artifact is mute — reproduction requires the flake/derivation and the
   store; store paths are input-addressed (CA-derivations experimental for years); and the
   unit of reproduction is the coarse derivation. Here the artifact carries its own
