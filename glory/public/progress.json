@@ -1,5 +1,5 @@
 {
-  "updated": "2026-07-08T01:05:00+02:00",
+  "updated": "2026-07-08T02:05:00+02:00",
   "meta": {
     "title": "PATH TO GLORY",
     "subtitle": "vixen: from demand machine to sovereign build system",
@@ -255,16 +255,16 @@
       "short": "compose at scale",
       "lane": "cargo-model",
       "status": "active",
-      "desc": "Harness + solver fixes FOLDED (zero skew through ring 64). Now at the closure boundary: first real divergence under diagnosis (tokio 0.0.0 vs 1.52.3 — narrowing vs ordering). Perf lane sharing the hunt for the ring-145 wall.",
+      "desc": "FULL MEMBER RING DONE: 145/145 matches vs Cargo.lock, ZERO version skew, 23.1s (optimized build — the '180s wall' was mostly a debug-profile artifact; ring 64 went 20.3s→3.0s). Now: closure boundary (tokio ordering fix, hitting a Version-ordering language gap) then +direct-deps rings.",
       "deps": [
         "scale-measure",
         "cfg",
         "unit-derive"
       ],
       "evidence": [
-        "branch tier-a-scale-measurement @ 8fff80e26",
-        "TIER_A_FETCH_SPARSE=0 scripts/tier-a-scale-measurement.sh",
-        "pinned sparse snapshot fdc863bf"
+        "145/145, skew 0, 23.1s",
+        "debug→profiling: 6.8×",
+        "stax run 30: 93% demand, 7% load"
       ]
     },
     {
