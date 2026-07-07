@@ -102,6 +102,19 @@ Design sketch:
   derivation, addresses are content, and the replay is item-granular. The binary is its
   own flake.
 
+## Ambient-system policy (Amos, 2026-07-07 — DECIDED)
+
+The question "what does a recipe say when build.rs probes the ambient system (pkg-config,
+system libcurl)?" has an interim and a final answer:
+- **Interim**: builds run inside a container image pinned by exact digest, and the recipe
+  records that digest. Every ambient read resolves against an immutable filesystem, so
+  observability and reproducibility are both satisfied by the image hash. (This is a
+  content-addressed sysroot in crude form — a degenerate overlay.) Not the part we want
+  to tackle now; the image hash makes it sound in the meantime.
+- **Final**: there is no pkg-config, no ambient libcurl. **We build curl.** Native deps
+  become ordinary nodes in the graph, built from source, content-addressed like
+  everything else. The ambient world shrinks to the pinned toolchain, then to nothing.
+
 ## Trust edges (the design work Amos wants time on)
 
 Enterprises will ask; the answers should be boring and structural:
