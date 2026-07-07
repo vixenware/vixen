@@ -24,6 +24,9 @@ whole trick, and everything below falls out of it:
   [with an audit mode](/using/test-selection/) that proves skips sound.
 - **A cache hit is a proof, not a hope.** Builds run hermetically: an
   undeclared read *fails loudly* instead of silently poisoning the cache.
+- **"What's in this binary?" is a property of the binary.** Observed reads +
+  content identity make [provenance and audit](/provenance/) the build's own
+  working, not paperwork bolted on after.
 
 ## Where does it hurt?
 
@@ -31,6 +34,8 @@ whole trick, and everything below falls out of it:
 - **Slow local edit-build loop?** → [Try it on your repo](/using/quickstart/)
 - **"Will my Cargo setup even work?"** → [Compatibility](/using/compatibility/)
 - **Coming from Bazel or Buck2?** → [Why vixen?](/why/)
+- **CRA / NIS2 / supply-chain audit on your desk?** →
+  [Provenance, audit, and sovereignty](/provenance/)
 - **"Prove it."** → [The proof page](/proof/) — real numbers, real receipts,
   fixture-scale honesty included.
 
