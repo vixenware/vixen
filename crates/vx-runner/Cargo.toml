@@ -1,0 +1,22 @@
+[package]
+name = "vx-runner"
+publish = false
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+
+[dependencies]
+eyre = { workspace = true }
+tokio = { workspace = true }
+tracing = { workspace = true }
+tracing-subscriber = { workspace = true }
+vox = { workspace = true }
+vx-exec = { path = "../vx-exec" }
+vx-services = { path = "../vx-services" }
+
+[dev-dependencies]
+tempfile = { workspace = true }
+
+[lints]
+workspace = true

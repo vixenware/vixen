@@ -7,10 +7,13 @@ use std::path::{Component, Path, PathBuf};
 use std::process::Output;
 
 use vx_services::{
-    Blake3Hash, ContentHash, DiscoverProbeRequest, DiscoverResult, ExecArg, ExecMount,
-    ExecObservationScope, ExecOutcome, ExecPlan, ExecPrefixId, ExecReadObservation, ExecReadSet,
-    ExecRequest, ExecResult, ExecRole, ExecSubfileCompletion, ExecTree, ExecTreeEvent,
-    ExecTreeFinalization, NodeHash, Runner, exec_role_embedded_paths, exec_role_env_paths,
+    Blake3Hash, ByteLen, CapabilityProbeRequest, CapabilityProbeResult, ContentHash, ExecArg,
+    ExecCompletion, ExecDiagnostic, ExecError, ExecErrorKind, ExecExitCode, ExecMount,
+    ExecObservationScope, ExecOutcome, ExecPath, ExecPlan, ExecPrefixId, ExecReadObservation,
+    ExecReadSet, ExecRequest, ExecResult, ExecRole, ExecSubfileCompletion, ExecTree, ExecTreeEvent,
+    ExecTreeFinalization, NodeHash, PlatformArch, PlatformName, RUNNER_PROTOCOL_VERSION, Runner,
+    RunnerCapabilities, RunnerPlatform, RunnerProtocolVersion, RunnerTransport, SandboxCapability,
+    ToolchainCapability, ToolchainKind, exec_role_embedded_paths, exec_role_env_paths,
     exec_role_input_paths, exec_role_output_dir_paths, exec_role_output_paths,
     exec_role_search_dir_paths, exec_role_stdout_paths,
 };
@@ -38,20 +41,36 @@ impl Runner for SandboxedExecutor {
         self.exec_blocking(request)
     }
 
-    async fn discover_probe(&self, _request: DiscoverProbeRequest) -> DiscoverResult {
-        DiscoverResult {}
+    async fn capabilities(&self, _request: CapabilityProbeRequest) -> CapabilityProbeResult {
+        CapabilityProbeResult {
+            capabilities: detect_capabilities(),
+        }
     }
 }
 
-fn run_request(request: ExecRequest) -> Result<ExecResult, String> {
+fn run_request(request: ExecRequest) -> Result<ExecResult, ExecError> {
     let temp = tempfile::Builder::new()
         .prefix("vx-sandboxed-exec-")
         .tempdir()
-        .map_err(|err| format!("sandboxed exec tempdir: {err}"))?;
+        .map_err(|err| {
+            exec_error(
+                ExecErrorKind::Staging,
+                format!("sandboxed exec tempdir: {err}"),
+            )
+        })?;
     let root = temp.path();
-    fs::create_dir_all(root.join(".vx-exec-cas"))
-        .map_err(|err| format!("sandboxed exec cas dir: {err}"))?;
-    fs::create_dir_all(root.join("tmp")).map_err(|err| format!("sandboxed exec tmp dir: {err}"))?;
+    fs::create_dir_all(root.join(".vx-exec-cas")).map_err(|err| {
+        exec_error(
+            ExecErrorKind::Staging,
+            format!("sandboxed exec cas dir: {err}"),
+        )
+    })?;
+    fs::create_dir_all(root.join("tmp")).map_err(|err| {
+        exec_error(
+            ExecErrorKind::Staging,
+            format!("sandboxed exec tmp dir: {err}"),
+        )
+    })?;
     let scope_id = ExecPrefixId(
         root.file_name()
             .and_then(|name| name.to_str())
@@ -61,12 +80,12 @@ fn run_request(request: ExecRequest) -> Result<ExecResult, String> {
 
     let world = MountedWorld::new(&request.mounts);
     let mut observed = ObservedWorld::new(&world);
-    stage_declared_inputs(&request.plan, &mut observed, root)?;
-    let mut write_roots = prepare_output_dirs(&request.plan, root)?;
+    stage_declared_inputs(&request.plan, &mut observed, root).map_err(stage_error)?;
+    let mut write_roots = prepare_output_dirs(&request.plan, root).map_err(stage_error)?;
     write_roots.push(root.join("tmp"));
 
-    let env = command_env(&request.plan, root)?;
-    let (program, argv) = command_program_and_argv(&request, &env, root)?;
+    let env = command_env(&request.plan, root).map_err(stage_error)?;
+    let (program, argv) = command_program_and_argv(&request, &env, root).map_err(stage_error)?;
     let output = run_sandboxed_process(
         &program,
         &argv,
@@ -75,29 +94,33 @@ fn run_request(request: ExecRequest) -> Result<ExecResult, String> {
         root,
         &write_roots,
         &request.toolchain_roots,
-    )?;
+    )
+    .map_err(spawn_or_unsupported_error)?;
 
     let exit_code = status_code(&output);
     if !output.status.success() {
         let stderr = output.stderr;
         let stdout = output.stdout;
-        let error = format!(
-            "sandboxed exec {} exited with {}: {}",
-            program.display(),
-            exit_code,
-            String::from_utf8_lossy(&stderr)
+        let error = exec_error(
+            ExecErrorKind::ProcessExit,
+            format!(
+                "sandboxed exec {} exited with {}: {}",
+                program.display(),
+                exit_code,
+                String::from_utf8_lossy(&stderr)
+            ),
         );
         return Ok(ExecResult {
-            exit_code,
+            exit_code: ExecExitCode(exit_code),
             stdout,
             stderr,
-            outcome: None,
-            error: Some(error),
+            completion: ExecCompletion::Failed(error),
         });
     }
 
-    let harvested = harvest_outputs(&request.plan, root, &output.stdout)?;
-    verify_subfile_completions_at_exit(root, &harvested.tree, &harvested.subfiles)?;
+    let harvested = harvest_outputs(&request.plan, root, &output.stdout).map_err(harvest_error)?;
+    verify_subfile_completions_at_exit(root, &harvested.tree, &harvested.subfiles)
+        .map_err(verification_error)?;
     let tree_events = tree_events_from_subfiles(harvested.subfiles.clone());
     let outcome = ExecOutcome {
         outputs: harvested.tree,
@@ -106,22 +129,101 @@ fn run_request(request: ExecRequest) -> Result<ExecResult, String> {
         tree_events,
     };
     Ok(ExecResult {
-        exit_code,
+        exit_code: ExecExitCode(exit_code),
         stdout: output.stdout,
         stderr: output.stderr,
-        outcome: Some(outcome),
-        error: None,
+        completion: ExecCompletion::Succeeded(outcome),
     })
 }
 
-fn failed_without_process(error: String) -> ExecResult {
+fn failed_without_process(error: ExecError) -> ExecResult {
     ExecResult {
-        exit_code: -1,
+        exit_code: ExecExitCode(-1),
         stdout: Vec::new(),
         stderr: Vec::new(),
-        outcome: None,
-        error: Some(error),
+        completion: ExecCompletion::Failed(error),
     }
+}
+
+fn exec_error(kind: ExecErrorKind, diagnostic: impl Into<String>) -> ExecError {
+    ExecError {
+        kind,
+        diagnostic: ExecDiagnostic(diagnostic.into()),
+    }
+}
+
+fn stage_error(diagnostic: String) -> ExecError {
+    exec_error(ExecErrorKind::Staging, diagnostic)
+}
+
+fn harvest_error(diagnostic: String) -> ExecError {
+    exec_error(ExecErrorKind::Harvest, diagnostic)
+}
+
+fn verification_error(diagnostic: String) -> ExecError {
+    exec_error(ExecErrorKind::Verification, diagnostic)
+}
+
+fn spawn_or_unsupported_error(diagnostic: String) -> ExecError {
+    let kind = if diagnostic.contains("implemented for macOS") {
+        ExecErrorKind::UnsupportedPlatform
+    } else {
+        ExecErrorKind::Spawn
+    };
+    exec_error(kind, diagnostic)
+}
+
+fn detect_capabilities() -> RunnerCapabilities {
+    RunnerCapabilities {
+        protocol_version: RunnerProtocolVersion(RUNNER_PROTOCOL_VERSION),
+        platform: RunnerPlatform {
+            os: PlatformName(std::env::consts::OS.to_string()),
+            arch: PlatformArch(std::env::consts::ARCH.to_string()),
+        },
+        transports: vec![
+            RunnerTransport::VoxWebsocket,
+            RunnerTransport::VoxLocal,
+            RunnerTransport::VoxTcp,
+        ],
+        sandboxes: detected_sandboxes(),
+        toolchains: detected_toolchains(),
+    }
+}
+
+fn detected_sandboxes() -> Vec<SandboxCapability> {
+    let mut sandboxes = Vec::new();
+    if cfg!(target_os = "macos") && Path::new("/usr/bin/sandbox-exec").exists() {
+        sandboxes.push(SandboxCapability::Seatbelt);
+    }
+    if cfg!(target_os = "linux") {
+        sandboxes.push(SandboxCapability::Landlock);
+    }
+    sandboxes
+}
+
+fn detected_toolchains() -> Vec<ToolchainCapability> {
+    [
+        (ToolchainKind::Shell, "/bin/sh"),
+        (ToolchainKind::CCompiler, "/usr/bin/cc"),
+        (ToolchainKind::CCompiler, "/usr/bin/clang"),
+        (ToolchainKind::Rustc, "/usr/bin/rustc"),
+        (ToolchainKind::SandboxExec, "/usr/bin/sandbox-exec"),
+    ]
+    .into_iter()
+    .filter_map(|(kind, path)| {
+        let path_ref = Path::new(path);
+        if !path_ref.exists() {
+            return None;
+        }
+        Some(ToolchainCapability {
+            kind,
+            executable: ExecPath::from(path),
+            content_hash: fs::read(path_ref)
+                .ok()
+                .map(|bytes| ContentHash(Blake3Hash::from_bytes(&bytes))),
+        })
+    })
+    .collect()
 }
 
 fn stage_declared_inputs(
@@ -130,21 +232,22 @@ fn stage_declared_inputs(
     root: &Path,
 ) -> Result<(), String> {
     for ExecArg { value, role } in &plan.argv {
+        let value = value.as_str();
         match role {
             ExecRole::Executable | ExecRole::Input | ExecRole::InputFlag => {
                 for input in exec_role_input_paths(value, *role) {
-                    stage_declared_input(&input, world, root)?;
+                    stage_declared_input(input.as_str(), world, root)?;
                 }
             }
             ExecRole::SearchDir | ExecRole::SearchDirFlag => {
                 for dir in exec_role_search_dir_paths(value, *role) {
-                    let physical = physical_path(&dir, root)?;
+                    let physical = physical_path(dir.as_str(), root)?;
                     fs::create_dir_all(&physical).map_err(|err| {
                         format!("sandboxed exec create search dir `{dir}`: {err}")
                     })?;
-                    if let Some(names) = world.list(&dir) {
+                    if let Some(names) = world.list(dir.as_str()) {
                         for name in names {
-                            let logical = listed_logical_path(&dir, &name, world);
+                            let logical = listed_logical_path(dir.as_str(), &name, world);
                             if let Some(bytes) = world.peek_bytes(&logical) {
                                 stage_file(root, &logical, &bytes)?;
                             }
@@ -154,7 +257,7 @@ fn stage_declared_inputs(
             }
             ExecRole::Env => {
                 for path in exec_role_env_paths(value, *role) {
-                    stage_env_path(root, &path, world)?;
+                    stage_env_path(root, path.as_str(), world)?;
                 }
             }
             ExecRole::Output
@@ -247,8 +350,9 @@ fn mount_root(path: &str) -> Option<String> {
 fn prepare_output_dirs(plan: &ExecPlan, root: &Path) -> Result<Vec<PathBuf>, String> {
     let mut write_roots = Vec::new();
     for ExecArg { value, role } in &plan.argv {
+        let value = value.as_str();
         for output in exec_role_output_paths(value, *role) {
-            let path = physical_path(&output, root)?;
+            let path = physical_path(output.as_str(), root)?;
             if let Some(parent) = path.parent() {
                 fs::create_dir_all(parent)
                     .map_err(|err| format!("sandboxed exec create output dir `{output}`: {err}"))?;
@@ -256,7 +360,7 @@ fn prepare_output_dirs(plan: &ExecPlan, root: &Path) -> Result<Vec<PathBuf>, Str
             }
         }
         for output in exec_role_output_dir_paths(value, *role) {
-            let path = physical_path(&output, root)?;
+            let path = physical_path(output.as_str(), root)?;
             fs::create_dir_all(&path)
                 .map_err(|err| format!("sandboxed exec create output dir `{output}`: {err}"))?;
             write_roots.push(path);
@@ -278,20 +382,21 @@ fn harvest_outputs(
     let mut tree = ExecTree::default();
     let mut subfiles = Vec::new();
     for ExecArg { value, role } in &plan.argv {
+        let value = value.as_str();
         for output in exec_role_output_paths(value, *role) {
-            let path = physical_path(&output, root)?;
+            let path = physical_path(output.as_str(), root)?;
             let bytes = fs::read(&path).map_err(|err| {
                 format!("sandboxed exec output `{output}` was not produced: {err}")
             })?;
             subfiles.push(subfile_completion(output.clone(), &bytes));
-            tree.insert_bytes(output, bytes);
+            tree.insert_bytes(output.0, bytes);
         }
         for stdout_path in exec_role_stdout_paths(value, *role) {
             subfiles.push(subfile_completion(stdout_path.clone(), stdout));
-            tree.insert_bytes(stdout_path, stdout.to_vec());
+            tree.insert_bytes(stdout_path.0, stdout.to_vec());
         }
         for output_dir in exec_role_output_dir_paths(value, *role) {
-            harvest_output_dir(root, &output_dir, &mut tree, &mut subfiles)?;
+            harvest_output_dir(root, output_dir.as_str(), &mut tree, &mut subfiles)?;
         }
     }
     if tree.entries.is_empty() && tree.blobs.is_empty() {
@@ -338,7 +443,7 @@ fn harvest_output_dir(
                         path.display()
                     )
                 })?;
-                subfiles.push(subfile_completion(logical.clone(), &bytes));
+                subfiles.push(subfile_completion(ExecPath::from(logical.clone()), &bytes));
                 tree.insert_bytes(logical, bytes);
             }
         }
@@ -346,11 +451,11 @@ fn harvest_output_dir(
     Ok(())
 }
 
-fn subfile_completion(path: String, bytes: &[u8]) -> ExecSubfileCompletion {
+fn subfile_completion(path: ExecPath, bytes: &[u8]) -> ExecSubfileCompletion {
     ExecSubfileCompletion {
         path,
         content_hash: ContentHash(Blake3Hash::from_bytes(bytes)),
-        size: bytes.len() as u64,
+        size: ByteLen(bytes.len() as u64),
     }
 }
 
@@ -376,10 +481,10 @@ fn verify_subfile_completions_at_exit(
     subfiles: &[ExecSubfileCompletion],
 ) -> Result<(), String> {
     for subfile in subfiles {
-        let path = physical_path(&subfile.path, root)?;
+        let path = physical_path(subfile.path.as_str(), root)?;
         let bytes = match fs::read(&path) {
             Ok(bytes) => bytes,
-            Err(err) => outputs.bytes(&subfile.path).ok_or_else(|| {
+            Err(err) => outputs.bytes(subfile.path.as_str()).ok_or_else(|| {
                 format!(
                     "sandboxed exec completed output `{}` vanished before exit verification: {err}",
                     subfile.path
@@ -387,7 +492,7 @@ fn verify_subfile_completions_at_exit(
             })?,
         };
         let exit_hash = ContentHash(Blake3Hash::from_bytes(&bytes));
-        if exit_hash != subfile.content_hash || bytes.len() as u64 != subfile.size {
+        if exit_hash != subfile.content_hash || ByteLen(bytes.len() as u64) != subfile.size {
             return Err(format!(
                 "sandboxed exec output `{}` changed after close observation",
                 subfile.path
@@ -427,13 +532,13 @@ fn command_program_and_argv(
     env: &[(OsString, OsString)],
     root: &Path,
 ) -> Result<(PathBuf, Vec<OsString>), String> {
-    if request.program == "build_script" {
+    if request.program.as_str() == "build_script" {
         let executable = request
             .plan
             .argv
             .iter()
             .find(|arg| arg.role == ExecRole::Executable)
-            .map(|arg| physical_path(&arg.value, root))
+            .map(|arg| physical_path(arg.value.as_str(), root))
             .transpose()?
             .ok_or_else(|| "build_script command missing executable role".to_string())?;
         make_executable(&executable)?;
@@ -441,7 +546,7 @@ fn command_program_and_argv(
     }
 
     Ok((
-        resolve_program(&request.program, env)?,
+        resolve_program(request.program.as_str(), env)?,
         process_argv(&request.plan, root)?,
     ))
 }
@@ -449,8 +554,8 @@ fn command_program_and_argv(
 fn process_argv(plan: &ExecPlan, root: &Path) -> Result<Vec<OsString>, String> {
     plan.argv
         .iter()
-        .filter(|arg| !is_control_arg(&arg.value, arg.role))
-        .map(|arg| map_arg(&arg.value, arg.role, root))
+        .filter(|arg| !is_control_arg(arg.value.as_str(), arg.role))
+        .map(|arg| map_arg(arg.value.as_str(), arg.role, root))
         .collect()
 }
 
@@ -472,10 +577,10 @@ fn map_arg(arg: &str, role: ExecRole, root: &Path) -> Result<OsString, String> {
         ExecRole::InputFlag | ExecRole::OutputFlag | ExecRole::Env | ExecRole::SearchDirFlag => {
             let mut mapped = arg.to_string();
             let mut paths = exec_role_embedded_paths(arg, role);
-            paths.sort_by_key(|path| std::cmp::Reverse(path.len()));
+            paths.sort_by_key(|path| std::cmp::Reverse(path.as_str().len()));
             for path in paths {
-                let physical = physical_path(&path, root)?;
-                mapped = mapped.replace(&path, physical.to_string_lossy().as_ref());
+                let physical = physical_path(path.as_str(), root)?;
+                mapped = mapped.replace(path.as_str(), physical.to_string_lossy().as_ref());
             }
             Ok(OsString::from(mapped))
         }
@@ -490,8 +595,9 @@ fn command_env(plan: &ExecPlan, root: &Path) -> Result<Vec<(OsString, OsString)>
             continue;
         }
         let (key, value) = value
+            .as_str()
             .split_once('=')
-            .ok_or_else(|| format!("env role expected KEY=VALUE, got `{value}`"))?;
+            .ok_or_else(|| format!("env role expected KEY=VALUE, got `{}`", value.as_str()))?;
         let value = if value.starts_with('/') {
             physical_path(value, root)?.into_os_string()
         } else {
@@ -581,14 +687,14 @@ fn run_sandboxed_process(
     env: &[(OsString, OsString)],
     read_root: &Path,
     write_roots: &[PathBuf],
-    toolchain_roots: &[String],
+    toolchain_roots: &[ExecPath],
 ) -> Result<Output, String> {
     let mut plan = seatbelt_exec::SeatbeltPlan::new().read_root(read_root);
     for root in write_roots {
         plan = plan.write_root(root);
     }
     for root in toolchain_roots {
-        plan = plan.toolchain_root(root);
+        plan = plan.toolchain_root(root.as_str());
     }
     let argv: Vec<String> = argv
         .iter()
@@ -613,7 +719,7 @@ fn run_sandboxed_process(
     _env: &[(OsString, OsString)],
     _read_root: &Path,
     _write_roots: &[PathBuf],
-    _toolchain_roots: &[String],
+    _toolchain_roots: &[ExecPath],
 ) -> Result<Output, String> {
     Err("sandboxed exec is implemented for macOS seatbelt in stage 1".to_string())
 }
@@ -671,7 +777,7 @@ impl<'a> MountedWorld<'a> {
 
     fn read_bytes(&self, path: &str) -> MountLookup {
         for mount in self.mounts {
-            if let Some(rest) = strip_mount(path, &mount.at) {
+            if let Some(rest) = strip_mount(path, mount.at.as_str()) {
                 let relative = rest.trim_start_matches('/');
                 if let Some(bytes) = mount.tree.bytes(relative) {
                     return MountLookup::File(bytes);
@@ -690,14 +796,15 @@ impl<'a> MountedWorld<'a> {
 
     fn list(&self, dir: &str) -> Option<Vec<String>> {
         for mount in self.mounts {
-            let Some(rest) = strip_mount(dir, &mount.at) else {
+            let Some(rest) = strip_mount(dir, mount.at.as_str()) else {
                 continue;
             };
             let prefix = rest.trim_matches('/');
             let mut names = BTreeSet::new();
             for key in mount.tree.entries.keys().chain(mount.tree.blobs.keys()) {
+                let key = key.as_str();
                 if prefix.is_empty() {
-                    names.insert(key.clone());
+                    names.insert(key.to_string());
                 } else if let Some(child) = key
                     .strip_prefix(prefix)
                     .and_then(|child| child.strip_prefix('/'))
@@ -723,7 +830,7 @@ impl<'a> MountedWorld<'a> {
             .entries
             .keys()
             .chain(mount.tree.blobs.keys())
-            .any(|key| key.starts_with(&prefix))
+            .any(|key| key.as_str().starts_with(&prefix))
     }
 }
 
@@ -774,11 +881,11 @@ impl<'a> ObservedWorld<'a> {
         match self.world.read_bytes(path) {
             MountLookup::File(contents) => {
                 self.read_set.entries.insert(
-                    path.to_string(),
+                    ExecPath::from(path),
                     ExecReadObservation::File {
                         content_hash: ContentHash(Blake3Hash::from_bytes(&contents)),
                         blob_node: None,
-                        size: contents.len() as u64,
+                        size: ByteLen(contents.len() as u64),
                     },
                 );
                 Some(contents)
@@ -788,9 +895,9 @@ impl<'a> ObservedWorld<'a> {
                 directory_node,
             } => {
                 self.read_set.entries.insert(
-                    path.to_string(),
+                    ExecPath::from(path),
                     ExecReadObservation::LookupMiss {
-                        parent_path,
+                        parent_path: ExecPath::from(parent_path),
                         directory_node,
                     },
                 );
@@ -811,7 +918,7 @@ impl<'a> ObservedWorld<'a> {
         let got = self.world.list(dir);
         if let Some(names) = &got {
             self.read_set.entries.insert(
-                dir.to_string(),
+                ExecPath::from(dir),
                 ExecReadObservation::Directory {
                     directory_node: directory_node_hash(names),
                 },
@@ -853,8 +960,9 @@ fn directory_node_for_parent(tree: &ExecTree, relative: &str) -> NodeHash {
         format!("{}/", parent.trim_matches('/'))
     };
     for key in tree.entries.keys().chain(tree.blobs.keys()) {
+        let key = key.as_str();
         let rest = if prefix.is_empty() {
-            key.as_str()
+            key
         } else if let Some(rest) = key.strip_prefix(&prefix) {
             rest
         } else {
@@ -882,7 +990,7 @@ mod tests {
         let path = temp.path().join("m/out/artifact.txt");
         fs::create_dir_all(path.parent().unwrap()).unwrap();
         fs::write(&path, b"first").unwrap();
-        let completion = subfile_completion("/m/out/artifact.txt".to_string(), b"first");
+        let completion = subfile_completion(ExecPath::from("/m/out/artifact.txt"), b"first");
 
         fs::write(&path, b"second").unwrap();
         let error =

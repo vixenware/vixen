@@ -16,31 +16,189 @@ pub const RUNNER_PROTOCOL_VERSION: u32 = 23;
 // Generic Sandboxed Tool Execution
 // =============================================================================
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Facet)]
+#[repr(transparent)]
+pub struct RunnerProtocolVersion(pub u32);
+
+#[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Hash, Facet)]
+#[repr(transparent)]
+pub struct ExecPath(pub String);
+
+impl ExecPath {
+    pub fn as_str(&self) -> &str {
+        &self.0
+    }
+}
+
+impl From<&str> for ExecPath {
+    fn from(value: &str) -> Self {
+        Self(value.to_string())
+    }
+}
+
+impl From<String> for ExecPath {
+    fn from(value: String) -> Self {
+        Self(value)
+    }
+}
+
+impl std::borrow::Borrow<str> for ExecPath {
+    fn borrow(&self) -> &str {
+        &self.0
+    }
+}
+
+impl std::fmt::Display for ExecPath {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(&self.0)
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Hash, Facet)]
+#[repr(transparent)]
+pub struct ExecProgram(pub String);
+
+impl ExecProgram {
+    pub fn as_str(&self) -> &str {
+        &self.0
+    }
+}
+
+impl From<&str> for ExecProgram {
+    fn from(value: &str) -> Self {
+        Self(value.to_string())
+    }
+}
+
+impl From<String> for ExecProgram {
+    fn from(value: String) -> Self {
+        Self(value)
+    }
+}
+
+impl std::fmt::Display for ExecProgram {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(&self.0)
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Hash, Facet)]
+#[repr(transparent)]
+pub struct ExecArgValue(pub String);
+
+impl ExecArgValue {
+    pub fn as_str(&self) -> &str {
+        &self.0
+    }
+}
+
+impl From<&str> for ExecArgValue {
+    fn from(value: &str) -> Self {
+        Self(value.to_string())
+    }
+}
+
+impl From<String> for ExecArgValue {
+    fn from(value: String) -> Self {
+        Self(value)
+    }
+}
+
+impl std::fmt::Display for ExecArgValue {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(&self.0)
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Facet)]
+#[repr(transparent)]
+pub struct ByteLen(pub u64);
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Facet)]
+#[repr(transparent)]
+pub struct ExecExitCode(pub i32);
+
+#[derive(Debug, Clone, PartialEq, Eq, Facet)]
+#[repr(transparent)]
+pub struct ExecDiagnostic(pub String);
+
 // =============================================================================
 // Runner Service Trait
 // =============================================================================
 
-#[derive(Facet)]
-pub struct DiscoverProbeRequest {
-    // TODO: a closure?
+#[derive(Debug, Clone, PartialEq, Eq, Facet)]
+#[repr(transparent)]
+pub struct PlatformName(pub String);
+
+#[derive(Debug, Clone, PartialEq, Eq, Facet)]
+#[repr(transparent)]
+pub struct PlatformArch(pub String);
+
+#[derive(Debug, Clone, PartialEq, Eq, Facet)]
+pub struct RunnerPlatform {
+    pub os: PlatformName,
+    pub arch: PlatformArch,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Facet)]
+#[repr(u8)]
+pub enum RunnerTransport {
+    VoxWebsocket,
+    VoxLocal,
+    VoxTcp,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Facet)]
+#[repr(u8)]
+pub enum SandboxCapability {
+    Seatbelt,
+    Landlock,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Facet)]
+#[repr(u8)]
+pub enum ToolchainKind {
+    Shell,
+    CCompiler,
+    Rustc,
+    SandboxExec,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Facet)]
+pub struct ToolchainCapability {
+    pub kind: ToolchainKind,
+    pub executable: ExecPath,
+    pub content_hash: Option<ContentHash>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Facet)]
+pub struct RunnerCapabilities {
+    pub protocol_version: RunnerProtocolVersion,
+    pub platform: RunnerPlatform,
+    pub transports: Vec<RunnerTransport>,
+    pub sandboxes: Vec<SandboxCapability>,
+    pub toolchains: Vec<ToolchainCapability>,
 }
 
 #[derive(Facet)]
-pub struct DiscoverResult {
-    // TODO: design
+pub struct CapabilityProbeRequest {}
+
+#[derive(Facet)]
+pub struct CapabilityProbeResult {
+    pub capabilities: RunnerCapabilities,
 }
 
 /// A mounted or flushed tree. Text entries keep fixtures readable; blob entries
 /// carry arbitrary bytes without lossy UTF-8 conversion.
 #[derive(Debug, Clone, Default, PartialEq, Eq, Facet)]
 pub struct ExecTree {
-    pub entries: BTreeMap<String, String>,
-    pub blobs: BTreeMap<String, Vec<u8>>,
+    pub entries: BTreeMap<ExecPath, String>,
+    pub blobs: BTreeMap<ExecPath, Vec<u8>>,
 }
 
 impl ExecTree {
     pub fn insert_bytes(&mut self, path: impl Into<String>, contents: Vec<u8>) {
-        let path = path.into();
+        let path = ExecPath(path.into());
         match String::from_utf8(contents) {
             Ok(text) => {
                 self.entries.insert(path, text);
@@ -62,7 +220,7 @@ impl ExecTree {
 /// One declared mount: a tree mounted at an absolute logical path.
 #[derive(Debug, Clone, PartialEq, Eq, Facet)]
 pub struct ExecMount {
-    pub at: String,
+    pub at: ExecPath,
     pub tree: ExecTree,
 }
 
@@ -96,7 +254,7 @@ pub enum ExecRole {
 
 #[derive(Debug, Clone, PartialEq, Eq, Facet)]
 pub struct ExecArg {
-    pub value: String,
+    pub value: ExecArgValue,
     pub role: ExecRole,
 }
 
@@ -113,13 +271,13 @@ pub struct ExecPlan {
 pub struct ExecRequest {
     /// The program to execute: an absolute path, or a name resolved on PATH
     /// before entering the sandbox.
-    pub program: String,
+    pub program: ExecProgram,
     /// Role-annotated argv.
     pub plan: ExecPlan,
     /// Declared input mounts.
     pub mounts: Vec<ExecMount>,
     /// Declared roots that may be executed or read as ambient toolchain state.
-    pub toolchain_roots: Vec<String>,
+    pub toolchain_roots: Vec<ExecPath>,
 }
 
 /// One observed interaction with the mounted world.
@@ -130,13 +288,13 @@ pub enum ExecReadObservation {
     File {
         content_hash: ContentHash,
         blob_node: Option<NodeHash>,
-        size: u64,
+        size: ByteLen,
     },
     /// The path existed as a directory with this Merkle directory identity.
     Directory { directory_node: NodeHash },
     /// A lookup under an observed directory missed.
     LookupMiss {
-        parent_path: String,
+        parent_path: ExecPath,
         directory_node: NodeHash,
     },
 }
@@ -150,22 +308,22 @@ pub struct ExecPrefixId(pub String);
 #[derive(Debug, Clone, PartialEq, Eq, Facet)]
 pub struct ExecObservationScope {
     pub prefix_id: ExecPrefixId,
-    pub roots: Vec<String>,
+    pub roots: Vec<ExecPath>,
 }
 
 /// Exactly what the run was allowed and expected to read in stage 1. Stage 2
 /// replaces this declared set with VFS-observed reads.
 #[derive(Debug, Clone, Default, PartialEq, Eq, Facet)]
 pub struct ExecReadSet {
-    pub entries: BTreeMap<String, ExecReadObservation>,
+    pub entries: BTreeMap<ExecPath, ExecReadObservation>,
 }
 
 /// One output subfile that is ready for subfile-granular demand release.
 #[derive(Debug, Clone, PartialEq, Eq, Facet)]
 pub struct ExecSubfileCompletion {
-    pub path: String,
+    pub path: ExecPath,
     pub content_hash: ContentHash,
-    pub size: u64,
+    pub size: ByteLen,
 }
 
 /// Final output-tree receipt after process exit.
@@ -205,69 +363,89 @@ pub struct ExecOutcome {
     pub tree_events: Vec<ExecTreeEvent>,
 }
 
-/// The result of an execution: the process outcome plus the captured write-set.
+#[derive(Debug, Clone, PartialEq, Eq, Facet)]
+#[repr(u8)]
+pub enum ExecErrorKind {
+    Staging,
+    Spawn,
+    UnsupportedPlatform,
+    ProcessExit,
+    Harvest,
+    Verification,
+    Protocol,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Facet)]
+pub struct ExecError {
+    pub kind: ExecErrorKind,
+    pub diagnostic: ExecDiagnostic,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Facet)]
+#[repr(u8)]
+pub enum ExecCompletion {
+    Succeeded(ExecOutcome),
+    Failed(ExecError),
+}
+
+/// The result of an execution: process bytes plus a typed completion.
 #[derive(Debug, Clone, PartialEq, Eq, Facet)]
 pub struct ExecResult {
     /// Exit status — the process exit code, or `128 + signal` if killed by a signal.
-    pub exit_code: i32,
+    pub exit_code: ExecExitCode,
     /// Captured standard output.
     pub stdout: Vec<u8>,
     /// Captured standard error.
     pub stderr: Vec<u8>,
-    /// Outputs and read-set when the process ran successfully and declared
-    /// outputs were harvested.
-    pub outcome: Option<ExecOutcome>,
-    /// Machine-visible failure reason: spawn/sandbox/harvest failures, or a
-    /// nonzero process exit.
-    pub error: Option<String>,
+    pub completion: ExecCompletion,
 }
 
-pub fn exec_role_input_paths(arg: &str, role: ExecRole) -> Vec<String> {
+pub fn exec_role_input_paths(arg: &str, role: ExecRole) -> Vec<ExecPath> {
     match role {
-        ExecRole::Executable | ExecRole::Input => vec![arg.to_string()],
+        ExecRole::Executable | ExecRole::Input => vec![ExecPath::from(arg)],
         ExecRole::InputFlag => embedded_path_after_equals(arg).into_iter().collect(),
         _ => Vec::new(),
     }
 }
 
-pub fn exec_role_output_paths(arg: &str, role: ExecRole) -> Vec<String> {
+pub fn exec_role_output_paths(arg: &str, role: ExecRole) -> Vec<ExecPath> {
     match role {
-        ExecRole::Output => vec![arg.to_string()],
+        ExecRole::Output => vec![ExecPath::from(arg)],
         ExecRole::OutputFlag => rustc_emit_output_paths(arg),
         _ => Vec::new(),
     }
 }
 
-pub fn exec_role_output_dir_paths(arg: &str, role: ExecRole) -> Vec<String> {
+pub fn exec_role_output_dir_paths(arg: &str, role: ExecRole) -> Vec<ExecPath> {
     match role {
-        ExecRole::OutputDir => vec![arg.to_string()],
+        ExecRole::OutputDir => vec![ExecPath::from(arg)],
         _ => Vec::new(),
     }
 }
 
-pub fn exec_role_stdout_paths(arg: &str, role: ExecRole) -> Vec<String> {
+pub fn exec_role_stdout_paths(arg: &str, role: ExecRole) -> Vec<ExecPath> {
     match role {
-        ExecRole::Stdout => vec![arg.to_string()],
+        ExecRole::Stdout => vec![ExecPath::from(arg)],
         _ => Vec::new(),
     }
 }
 
-pub fn exec_role_env_paths(arg: &str, role: ExecRole) -> Vec<String> {
+pub fn exec_role_env_paths(arg: &str, role: ExecRole) -> Vec<ExecPath> {
     match role {
         ExecRole::Env => embedded_path_after_equals(arg).into_iter().collect(),
         _ => Vec::new(),
     }
 }
 
-pub fn exec_role_search_dir_paths(arg: &str, role: ExecRole) -> Vec<String> {
+pub fn exec_role_search_dir_paths(arg: &str, role: ExecRole) -> Vec<ExecPath> {
     match role {
-        ExecRole::SearchDir => vec![arg.to_string()],
+        ExecRole::SearchDir => vec![ExecPath::from(arg)],
         ExecRole::SearchDirFlag => embedded_path_after_equals(arg).into_iter().collect(),
         _ => Vec::new(),
     }
 }
 
-pub fn exec_role_embedded_paths(arg: &str, role: ExecRole) -> Vec<String> {
+pub fn exec_role_embedded_paths(arg: &str, role: ExecRole) -> Vec<ExecPath> {
     let mut paths = exec_role_input_paths(arg, role);
     paths.extend(exec_role_output_paths(arg, role));
     paths.extend(exec_role_output_dir_paths(arg, role));
@@ -277,14 +455,14 @@ pub fn exec_role_embedded_paths(arg: &str, role: ExecRole) -> Vec<String> {
     paths
 }
 
-fn embedded_path_after_equals(arg: &str) -> Option<String> {
+fn embedded_path_after_equals(arg: &str) -> Option<ExecPath> {
     arg.rsplit_once('=')
         .map(|(_, path)| path)
         .filter(|path| !path.is_empty())
-        .map(str::to_string)
+        .map(ExecPath::from)
 }
 
-fn rustc_emit_output_paths(arg: &str) -> Vec<String> {
+fn rustc_emit_output_paths(arg: &str) -> Vec<ExecPath> {
     let Some(spec) = arg.strip_prefix("--emit=") else {
         return Vec::new();
     };
@@ -295,7 +473,7 @@ fn rustc_emit_output_paths(arg: &str) -> Vec<String> {
             parts
                 .next()
                 .filter(|path| !path.is_empty())
-                .map(str::to_string)
+                .map(ExecPath::from)
         })
         .collect()
 }
@@ -307,5 +485,5 @@ fn rustc_emit_output_paths(arg: &str) -> Vec<String> {
 #[allow(async_fn_in_trait)]
 pub trait Runner {
     async fn exec(&self, request: ExecRequest) -> ExecResult;
-    async fn discover_probe(&self, request: DiscoverProbeRequest) -> DiscoverResult;
+    async fn capabilities(&self, request: CapabilityProbeRequest) -> CapabilityProbeResult;
 }

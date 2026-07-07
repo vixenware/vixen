@@ -5,8 +5,9 @@ use std::path::{Path, PathBuf};
 
 use vx_exec::SandboxedExecutor;
 use vx_services::{
-    Blake3Hash, ContentHash, ExecArg, ExecMount, ExecPlan, ExecReadObservation, ExecRequest,
-    ExecRole, ExecTree, ExecTreeEvent, Runner,
+    Blake3Hash, ByteLen, ContentHash, ExecArg, ExecArgValue, ExecCompletion, ExecError,
+    ExecErrorKind, ExecExitCode, ExecMount, ExecOutcome, ExecPath, ExecPlan, ExecProgram,
+    ExecReadObservation, ExecRequest, ExecRole, ExecTree, ExecTreeEvent, Runner,
 };
 
 #[tokio::test]
@@ -20,7 +21,7 @@ async fn shell_exec_harvests_declared_output() {
 
     let result = SandboxedExecutor::new()
         .exec(ExecRequest {
-            program: "/bin/sh".to_string(),
+            program: ExecProgram::from("/bin/sh"),
             plan: ExecPlan {
                 argv: vec![
                     arg("-c", ExecRole::Flag),
@@ -32,7 +33,7 @@ async fn shell_exec_harvests_declared_output() {
                 ],
             },
             mounts: vec![ExecMount {
-                at: "/m/in".to_string(),
+                at: ExecPath::from("/m/in"),
                 tree: input_tree,
             }],
             toolchain_roots: default_toolchain_roots(),
@@ -41,13 +42,12 @@ async fn shell_exec_harvests_declared_output() {
 
     assert_eq!(
         result.exit_code,
-        0,
+        ExecExitCode(0),
         "error: {:?}\nstderr: {}",
-        result.error,
+        failure(&result),
         stderr(&result)
     );
-    assert_eq!(result.error, None);
-    let outcome = result.outcome.expect("successful exec returns an outcome");
+    let outcome = outcome(&result);
     assert_eq!(
         outcome.outputs.entries.get("/m/out/hello.txt"),
         Some(&"hello from declared mount\n".to_string())
@@ -57,16 +57,19 @@ async fn shell_exec_harvests_declared_output() {
         Some(&ExecReadObservation::File {
             content_hash: ContentHash(Blake3Hash::from_bytes(b"hello from declared mount\n")),
             blob_node: None,
-            size: "hello from declared mount\n".len() as u64,
+            size: ByteLen("hello from declared mount\n".len() as u64),
         })
     );
     assert_eq!(outcome.observation_scopes.len(), 1);
-    assert_eq!(outcome.observation_scopes[0].roots, vec!["/m/in"]);
+    assert_eq!(
+        outcome.observation_scopes[0].roots,
+        vec![ExecPath::from("/m/in")]
+    );
     assert!(
         outcome
             .tree_events
             .iter()
-            .any(|event| matches!(event, ExecTreeEvent::SubfileCompleted(file) if file.path == "/m/out/hello.txt"))
+            .any(|event| matches!(event, ExecTreeEvent::SubfileCompleted(file) if file.path == ExecPath::from("/m/out/hello.txt")))
     );
     assert!(matches!(
         outcome.tree_events.last(),
@@ -92,19 +95,16 @@ async fn undeclared_read_is_loud_failure() {
         .await;
 
     assert_ne!(
-        result.exit_code, 0,
+        result.exit_code,
+        ExecExitCode(0),
         "undeclared read unexpectedly succeeded"
     );
+    let error = failure(&result);
+    assert_ne!(error.kind, ExecErrorKind::Protocol);
     assert!(
-        result.outcome.is_none(),
-        "failed exec must not harvest outputs"
-    );
-    assert!(
-        result.error.as_deref().is_some_and(|error| {
-            error.contains("sandboxed exec") || error.contains("Operation not permitted")
-        }),
+        error.kind == ExecErrorKind::ProcessExit || error.kind == ExecErrorKind::Spawn,
         "failure should be machine-visible: {:?}\nstderr:\n{}",
-        result.error,
+        error,
         stderr(&result)
     );
 }
@@ -121,7 +121,7 @@ async fn observed_read_set_contains_files_directory_and_lookup_miss() {
 
     let result = SandboxedExecutor::new()
         .exec(ExecRequest {
-            program: "/bin/sh".to_string(),
+            program: ExecProgram::from("/bin/sh"),
             plan: ExecPlan {
                 argv: vec![
                     arg("-c", ExecRole::Flag),
@@ -139,7 +139,7 @@ async fn observed_read_set_contains_files_directory_and_lookup_miss() {
                 ],
             },
             mounts: vec![ExecMount {
-                at: "/m/in".to_string(),
+                at: ExecPath::from("/m/in"),
                 tree: input_tree,
             }],
             toolchain_roots: default_toolchain_roots(),
@@ -148,12 +148,12 @@ async fn observed_read_set_contains_files_directory_and_lookup_miss() {
 
     assert_eq!(
         result.exit_code,
-        0,
+        ExecExitCode(0),
         "error: {:?}\nstderr: {}",
-        result.error,
+        failure(&result),
         stderr(&result)
     );
-    let outcome = result.outcome.expect("successful exec returns an outcome");
+    let outcome = outcome(&result);
     assert_eq!(
         outcome.outputs.entries.get("/m/out/combined.txt"),
         Some(&"observed\n".to_string())
@@ -162,14 +162,14 @@ async fn observed_read_set_contains_files_directory_and_lookup_miss() {
     assert!(matches!(
         outcome.read_set.entries.get("/m/in/a.txt"),
         Some(ExecReadObservation::File { content_hash, size, .. })
-            if *content_hash == ContentHash(Blake3Hash::from_bytes(b"alpha\n"))
-                && *size == 6
+            if content_hash == &ContentHash(Blake3Hash::from_bytes(b"alpha\n"))
+                && size == &ByteLen(6)
     ));
     assert!(matches!(
         outcome.read_set.entries.get("/m/in/b.txt"),
         Some(ExecReadObservation::File { content_hash, size, .. })
-            if *content_hash == ContentHash(Blake3Hash::from_bytes(b"beta\n"))
-                && *size == 5
+            if content_hash == &ContentHash(Blake3Hash::from_bytes(b"beta\n"))
+                && size == &ByteLen(5)
     ));
     assert!(matches!(
         outcome.read_set.entries.get("/m/in"),
@@ -177,7 +177,7 @@ async fn observed_read_set_contains_files_directory_and_lookup_miss() {
     ));
     assert!(matches!(
         outcome.read_set.entries.get("/m/in/missing.txt"),
-        Some(ExecReadObservation::LookupMiss { parent_path, .. }) if parent_path == "/m/in"
+        Some(ExecReadObservation::LookupMiss { parent_path, .. }) if parent_path == &ExecPath::from("/m/in")
     ));
 }
 
@@ -198,16 +198,14 @@ async fn undeclared_write_is_denied() {
         .await;
 
     assert_ne!(
-        result.exit_code, 0,
+        result.exit_code,
+        ExecExitCode(0),
         "undeclared write unexpectedly succeeded"
     );
-    assert!(
-        result.outcome.is_none(),
-        "failed exec must not harvest outputs"
-    );
+    let error = failure(&result);
     assert!(!outside.exists(), "sandbox denial must prevent the write");
     assert!(
-        result.error.is_some(),
+        error.kind == ExecErrorKind::ProcessExit || error.kind == ExecErrorKind::Spawn,
         "failure should be machine-visible\nstderr:\n{}",
         stderr(&result)
     );
@@ -215,23 +213,23 @@ async fn undeclared_write_is_denied() {
 
 fn shell_request(script: &str, output: &str) -> ExecRequest {
     ExecRequest {
-        program: "/bin/sh".to_string(),
+        program: ExecProgram::from("/bin/sh"),
         plan: ExecPlan {
             argv: vec![
                 ExecArg {
-                    value: "-c".to_string(),
+                    value: ExecArgValue::from("-c"),
                     role: ExecRole::Flag,
                 },
                 ExecArg {
-                    value: script.to_string(),
+                    value: ExecArgValue::from(script),
                     role: ExecRole::Flag,
                 },
                 ExecArg {
-                    value: format!("OUT={output}"),
+                    value: ExecArgValue::from(format!("OUT={output}")),
                     role: ExecRole::Env,
                 },
                 ExecArg {
-                    value: output.to_string(),
+                    value: ExecArgValue::from(output),
                     role: ExecRole::Output,
                 },
             ],
@@ -243,13 +241,13 @@ fn shell_request(script: &str, output: &str) -> ExecRequest {
 
 fn arg(value: &str, role: ExecRole) -> ExecArg {
     ExecArg {
-        value: value.to_string(),
+        value: ExecArgValue::from(value),
         role,
     }
 }
 
-fn default_toolchain_roots() -> Vec<String> {
-    vec!["/bin".to_string(), "/usr/bin".to_string()]
+fn default_toolchain_roots() -> Vec<ExecPath> {
+    vec![ExecPath::from("/bin"), ExecPath::from("/usr/bin")]
 }
 
 fn host_tools_available() -> bool {
@@ -258,6 +256,20 @@ fn host_tools_available() -> bool {
 
 fn stderr(result: &vx_services::ExecResult) -> String {
     String::from_utf8_lossy(&result.stderr).to_string()
+}
+
+fn outcome(result: &vx_services::ExecResult) -> &ExecOutcome {
+    match &result.completion {
+        ExecCompletion::Succeeded(outcome) => outcome,
+        ExecCompletion::Failed(error) => panic!("expected success, got {error:?}"),
+    }
+}
+
+fn failure(result: &vx_services::ExecResult) -> &ExecError {
+    match &result.completion {
+        ExecCompletion::Failed(error) => error,
+        ExecCompletion::Succeeded(_) => panic!("expected failure"),
+    }
 }
 
 struct Fixture {
