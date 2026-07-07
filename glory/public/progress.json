@@ -1,9 +1,9 @@
 {
-  "updated": "2026-07-07T22:58:00+02:00",
+  "updated": "2026-07-08T01:05:00+02:00",
   "meta": {
     "title": "PATH TO GLORY",
     "subtitle": "vixen: from demand machine to sovereign build system",
-    "trunk": "rodin @ c868cd51a — EPOCH CLOSED"
+    "trunk": "rodin @ 499f3964c — 5 folds landed, suite 214"
   },
   "lanes": {
     "machine": "#4ecdc4",
@@ -255,7 +255,7 @@
       "short": "compose at scale",
       "lane": "cargo-model",
       "status": "active",
-      "desc": "molten-handle bug fixed on trunk — remeasuring now. Residue owned here: semantic empty-solve on prerelease workspace members (root-clause suspect).",
+      "desc": "Harness + solver fixes FOLDED (zero skew through ring 64). Now at the closure boundary: first real divergence under diagnosis (tokio 0.0.0 vs 1.52.3 — narrowing vs ordering). Perf lane sharing the hunt for the ring-145 wall.",
       "deps": [
         "scale-measure",
         "cfg",
@@ -293,8 +293,8 @@
       "id": "lang-mission",
       "title": "argv enum + Path.join + Tree→String",
       "lane": "language",
-      "status": "active",
-      "desc": "Active, mid-lowering: Arg enum (Str|Path|Interpolation) replacing the shims at the UnitArtifactRef seam in crate.vix; agent self-caught a Target::host() vs consumer-target bug. Quiet phase — no push until the enum lowers end-to-end.",
+      "status": "done",
+      "desc": "FOLDED: Arg::{Str,Path,Interpolation} lazy argv (graph edges in argv costume), Tree.text projection, --extern via unit artifact subpaths. The tier-B bottleneck, gone.",
       "deps": [
         "epoch-blake3"
       ],
@@ -321,23 +321,44 @@
       "short": "build scripts"
     },
     {
+      "id": "demo-taxon",
+      "title": "DEMO: vixen builds taxon, no hands",
+      "short": "DEMO: taxon",
+      "lane": "build-real",
+      "status": "active",
+      "desc": "One end-to-end test: real workspace manifests → rodin solution → derived units → profile flags → lazy extern argv → REAL rustc → verified artifact. Zero hand-authored graph. Ladder target #1.",
+      "deps": [
+        "lang-mission",
+        "profiles",
+        "unit-derive"
+      ],
+      "evidence": [
+        "agent 42c8490d",
+        "branch demo-vix-builds-taxon"
+      ]
+    },
+    {
       "id": "proc-macros",
       "title": "proc-macro dylibs for real",
       "lane": "build-real",
-      "status": "queued",
+      "status": "active",
       "desc": "Host-platform lib units spliced into consumers via --extern artifact references. Shape proven with fake backend; real path needs the argv enum.",
       "deps": [
         "lang-mission",
         "unit-derive"
       ],
-      "short": "proc macros"
+      "short": "proc macros",
+      "evidence": [
+        "agent a4ed4c61",
+        "branch proc-macro-real-path"
+      ]
     },
     {
       "id": "profiles",
       "title": "profile flag emission",
       "lane": "build-real",
-      "status": "active",
-      "desc": "opt-level, debuginfo, panic, per-package overrides — currently zero emission exists. Data plumbing from manifest profiles to rustc args; facet-cc's own overrides are the test.",
+      "status": "done",
+      "desc": "FOLDED: profile ingestion + rustc flag emission, ZERO divergence on all seven fields vs unit-graph oracle incl. real per-package overrides. Bonus: fixed a second molten-reuse defeat (match-arm hoisting) caught by the memcap watchdog.",
       "deps": [
         "unit-derive"
       ],
@@ -358,7 +379,8 @@
         "proc-macros",
         "profiles",
         "exec-compose",
-        "tier-a-claim"
+        "tier-a-claim",
+        "demo-taxon"
       ],
       "short": "BUILDS FACET"
     },
@@ -465,8 +487,8 @@
       "id": "test-selection",
       "title": "reloc-walk test selection",
       "lane": "infra",
-      "status": "active",
-      "desc": "Landed: vix::reloc_selection (Mach-O), Reached/NotReached/UnknownRun with conservative unknown, panic-Location masking, differential fixture that RUNS skipped tests as its own audit oracle. In gatekeeper review.",
+      "status": "done",
+      "desc": "FOLDED: reloc-walk capability on trunk — Reached/NotReached/UnknownRun, panic-Location masking, skipped-tests-run-as-audit-oracle.",
       "evidence": [
         "branch reloc-walk-analysis @ 919ee27c2",
         "gatekeeper gate running"
