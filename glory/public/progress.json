@@ -1,5 +1,5 @@
 {
-  "updated": "2026-07-07T19:58:30+02:00",
+  "updated": "2026-07-07T20:14:00+02:00",
   "meta": {
     "title": "PATH TO GLORY",
     "subtitle": "vixen: from demand machine to sovereign build system",
@@ -21,7 +21,11 @@
       "lane": "machine",
       "status": "done",
       "desc": "Kind/Schema/SchemaRef/SchemaId + blake3 structural identity in one no_std crate at the bottom of the constellation. Name reserved on crates.io.",
-      "evidence": ["phon/rust/taxon", "crates.io/taxon reserved v0.0.0"]
+      "evidence": [
+        "phon/rust/taxon",
+        "crates.io/taxon reserved v0.0.0"
+      ],
+      "short": "taxon"
     },
     {
       "id": "molten",
@@ -29,7 +33,10 @@
       "lane": "machine",
       "status": "done",
       "desc": "Values are molten (mutable in place when refs==1) inside computations; the consuming-move rebind rule makes reuse actually fire. Differential oracle: VIX_FORCE_MOLTEN_COPY.",
-      "evidence": ["named-rebind 70.8µs ≈ reuse ceiling (spike C)"]
+      "evidence": [
+        "named-rebind 70.8µs ≈ reuse ceiling (spike C)"
+      ],
+      "short": "molten reuse"
     },
     {
       "id": "tail-loops",
@@ -37,7 +44,10 @@
       "lane": "machine",
       "status": "done",
       "desc": "Self-tail-calls lower to weavy backward jumps with parallel-staged param rebinding. Loops no longer cost an INVOKE per iteration; tree recursion keeps memoization on purpose.",
-      "evidence": ["rodin interiors tail-looped same day"]
+      "evidence": [
+        "rodin interiors tail-looped same day"
+      ],
+      "short": "tail loops"
     },
     {
       "id": "epoch-s14",
@@ -45,8 +55,14 @@
       "lane": "machine",
       "status": "done",
       "desc": "Descriptors carry SchemaRefs not strings; dispatch matches Kind; readiness moved off types onto handle tiers (scheduling state OUT of content identity); per-run intern table deleted — frames carry real SchemaId bits.",
-      "deps": ["taxon"],
-      "evidence": ["rodin 348ff2ce0, 1507d46d9", "committee-reviewed 2×"]
+      "deps": [
+        "taxon"
+      ],
+      "evidence": [
+        "rodin 348ff2ce0, 1507d46d9",
+        "committee-reviewed 2×"
+      ],
+      "short": "typed schemas"
     },
     {
       "id": "epoch-collections",
@@ -54,8 +70,14 @@
       "lane": "machine",
       "status": "done",
       "desc": "Arrays/maps/options are real declared descriptors moved in lockstep with MoltenValue; full-SchemaRef descriptor keying (caught a real Doc::Array bug on day one); Sealed placeholder retired; little-endian end-to-end.",
-      "deps": ["epoch-s14"],
-      "evidence": ["rodin b18870fc0", "185→199 tests green"]
+      "deps": [
+        "epoch-s14"
+      ],
+      "evidence": [
+        "rodin b18870fc0",
+        "185→199 tests green"
+      ],
+      "short": "typed collections"
     },
     {
       "id": "epoch-blake3",
@@ -63,8 +85,14 @@
       "lane": "machine",
       "status": "active",
       "desc": "The epoch closer: sha2→blake3, carried incremental hasher on molten arrays (the measured ~50× lever), SchemaId bytes replace name strings in hashes, every recorded flag discharged. After this, a hash is a durable cross-machine cache key.",
-      "deps": ["epoch-collections"],
-      "evidence": ["agent a4835967", "branch hash-epoch-blake3"]
+      "deps": [
+        "epoch-collections"
+      ],
+      "evidence": [
+        "agent a4835967",
+        "branch hash-epoch-blake3"
+      ],
+      "short": "blake3 freeze"
     },
     {
       "id": "molten-drop",
@@ -72,7 +100,10 @@
       "lane": "machine",
       "status": "queued",
       "desc": "Refs are currently monotone; last-use analysis lets molten values die early and reuse fire more. Next machine unlock after the epoch closes.",
-      "deps": ["epoch-blake3"]
+      "deps": [
+        "epoch-blake3"
+      ],
+      "short": "MOLTEN_DROP"
     },
     {
       "id": "jit-anomaly",
@@ -80,7 +111,11 @@
       "lane": "machine",
       "status": "active",
       "desc": "JIT lane measured slower than the interpreter on host-call-heavy work even after the compile cache. Re-measuring post-epoch with stax; three hypotheses minimum; report before fixes.",
-      "evidence": ["agent 873934f1", "branch jit-lane-investigation"]
+      "evidence": [
+        "agent 873934f1",
+        "branch jit-lane-investigation"
+      ],
+      "short": "JIT anomaly"
     },
     {
       "id": "dwarf",
@@ -88,16 +123,22 @@
       "lane": "machine",
       "status": "done",
       "desc": "Descriptor → DWARF type DIEs (structs, variants incl. niches, arrays, recursive refs). The observability obligation of owning our ABI, paid.",
-      "evidence": ["weavy/src/jit/dwarf.rs +1641"]
+      "evidence": [
+        "weavy/src/jit/dwarf.rs +1641"
+      ],
+      "short": "DWARF types"
     },
-
     {
       "id": "rodin-solver",
       "title": "rodin solver in vix: search + learning",
       "lane": "rodin",
       "status": "done",
       "desc": "Propagation, candidate selection, chronological backtracking, no-goods with point regions, restart-with-retained-facts — a CDCL-family resolver written entirely in the build language, five days old.",
-      "evidence": ["rodin/rodin.vix", "sub-reference-impl perf after tail loops"]
+      "evidence": [
+        "rodin/rodin.vix",
+        "sub-reference-impl perf after tail loops"
+      ],
+      "short": "rodin solver"
     },
     {
       "id": "rodin-features",
@@ -105,7 +146,10 @@
       "lane": "rodin",
       "status": "done",
       "desc": "Weak/strong/dep: features, monotone unification, prerelease-complete semver with the semver crate as differential oracle.",
-      "deps": ["rodin-solver"]
+      "deps": [
+        "rodin-solver"
+      ],
+      "short": "features + semver"
     },
     {
       "id": "warm-facts",
@@ -113,7 +157,10 @@
       "lane": "rodin",
       "status": "done",
       "desc": "The corpus-adjudicated shape for facts that survive across solves: premise-keyed support (absence first-class), proof digest, replay-gated install. A learned fact needs a receipt like a build does.",
-      "evidence": ["docs/design/warm-facts-spec.md"]
+      "evidence": [
+        "docs/design/warm-facts-spec.md"
+      ],
+      "short": "warm-facts spec"
     },
     {
       "id": "fact-persist",
@@ -121,16 +168,21 @@
       "lane": "rodin",
       "status": "queued",
       "desc": "Cross-solve learned facts, implemented to the spec. Gated hard: no persistence without the proof-bearing shape. Three lowering choices await ratification.",
-      "deps": ["warm-facts"]
+      "deps": [
+        "warm-facts"
+      ],
+      "short": "fact persistence"
     },
-
     {
       "id": "sparse-index",
       "title": "crates.io sparse index ingestion",
       "lane": "cargo-model",
       "status": "done",
       "desc": "Real registry index → rodin Index facts; real fetch/extract round trip.",
-      "evidence": ["folded pre-epoch; real crates.io tests"]
+      "evidence": [
+        "folded pre-epoch; real crates.io tests"
+      ],
+      "short": "sparse index"
     },
     {
       "id": "manifests",
@@ -138,8 +190,14 @@
       "lane": "cargo-model",
       "status": "done",
       "desc": "workspace=true inheritance, workspace.package, member globs — all derived in vix against the real 145-member workspace. 760 formerly-unhandleable deps → 0 mismatches.",
-      "deps": ["sparse-index"],
-      "evidence": ["rodin 23370fe5f + 1e75f74b6", "oracle: cargo metadata --locked"]
+      "deps": [
+        "sparse-index"
+      ],
+      "evidence": [
+        "rodin 23370fe5f + 1e75f74b6",
+        "oracle: cargo metadata --locked"
+      ],
+      "short": "generic manifests"
     },
     {
       "id": "cfg",
@@ -147,8 +205,14 @@
       "lane": "cargo-model",
       "status": "done",
       "desc": "cfg(...) parsed by a declarative snark grammar, carried as data on dep edges (55→0 vs oracle); evaluation is pure vix over demanded `rustc --print cfg --target` facts. Cross-compilation falls out.",
-      "deps": ["manifests"],
-      "evidence": ["rodin d27e2478f", "cross-target fixtures oracle-checked"]
+      "deps": [
+        "manifests"
+      ],
+      "evidence": [
+        "rodin d27e2478f",
+        "cross-target fixtures oracle-checked"
+      ],
+      "short": "cfg facts"
     },
     {
       "id": "unit-derive",
@@ -156,8 +220,15 @@
       "lane": "cargo-model",
       "status": "done",
       "desc": "The audit watch-point, closed: units are a recursive memoized vix function over rodin's solve output — the graph is the demand trace, dedup is memoization. Zero new host fns.",
-      "deps": ["rodin-features", "manifests"],
-      "evidence": ["rodin 0f4c2a40f", "fidelity audit: CLEAN"]
+      "deps": [
+        "rodin-features",
+        "manifests"
+      ],
+      "evidence": [
+        "rodin 0f4c2a40f",
+        "fidelity audit: CLEAN"
+      ],
+      "short": "unit() derived"
     },
     {
       "id": "scale-measure",
@@ -165,8 +236,15 @@
       "lane": "cargo-model",
       "status": "active",
       "desc": "rodin's solve vs the real Cargo.lock; derived units vs cargo --unit-graph; divergences categorized and counted; perf walls recorded as data. The reusable harness that turns the claim into a number.",
-      "deps": ["cfg", "unit-derive"],
-      "evidence": ["agent 56b36643", "branch tier-a-scale-measurement"]
+      "deps": [
+        "cfg",
+        "unit-derive"
+      ],
+      "evidence": [
+        "agent 56b36643",
+        "branch tier-a-scale-measurement"
+      ],
+      "short": "scale measure"
     },
     {
       "id": "tier-a-claim",
@@ -174,16 +252,21 @@
       "lane": "cargo-model",
       "status": "goal",
       "desc": "\"vixen resolves and plans the entire facet workspace, continuously verified against cargo itself.\" Sayable when the scale measurement's divergence tables hit zero.",
-      "deps": ["scale-measure"]
+      "deps": [
+        "scale-measure"
+      ],
+      "short": "PLANS MONOREPO"
     },
-
     {
       "id": "exec-seam",
       "title": "real rustc through the exec seam",
       "lane": "build-real",
       "status": "done",
       "desc": "rustc!/build_script!/cc! lower to one demand-spawned EXEC node kind; real and fake backends behind one seam; lib/bin/proc-macro unit shapes proven at fixture scale. (Not yet sandbox-composed — see infra.)",
-      "evidence": ["one Command::new in all of vix/src"]
+      "evidence": [
+        "one Command::new in all of vix/src"
+      ],
+      "short": "exec seam"
     },
     {
       "id": "lang-mission",
@@ -191,8 +274,14 @@
       "lane": "language",
       "status": "queued",
       "desc": "Three ratified primitives, one mission: exec argv elements as Str|Path|Interpolation-into-output-trees (lazy graph edges), capability-style join-only paths, single-file text projection. Unblocks three parked lanes at once.",
-      "deps": ["epoch-blake3"],
-      "evidence": ["ratified 2026-07-07", "fires when blake3 frees lower.rs"]
+      "deps": [
+        "epoch-blake3"
+      ],
+      "evidence": [
+        "ratified 2026-07-07",
+        "fires when blake3 frees lower.rs"
+      ],
+      "short": "argv + paths"
     },
     {
       "id": "build-scripts",
@@ -200,8 +289,15 @@
       "lane": "build-real",
       "status": "parked",
       "desc": "Directive parsing (rustc-cfg, env, links/DEP_, rerun-if) as pure vix functions; rerun-if recorded but observed reads stay the invalidation authority. Parked on Tree→String; agent warm.",
-      "deps": ["lang-mission", "exec-seam"],
-      "evidence": ["agent 7908ef2f parked", "stop-and-report: correct"]
+      "deps": [
+        "lang-mission",
+        "exec-seam"
+      ],
+      "evidence": [
+        "agent 7908ef2f parked",
+        "stop-and-report: correct"
+      ],
+      "short": "build scripts"
     },
     {
       "id": "proc-macros",
@@ -209,15 +305,26 @@
       "lane": "build-real",
       "status": "queued",
       "desc": "Host-platform lib units spliced into consumers via --extern artifact references. Shape proven with fake backend; real path needs the argv enum.",
-      "deps": ["lang-mission", "unit-derive"]
+      "deps": [
+        "lang-mission",
+        "unit-derive"
+      ],
+      "short": "proc macros"
     },
     {
       "id": "profiles",
       "title": "profile flag emission",
       "lane": "build-real",
-      "status": "queued",
+      "status": "active",
       "desc": "opt-level, debuginfo, panic, per-package overrides — currently zero emission exists. Data plumbing from manifest profiles to rustc args; facet-cc's own overrides are the test.",
-      "deps": ["unit-derive"]
+      "deps": [
+        "unit-derive"
+      ],
+      "short": "profiles",
+      "evidence": [
+        "agent e0fa8b24",
+        "branch profile-emission"
+      ]
     },
     {
       "id": "tier-b-facet",
@@ -225,7 +332,14 @@
       "lane": "build-real",
       "status": "goal",
       "desc": "The whole monorepo, real rustc, hermetic, receipts. Our own 8,687-test workspace as the proving ground — one C dependency in the closure. \"vixen builds the code vixen is made of.\"",
-      "deps": ["build-scripts", "proc-macros", "profiles", "exec-compose", "tier-a-claim"]
+      "deps": [
+        "build-scripts",
+        "proc-macros",
+        "profiles",
+        "exec-compose",
+        "tier-a-claim"
+      ],
+      "short": "BUILDS FACET"
     },
     {
       "id": "native-tail",
@@ -233,7 +347,10 @@
       "lane": "build-real",
       "status": "queued",
       "desc": "-sys build scripts probe the ambient system; interim policy (decided): build inside a container pinned by digest — every ambient read resolves against an immutable filesystem. Final: no pkg-config, we build curl.",
-      "deps": ["exec-stage2"]
+      "deps": [
+        "exec-stage2"
+      ],
+      "short": "native tail"
     },
     {
       "id": "tier-b-cargo",
@@ -241,16 +358,22 @@
       "lane": "build-real",
       "status": "goal",
       "desc": "The oracle becomes the subject: unmodified rust-lang/cargo at a pinned commit, built by vixen with receipts. The external flagship; the sovereignty demo in one sentence.",
-      "deps": ["tier-b-facet", "native-tail"]
+      "deps": [
+        "tier-b-facet",
+        "native-tail"
+      ],
+      "short": "BUILDS CARGO"
     },
-
     {
       "id": "exec-stage1",
       "title": "sandbox stage 1: confine",
       "lane": "infra",
       "status": "done",
       "desc": "Seatbelt confinement: undeclared reads fail loudly. Public protocol types over vox RPC, private impls. Parked gate-green.",
-      "evidence": ["branch sandboxed-exec-stage-1"]
+      "evidence": [
+        "branch sandboxed-exec-stage-1"
+      ],
+      "short": "confine"
     },
     {
       "id": "exec-stage2",
@@ -258,16 +381,29 @@
       "lane": "infra",
       "status": "done",
       "desc": "vfsd observations (File/Directory/LookupMiss, blake3 newtypes) populate ExecOutcome read-sets; progressive ExecTree events with close-is-provisional verification; kill hook typed but dormant. vfsd close-callback integration precisely pinned.",
-      "deps": ["exec-stage1"],
-      "evidence": ["branch vx-exec-observations-trees @ 3ac76ec4", "114 green, parked for fold"]
+      "deps": [
+        "exec-stage1"
+      ],
+      "evidence": [
+        "branch vx-exec-observations-trees @ 3ac76ec4",
+        "114 green, parked for fold"
+      ],
+      "short": "observe (VFS)"
     },
     {
       "id": "exec-compose",
       "title": "runner ∘ daemon ∘ vix: sandboxed builds",
       "lane": "infra",
-      "status": "queued",
+      "status": "active",
       "desc": "The vixenware runner implements vix's exec backend over vox RPC: real rustc actually running under VFS mounts + seatbelt with observed read-sets. The composition that makes 'hermetic' true instead of polite.",
-      "deps": ["exec-stage2"]
+      "deps": [
+        "exec-stage2"
+      ],
+      "short": "runner ∘ vix",
+      "evidence": [
+        "agent 6a3bdefd",
+        "branch runner-exec-service (server half)"
+      ]
     },
     {
       "id": "progressive",
@@ -275,7 +411,11 @@
       "lane": "infra",
       "status": "queued",
       "desc": "Exec output trees materialize incrementally; subfile demands park on close events. Pipelining, vx check, and kill-when-satisfied become one mechanism. Protocol events already landed in stage 2.",
-      "deps": ["exec-stage2", "lang-mission"]
+      "deps": [
+        "exec-stage2",
+        "lang-mission"
+      ],
+      "short": "progressive trees"
     },
     {
       "id": "rdr",
@@ -283,24 +423,34 @@
       "lane": "infra",
       "status": "queued",
       "desc": "Consumers referencing only the .rmeta inside a unit's output tree get rmeta-level early cutoff from the argv grammar itself — per-subfile invalidation granularity.",
-      "deps": ["progressive"]
+      "deps": [
+        "progressive"
+      ],
+      "short": "rmeta cutoff"
     },
     {
       "id": "test-selection",
       "title": "reloc-walk test selection",
       "lane": "infra",
-      "status": "queued",
+      "status": "active",
       "desc": "Sound test skipping computed from compiled artifacts' reference graphs. Spike proved it works on Mach-O; panic-Location rodata masking is the known false-positive fix.",
-      "evidence": ["spike F: WORKS"]
+      "evidence": [
+        "agent a827ef1a",
+        "branch reloc-walk-capability",
+        "spike F: WORKS"
+      ],
+      "short": "test selection"
     },
-
     {
       "id": "kb",
       "title": "knowledge base: user + dev sites",
       "lane": "product",
       "status": "done",
       "desc": "dodeca-served, two sites, pain-led user lanes, honest status ledger, wiki-links, live annotations.",
-      "evidence": ["ddc serve :4001"]
+      "evidence": [
+        "ddc serve :4001"
+      ],
+      "short": "knowledge base"
     },
     {
       "id": "provenance-page",
@@ -308,7 +458,10 @@
       "lane": "product",
       "status": "done",
       "desc": "\"You now have to prove what's in your software — as law.\" CRA/NIS2/DORA mapped to mechanisms; real-today vs designed-spec always marked.",
-      "deps": ["kb"]
+      "deps": [
+        "kb"
+      ],
+      "short": "/provenance/"
     },
     {
       "id": "pkg-brief",
@@ -316,7 +469,10 @@
       "lane": "product",
       "status": "done",
       "desc": "Recipe-embedded artifacts (the binary is its own flake), vx upgrade re-resolves from the embedded request, advisories keyed by content hash (backport-aware), overlays as resolver feature, transparency log, EU infra, 2FA.",
-      "evidence": ["docs/design/package-manager-and-provenance.md"]
+      "evidence": [
+        "docs/design/package-manager-and-provenance.md"
+      ],
+      "short": "registry design"
     },
     {
       "id": "registry",
@@ -324,7 +480,10 @@
       "lane": "product",
       "status": "queued",
       "desc": "The first inhabitant of the cloud control plane. Open question #1 gates the rest: what is a package (source / artifacts+attestations / both).",
-      "deps": ["pkg-brief"]
+      "deps": [
+        "pkg-brief"
+      ],
+      "short": "EU registry"
     },
     {
       "id": "branding",
@@ -332,7 +491,10 @@
       "lane": "product",
       "status": "parked",
       "desc": "Two-brand architecture: vix + the fox stay the language forever; the fundable product name is open. Committee with EU-procurement personas on call — Amos's trigger.",
-      "evidence": ["\"maybe it's called fucking MetalGraph or whatever\""]
+      "evidence": [
+        "\"maybe it's called fucking MetalGraph or whatever\""
+      ],
+      "short": "naming"
     },
     {
       "id": "sovereignty-goal",
@@ -340,7 +502,13 @@
       "lane": "product",
       "status": "goal",
       "desc": "Traceability, auditability, EU operation — real on day one, structural not certificational. CRA reporting obligations bite Sep 2026; France alone assembled ~€13B. The thing that funds everything else.",
-      "deps": ["tier-b-facet", "registry", "provenance-page", "branding"]
+      "deps": [
+        "tier-b-facet",
+        "registry",
+        "provenance-page",
+        "branding"
+      ],
+      "short": "SOVEREIGNTY €"
     }
   ]
 }

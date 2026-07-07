@@ -181,6 +181,29 @@
   opacity: 1;
 }
 
+/* ------- LOD (mip-mapped labels when zoomed out) ------- */
+.skill-node.lod {
+  justify-content: flex-start;
+}
+.skill-short {
+  font-size: 19px;
+  font-weight: 700;
+  letter-spacing: 0.01em;
+  line-height: 1.15;
+  color: var(--ink);
+}
+.skill-node.lod.goal .skill-short {
+  font-size: 21px;
+  color: #d9c7ff;
+}
+.skill-node.lod .skill-badge {
+  font-size: 19px;
+}
+.skill-node.lod.queued .skill-short,
+.skill-node.lod.parked .skill-short {
+  color: #97a1ba;
+}
+
 /* ------- side panel ------- */
 .panel {
   position: absolute;

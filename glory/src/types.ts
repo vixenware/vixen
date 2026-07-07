@@ -3,6 +3,7 @@ export type Status = "done" | "active" | "queued" | "parked" | "goal";
 export interface SkillNodeData {
   id: string;
   title: string;
+  short?: string;
   lane: string;
   status: Status;
   desc: string;
