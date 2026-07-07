@@ -1,5 +1,5 @@
 {
-  "updated": "2026-07-07T20:52:00+02:00",
+  "updated": "2026-07-07T21:32:00+02:00",
   "meta": {
     "title": "PATH TO GLORY",
     "subtitle": "vixen: from demand machine to sovereign build system",
@@ -254,15 +254,16 @@
       "short": "compose at scale",
       "lane": "cargo-model",
       "status": "active",
-      "desc": "The tier-A gap-closer: wire real workspace manifests + pinned sparse-index rows into one rodin Index, solve, derive units — ring by ring (members-only → +direct deps → transitive). All in vix. Walls are data.",
+      "desc": "145/145 members compose into one rodin Index (84s interpreted). Solve blocked by trunk machine bug `molten handle -1` (assigned to machine lane); diff machinery being pre-wired so numbers appear the moment it's fixed.",
       "deps": [
         "scale-measure",
         "cfg",
         "unit-derive"
       ],
       "evidence": [
-        "agent 56b36643 (continued)",
-        "branch tier-a-scale-measurement"
+        "agent 56b36643",
+        "branch tier-a-scale-measurement @ 02a3d13c9",
+        "pinned sparse snapshot fdc863bf"
       ]
     },
     {
@@ -393,6 +394,18 @@
         "branch sandboxed-exec-stage-1"
       ],
       "short": "confine"
+    },
+    {
+      "id": "memcap-watchdog",
+      "title": "memcap watchdog: no more machine OOMs",
+      "short": "memcap watchdog",
+      "lane": "infra",
+      "status": "done",
+      "desc": "Every nextest test runs under an RSS-sampling wrapper — SIGKILL past MEMCAP_MB (6GB default). Born from a test allocating 22GB in 4s; caught its first runaway in production within the hour (7GB accumulator → loud single-test fail). Also a memory tripwire for every future gate.",
+      "evidence": [
+        "rodin c3156ed5c",
+        "scripts/memcap-wrapper.sh"
+      ]
     },
     {
       "id": "exec-stage2",
