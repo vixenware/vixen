@@ -1,5 +1,5 @@
 {
-  "updated": "2026-07-08T02:05:00+02:00",
+  "updated": "2026-07-08T04:10:00+02:00",
   "meta": {
     "title": "PATH TO GLORY",
     "subtitle": "vixen: from demand machine to sovereign build system",
@@ -497,14 +497,14 @@
     },
     {
       "id": "kb",
-      "title": "knowledge base: user + dev sites",
+      "title": "knowledge base: user + dev + vix sites",
       "lane": "product",
       "status": "done",
-      "desc": "dodeca-served, two sites, pain-led user lanes, honest status ledger, wiki-links, live annotations.",
+      "desc": "Three mounts: user site (pain-led), /dev (machine internals), /vix (the language reference — 14 pages, real-program examples, dated gaps appendix, migrated from /dev, render-verified live).",
       "evidence": [
         "ddc serve :4001"
       ],
-      "short": "knowledge base"
+      "short": "KB ×3 sites"
     },
     {
       "id": "provenance-page",
