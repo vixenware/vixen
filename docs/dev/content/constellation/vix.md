@@ -26,6 +26,11 @@ elsewhere. The dependency resolver ([rodin](/constellation/rodin/)) is
 ordinary-looking functional code; memoization, warm restarts, and incremental
 re-resolution come from the machine, not from resolver-specific cleverness.
 
+For the language itself — values, functions, pattern matching, molten
+values, loops, exec nodes, the standard library — see
+**[the vix reference manual](/vix/)**. This page stays focused on where vix
+sits among the rest of the pieces.
+
 ## How it runs
 
 vix does not interpret an AST. Programs lower to [weavy](/constellation/weavy/),

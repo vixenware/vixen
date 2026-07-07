@@ -11,5 +11,7 @@ comparing it to cargo or Bazel — you want [the user site](/) instead.
 - **[Concepts](/dev/concepts/)** — demand, content addressing, read-sets,
   molten values, hermetic execution, services.
 - **[The constellation](/dev/constellation/)** — the map of the pieces.
-- **[The vix language](/dev/vix/)** — guide and reference.
+- **[The vix language](/vix/)** — guide and reference. It's its own
+  top-level section now; this developer site keeps the machine internals
+  underneath it (lowering, lowering-cache, hashing, the store).
 - **[Developing vixen](/dev/developing/)** — invariants, oracles, method, holes.
