@@ -1,5 +1,5 @@
 {
-  "updated": "2026-07-07T20:14:00+02:00",
+  "updated": "2026-07-07T20:31:00+02:00",
   "meta": {
     "title": "PATH TO GLORY",
     "subtitle": "vixen: from demand machine to sovereign build system",
@@ -232,19 +232,37 @@
     },
     {
       "id": "scale-measure",
-      "title": "scale measurement: resolve + units vs oracles",
+      "title": "scale measurement: the frontier named",
       "lane": "cargo-model",
-      "status": "active",
-      "desc": "rodin's solve vs the real Cargo.lock; derived units vs cargo --unit-graph; divergences categorized and counted; perf walls recorded as data. The reusable harness that turns the claim into a number.",
+      "status": "done",
+      "desc": "The number: 0/863 resolve, 0/880 units — NOT divergences: each leg works (ingestion 1,122/1,122, solve, fixture units 4/4) but the composed real-scale path never existed. Reusable harness landed; re-run after every fold.",
       "deps": [
         "cfg",
         "unit-derive"
       ],
       "evidence": [
-        "agent 56b36643",
-        "branch tier-a-scale-measurement"
+        "notes/tier-a-scale-measurement.md",
+        "scripts/tier-a-scale-measurement.sh",
+        "f8c2d34f9"
       ],
-      "short": "scale measure"
+      "short": "frontier named"
+    },
+    {
+      "id": "compose-at-scale",
+      "title": "compose at scale: manifests + index → solve → units",
+      "short": "compose at scale",
+      "lane": "cargo-model",
+      "status": "active",
+      "desc": "The tier-A gap-closer: wire real workspace manifests + pinned sparse-index rows into one rodin Index, solve, derive units — ring by ring (members-only → +direct deps → transitive). All in vix. Walls are data.",
+      "deps": [
+        "scale-measure",
+        "cfg",
+        "unit-derive"
+      ],
+      "evidence": [
+        "agent 56b36643 (continued)",
+        "branch tier-a-scale-measurement"
+      ]
     },
     {
       "id": "tier-a-claim",
@@ -253,7 +271,7 @@
       "status": "goal",
       "desc": "\"vixen resolves and plans the entire facet workspace, continuously verified against cargo itself.\" Sayable when the scale measurement's divergence tables hit zero.",
       "deps": [
-        "scale-measure"
+        "compose-at-scale"
       ],
       "short": "PLANS MONOREPO"
     },
