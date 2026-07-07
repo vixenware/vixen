@@ -1,7 +1,8 @@
 +++
 title = "Document parsing"
 weight = 7
-type = "reference"
+
+[extra]
 updated = "2026-07-08"
 +++
 

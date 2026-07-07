@@ -1,7 +1,8 @@
 +++
 title = "Molten values and the consuming-move rule"
 weight = 4
-type = "reference"
+
+[extra]
 updated = "2026-07-08"
 +++
 

@@ -1,7 +1,8 @@
 +++
 title = "Values and types"
 weight = 1
-type = "reference"
+
+[extra]
 updated = "2026-07-08"
 +++
 

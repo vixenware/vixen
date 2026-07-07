@@ -1,7 +1,8 @@
 +++
 title = "Functions and calls"
 weight = 2
-type = "reference"
+
+[extra]
 updated = "2026-07-08"
 +++
 

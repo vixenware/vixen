@@ -1,7 +1,8 @@
 +++
 title = "Worked examples"
 weight = 12
-type = "reference"
+
+[extra]
 updated = "2026-07-08"
 +++
 

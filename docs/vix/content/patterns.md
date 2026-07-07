@@ -1,7 +1,8 @@
 +++
 title = "Pattern matching"
 weight = 3
-type = "reference"
+
+[extra]
 updated = "2026-07-08"
 +++
 

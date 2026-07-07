@@ -1,7 +1,8 @@
 +++
 title = "Demand semantics"
 weight = 8
-type = "reference"
+
+[extra]
 updated = "2026-07-08"
 +++
 

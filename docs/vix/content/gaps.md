@@ -1,7 +1,8 @@
 +++
 title = "Honest gaps"
 weight = 13
-type = "gaps"
+
+[extra]
 updated = "2026-07-08"
 +++
 

@@ -1,7 +1,8 @@
 +++
 title = "Loops"
 weight = 5
-type = "reference"
+
+[extra]
 updated = "2026-07-08"
 +++
 

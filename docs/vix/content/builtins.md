@@ -1,7 +1,8 @@
 +++
 title = "Builtins"
 weight = 10
-type = "reference"
+
+[extra]
 updated = "2026-07-08"
 +++
 
