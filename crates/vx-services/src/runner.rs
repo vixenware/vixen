@@ -1,18 +1,16 @@
 //! Runner service protocol definitions
 //!
-//! This crate defines the runner RPC surface only.
-//!
-//! During the evaluator purge, `vx-runner` is intentionally a minimal protocol
-//! shell. The request and result payloads here are placeholders, not a stable
-//! execution model.
+//! This crate defines the runner RPC surface only. Implementations live in
+//! private runtime crates so the protocol can stay publishable.
 
+use std::collections::BTreeMap;
+
+use crate::{Blake3Hash, ContentHash};
 use facet::Facet;
-
-use crate::Blake3Hash;
 
 /// Runner protocol version.
 /// Bump this when making breaking changes to the Runner RPC interface.
-pub const RUNNER_PROTOCOL_VERSION: u32 = 21;
+pub const RUNNER_PROTOCOL_VERSION: u32 = 22;
 
 // =============================================================================
 // Generic Sandboxed Tool Execution
@@ -32,56 +30,131 @@ pub struct DiscoverResult {
     // TODO: design
 }
 
-/// One input mount: a content-addressed tree mounted at a prefix-relative path.
-#[derive(Facet)]
+/// A mounted or flushed tree. Text entries keep fixtures readable; blob entries
+/// carry arbitrary bytes without lossy UTF-8 conversion.
+#[derive(Debug, Clone, Default, PartialEq, Eq, Facet)]
+pub struct ExecTree {
+    pub entries: BTreeMap<String, String>,
+    pub blobs: BTreeMap<String, Vec<u8>>,
+}
+
+impl ExecTree {
+    pub fn insert_bytes(&mut self, path: impl Into<String>, contents: Vec<u8>) {
+        let path = path.into();
+        match String::from_utf8(contents) {
+            Ok(text) => {
+                self.entries.insert(path, text);
+            }
+            Err(err) => {
+                self.blobs.insert(path, err.into_bytes());
+            }
+        }
+    }
+
+    pub fn bytes(&self, path: &str) -> Option<Vec<u8>> {
+        self.entries
+            .get(path)
+            .map(|contents| contents.as_bytes().to_vec())
+            .or_else(|| self.blobs.get(path).cloned())
+    }
+}
+
+/// One declared mount: a tree mounted at an absolute logical path.
+#[derive(Debug, Clone, PartialEq, Eq, Facet)]
 pub struct ExecMount {
-    /// Where to mount, relative to the action's VFS prefix (e.g. `"src"`).
-    pub path: String,
-    /// The tree manifest (in CAS) to mount there.
-    pub tree: Blake3Hash,
+    pub at: String,
+    pub tree: ExecTree,
 }
 
-/// One environment variable for the executed process.
-#[derive(Facet)]
-pub struct ExecEnv {
-    pub key: String,
+/// What a command grammar says an argv element is.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Facet)]
+#[repr(u8)]
+pub enum ExecRole {
+    /// A staged executable produced by a prior command.
+    Executable,
+    /// A path the tool will read.
+    Input,
+    /// An argv element that contains a path the tool will read.
+    InputFlag,
+    /// A path the tool will write.
+    Output,
+    /// An argv element that contains one or more paths the tool will write.
+    OutputFlag,
+    /// A directory the tool may write with unknown contents.
+    OutputDir,
+    /// Captured process stdout, stored as an output artifact at this path.
+    Stdout,
+    /// An environment binding in KEY=VALUE form.
+    Env,
+    /// A directory the tool will probe.
+    SearchDir,
+    /// An argv element that contains a directory the tool will probe.
+    SearchDirFlag,
+    /// Behavior-changing but not path-shaped.
+    Flag,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Facet)]
+pub struct ExecArg {
     pub value: String,
+    pub role: ExecRole,
 }
 
-/// A flushed output root: the directory and the tree manifest of what was written.
-#[derive(Facet)]
-pub struct ExecOutput {
-    /// The output directory, relative to the action's VFS prefix.
-    pub path: String,
-    /// The tree manifest (in CAS) of the files written there.
-    pub tree: Blake3Hash,
+/// A resolved command after command-grammar role assignment.
+#[derive(Debug, Clone, PartialEq, Eq, Facet)]
+pub struct ExecPlan {
+    pub argv: Vec<ExecArg>,
 }
 
-/// A tool execution on an executor: the program to run, the content-addressed inputs
-/// to mount under a fresh VFS prefix, and the writable output roots to flush as the
-/// write-set. The process runs against the VFS prefix via the executor's access path.
-/// (Sandbox confinement — the seatbelt profile derived from these mounts/outputs —
-/// and caching join next; this is the mount → run → flush spine.)
-#[derive(Facet)]
+/// A tool execution on a runner. The runner stages declared input mounts under
+/// a fresh prefix, runs the process through the daemon's sandbox launch
+/// capability, then flushes declared outputs.
+#[derive(Debug, Clone, PartialEq, Eq, Facet)]
 pub struct ExecRequest {
-    /// The program — an absolute path, or a name resolved on the executor's `PATH`.
+    /// The program to execute: an absolute path, or a name resolved on PATH
+    /// before entering the sandbox.
     pub program: String,
-    /// The arguments after the program.
-    pub args: Vec<String>,
-    /// The environment for the process.
-    pub env: Vec<ExecEnv>,
-    /// Content-addressed inputs to mount under the action's VFS prefix.
+    /// Role-annotated argv.
+    pub plan: ExecPlan,
+    /// Declared input mounts.
     pub mounts: Vec<ExecMount>,
-    /// Writable output directories (prefix-relative) to create before launch and
-    /// flush as trees afterward.
-    pub outputs: Vec<String>,
-    /// Additional directories to create before launch. Each one must be equal to or
-    /// nested under a writable output root.
-    pub create_dirs: Vec<String>,
+    /// Declared roots that may be executed or read as ambient toolchain state.
+    pub toolchain_roots: Vec<String>,
+}
+
+/// One observed interaction with the mounted world.
+#[derive(Debug, Clone, PartialEq, Eq, Facet)]
+#[repr(u8)]
+pub enum ExecReadObservation {
+    /// The path existed with this content hash.
+    Content(ContentHash),
+    /// The path did not exist.
+    Absent,
+    /// A directory was enumerated; the hash covers the sorted name list.
+    Listing(DirectoryListingHash),
+}
+
+/// Hash of a canonical directory listing observation.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Facet)]
+#[repr(transparent)]
+pub struct DirectoryListingHash(pub Blake3Hash);
+
+/// Exactly what the run was allowed and expected to read in stage 1. Stage 2
+/// replaces this declared set with VFS-observed reads.
+#[derive(Debug, Clone, Default, PartialEq, Eq, Facet)]
+pub struct ExecReadSet {
+    pub entries: BTreeMap<String, ExecReadObservation>,
+}
+
+/// A completed run: declared outputs plus the read-set observation slot.
+#[derive(Debug, Clone, PartialEq, Eq, Facet)]
+pub struct ExecOutcome {
+    pub outputs: ExecTree,
+    pub read_set: ExecReadSet,
 }
 
 /// The result of an execution: the process outcome plus the captured write-set.
-#[derive(Facet)]
+#[derive(Debug, Clone, PartialEq, Eq, Facet)]
 pub struct ExecResult {
     /// Exit status — the process exit code, or `128 + signal` if killed by a signal.
     pub exit_code: i32,
@@ -89,18 +162,97 @@ pub struct ExecResult {
     pub stdout: Vec<u8>,
     /// Captured standard error.
     pub stderr: Vec<u8>,
-    /// The flushed write-set, one tree per requested output root.
-    pub outputs: Vec<ExecOutput>,
-    /// If the execution itself failed to run (couldn't mount, spawn, or flush) — as
-    /// opposed to the process running and exiting nonzero — the reason. `None` on a
-    /// clean run-to-completion (whatever the exit code).
+    /// Outputs and read-set when the process ran successfully and declared
+    /// outputs were harvested.
+    pub outcome: Option<ExecOutcome>,
+    /// Machine-visible failure reason: spawn/sandbox/harvest failures, or a
+    /// nonzero process exit.
     pub error: Option<String>,
+}
+
+pub fn exec_role_input_paths(arg: &str, role: ExecRole) -> Vec<String> {
+    match role {
+        ExecRole::Executable | ExecRole::Input => vec![arg.to_string()],
+        ExecRole::InputFlag => embedded_path_after_equals(arg).into_iter().collect(),
+        _ => Vec::new(),
+    }
+}
+
+pub fn exec_role_output_paths(arg: &str, role: ExecRole) -> Vec<String> {
+    match role {
+        ExecRole::Output => vec![arg.to_string()],
+        ExecRole::OutputFlag => rustc_emit_output_paths(arg),
+        _ => Vec::new(),
+    }
+}
+
+pub fn exec_role_output_dir_paths(arg: &str, role: ExecRole) -> Vec<String> {
+    match role {
+        ExecRole::OutputDir => vec![arg.to_string()],
+        _ => Vec::new(),
+    }
+}
+
+pub fn exec_role_stdout_paths(arg: &str, role: ExecRole) -> Vec<String> {
+    match role {
+        ExecRole::Stdout => vec![arg.to_string()],
+        _ => Vec::new(),
+    }
+}
+
+pub fn exec_role_env_paths(arg: &str, role: ExecRole) -> Vec<String> {
+    match role {
+        ExecRole::Env => embedded_path_after_equals(arg).into_iter().collect(),
+        _ => Vec::new(),
+    }
+}
+
+pub fn exec_role_search_dir_paths(arg: &str, role: ExecRole) -> Vec<String> {
+    match role {
+        ExecRole::SearchDir => vec![arg.to_string()],
+        ExecRole::SearchDirFlag => embedded_path_after_equals(arg).into_iter().collect(),
+        _ => Vec::new(),
+    }
+}
+
+pub fn exec_role_embedded_paths(arg: &str, role: ExecRole) -> Vec<String> {
+    let mut paths = exec_role_input_paths(arg, role);
+    paths.extend(exec_role_output_paths(arg, role));
+    paths.extend(exec_role_output_dir_paths(arg, role));
+    paths.extend(exec_role_stdout_paths(arg, role));
+    paths.extend(exec_role_env_paths(arg, role));
+    paths.extend(exec_role_search_dir_paths(arg, role));
+    paths
+}
+
+fn embedded_path_after_equals(arg: &str) -> Option<String> {
+    arg.rsplit_once('=')
+        .map(|(_, path)| path)
+        .filter(|path| !path.is_empty())
+        .map(str::to_string)
+}
+
+fn rustc_emit_output_paths(arg: &str) -> Vec<String> {
+    let Some(spec) = arg.strip_prefix("--emit=") else {
+        return Vec::new();
+    };
+    spec.split(',')
+        .filter_map(|entry| {
+            let mut parts = entry.splitn(2, '=');
+            let _kind = parts.next()?;
+            parts
+                .next()
+                .filter(|path| !path.is_empty())
+                .map(str::to_string)
+        })
+        .collect()
 }
 
 /// Runner service trait
 ///
 /// A remote-capable worker shell.
 #[vox::service]
+#[allow(async_fn_in_trait)]
 pub trait Runner {
     async fn exec(&self, request: ExecRequest) -> ExecResult;
     async fn discover_probe(&self, request: DiscoverProbeRequest) -> DiscoverResult;

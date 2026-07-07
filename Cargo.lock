@@ -3179,6 +3179,17 @@ dependencies = [
 ]
 
 [[package]]
+name = "vx-exec"
+version = "0.1.0"
+dependencies = [
+ "seatbelt-exec",
+ "tempfile",
+ "tokio",
+ "tracing",
+ "vx-services",
+]
+
+[[package]]
 name = "vx-fskit"
 version = "0.1.0"
 dependencies = [
