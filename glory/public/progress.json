@@ -1,5 +1,5 @@
 {
-  "updated": "2026-07-07T20:31:00+02:00",
+  "updated": "2026-07-07T20:52:00+02:00",
   "meta": {
     "title": "PATH TO GLORY",
     "subtitle": "vixen: from demand machine to sovereign build system",
@@ -107,15 +107,16 @@
     },
     {
       "id": "jit-anomaly",
-      "title": "JIT 2× anomaly investigation",
+      "title": "JIT anomaly: solved (stringly layer, Amdahl)",
       "lane": "machine",
-      "status": "active",
-      "desc": "JIT lane measured slower than the interpreter on host-call-heavy work even after the compile cache. Re-measuring post-epoch with stax; three hypotheses minimum; report before fixes.",
+      "status": "done",
+      "desc": "2× → 1.1× on trunk: one SipHash lookup over SchemaId keys was 30.8% of JIT time (0.7% of interp's). The epoch was the fix; remaining: identity hasher on SchemaId maps + one pop-typing regression, both queued.",
       "evidence": [
-        "agent 873934f1",
-        "branch jit-lane-investigation"
+        "origin/jit-lane-profiling",
+        "notes/jit-lane-investigation.md",
+        "stax: 4809/736 kperf samples"
       ],
-      "short": "JIT anomaly"
+      "short": "JIT solved"
     },
     {
       "id": "dwarf",
