@@ -1,9 +1,9 @@
 {
-  "updated": "2026-07-07T21:55:00+02:00",
+  "updated": "2026-07-07T22:20:00+02:00",
   "meta": {
     "title": "PATH TO GLORY",
     "subtitle": "vixen: from demand machine to sovereign build system",
-    "trunk": "rodin @ d27e2478f"
+    "trunk": "rodin @ c868cd51a — EPOCH CLOSED"
   },
   "lanes": {
     "machine": "#4ecdc4",
@@ -81,18 +81,19 @@
     },
     {
       "id": "epoch-blake3",
-      "title": "blake3 + carried hasher — identity freeze",
+      "title": "blake3 identity freeze — EPOCH CLOSED",
       "lane": "machine",
-      "status": "active",
-      "desc": "The epoch closer: sha2→blake3, carried incremental hasher on molten arrays (the measured ~50× lever), SchemaId bytes replace name strings in hashes, every recorded flag discharged. After this, a hash is a durable cross-machine cache key.",
+      "status": "done",
+      "desc": "sha2→blake3 everywhere on identity paths, SchemaId bytes not names, stable legacy marker, descriptor hashing complete. Bonus kills: the 7GB accumulator (now 809MB — pushes move, not copy) and the Int(-1) molten sentinel bug. Honest perf: 7.3× append reuse (the old 50× harness was invalid — pop invalidates carried hashes). A hash is now a durable cross-machine cache key.",
       "deps": [
         "epoch-collections"
       ],
       "evidence": [
-        "agent a4835967",
-        "branch hash-epoch-blake3"
+        "rodin c3156ed5c..c868cd51a",
+        "gatekeeper-verified identity freeze",
+        "202/122/69 + clippy clean"
       ],
-      "short": "blake3 freeze"
+      "short": "EPOCH CLOSED"
     },
     {
       "id": "molten-drop",
@@ -253,8 +254,8 @@
       "title": "compose at scale: manifests + index → solve → units",
       "short": "compose at scale",
       "lane": "cargo-model",
-      "status": "parked",
-      "desc": "145/145 members compose into one Index (84s interpreted). Both diff harnesses pre-wired and exercised (lock diff on live tiny solve; unit diff 4/4+3/3 edges). PARKED on trunk machine bug `molten handle -1` (machine lane owns it); remeasure = one command when fixed.",
+      "status": "active",
+      "desc": "molten-handle bug fixed on trunk — remeasuring now. Residue owned here: semantic empty-solve on prerelease workspace members (root-clause suspect).",
       "deps": [
         "scale-measure",
         "cfg",
@@ -292,14 +293,14 @@
       "id": "lang-mission",
       "title": "argv enum + Path.join + Tree→String",
       "lane": "language",
-      "status": "queued",
+      "status": "active",
       "desc": "Three ratified primitives, one mission: exec argv elements as Str|Path|Interpolation-into-output-trees (lazy graph edges), capability-style join-only paths, single-file text projection. Unblocks three parked lanes at once.",
       "deps": [
         "epoch-blake3"
       ],
       "evidence": [
-        "ratified 2026-07-07",
-        "fires when blake3 frees lower.rs"
+        "agent 47e503b1",
+        "branch argv-enum-paths"
       ],
       "short": "argv + paths"
     },
