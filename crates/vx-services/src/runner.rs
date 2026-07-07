@@ -5,12 +5,12 @@
 
 use std::collections::BTreeMap;
 
-use crate::{Blake3Hash, ContentHash};
+use crate::{ContentHash, NodeHash};
 use facet::Facet;
 
 /// Runner protocol version.
 /// Bump this when making breaking changes to the Runner RPC interface.
-pub const RUNNER_PROTOCOL_VERSION: u32 = 22;
+pub const RUNNER_PROTOCOL_VERSION: u32 = 23;
 
 // =============================================================================
 // Generic Sandboxed Tool Execution
@@ -126,18 +126,32 @@ pub struct ExecRequest {
 #[derive(Debug, Clone, PartialEq, Eq, Facet)]
 #[repr(u8)]
 pub enum ExecReadObservation {
-    /// The path existed with this content hash.
-    Content(ContentHash),
-    /// The path did not exist.
-    Absent,
-    /// A directory was enumerated; the hash covers the sorted name list.
-    Listing(DirectoryListingHash),
+    /// The path existed as a file with this content identity.
+    File {
+        content_hash: ContentHash,
+        blob_node: Option<NodeHash>,
+        size: u64,
+    },
+    /// The path existed as a directory with this Merkle directory identity.
+    Directory { directory_node: NodeHash },
+    /// A lookup under an observed directory missed.
+    LookupMiss {
+        parent_path: String,
+        directory_node: NodeHash,
+    },
 }
 
-/// Hash of a canonical directory listing observation.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Facet)]
+/// Per-exec VFS prefix used to scope read observations.
+#[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Hash, Facet)]
 #[repr(transparent)]
-pub struct DirectoryListingHash(pub Blake3Hash);
+pub struct ExecPrefixId(pub String);
+
+/// A tracked observation scope granted to one memoized exec.
+#[derive(Debug, Clone, PartialEq, Eq, Facet)]
+pub struct ExecObservationScope {
+    pub prefix_id: ExecPrefixId,
+    pub roots: Vec<String>,
+}
 
 /// Exactly what the run was allowed and expected to read in stage 1. Stage 2
 /// replaces this declared set with VFS-observed reads.
@@ -146,11 +160,49 @@ pub struct ExecReadSet {
     pub entries: BTreeMap<String, ExecReadObservation>,
 }
 
+/// One output subfile that is ready for subfile-granular demand release.
+#[derive(Debug, Clone, PartialEq, Eq, Facet)]
+pub struct ExecSubfileCompletion {
+    pub path: String,
+    pub content_hash: ContentHash,
+    pub size: u64,
+}
+
+/// Final output-tree receipt after process exit.
+#[derive(Debug, Clone, PartialEq, Eq, Facet)]
+pub struct ExecTreeFinalization {
+    pub files: Vec<ExecSubfileCompletion>,
+}
+
+/// Progressive output-tree events visible to callers.
+#[derive(Debug, Clone, PartialEq, Eq, Facet)]
+#[repr(u8)]
+pub enum ExecTreeEvent {
+    SubfileCompleted(ExecSubfileCompletion),
+    TreeFinalized(ExecTreeFinalization),
+}
+
+/// Typed control hook for future kill-when-satisfied demand accounting.
+#[derive(Debug, Clone, PartialEq, Eq, Facet)]
+#[repr(u8)]
+pub enum ExecControlSignal {
+    /// PIN(progressive-exec-trees): vix-side demand accounting will send this
+    /// to a running exec once all demanded subfiles have completed.
+    DemandsSatisfied(ExecDemandsSatisfied),
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Facet)]
+pub struct ExecDemandsSatisfied {
+    pub completed: Vec<String>,
+}
+
 /// A completed run: declared outputs plus the read-set observation slot.
 #[derive(Debug, Clone, PartialEq, Eq, Facet)]
 pub struct ExecOutcome {
     pub outputs: ExecTree,
     pub read_set: ExecReadSet,
+    pub observation_scopes: Vec<ExecObservationScope>,
+    pub tree_events: Vec<ExecTreeEvent>,
 }
 
 /// The result of an execution: the process outcome plus the captured write-set.

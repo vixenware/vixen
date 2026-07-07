@@ -6,7 +6,7 @@ use std::path::{Path, PathBuf};
 use vx_exec::SandboxedExecutor;
 use vx_services::{
     Blake3Hash, ContentHash, ExecArg, ExecMount, ExecPlan, ExecReadObservation, ExecRequest,
-    ExecRole, ExecTree, Runner,
+    ExecRole, ExecTree, ExecTreeEvent, Runner,
 };
 
 #[tokio::test]
@@ -39,7 +39,13 @@ async fn shell_exec_harvests_declared_output() {
         })
         .await;
 
-    assert_eq!(result.exit_code, 0, "stderr: {}", stderr(&result));
+    assert_eq!(
+        result.exit_code,
+        0,
+        "error: {:?}\nstderr: {}",
+        result.error,
+        stderr(&result)
+    );
     assert_eq!(result.error, None);
     let outcome = result.outcome.expect("successful exec returns an outcome");
     assert_eq!(
@@ -48,10 +54,24 @@ async fn shell_exec_harvests_declared_output() {
     );
     assert_eq!(
         outcome.read_set.entries.get("/m/in/message.txt"),
-        Some(&ExecReadObservation::Content(ContentHash(
-            Blake3Hash::from_bytes(b"hello from declared mount\n")
-        )))
+        Some(&ExecReadObservation::File {
+            content_hash: ContentHash(Blake3Hash::from_bytes(b"hello from declared mount\n")),
+            blob_node: None,
+            size: "hello from declared mount\n".len() as u64,
+        })
     );
+    assert_eq!(outcome.observation_scopes.len(), 1);
+    assert_eq!(outcome.observation_scopes[0].roots, vec!["/m/in"]);
+    assert!(
+        outcome
+            .tree_events
+            .iter()
+            .any(|event| matches!(event, ExecTreeEvent::SubfileCompleted(file) if file.path == "/m/out/hello.txt"))
+    );
+    assert!(matches!(
+        outcome.tree_events.last(),
+        Some(ExecTreeEvent::TreeFinalized(finalization)) if finalization.files.len() == 1
+    ));
 }
 
 #[tokio::test]
@@ -87,6 +107,78 @@ async fn undeclared_read_is_loud_failure() {
         result.error,
         stderr(&result)
     );
+}
+
+#[tokio::test]
+async fn observed_read_set_contains_files_directory_and_lookup_miss() {
+    if !host_tools_available() {
+        return;
+    }
+
+    let mut input_tree = ExecTree::default();
+    input_tree.insert_bytes("a.txt", b"alpha\n".to_vec());
+    input_tree.insert_bytes("b.txt", b"beta\n".to_vec());
+
+    let result = SandboxedExecutor::new()
+        .exec(ExecRequest {
+            program: "/bin/sh".to_string(),
+            plan: ExecPlan {
+                argv: vec![
+                    arg("-c", ExecRole::Flag),
+                    arg(
+                        "set -e; cat \"$1\" >/dev/null; cat \"$B\" >/dev/null; printf 'observed\\n' > \"$OUT\"",
+                        ExecRole::Flag,
+                    ),
+                    arg("sh", ExecRole::Flag),
+                    arg("/m/in/a.txt", ExecRole::Input),
+                    arg("B=/m/in/b.txt", ExecRole::Env),
+                    arg("DIR=/m/in", ExecRole::Env),
+                    arg("MISS=/m/in/missing.txt", ExecRole::Env),
+                    arg("OUT=/m/out/combined.txt", ExecRole::Env),
+                    arg("/m/out/combined.txt", ExecRole::Output),
+                ],
+            },
+            mounts: vec![ExecMount {
+                at: "/m/in".to_string(),
+                tree: input_tree,
+            }],
+            toolchain_roots: default_toolchain_roots(),
+        })
+        .await;
+
+    assert_eq!(
+        result.exit_code,
+        0,
+        "error: {:?}\nstderr: {}",
+        result.error,
+        stderr(&result)
+    );
+    let outcome = result.outcome.expect("successful exec returns an outcome");
+    assert_eq!(
+        outcome.outputs.entries.get("/m/out/combined.txt"),
+        Some(&"observed\n".to_string())
+    );
+    assert_eq!(outcome.read_set.entries.len(), 4);
+    assert!(matches!(
+        outcome.read_set.entries.get("/m/in/a.txt"),
+        Some(ExecReadObservation::File { content_hash, size, .. })
+            if *content_hash == ContentHash(Blake3Hash::from_bytes(b"alpha\n"))
+                && *size == 6
+    ));
+    assert!(matches!(
+        outcome.read_set.entries.get("/m/in/b.txt"),
+        Some(ExecReadObservation::File { content_hash, size, .. })
+            if *content_hash == ContentHash(Blake3Hash::from_bytes(b"beta\n"))
+                && *size == 5
+    ));
+    assert!(matches!(
+        outcome.read_set.entries.get("/m/in"),
+        Some(ExecReadObservation::Directory { .. })
+    ));
+    assert!(matches!(
+        outcome.read_set.entries.get("/m/in/missing.txt"),
+        Some(ExecReadObservation::LookupMiss { parent_path, .. }) if parent_path == "/m/in"
+    ));
 }
 
 #[tokio::test]

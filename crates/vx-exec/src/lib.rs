@@ -7,9 +7,10 @@ use std::path::{Component, Path, PathBuf};
 use std::process::Output;
 
 use vx_services::{
-    Blake3Hash, ContentHash, DirectoryListingHash, DiscoverProbeRequest, DiscoverResult, ExecArg,
-    ExecMount, ExecOutcome, ExecPlan, ExecReadObservation, ExecReadSet, ExecRequest, ExecResult,
-    ExecRole, ExecTree, Runner, exec_role_embedded_paths, exec_role_env_paths,
+    Blake3Hash, ContentHash, DiscoverProbeRequest, DiscoverResult, ExecArg, ExecMount,
+    ExecObservationScope, ExecOutcome, ExecPlan, ExecPrefixId, ExecReadObservation, ExecReadSet,
+    ExecRequest, ExecResult, ExecRole, ExecSubfileCompletion, ExecTree, ExecTreeEvent,
+    ExecTreeFinalization, NodeHash, Runner, exec_role_embedded_paths, exec_role_env_paths,
     exec_role_input_paths, exec_role_output_dir_paths, exec_role_output_paths,
     exec_role_search_dir_paths, exec_role_stdout_paths,
 };
@@ -51,6 +52,12 @@ fn run_request(request: ExecRequest) -> Result<ExecResult, String> {
     fs::create_dir_all(root.join(".vx-exec-cas"))
         .map_err(|err| format!("sandboxed exec cas dir: {err}"))?;
     fs::create_dir_all(root.join("tmp")).map_err(|err| format!("sandboxed exec tmp dir: {err}"))?;
+    let scope_id = ExecPrefixId(
+        root.file_name()
+            .and_then(|name| name.to_str())
+            .unwrap_or("vx-sandboxed-exec")
+            .to_string(),
+    );
 
     let world = MountedWorld::new(&request.mounts);
     let mut observed = ObservedWorld::new(&world);
@@ -89,10 +96,14 @@ fn run_request(request: ExecRequest) -> Result<ExecResult, String> {
         });
     }
 
-    let outputs = harvest_outputs(&request.plan, root, &output.stdout)?;
+    let harvested = harvest_outputs(&request.plan, root, &output.stdout)?;
+    verify_subfile_completions_at_exit(root, &harvested.tree, &harvested.subfiles)?;
+    let tree_events = tree_events_from_subfiles(harvested.subfiles.clone());
     let outcome = ExecOutcome {
-        outputs,
+        outputs: harvested.tree,
         read_set: observed.into_read_set(),
+        observation_scopes: observation_scopes(&scope_id, &request.mounts),
+        tree_events,
     };
     Ok(ExecResult {
         exit_code,
@@ -156,18 +167,24 @@ fn stage_declared_inputs(
     Ok(())
 }
 
-fn stage_env_path(root: &Path, path: &str, world: &ObservedWorld<'_>) -> Result<(), String> {
-    if let Some(bytes) = world.peek_bytes(path) {
+fn stage_env_path(root: &Path, path: &str, world: &mut ObservedWorld<'_>) -> Result<(), String> {
+    if let Some(bytes) = world.read_bytes(path) {
         return stage_file(root, path, &bytes);
     }
-    let Some(names) = world.peek_list(path) else {
-        return Ok(());
-    };
-    for name in names {
-        let logical = listed_logical_path(path, &name, world);
-        if let Some(bytes) = world.peek_bytes(&logical) {
-            stage_file(root, &logical, &bytes)?;
+    if let Some(names) = world.list(path) {
+        for name in names {
+            let logical = listed_logical_path(path, &name, world);
+            if let Some(bytes) = world.peek_bytes(&logical) {
+                stage_file(root, &logical, &bytes)?;
+            }
         }
+        return Ok(());
+    }
+    if world.saw_lookup_miss(path) {
+        let parent = parent_logical_path(path);
+        let physical_parent = physical_path(&parent, root)?;
+        fs::create_dir_all(&physical_parent)
+            .map_err(|err| format!("sandboxed exec create lookup-miss parent `{parent}`: {err}"))?;
     }
     Ok(())
 }
@@ -188,6 +205,13 @@ fn stage_declared_input(
             })?;
             stage_file(root, &logical, &bytes)?;
         }
+        return Ok(());
+    }
+    if world.saw_lookup_miss(input) {
+        let parent = parent_logical_path(input);
+        let physical_parent = physical_path(&parent, root)?;
+        fs::create_dir_all(&physical_parent)
+            .map_err(|err| format!("sandboxed exec create lookup-miss parent `{parent}`: {err}"))?;
         return Ok(());
     }
     Err(format!(
@@ -241,30 +265,48 @@ fn prepare_output_dirs(plan: &ExecPlan, root: &Path) -> Result<Vec<PathBuf>, Str
     Ok(dedup_paths(write_roots))
 }
 
-fn harvest_outputs(plan: &ExecPlan, root: &Path, stdout: &[u8]) -> Result<ExecTree, String> {
+struct HarvestedOutputs {
+    tree: ExecTree,
+    subfiles: Vec<ExecSubfileCompletion>,
+}
+
+fn harvest_outputs(
+    plan: &ExecPlan,
+    root: &Path,
+    stdout: &[u8],
+) -> Result<HarvestedOutputs, String> {
     let mut tree = ExecTree::default();
+    let mut subfiles = Vec::new();
     for ExecArg { value, role } in &plan.argv {
         for output in exec_role_output_paths(value, *role) {
             let path = physical_path(&output, root)?;
             let bytes = fs::read(&path).map_err(|err| {
                 format!("sandboxed exec output `{output}` was not produced: {err}")
             })?;
+            subfiles.push(subfile_completion(output.clone(), &bytes));
             tree.insert_bytes(output, bytes);
         }
         for stdout_path in exec_role_stdout_paths(value, *role) {
+            subfiles.push(subfile_completion(stdout_path.clone(), stdout));
             tree.insert_bytes(stdout_path, stdout.to_vec());
         }
         for output_dir in exec_role_output_dir_paths(value, *role) {
-            harvest_output_dir(root, &output_dir, &mut tree)?;
+            harvest_output_dir(root, &output_dir, &mut tree, &mut subfiles)?;
         }
     }
     if tree.entries.is_empty() && tree.blobs.is_empty() {
         return Err("sandboxed exec plan declared no outputs".to_string());
     }
-    Ok(tree)
+    subfiles.sort_by(|left, right| left.path.cmp(&right.path));
+    Ok(HarvestedOutputs { tree, subfiles })
 }
 
-fn harvest_output_dir(root: &Path, logical_dir: &str, tree: &mut ExecTree) -> Result<(), String> {
+fn harvest_output_dir(
+    root: &Path,
+    logical_dir: &str,
+    tree: &mut ExecTree,
+    subfiles: &mut Vec<ExecSubfileCompletion>,
+) -> Result<(), String> {
     let physical = physical_path(logical_dir, root)?;
     if !physical.exists() {
         return Ok(());
@@ -296,11 +338,70 @@ fn harvest_output_dir(root: &Path, logical_dir: &str, tree: &mut ExecTree) -> Re
                         path.display()
                     )
                 })?;
+                subfiles.push(subfile_completion(logical.clone(), &bytes));
                 tree.insert_bytes(logical, bytes);
             }
         }
     }
     Ok(())
+}
+
+fn subfile_completion(path: String, bytes: &[u8]) -> ExecSubfileCompletion {
+    ExecSubfileCompletion {
+        path,
+        content_hash: ContentHash(Blake3Hash::from_bytes(bytes)),
+        size: bytes.len() as u64,
+    }
+}
+
+fn tree_events_from_subfiles(subfiles: Vec<ExecSubfileCompletion>) -> Vec<ExecTreeEvent> {
+    // PIN(progressive-exec-trees): this private staging executor has no daemon
+    // close callback. vx-vfsd integration must emit SubfileCompleted from VFS
+    // close/release notifications before process exit, then reuse the exit
+    // verification below to enforce close-is-provisional.
+    let mut events = subfiles
+        .iter()
+        .cloned()
+        .map(ExecTreeEvent::SubfileCompleted)
+        .collect::<Vec<_>>();
+    events.push(ExecTreeEvent::TreeFinalized(ExecTreeFinalization {
+        files: subfiles,
+    }));
+    events
+}
+
+fn verify_subfile_completions_at_exit(
+    root: &Path,
+    outputs: &ExecTree,
+    subfiles: &[ExecSubfileCompletion],
+) -> Result<(), String> {
+    for subfile in subfiles {
+        let path = physical_path(&subfile.path, root)?;
+        let bytes = match fs::read(&path) {
+            Ok(bytes) => bytes,
+            Err(err) => outputs.bytes(&subfile.path).ok_or_else(|| {
+                format!(
+                    "sandboxed exec completed output `{}` vanished before exit verification: {err}",
+                    subfile.path
+                )
+            })?,
+        };
+        let exit_hash = ContentHash(Blake3Hash::from_bytes(&bytes));
+        if exit_hash != subfile.content_hash || bytes.len() as u64 != subfile.size {
+            return Err(format!(
+                "sandboxed exec output `{}` changed after close observation",
+                subfile.path
+            ));
+        }
+    }
+    Ok(())
+}
+
+fn observation_scopes(scope_id: &ExecPrefixId, mounts: &[ExecMount]) -> Vec<ExecObservationScope> {
+    vec![ExecObservationScope {
+        prefix_id: scope_id.clone(),
+        roots: mounts.iter().map(|mount| mount.at.clone()).collect(),
+    }]
 }
 
 fn stage_file(root: &Path, logical: &str, bytes: &[u8]) -> Result<(), String> {
@@ -568,13 +669,23 @@ impl<'a> MountedWorld<'a> {
         Self { mounts }
     }
 
-    fn read_bytes(&self, path: &str) -> Option<Vec<u8>> {
+    fn read_bytes(&self, path: &str) -> MountLookup {
         for mount in self.mounts {
             if let Some(rest) = strip_mount(path, &mount.at) {
-                return mount.tree.bytes(rest.trim_start_matches('/'));
+                let relative = rest.trim_start_matches('/');
+                if let Some(bytes) = mount.tree.bytes(relative) {
+                    return MountLookup::File(bytes);
+                }
+                if self.parent_exists(mount, relative) {
+                    return MountLookup::LookupMiss {
+                        parent_path: parent_logical_path(path),
+                        directory_node: directory_node_for_parent(&mount.tree, relative),
+                    };
+                }
+                return MountLookup::Outside;
             }
         }
-        None
+        MountLookup::Outside
     }
 
     fn list(&self, dir: &str) -> Option<Vec<String>> {
@@ -601,6 +712,28 @@ impl<'a> MountedWorld<'a> {
         }
         None
     }
+
+    fn parent_exists(&self, mount: &ExecMount, relative: &str) -> bool {
+        let Some((parent, _leaf)) = relative.rsplit_once('/') else {
+            return true;
+        };
+        let prefix = format!("{}/", parent.trim_matches('/'));
+        mount
+            .tree
+            .entries
+            .keys()
+            .chain(mount.tree.blobs.keys())
+            .any(|key| key.starts_with(&prefix))
+    }
+}
+
+enum MountLookup {
+    File(Vec<u8>),
+    LookupMiss {
+        parent_path: String,
+        directory_node: NodeHash,
+    },
+    Outside,
 }
 
 fn strip_mount<'a>(path: &'a str, mount_at: &str) -> Option<&'a str> {
@@ -610,6 +743,18 @@ fn strip_mount<'a>(path: &'a str, mount_at: &str) -> Option<&'a str> {
     }
     path.strip_prefix(mount_at)
         .and_then(|rest| rest.strip_prefix('/'))
+}
+
+fn parent_logical_path(path: &str) -> String {
+    path.rsplit_once('/')
+        .map(|(parent, _)| {
+            if parent.is_empty() {
+                "/".to_string()
+            } else {
+                parent.to_string()
+            }
+        })
+        .unwrap_or_else(|| "/".to_string())
 }
 
 struct ObservedWorld<'a> {
@@ -626,33 +771,60 @@ impl<'a> ObservedWorld<'a> {
     }
 
     fn read_bytes(&mut self, path: &str) -> Option<Vec<u8>> {
-        let got = self.world.read_bytes(path);
-        let observation = match &got {
-            Some(contents) => {
-                ExecReadObservation::Content(ContentHash(Blake3Hash::from_bytes(contents)))
+        match self.world.read_bytes(path) {
+            MountLookup::File(contents) => {
+                self.read_set.entries.insert(
+                    path.to_string(),
+                    ExecReadObservation::File {
+                        content_hash: ContentHash(Blake3Hash::from_bytes(&contents)),
+                        blob_node: None,
+                        size: contents.len() as u64,
+                    },
+                );
+                Some(contents)
             }
-            None => ExecReadObservation::Absent,
-        };
-        self.read_set.entries.insert(path.to_string(), observation);
-        got
+            MountLookup::LookupMiss {
+                parent_path,
+                directory_node,
+            } => {
+                self.read_set.entries.insert(
+                    path.to_string(),
+                    ExecReadObservation::LookupMiss {
+                        parent_path,
+                        directory_node,
+                    },
+                );
+                None
+            }
+            MountLookup::Outside => None,
+        }
     }
 
     fn peek_bytes(&self, path: &str) -> Option<Vec<u8>> {
-        self.world.read_bytes(path)
-    }
-
-    fn peek_list(&self, dir: &str) -> Option<Vec<String>> {
-        self.world.list(dir)
+        match self.world.read_bytes(path) {
+            MountLookup::File(contents) => Some(contents),
+            MountLookup::LookupMiss { .. } | MountLookup::Outside => None,
+        }
     }
 
     fn list(&mut self, dir: &str) -> Option<Vec<String>> {
         let got = self.world.list(dir);
-        let observation = match &got {
-            Some(names) => ExecReadObservation::Listing(listing_hash(names)),
-            None => ExecReadObservation::Absent,
-        };
-        self.read_set.entries.insert(format!("{dir}/"), observation);
+        if let Some(names) = &got {
+            self.read_set.entries.insert(
+                dir.to_string(),
+                ExecReadObservation::Directory {
+                    directory_node: directory_node_hash(names),
+                },
+            );
+        }
         got
+    }
+
+    fn saw_lookup_miss(&self, path: &str) -> bool {
+        matches!(
+            self.read_set.entries.get(path),
+            Some(ExecReadObservation::LookupMiss { .. })
+        )
     }
 
     fn into_read_set(self) -> ExecReadSet {
@@ -660,11 +832,62 @@ impl<'a> ObservedWorld<'a> {
     }
 }
 
-fn listing_hash(names: &[String]) -> DirectoryListingHash {
+fn directory_node_hash(names: &[String]) -> NodeHash {
     let mut bytes = Vec::new();
     for name in names {
         bytes.extend_from_slice(&(name.len() as u64).to_le_bytes());
         bytes.extend_from_slice(name.as_bytes());
     }
-    DirectoryListingHash(Blake3Hash::from_bytes(&bytes))
+    NodeHash(Blake3Hash::from_bytes(&bytes))
+}
+
+fn directory_node_for_parent(tree: &ExecTree, relative: &str) -> NodeHash {
+    let parent = relative
+        .rsplit_once('/')
+        .map(|(parent, _)| parent)
+        .unwrap_or("");
+    let mut names = BTreeSet::new();
+    let prefix = if parent.is_empty() {
+        String::new()
+    } else {
+        format!("{}/", parent.trim_matches('/'))
+    };
+    for key in tree.entries.keys().chain(tree.blobs.keys()) {
+        let rest = if prefix.is_empty() {
+            key.as_str()
+        } else if let Some(rest) = key.strip_prefix(&prefix) {
+            rest
+        } else {
+            continue;
+        };
+        if let Some(name) = rest.split('/').next()
+            && !name.is_empty()
+        {
+            names.insert(name.to_string());
+        }
+    }
+    directory_node_hash(&names.into_iter().collect::<Vec<_>>())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn exit_verification_rejects_changed_subfile() {
+        let temp = tempfile::Builder::new()
+            .prefix("vx-exec-close-verify-")
+            .tempdir()
+            .unwrap();
+        let path = temp.path().join("m/out/artifact.txt");
+        fs::create_dir_all(path.parent().unwrap()).unwrap();
+        fs::write(&path, b"first").unwrap();
+        let completion = subfile_completion("/m/out/artifact.txt".to_string(), b"first");
+
+        fs::write(&path, b"second").unwrap();
+        let error =
+            verify_subfile_completions_at_exit(temp.path(), &ExecTree::default(), &[completion])
+                .expect_err("changed output must fail close-is-provisional verification");
+        assert!(error.contains("changed after close observation"));
+    }
 }
