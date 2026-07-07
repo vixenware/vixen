@@ -5,7 +5,7 @@ weight = 5
 
 This page is load-bearing: early access only works if you know what you're
 early to. Everything here is stated as of its date; the
-[Status](@/status/_index.md) page moves faster.
+[Status](/status/) page moves faster.
 
 **Scale honesty.** The end-to-end pipeline — manifest → resolve → fetch →
 extract → build with real rustc → verified against Cargo — runs at *fixture

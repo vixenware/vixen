@@ -1,5 +1,11 @@
 @schema {id crate:dodeca-config@1, cli ddc}
 
+// vixen docs: two sites, one server.
+// Root (/) is the USER site: evaluate, install, build, trust.
+// /dev is the DEVELOPER site: concepts, constellation, the vix language,
+// contributing. Each has its own chrome (templates/static as content-dir
+// siblings); cross-links use [[dev:...]] / absolute paths.
+
 source {
     content docs/content
     impls ()
@@ -14,5 +20,9 @@ source {
     }
     skip_domains ()
 }
+
+mounts (
+    { name dev, path /dev, local docs/dev/content }
+)
 
 site {output public}

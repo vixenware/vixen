@@ -37,5 +37,5 @@ CI can make the same kinds of assertions about your builds — "this change clas
 should never rebuild that crate" as a checkable statement.
 
 The interactive form — expand a build, follow a demand chain, diff two runs —
-is a UI milestone tracked on [Status](@/status/_index.md). The trace itself
+is a UI milestone tracked on [Status](/status/). The trace itself
 exists today; it's how the machine is tested.

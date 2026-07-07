@@ -1,0 +1,17 @@
+{% extends "base.html" %}
+
+{% block title %}{{ page.title }} — vixen{% endblock %}
+
+{% block content %}
+<article class="page-frame">
+    <div class="page-meta">
+        {% if "type" in page.extra %}<span class="stamp">{{ page.extra.type }}</span>{% endif %}
+        {% if "tiers" in page.extra %}{% for t in page.extra.tiers %}<span class="stamp stamp-tier">{{ t }}</span>{% endfor %}{% endif %}
+        {% if "updated" in page.extra %}<span><span class="meta-sep">/</span> updated {{ page.extra.updated }}</span>{% endif %}
+    </div>
+    <h1 class="display display-2 page-title">{{ page.title }}</h1>
+    <div class="page-body">
+        {{ page.content | safe }}
+    </div>
+</article>
+{% endblock %}

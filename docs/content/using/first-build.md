@@ -8,7 +8,7 @@ weight = 2
 > narrated for a human.
 
 Point vixen at a Cargo workspace and demand a build. Here is what actually
-happens — and what you'll see in the [receipts](@/using/receipts.md):
+happens — and what you'll see in the [receipts](/using/receipts/):
 
 **1. Manifests are parsed — in vix.** Your `Cargo.toml` files are read by build
 logic written in the build language (`cargo_manifest.vix`), producing typed
@@ -16,9 +16,9 @@ values: packages, targets, dependency declarations. From here on, everything is
 values with content identity.
 
 **2. Resolution — rodin.** The dependency graph plus a pinned snapshot of the
-package index go to [rodin](@/constellation/rodin.md), which selects versions
+package index go to [rodin](/dev/constellation/rodin/), which selects versions
 exactly as Cargo would (verified differentially against real `cargo` — the
-current fixture score is on the [Status](@/status/_index.md) page). The
+current fixture score is on the [Status](/status/) page). The
 selection is a value; resolve again without changes and it's a memo hit.
 
 **3. Fetch and extract.** Selected crates are fetched from the registry by

@@ -36,7 +36,7 @@ passed.
 The pieces here have been validated on real object files (the motivating
 scenario — "half my tests depend on this crate, it changed, skip the other
 half" — works, monomorphized generics and all); productization into the build
-flow is tracked on [Status](@/status/_index.md). Granularity note: this
-composes with [item-granular invalidation](@/concepts/read-sets.md) — a
+flow is tracked on [Status](/status/). Granularity note: this
+composes with [item-granular invalidation](/dev/concepts/read-sets/) — a
 comment-only change never even reaches test selection, because nothing's
 content changed.

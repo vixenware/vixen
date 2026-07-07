@@ -26,7 +26,7 @@ daemon and runner run side by side and you never think about the distinction.
 The distinction exists because it's also the *distribution* seam: a beefy build
 box is just a machine whose runner advertises more, and dispatching work there
 is the same conversation over longer wires. See
-[Daemons, runners, and services](@/concepts/services.md).
+[Daemons, runners, and services](/dev/concepts/services/).
 
 ## Platform expectations
 

@@ -9,14 +9,14 @@ worth your time — learning to *read what it did and didn't do*. vixen is built
 show its work; once you can read a demand trace, "why did this rebuild?" stops
 being a mystery forever.
 
-- **[Install](@/using/install.md)** — the daemon, the CLI, what runs where.
-- **[Your first build](@/using/first-build.md)** — point vixen at a Cargo
+- **[Install](/using/install/)** — the daemon, the CLI, what runs where.
+- **[Your first build](/using/first-build/)** — point vixen at a Cargo
   workspace; what happens, step by step.
-- **[Receipts](@/using/receipts.md)** — reading demand traces: what was computed,
+- **[Receipts](/using/receipts/)** — reading demand traces: what was computed,
   what was reused, and the proof.
-- **[Test selection](@/using/test-selection.md)** — how vixen decides which tests
+- **[Test selection](/using/test-selection/)** — how vixen decides which tests
   a change can affect, and how to check its reasoning.
-- **[Current limitations](@/using/limitations.md)** — the honest page: what's
+- **[Current limitations](/using/limitations/)** — the honest page: what's
   fixture-scale, what's real-scale, which Cargo features are deliberately not
   covered yet.
 
