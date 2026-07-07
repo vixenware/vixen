@@ -1,5 +1,5 @@
 {
-  "updated": "2026-07-07T22:20:00+02:00",
+  "updated": "2026-07-07T22:58:00+02:00",
   "meta": {
     "title": "PATH TO GLORY",
     "subtitle": "vixen: from demand machine to sovereign build system",
@@ -294,7 +294,7 @@
       "title": "argv enum + Path.join + Tree→String",
       "lane": "language",
       "status": "active",
-      "desc": "Three ratified primitives, one mission: exec argv elements as Str|Path|Interpolation-into-output-trees (lazy graph edges), capability-style join-only paths, single-file text projection. Unblocks three parked lanes at once.",
+      "desc": "Active, mid-lowering: Arg enum (Str|Path|Interpolation) replacing the shims at the UnitArtifactRef seam in crate.vix; agent self-caught a Target::host() vs consumer-target bug. Quiet phase — no push until the enum lowers end-to-end.",
       "deps": [
         "epoch-blake3"
       ],
@@ -466,11 +466,10 @@
       "title": "reloc-walk test selection",
       "lane": "infra",
       "status": "active",
-      "desc": "Sound test skipping computed from compiled artifacts' reference graphs. Spike proved it works on Mach-O; panic-Location rodata masking is the known false-positive fix.",
+      "desc": "Landed: vix::reloc_selection (Mach-O), Reached/NotReached/UnknownRun with conservative unknown, panic-Location masking, differential fixture that RUNS skipped tests as its own audit oracle. In gatekeeper review.",
       "evidence": [
-        "agent a827ef1a",
-        "branch reloc-walk-capability",
-        "spike F: WORKS"
+        "branch reloc-walk-analysis @ 919ee27c2",
+        "gatekeeper gate running"
       ],
       "short": "test selection"
     },
