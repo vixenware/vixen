@@ -3,8 +3,11 @@ title = "Why vixen?"
 weight = 1
 +++
 
-The honest comparison. Every system below is good at its job; the question is
-what job you have.
+Which tool are you fighting? Self-select: **coming from cargo**, the question
+is what changes about caching, granularity, tests, and trust. **Coming from
+Bazel or Buck2**, the question is what "observed instead of declared" buys and
+what it costs. Both sections end with what the incumbent does *better* today —
+because for this product, honesty is the pitch.
 
 ## vixen and cargo
 

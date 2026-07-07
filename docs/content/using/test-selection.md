@@ -1,6 +1,6 @@
 +++
 title = "Test selection"
-weight = 4
+weight = 6
 +++
 
 The question every CI pipeline mumbles about: *a change came in — which tests

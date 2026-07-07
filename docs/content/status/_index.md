@@ -37,8 +37,8 @@ studies had designed.
 - **Hermetic execution, stage two**: from *confining* undeclared reads (done, macOS)
   to *observing* all reads through the virtual filesystem.
 
-## Tiers
+## Early access waves
 
-Early access lands in waves. This site tags pages with the tier they require;
-untagged pages are general. (Tier definitions land here when the first wave
-goes out.)
+Access lands in waves; each wave's capabilities get a dated entry here when it
+ships. Nothing is tagged yet because wave one hasn't shipped — when it does,
+this section becomes the ledger of who can do what.

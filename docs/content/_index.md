@@ -2,28 +2,39 @@
 title = "vixen"
 +++
 
-vixen is a general-purpose build system with an emphasis on Rust.
+**Your build tool does too much work, and you can't tell why.** A comment edit
+triggers a rebuild. A dependency bump reruns every test. CI spends twenty
+minutes proving nothing changed. And when the cache *does* hit, a small voice
+asks whether you can trust it.
 
-You point it at a Cargo workspace and it builds it — resolving, fetching,
-compiling, testing — with one difference that changes daily life: **vixen can
-prove what it did and didn't have to do.** Every build step is identified by
-the content of its inputs, every step's reads are tracked, and every process
-runs hermetically. The result, in practice:
+vixen is a build system for Rust — it reads your existing `Cargo.toml`,
+resolves like Cargo resolves (verified against Cargo itself), and drives real
+`rustc` — built on one structural difference: **it observes what every build
+step actually reads, and identifies everything by content.** Not timestamps.
+Not hand-declared dependency lists. Observed reads, hashed content. That's the
+whole trick, and everything below falls out of it:
 
-- **Change a comment — nothing rebuilds.** Identity is content, not timestamps.
-- **Change a function — its dependents rebuild, nothing else.** Dependencies
-  are tracked at item granularity, not file granularity.
-- **Rerun eleven tests, skip 189 — soundly.** Computed from the artifacts
-  themselves, never guessed from coverage.
-- **Trust the cache.** Undeclared inputs are impossible, so a cache hit is a
-  proof, not a hope — and "why did this rebuild?" has a
-  [readable answer](/using/receipts/).
+- **"Why did this rebuild?" has a real answer.** Every decision leaves a
+  [receipt](/using/receipts/) — the demand trace — so surprise rebuilds are a
+  lookup, not folklore.
+- **Change a comment — nothing rebuilds.** Identity is content; unchanged
+  items are unchanged, [provably](/proof/).
+- **A dependency changed — only the tests that can reach it rerun.** Computed
+  from the compiled artifacts' own reference graphs,
+  [with an audit mode](/using/test-selection/) that proves skips sound.
+- **A cache hit is a proof, not a hope.** Builds run hermetically: an
+  undeclared read *fails loudly* instead of silently poisoning the cache.
 
-**[Why vixen?](/why/)** is the honest comparison with cargo, Bazel, and Buck2 —
-including what they do better today. **[Using vixen](/using/)** gets you from
-install to first build. **[Status](/status/)** says exactly what works right
-now, dated.
+## Where does it hurt?
 
-Curious how any of this is possible? The machinery — a demand-driven,
-content-addressed build language called vix — has
-[its own site](/dev/), for people who want the internals.
+- **Slow CI?** → [What happens to my CI?](/using/ci/)
+- **Slow local edit-build loop?** → [Try it on your repo](/using/quickstart/)
+- **"Will my Cargo setup even work?"** → [Compatibility](/using/compatibility/)
+- **Coming from Bazel or Buck2?** → [Why vixen?](/why/)
+- **"Prove it."** → [The proof page](/proof/) — real numbers, real receipts,
+  fixture-scale honesty included.
+
+vixen is in **early access**: [what works today](/status/) is dated and
+specific, [what breaks](/using/limitations/) is public, and
+[when *not* to use it](/using/when-not/) is a page we wrote on purpose.
+The machinery underneath has [its own site](/dev/).

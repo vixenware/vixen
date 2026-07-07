@@ -1,11 +1,11 @@
 +++
 title = "Your first build"
-weight = 2
+weight = 9
 +++
 
-> **Early access note.** Command syntax lands with the first wave; the walk
-> below is the real pipeline as it executes today in vixen's test harness,
-> narrated for a human.
+> Looking for the hands-on flow? That's [Try it on your repo](/using/quickstart/).
+> This page is the machine's-eye narration of what a build *is* — closer to
+> [the internals site](/dev/) in spirit, kept here for the curious.
 
 Point vixen at a Cargo workspace and demand a build. Here is what actually
 happens — and what you'll see in the [receipts](/using/receipts/):
