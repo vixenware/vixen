@@ -82,6 +82,20 @@ Design sketch:
     binary names its items; the fleet answer is "upgrade in place," not "hunt down the
     repos." Patching becomes an operation on artifacts you possess — the problem distro
     package managers exist for, dissolved.
+
+  **Advisories keyed by content hash, not version range** (Amos-endorsed, 2026-07-07):
+  OSV/RustSec/GHSA key on package@version-range; the registry PROJECTS those advisories
+  onto content hashes. Two properties version ranges can't give:
+  1. *No false positives on backports.* An enterprise overlay patching openssl produces
+     a distinct hash; the registry marks THAT hash not-affected even though upstream's
+     range says affected — the overlay patch IS the backport. Version-range auditing
+     punishes exactly the orgs doing the right thing; hash-keyed auditing rewards them.
+     (This is also the overlay-identity question answered: overlay entries MUST be
+     distinguishable-by-hash from upstream, or audit collapses back to ranges.)
+  2. *Transitive truth.* A binary doesn't "depend on openssl 3.0.1" — it embeds specific
+     item hashes. Audit answers "is the vulnerable code in this artifact," not "does the
+     lockfile mention a scary version" — which also kills the vendored-under-another-name
+     blind spot.
 - **vs Nix**: a Nix artifact is mute — reproduction requires the flake/derivation and the
   store; store paths are input-addressed (CA-derivations experimental for years); and the
   unit of reproduction is the coarse derivation. Here the artifact carries its own
