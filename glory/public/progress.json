@@ -1,5 +1,5 @@
 {
-  "updated": "2026-07-07T21:32:00+02:00",
+  "updated": "2026-07-07T21:55:00+02:00",
   "meta": {
     "title": "PATH TO GLORY",
     "subtitle": "vixen: from demand machine to sovereign build system",
@@ -253,16 +253,16 @@
       "title": "compose at scale: manifests + index → solve → units",
       "short": "compose at scale",
       "lane": "cargo-model",
-      "status": "active",
-      "desc": "145/145 members compose into one rodin Index (84s interpreted). Solve blocked by trunk machine bug `molten handle -1` (assigned to machine lane); diff machinery being pre-wired so numbers appear the moment it's fixed.",
+      "status": "parked",
+      "desc": "145/145 members compose into one Index (84s interpreted). Both diff harnesses pre-wired and exercised (lock diff on live tiny solve; unit diff 4/4+3/3 edges). PARKED on trunk machine bug `molten handle -1` (machine lane owns it); remeasure = one command when fixed.",
       "deps": [
         "scale-measure",
         "cfg",
         "unit-derive"
       ],
       "evidence": [
-        "agent 56b36643",
-        "branch tier-a-scale-measurement @ 02a3d13c9",
+        "branch tier-a-scale-measurement @ 8fff80e26",
+        "TIER_A_FETCH_SPARSE=0 scripts/tier-a-scale-measurement.sh",
         "pinned sparse snapshot fdc863bf"
       ]
     },
