@@ -1,0 +1,12 @@
+{% extends "base.html" %}
+
+{% block title %}vixen — a build system{% endblock %}
+
+{% block content %}
+<section class="home-intro">
+    <h1 class="display display-1">{{ section.title }}</h1>
+    <div class="home-intro-body page-body">
+        {{ section.content | safe }}
+    </div>
+</section>
+{% endblock %}

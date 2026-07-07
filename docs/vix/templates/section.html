@@ -1,0 +1,21 @@
+{% extends "base.html" %}
+
+{% block title %}{{ section.title }} — vixen{% endblock %}
+
+{% block content %}
+<article class="page-frame">
+    <h1 class="display display-2 page-title">{{ section.title }}</h1>
+    <div class="page-body">{{ section.content | safe }}</div>
+    {% if section.pages %}
+    <ol class="entry-list" style="margin-top: 2rem;">
+        {% for page in section.pages | sort(attribute="weight") %}
+        <li class="entry">
+            <a href="{{ page.permalink }}" class="entry-link">
+                <span class="entry-title">{{ page.title }}</span>
+            </a>
+        </li>
+        {% endfor %}
+    </ol>
+    {% endif %}
+</article>
+{% endblock %}
