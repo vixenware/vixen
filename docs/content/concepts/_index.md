@@ -1,5 +1,6 @@
 +++
 title = "Concepts"
+weight = 1
 +++
 
 Five ideas explain everything vixen does. They are not independent features — each

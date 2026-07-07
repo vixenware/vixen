@@ -1,5 +1,6 @@
 +++
 title = "Observed read-sets"
+weight = 3
 +++
 
 When a computation runs, vixen records what it *actually read* — not what a

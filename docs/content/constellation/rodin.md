@@ -1,5 +1,6 @@
 +++
 title = "rodin — the resolver"
+weight = 5
 +++
 
 rodin is vixen's dependency resolver: given manifests and a package index,

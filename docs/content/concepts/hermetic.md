@@ -1,5 +1,6 @@
 +++
 title = "Hermetic execution"
+weight = 5
 +++
 
 Everything vixen promises — trustworthy caches, exact invalidation, sound test

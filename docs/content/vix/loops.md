@@ -1,5 +1,6 @@
 +++
 title = "Loops"
+weight = 3
 +++
 
 vix has no `while` or `for`. Iteration is recursion — and **self-recursion in

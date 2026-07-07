@@ -1,5 +1,6 @@
 +++
 title = "The invariants"
+weight = 2
 +++
 
 A few properties of the machine cannot be recovered once lost — they aren't

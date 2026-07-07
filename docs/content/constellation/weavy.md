@@ -1,5 +1,6 @@
 +++
 title = "weavy — the substrate"
+weight = 2
 +++
 
 weavy is the execution substrate everything compiles to: a shared vocabulary for

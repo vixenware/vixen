@@ -1,5 +1,6 @@
 +++
 title = "Status"
+weight = 6
 +++
 
 The honest page. Updated as things land, dated so you can tell how stale it is.

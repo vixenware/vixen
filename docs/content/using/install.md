@@ -1,5 +1,6 @@
 +++
 title = "Install"
+weight = 1
 +++
 
 > **Early access note.** The exact install commands ship with the first access

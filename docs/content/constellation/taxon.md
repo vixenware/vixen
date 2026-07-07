@@ -1,5 +1,6 @@
 +++
 title = "taxon — types and identity"
+weight = 3
 +++
 
 taxon is the smallest piece of the constellation and the one everything else

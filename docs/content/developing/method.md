@@ -1,5 +1,6 @@
 +++
 title = "The method"
+weight = 4
 +++
 
 How work lands, distilled from practice. This is descriptive of how the

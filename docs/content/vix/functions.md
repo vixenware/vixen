@@ -1,5 +1,6 @@
 +++
 title = "Functions and demand"
+weight = 2
 +++
 
 A vix function looks ordinary:

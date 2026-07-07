@@ -1,69 +1,12 @@
-<!DOCTYPE html>
-<html lang="en">
+{% extends "base.html" %}
 
-<head>
-    <meta charset="utf-8">
-    <meta name="viewport" content="width=device-width, initial-scale=1">
-    <title>{{ section.title }} — vixen</title>
-    <link rel="preconnect" href="https://fonts.googleapis.com">
-    <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
-    <link
-        href="https://fonts.googleapis.com/css2?family=Fraunces:opsz,wght,SOFT,WONK@9..144,300..900,30..100,0..1&family=IBM+Plex+Mono:wght@400;500;600&family=Source+Serif+4:opsz,wght@8..60,400..700&display=swap"
-        rel="stylesheet">
-    <link rel="stylesheet" href="/style.css">
-</head>
+{% block title %}vixen — a build system{% endblock %}
 
-<body>
-    <header class="masthead">
-        <div class="masthead-row">
-            <a href="/" class="brand">
-                <span class="brand-mark">◆</span>
-                <span class="brand-text">vixen</span>
-            </a>
-            <div id="search" class="masthead-search"></div>
-            <a class="masthead-action" href="https://code.vixen.rs/vixen/vixen/src/branch/main/wiki/content"
-                target="_blank" rel="noopener">Browse on Forgejo</a>
-        </div>
-    </header>
-
-    <main>
-        <section class="home-intro">
-            <h1 class="display display-1">{{ section.title }}</h1>
-            <div class="home-intro-body">
-                {{ section.content | safe }}
-            </div>
-        </section>
-
-        {% set types = [
-        {"name": "Doc", "label": "Docs"},
-        {"name": "Task", "label": "Tasks"}
-        ] %}
-
-        {% for t in types %}
-        {% set type_pages = section.pages | selectattr(attribute="extra.type", value=t.name) %}
-        {% if type_pages | length > 0 %}
-        <section class="type-section">
-            <h2 class="type-section-title">
-                <span class="type-name">{{ t.label }}</span>
-                <span class="type-count">{{ type_pages | length }} entr{% if type_pages | length == 1 %}y{% else %}ies{%
-                    endif %}</span>
-            </h2>
-            <ol class="entry-list">
-                {% for page in type_pages %}
-                <li class="entry">
-                    <a href="{{ page.permalink }}" class="entry-link">
-                        <span class="entry-title">{{ page.title }}</span>
-                        {% if "status" in page.extra %}
-                        <span class="status status-{{ page.extra.status }}">{{ page.extra.status }}</span>
-                        {% endif %}
-                    </a>
-                </li>
-                {% endfor %}
-            </ol>
-        </section>
-        {% endif %}
-        {% endfor %}
-    </main>
-</body>
-
-</html>
+{% block content %}
+<section class="home-intro">
+    <h1 class="display display-1">{{ section.title }}</h1>
+    <div class="home-intro-body page-body">
+        {{ section.content | safe }}
+    </div>
+</section>
+{% endblock %}

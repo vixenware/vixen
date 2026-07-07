@@ -1,5 +1,6 @@
 +++
 title = "Content addressing"
+weight = 2
 +++
 
 Every value in vixen — a parsed manifest, a compiled object, a resolver decision,

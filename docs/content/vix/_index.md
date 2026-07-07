@@ -1,5 +1,6 @@
 +++
 title = "The vix language"
+weight = 4
 +++
 
 vix is the language vixen's builds are written in — including vixen's own

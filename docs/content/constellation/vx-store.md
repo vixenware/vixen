@@ -1,5 +1,6 @@
 +++
 title = "vx-store — the store"
+weight = 9
 +++
 
 vx-store is the persistence layer: a content-addressed store where values,

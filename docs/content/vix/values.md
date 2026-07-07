@@ -1,5 +1,6 @@
 +++
 title = "Values and schemas"
+weight = 1
 +++
 
 Every vix value is **bytes described by a schema**. There is no universal

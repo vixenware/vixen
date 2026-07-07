@@ -1,5 +1,6 @@
 +++
 title = "Developing vixen"
+weight = 5
 +++
 
 This section is for people changing vixen itself — the machine, the language, the

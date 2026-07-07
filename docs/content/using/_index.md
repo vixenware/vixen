@@ -1,5 +1,6 @@
 +++
 title = "Using vixen"
+weight = 3
 +++
 
 This section is the practical guide for early access: getting vixen onto your

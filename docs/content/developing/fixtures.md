@@ -1,5 +1,6 @@
 +++
 title = "Fixtures and oracles"
+weight = 3
 +++
 
 The house testing style is **differential**: run the real thing and a trusted

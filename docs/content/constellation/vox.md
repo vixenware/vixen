@@ -1,5 +1,6 @@
 +++
 title = "vox — typed RPC"
+weight = 8
 +++
 
 vox is the RPC framework the constellation's services speak: define a service

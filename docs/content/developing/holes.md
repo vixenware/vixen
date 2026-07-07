@@ -1,5 +1,6 @@
 +++
 title = "Deliberate holes"
+weight = 5
 +++
 
 Some things in these repositories are missing **on purpose**, and the project

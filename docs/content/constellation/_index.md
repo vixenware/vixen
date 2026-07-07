@@ -1,5 +1,6 @@
 +++
 title = "The constellation"
+weight = 2
 +++
 
 vixen is not one program; it is a small constellation of tools, each with one job,

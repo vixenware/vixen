@@ -1,5 +1,6 @@
 +++
 title = "dodeca — docs"
+weight = 10
 +++
 
 dodeca is the documentation engine — the thing serving the page you're reading.

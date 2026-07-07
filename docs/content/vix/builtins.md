@@ -1,5 +1,6 @@
 +++
 title = "Builtins"
+weight = 6
 +++
 
 Some capabilities are provided by the machine rather than written in vix.

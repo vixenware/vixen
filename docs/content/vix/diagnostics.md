@@ -1,5 +1,6 @@
 +++
 title = "Diagnostics"
+weight = 7
 +++
 
 vix's diagnostic philosophy in one line: **observability instead of

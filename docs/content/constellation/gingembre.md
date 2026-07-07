@@ -1,5 +1,6 @@
 +++
 title = "gingembre — templating"
+weight = 11
 +++
 
 gingembre (French for ginger) is the templating engine: text with holes,

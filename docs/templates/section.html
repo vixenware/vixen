@@ -1,46 +1,21 @@
-<!DOCTYPE html>
-<html lang="en">
-<head>
-    <meta charset="utf-8">
-    <meta name="viewport" content="width=device-width, initial-scale=1">
-    <title>{{ section.title }} — vixen.wiki</title>
-    <link rel="preconnect" href="https://fonts.googleapis.com">
-    <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
-    <link href="https://fonts.googleapis.com/css2?family=Fraunces:opsz,wght,SOFT,WONK@9..144,300..900,30..100,0..1&amp;family=IBM+Plex+Mono:wght@400;500;600&amp;family=Source+Serif+4:opsz,wght@8..60,400..700&amp;display=swap" rel="stylesheet">
-    <link rel="stylesheet" href="/style.css">
-</head>
-<body>
-    <header class="masthead">
-        <div class="masthead-row">
-            <a href="/" class="brand">
-                <span class="brand-mark">◆</span>
-                <span class="brand-text">vixen.wiki</span>
-            </a>
-            <div id="search" class="masthead-search"></div>
-            <div class="masthead-actions">
-                <a class="masthead-action" href="https://code.vixen.rs/vixen/vixen/src/branch/main/wiki/content/_index.md" target="_blank" rel="noopener">Edit on Forgejo</a>
-                <a href="/" class="masthead-back">← Index</a>
-            </div>
-        </div>
-    </header>
+{% extends "base.html" %}
 
-    <main>
-        <h1 class="display display-2 page-title">{{ section.title }}</h1>
-        <div class="page-body">{{ section.content | safe }}</div>
-        {% if section.pages %}
-        <ol class="entry-list" style="margin-top: 2rem;">
-            {% for page in section.pages %}
-            <li class="entry">
-                <a href="{{ page.permalink }}" class="entry-link">
-                    <span class="entry-title">{{ page.title }}</span>
-                    {% if "status" in page.extra %}
-                    <span class="status status-{{ page.extra.status }}">{{ page.extra.status }}</span>
-                    {% endif %}
-                </a>
-            </li>
-            {% endfor %}
-        </ol>
-        {% endif %}
-    </main>
-</body>
-</html>
+{% block title %}{{ section.title }} — vixen{% endblock %}
+
+{% block content %}
+<article class="page-frame">
+    <h1 class="display display-2 page-title">{{ section.title }}</h1>
+    <div class="page-body">{{ section.content | safe }}</div>
+    {% if section.pages %}
+    <ol class="entry-list" style="margin-top: 2rem;">
+        {% for page in section.pages | sort(attribute="weight") %}
+        <li class="entry">
+            <a href="{{ page.permalink }}" class="entry-link">
+                <span class="entry-title">{{ page.title }}</span>
+            </a>
+        </li>
+        {% endfor %}
+    </ol>
+    {% endif %}
+</article>
+{% endblock %}

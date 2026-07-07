@@ -1,5 +1,6 @@
 +++
 title = "Your first build"
+weight = 2
 +++
 
 > **Early access note.** Command syntax lands with the first wave; the walk

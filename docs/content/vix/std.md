@@ -1,5 +1,6 @@
 +++
 title = "The standard library"
+weight = 5
 +++
 
 vix's standard library is small and grows by necessity — a function enters when

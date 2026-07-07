@@ -1,5 +1,6 @@
 +++
 title = "Molten values in practice"
+weight = 4
 +++
 
 The [concept page](@/concepts/molten.md) explains the model: values are molten

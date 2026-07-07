@@ -1,5 +1,6 @@
 +++
 title = "Molten and frozen values"
+weight = 4
 +++
 
 Content addressing has an apparent tax: if every value's identity is a hash of

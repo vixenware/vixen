@@ -1,0 +1,99 @@
+<!DOCTYPE html>
+<html lang="en">
+
+<head>
+    <meta charset="utf-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1">
+    <title>{% block title %}vixen{% endblock %}</title>
+    <link rel="preconnect" href="https://fonts.googleapis.com">
+    <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+    <link href="https://fonts.googleapis.com/css2?family=Geist:wght@400;500;600;700;800&family=JetBrains+Mono:wght@400;500;700&display=swap"
+        rel="stylesheet">
+    <link rel="stylesheet" href="/style.css">
+</head>
+
+<body>
+    {% set here = current_path | default(value="") %}
+
+    <header class="masthead">
+        <div class="masthead-row">
+            <a href="/" class="brand">
+                <span class="brand-mark">◆</span>
+                <span class="brand-text">vixen</span>
+            </a>
+            <div id="search" class="masthead-search"></div>
+            <div class="masthead-actions">
+                {% block actions %}{% endblock %}
+                <a class="masthead-action" href="https://code.vixen.rs/vixen/vixen/src/branch/main/docs/content"
+                    target="_blank" rel="noopener">Forgejo</a>
+            </div>
+        </div>
+    </header>
+
+    <div class="kb-shell">
+        <aside class="kb-nav" aria-label="Site navigation">
+            <nav>
+                {% if source is defined and source.root %}
+                <a class="kb-nav-home{% if here == source.root.path %} is-active{% endif %}" href="/">vixen</a>
+                {% for sec in source.root.subsections | sort(attribute="weight") %}
+                <section class="kb-nav-section">
+                    <a class="kb-nav-title{% if here == sec.path %} is-active{% endif %}"
+                        href="{{ sec.permalink }}">{{ sec.title }}</a>
+                    {% set full = get_section(path=sec.path) %}
+                    {% if full and full.pages %}
+                    <ul>
+                        {% for p in full.pages | sort(attribute="weight") %}
+                        <li><a class="{% if here == p.path %}is-active{% endif %}"
+                                href="{{ p.permalink }}">{{ p.title }}</a></li>
+                        {% endfor %}
+                    </ul>
+                    {% endif %}
+                </section>
+                {% endfor %}
+                {% endif %}
+            </nav>
+        </aside>
+
+        <main class="kb-main">
+            {% block content %}{% endblock %}
+        </main>
+
+        {% set toc = [] %}
+        {% if page is defined and page %}{% set toc = page.toc | default(value=[]) %}
+        {% elif section is defined and section %}{% set toc = section.toc | default(value=[]) %}{% endif %}
+        <aside class="kb-toc" aria-label="On this page">
+            {% if toc | length > 0 %}
+            <div class="kb-toc-inner">
+                <p class="kb-toc-title">On this page</p>
+                <ul>
+                    {% for h1 in toc %}{% if h1 %}
+                    <li>
+                        {% if h1.permalink %}<a href="{{ h1.permalink }}">{{ h1.title }}</a>{% else %}<span>{{ h1.title }}</span>{% endif %}
+                        {% if h1.children %}
+                        <ul>
+                            {% for h2 in h1.children %}{% if h2 and h2.permalink %}
+                            <li><a href="{{ h2.permalink }}">{{ h2.title }}</a></li>
+                            {% endif %}{% endfor %}
+                        </ul>
+                        {% endif %}
+                    </li>
+                    {% endif %}{% endfor %}
+                </ul>
+            </div>
+            {% endif %}
+        </aside>
+    </div>
+
+    <script>
+        (() => {
+            const findInput = () => document.querySelector("#search .ds-input, #search input");
+            document.addEventListener("keydown", (e) => {
+                const i = findInput(); if (!i) return;
+                if ((e.metaKey || e.ctrlKey) && (e.key === "k" || e.key === "K")) { e.preventDefault(); i.focus(); i.select(); }
+                else if (e.key === "Escape" && document.activeElement === i) { i.blur(); }
+            });
+        })();
+    </script>
+</body>
+
+</html>

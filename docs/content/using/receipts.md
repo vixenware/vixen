@@ -1,5 +1,6 @@
 +++
 title = "Receipts"
+weight = 3
 +++
 
 Every build system answers "what happened?" with logs. vixen answers with a

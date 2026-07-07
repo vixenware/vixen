@@ -1,5 +1,6 @@
 +++
 title = "Demand-driven evaluation"
+weight = 1
 +++
 
 Most build systems are schedulers: they take a dependency graph, sort it, and

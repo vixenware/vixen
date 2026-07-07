@@ -1,5 +1,6 @@
 +++
 title = "vix — the language"
+weight = 1
 +++
 
 vix is the language vixen's build logic is written in. It exists because build

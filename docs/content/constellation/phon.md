@@ -1,5 +1,6 @@
 +++
 title = "phon — the wire"
+weight = 7
 +++
 
 phon is the serialization layer: how values leave a process — onto disk, over a

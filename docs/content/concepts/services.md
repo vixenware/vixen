@@ -1,5 +1,6 @@
 +++
 title = "Daemons, runners, and services"
+weight = 6
 +++
 
 vixen runs as a small set of cooperating services, and the division of labor is

@@ -1,5 +1,6 @@
 +++
 title = "snark — declarative parsing"
+weight = 4
 +++
 
 snark is a parser system in the tree-sitter tradition — grammars as declarative

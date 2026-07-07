@@ -1,5 +1,6 @@
 +++
 title = "facet — Rust reflection"
+weight = 6
 +++
 
 facet is how Rust types enter the constellation. Deriving `Facet` on a type
