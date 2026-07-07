@@ -7,15 +7,16 @@ use std::path::{Component, Path, PathBuf};
 use std::process::Output;
 
 use vx_services::{
-    Blake3Hash, ByteLen, CapabilityProbeRequest, CapabilityProbeResult, ContentHash, ExecArg,
-    ExecCompletion, ExecDiagnostic, ExecError, ExecErrorKind, ExecExitCode, ExecMount,
-    ExecObservationScope, ExecOutcome, ExecPath, ExecPlan, ExecPrefixId, ExecReadObservation,
-    ExecReadSet, ExecRequest, ExecResult, ExecRole, ExecSubfileCompletion, ExecTree, ExecTreeEvent,
-    ExecTreeFinalization, NodeHash, PlatformArch, PlatformName, RUNNER_PROTOCOL_VERSION, Runner,
-    RunnerCapabilities, RunnerPlatform, RunnerProtocolVersion, RunnerTransport, SandboxCapability,
-    ToolchainCapability, ToolchainKind, exec_role_embedded_paths, exec_role_env_paths,
-    exec_role_input_paths, exec_role_output_dir_paths, exec_role_output_paths,
-    exec_role_search_dir_paths, exec_role_stdout_paths,
+    ByteLen, CapabilityProbeRequest, CapabilityProbeResult, ExecArg, ExecBlake3Hash as Blake3Hash,
+    ExecCompletion, ExecContentHash as ContentHash, ExecDiagnostic, ExecError, ExecErrorKind,
+    ExecExitCode, ExecMount, ExecNodeHash as NodeHash, ExecObservationScope, ExecOutcome, ExecPath,
+    ExecPlan, ExecPrefixId, ExecReadObservation, ExecReadSet, ExecRequest, ExecResult, ExecRole,
+    ExecSubfileCompletion, ExecTree, ExecTreeEvent, ExecTreeFinalization, PlatformArch,
+    PlatformName, RUNNER_PROTOCOL_VERSION, Runner, RunnerCapabilities, RunnerPlatform,
+    RunnerTransport, SandboxCapability, ToolchainCapability, ToolchainKind,
+    exec_role_embedded_paths, exec_role_env_paths, exec_role_input_paths,
+    exec_role_output_dir_paths, exec_role_output_paths, exec_role_search_dir_paths,
+    exec_role_stdout_paths,
 };
 
 const ENV_ALLOWLIST: &[&str] = &["PATH", "HOME", "TMPDIR", "TEMP", "TMP", "SystemRoot"];
@@ -175,7 +176,7 @@ fn spawn_or_unsupported_error(diagnostic: String) -> ExecError {
 
 fn detect_capabilities() -> RunnerCapabilities {
     RunnerCapabilities {
-        protocol_version: RunnerProtocolVersion(RUNNER_PROTOCOL_VERSION),
+        protocol_version: RUNNER_PROTOCOL_VERSION,
         platform: RunnerPlatform {
             os: PlatformName(std::env::consts::OS.to_string()),
             arch: PlatformArch(std::env::consts::ARCH.to_string()),

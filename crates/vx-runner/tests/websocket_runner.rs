@@ -5,10 +5,10 @@ use std::path::{Path, PathBuf};
 
 use vx_exec::SandboxedExecutor;
 use vx_services::{
-    Blake3Hash, ByteLen, CapabilityProbeRequest, ContentHash, ExecArg, ExecArgValue,
-    ExecCompletion, ExecErrorKind, ExecExitCode, ExecMount, ExecPath, ExecPlan, ExecProgram,
-    ExecReadObservation, ExecRequest, ExecRole, ExecTree, ExecTreeEvent, RunnerClient,
-    RunnerDispatcher, RunnerTransport, SandboxCapability,
+    ByteLen, CapabilityProbeRequest, ExecArg, ExecArgValue, ExecBlake3Hash as Blake3Hash,
+    ExecCompletion, ExecContentHash as ContentHash, ExecErrorKind, ExecExitCode, ExecMount,
+    ExecPath, ExecPlan, ExecProgram, ExecReadObservation, ExecRequest, ExecRole, ExecText,
+    ExecTree, ExecTreeEvent, RunnerClient, RunnerDispatcher, RunnerTransport, SandboxCapability,
 };
 
 #[tokio::test]
@@ -65,7 +65,7 @@ async fn websocket_runner_exec_returns_observed_outcome_and_typed_failure() {
     };
     assert_eq!(
         outcome.outputs.entries.get("/m/out/hello.txt"),
-        Some(&"hello over vox\n".to_string())
+        Some(&ExecText::from("hello over vox\n"))
     );
     assert_eq!(
         outcome.read_set.entries.get("/m/in/message.txt"),

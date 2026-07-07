@@ -5,9 +5,10 @@ use std::path::{Path, PathBuf};
 
 use vx_exec::SandboxedExecutor;
 use vx_services::{
-    Blake3Hash, ByteLen, ContentHash, ExecArg, ExecArgValue, ExecCompletion, ExecError,
-    ExecErrorKind, ExecExitCode, ExecMount, ExecOutcome, ExecPath, ExecPlan, ExecProgram,
-    ExecReadObservation, ExecRequest, ExecRole, ExecTree, ExecTreeEvent, Runner,
+    ByteLen, ExecArg, ExecArgValue, ExecBlake3Hash as Blake3Hash, ExecCompletion,
+    ExecContentHash as ContentHash, ExecError, ExecErrorKind, ExecExitCode, ExecMount, ExecOutcome,
+    ExecPath, ExecPlan, ExecProgram, ExecReadObservation, ExecRequest, ExecRole, ExecText,
+    ExecTree, ExecTreeEvent, Runner,
 };
 
 #[tokio::test]
@@ -50,7 +51,7 @@ async fn shell_exec_harvests_declared_output() {
     let outcome = outcome(&result);
     assert_eq!(
         outcome.outputs.entries.get("/m/out/hello.txt"),
-        Some(&"hello from declared mount\n".to_string())
+        Some(&ExecText::from("hello from declared mount\n"))
     );
     assert_eq!(
         outcome.read_set.entries.get("/m/in/message.txt"),
@@ -156,7 +157,7 @@ async fn observed_read_set_contains_files_directory_and_lookup_miss() {
     let outcome = outcome(&result);
     assert_eq!(
         outcome.outputs.entries.get("/m/out/combined.txt"),
-        Some(&"observed\n".to_string())
+        Some(&ExecText::from("observed\n"))
     );
     assert_eq!(outcome.read_set.entries.len(), 4);
     assert!(matches!(
