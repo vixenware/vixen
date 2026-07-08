@@ -1,5 +1,5 @@
 {
-  "updated": "2026-07-08T09:30:00+02:00",
+  "updated": "2026-07-08T10:40:00+02:00",
   "meta": {
     "title": "PATH TO GLORY",
     "subtitle": "vixen: from demand machine to sovereign build system",
@@ -412,7 +412,7 @@
       "title": "sandbox stage 1: confine",
       "lane": "infra",
       "status": "done",
-      "desc": "Seatbelt confinement: undeclared reads fail loudly. Public protocol types over vox RPC, private impls. Parked gate-green.",
+      "desc": "Seatbelt confinement: undeclared reads fail loudly. Public protocol types over vox RPC, private impls. FOLDED to vixen main.",
       "evidence": [
         "branch sandboxed-exec-stage-1"
       ],
@@ -435,7 +435,7 @@
       "title": "sandbox stage 2: observe (VFS)",
       "lane": "infra",
       "status": "done",
-      "desc": "vfsd observations (File/Directory/LookupMiss, blake3 newtypes) populate ExecOutcome read-sets; progressive ExecTree events with close-is-provisional verification; kill hook typed but dormant. vfsd close-callback integration precisely pinned.",
+      "desc": "vfsd observations (File/Directory/LookupMiss, blake3 newtypes) populate ExecOutcome read-sets; progressive ExecTree events with close-is-provisional verification; kill hook typed but dormant. vfsd close-callback integration precisely pinned. FOLDED to vixen main.",
       "deps": [
         "exec-stage1"
       ],
@@ -450,7 +450,7 @@
       "title": "runner ∘ daemon ∘ vix: sandboxed builds",
       "lane": "infra",
       "status": "active",
-      "desc": "Protocol crate + vix RpcRunnerBackend both FOLDED (loopback-tested: read-sets, tree events, typed failures, cache hits). Remaining: cross-repo integration (vix machine driving the real vixenware runner) + vixenware fold decision (Amos).",
+      "desc": "Vixenware side ON MAIN (ca54b05fa: stage-1+2, runner service, exec-protocol repoint to facet-cc rodin); vix RpcRunnerBackend folded on rodin. Remaining: the cross-repo integration test — vix machine driving the real runner. FOLD ALL ALWAYS is vixenware's standing rule now.",
       "deps": [
         "exec-stage2"
       ],
