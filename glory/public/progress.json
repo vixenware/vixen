@@ -1,5 +1,5 @@
 {
-  "updated": "2026-07-08T07:40:00+02:00",
+  "updated": "2026-07-08T10:55:00+02:00",
   "meta": {
     "title": "PATH TO GLORY",
     "subtitle": "vixen — certifiable builds",
@@ -493,17 +493,18 @@
     },
     {
       "id": "exec-compose",
-      "title": "runner ∘ daemon ∘ vix: sandboxed builds",
+      "title": "HERMETIC: vix ∘ RPC ∘ sandbox, tested",
       "lane": "infra",
-      "status": "active",
-      "desc": "Vixenware side ON MAIN (ca54b05fa: stage-1+2, runner service, exec-protocol repoint to facet-cc rodin); vix RpcRunnerBackend folded on rodin. Remaining: the cross-repo integration test — vix machine driving the real runner. FOLD ALL ALWAYS is vixenware's standing rule now.",
+      "status": "done",
+      "desc": "vixen main b4fe467bf: real Machine demand → RpcRunnerBackend → websocket → real runner → seatbelt sandbox → observed read-set + tree events back; undeclared read = typed failure through the whole stack. 'Hermetic' is a tested fact now.",
       "deps": [
         "exec-stage2"
       ],
-      "short": "runner ∘ vix",
+      "short": "HERMETIC ✓",
       "evidence": [
-        "agent 6a3bdefd",
-        "branch runner-exec-service (server half)"
+        "vixen main b4fe467bf",
+        "vx-runner/tests/vix_rpc_composition.rs",
+        "116 green"
       ]
     },
     {
