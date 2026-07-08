@@ -495,19 +495,20 @@
     },
     {
       "id": "exec-compose",
-      "title": "HERMETIC: vix ∘ RPC ∘ sandbox + VFS feed",
+      "title": "HERMETIC: vix ∘ RPC ∘ sandbox + FSKit VFS",
       "lane": "infra",
-      "status": "active",
-      "desc": "RPC/seatbelt composition is folded on main; the next rung is wired on taxon-hermetic-sandbox: ExecObservationFeed calls singleton vx-vfsd tracked_observations(prefix_id, roots) and maps File/Directory/LookupMiss into ExecReadSet. Live /Volumes/Vixen/vfs proof is blocked by the installed FSKit watchdog killing provider prefix vx with ESTALE; fskit-unstick owns that provider-lifetime fix.",
+      "status": "done",
+      "desc": "Summit reached: vix/RPC/seatbelt composition is folded; the FSKit runner path now uses singleton vx-vfsd virtual prefixes and tracked_observations(prefix_id, roots) as the ExecReadSet authority. Live /Volumes/Vixen/vfs proof passed on VixenFS 0.6.3 with no copy staging: real spawned process read through /Volumes/Vixen/vfs/vx/<prefix> and produced File + LookupMiss observations.",
       "deps": [
         "exec-stage2"
       ],
-      "short": "VFS feed wired",
+      "short": "HERMETIC ✓",
       "evidence": [
-        "vixen main b4fe467bf",
+        "vixen main d734de83",
         "vx-runner/tests/vix_rpc_composition.rs",
-        "branch taxon-hermetic-sandbox: FSKit feed + ignored live proof",
-        "live blocker: provider watchdog ESTALE on /Volumes/Vixen/vfs/vx/<prefix>"
+        "docs/design/fskit-hermetic-summit-receipt.md",
+        "live proof: VixenFS 0.6.3, nextest run 15b6b54a-c159-40c5-bb4e-df1500a85bec, 1 passed",
+        "read-set: /m/in/message.txt File + /m/in/._message.txt LookupMiss from tracked_observations"
       ]
     },
     {
