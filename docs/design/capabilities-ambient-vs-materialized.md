@@ -67,3 +67,19 @@ are inputs, which makes the split computable:
   from the grammar; observed content from the VFS.
 Properties: lookup precedes input I/O; normalization prevents path/flag-order cache
 shatter; tier-1-hit + tier-2-miss IS the incremental question, asked by the key itself.
+
+## Typed deserialization (Amos, 2026-07-08, fourth dictation — "barf" at generic Doc walking)
+INTENDED DESIGN, always: (1) Rust deserializers (facet-json/facet-toml machinery) target vix
+STRUCTS DIRECTLY via schema — one host call per document, typed store values out, zero
+generic-Doc projection walking on hot paths; (2) then SPECIALIZED per-schema deserializers
+lowered to weavy itself (serde-monomorphization as generated IR/stencils from schema+grammar)
+— surgical, extremely fast, no host barrier. Doc projections remain for dynamic/exploratory
+access only.
+
+## Open ABI question (Amos, 2026-07-08): ARE PADDING BYTES CANONICALLY ZERO?
+Gates hash-input-is-memory-repr. Options: (a) canonical-zero padding as an ABI RULE (write
+paths zero-init, mutations/copies preserve — a forever commitment); (b) descriptor-driven
+field-walk hashing that skips padding (no zeroing tax; "hash the fields" not "hash the
+bytes", still stencil-able); (c) packed layouts (doesn't generalize). NOTE: today's identity
+hashes canonical payload ENCODINGS, not raw memory — the memory-repr shortcut is aspiration
+until this is answered. Assigned to the hash-as-field design proposal.
