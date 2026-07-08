@@ -495,18 +495,19 @@
     },
     {
       "id": "exec-compose",
-      "title": "HERMETIC: vix ∘ RPC ∘ sandbox, tested",
+      "title": "HERMETIC: vix ∘ RPC ∘ sandbox + VFS feed",
       "lane": "infra",
-      "status": "done",
-      "desc": "vixen main b4fe467bf: real Machine demand → RpcRunnerBackend → websocket → real runner → seatbelt sandbox → observed read-set + tree events back; undeclared read = typed failure through the whole stack. 'Hermetic' is a tested fact now.",
+      "status": "active",
+      "desc": "RPC/seatbelt composition is folded on main; the next rung is wired on taxon-hermetic-sandbox: ExecObservationFeed calls singleton vx-vfsd tracked_observations(prefix_id, roots) and maps File/Directory/LookupMiss into ExecReadSet. Live /Volumes/Vixen/vfs proof is blocked by the installed FSKit watchdog killing provider prefix vx with ESTALE; fskit-unstick owns that provider-lifetime fix.",
       "deps": [
         "exec-stage2"
       ],
-      "short": "HERMETIC ✓",
+      "short": "VFS feed wired",
       "evidence": [
         "vixen main b4fe467bf",
         "vx-runner/tests/vix_rpc_composition.rs",
-        "116 green"
+        "branch taxon-hermetic-sandbox: FSKit feed + ignored live proof",
+        "live blocker: provider watchdog ESTALE on /Volumes/Vixen/vfs/vx/<prefix>"
       ]
     },
     {
