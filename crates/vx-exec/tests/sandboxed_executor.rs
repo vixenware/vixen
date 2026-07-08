@@ -2,13 +2,14 @@
 
 use std::fs;
 use std::path::{Path, PathBuf};
+use std::sync::{Arc, Mutex};
 
-use vx_exec::SandboxedExecutor;
+use vx_exec::{ExecObservationFeed, ExecObservationFuture, SandboxedExecutor};
 use vx_services::{
     ByteLen, ExecArg, ExecArgValue, ExecBlake3Hash as Blake3Hash, ExecCompletion,
     ExecContentHash as ContentHash, ExecError, ExecErrorKind, ExecExitCode, ExecMount, ExecOutcome,
-    ExecPath, ExecPlan, ExecProgram, ExecReadObservation, ExecRequest, ExecRole, ExecText,
-    ExecTree, ExecTreeEvent, Runner,
+    ExecPath, ExecPlan, ExecPrefixId, ExecProgram, ExecReadObservation, ExecReadSet, ExecRequest,
+    ExecRole, ExecText, ExecTree, ExecTreeEvent, Runner,
 };
 
 #[tokio::test]
@@ -183,6 +184,90 @@ async fn observed_read_set_contains_files_directory_and_lookup_miss() {
 }
 
 #[tokio::test]
+async fn observation_feed_supplies_exact_read_set() {
+    if !host_tools_available() {
+        return;
+    }
+
+    let mut input_tree = ExecTree::default();
+    input_tree.insert_bytes(
+        "message.txt",
+        b"staged but not the read-set source\n".to_vec(),
+    );
+
+    let mut feed_read_set = ExecReadSet::default();
+    feed_read_set.entries.insert(
+        ExecPath::from("/m/in/message.txt"),
+        ExecReadObservation::File {
+            content_hash: ContentHash(Blake3Hash::from_bytes(b"observed by fskit feed\n")),
+            blob_node: None,
+            size: ByteLen("observed by fskit feed\n".len() as u64),
+        },
+    );
+    feed_read_set.entries.insert(
+        ExecPath::from("/m/in"),
+        ExecReadObservation::Directory {
+            directory_node: vx_services::ExecNodeHash(Blake3Hash::from_bytes(
+                b"feed directory node",
+            )),
+        },
+    );
+    feed_read_set.entries.insert(
+        ExecPath::from("/m/in/missing.h"),
+        ExecReadObservation::LookupMiss {
+            parent_path: ExecPath::from("/m/in"),
+            directory_node: vx_services::ExecNodeHash(Blake3Hash::from_bytes(
+                b"feed lookup miss directory",
+            )),
+        },
+    );
+
+    let feed = InMemoryObservationFeed::new(feed_read_set.clone());
+    let result = SandboxedExecutor::with_observation_feed(feed.clone())
+        .exec(ExecRequest {
+            program: ExecProgram::from("/bin/sh"),
+            plan: ExecPlan {
+                argv: vec![
+                    arg("-c", ExecRole::Flag),
+                    arg("cat \"$1\" > \"$OUT\"", ExecRole::Flag),
+                    arg("sh", ExecRole::Flag),
+                    arg("/m/in/message.txt", ExecRole::Input),
+                    arg("OUT=/m/out/hello.txt", ExecRole::Env),
+                    arg("/m/out/hello.txt", ExecRole::Output),
+                ],
+            },
+            mounts: vec![ExecMount {
+                at: ExecPath::from("/m/in"),
+                tree: input_tree,
+            }],
+            toolchain_roots: default_toolchain_roots(),
+        })
+        .await;
+
+    assert_eq!(
+        result.exit_code,
+        ExecExitCode(0),
+        "error: {:?}\nstderr: {}",
+        failure(&result),
+        stderr(&result)
+    );
+    let outcome = outcome(&result);
+    assert_eq!(outcome.read_set, feed_read_set);
+    assert_eq!(
+        outcome.outputs.entries.get("/m/out/hello.txt"),
+        Some(&ExecText::from("staged but not the read-set source\n"))
+    );
+    let requests = feed.requests().expect("observation feed requests");
+    assert_eq!(requests.len(), 1);
+    assert!(
+        requests[0].0.0.starts_with("vx-sandboxed-exec-"),
+        "unexpected observation prefix id: {:?}",
+        requests[0].0
+    );
+    assert_eq!(requests[0].1, vec![ExecPath::from("/m/in")]);
+}
+
+#[tokio::test]
 async fn undeclared_write_is_denied() {
     if !host_tools_available() {
         return;
@@ -257,6 +342,56 @@ fn host_tools_available() -> bool {
 
 fn stderr(result: &vx_services::ExecResult) -> String {
     String::from_utf8_lossy(&result.stderr).to_string()
+}
+
+#[derive(Clone)]
+struct InMemoryObservationFeed {
+    read_set: ExecReadSet,
+    requests: Arc<Mutex<ObservationRequests>>,
+}
+
+type ObservationRequests = Vec<(ExecPrefixId, Vec<ExecPath>)>;
+
+impl InMemoryObservationFeed {
+    fn new(read_set: ExecReadSet) -> Self {
+        Self {
+            read_set,
+            requests: Arc::new(Mutex::new(Vec::new())),
+        }
+    }
+
+    fn requests(&self) -> Result<Vec<(ExecPrefixId, Vec<ExecPath>)>, String> {
+        self.requests
+            .lock()
+            .map_err(|_| "observation feed requests poisoned".to_string())
+            .map(|requests| requests.clone())
+    }
+}
+
+impl ExecObservationFeed for InMemoryObservationFeed {
+    fn read_set<'a>(
+        &'a self,
+        prefix_id: &'a ExecPrefixId,
+        roots: &'a [ExecPath],
+    ) -> ExecObservationFuture<'a> {
+        Box::pin(async move {
+            if roots.is_empty() {
+                return Err(observation_error("missing observation root"));
+            }
+            self.requests
+                .lock()
+                .map_err(|_| observation_error("observation feed requests poisoned"))?
+                .push((prefix_id.clone(), roots.to_vec()));
+            Ok(Some(self.read_set.clone()))
+        })
+    }
+}
+
+fn observation_error(message: &str) -> ExecError {
+    ExecError {
+        kind: ExecErrorKind::Verification,
+        diagnostic: vx_services::ExecDiagnostic(message.to_string()),
+    }
 }
 
 fn outcome(result: &vx_services::ExecResult) -> &ExecOutcome {

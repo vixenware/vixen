@@ -3,8 +3,11 @@
 use std::collections::BTreeSet;
 use std::ffi::OsString;
 use std::fs;
+use std::future::Future;
 use std::path::{Component, Path, PathBuf};
+use std::pin::Pin;
 use std::process::Output;
+use std::sync::Arc;
 
 use vx_services::{
     ByteLen, CapabilityProbeRequest, CapabilityProbeResult, ExecArg, ExecBlake3Hash as Blake3Hash,
@@ -21,25 +24,55 @@ use vx_services::{
 
 const ENV_ALLOWLIST: &[&str] = &["PATH", "HOME", "TMPDIR", "TEMP", "TMP", "SystemRoot"];
 
-#[derive(Debug, Clone, Default)]
-pub struct SandboxedExecutor;
+pub type ExecObservationFuture<'a> =
+    Pin<Box<dyn Future<Output = Result<Option<ExecReadSet>, ExecError>> + Send + 'a>>;
+
+pub trait ExecObservationFeed: Send + Sync {
+    fn read_set<'a>(
+        &'a self,
+        prefix_id: &'a ExecPrefixId,
+        roots: &'a [ExecPath],
+    ) -> ExecObservationFuture<'a>;
+}
+
+#[derive(Clone)]
+pub struct SandboxedExecutor {
+    observation_feed: Arc<dyn ExecObservationFeed>,
+}
 
 impl SandboxedExecutor {
     pub fn new() -> Self {
-        Self
+        Self {
+            observation_feed: Arc::new(NoExecObservationFeed),
+        }
+    }
+
+    pub fn with_observation_feed(feed: impl ExecObservationFeed + 'static) -> Self {
+        Self {
+            observation_feed: Arc::new(feed),
+        }
     }
 
     pub fn exec_blocking(&self, request: ExecRequest) -> ExecResult {
-        match run_request(request) {
+        match run_request_blocking(request) {
             Ok(result) => result,
             Err(error) => failed_without_process(error),
         }
     }
 }
 
+impl Default for SandboxedExecutor {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
 impl Runner for SandboxedExecutor {
     async fn exec(&self, request: ExecRequest) -> ExecResult {
-        self.exec_blocking(request)
+        match run_request(request, self.observation_feed.as_ref()).await {
+            Ok(result) => result,
+            Err(error) => failed_without_process(error),
+        }
     }
 
     async fn capabilities(&self, _request: CapabilityProbeRequest) -> CapabilityProbeResult {
@@ -49,7 +82,83 @@ impl Runner for SandboxedExecutor {
     }
 }
 
-fn run_request(request: ExecRequest) -> Result<ExecResult, ExecError> {
+struct NoExecObservationFeed;
+
+impl ExecObservationFeed for NoExecObservationFeed {
+    fn read_set<'a>(
+        &'a self,
+        _prefix_id: &'a ExecPrefixId,
+        _roots: &'a [ExecPath],
+    ) -> ExecObservationFuture<'a> {
+        Box::pin(async { Ok(None) })
+    }
+}
+
+async fn run_request(
+    request: ExecRequest,
+    observation_feed: &dyn ExecObservationFeed,
+) -> Result<ExecResult, ExecError> {
+    let prepared = match run_request_to_harvest(request)? {
+        PreparedExecCompletion::Succeeded(prepared) => prepared,
+        PreparedExecCompletion::Failed(result) => return Ok(result),
+    };
+    let read_set = match observation_feed
+        .read_set(&prepared.scope_id, &prepared.observation_roots)
+        .await
+        .map_err(observation_error)?
+    {
+        Some(read_set) => read_set,
+        None => prepared.staged_read_set.clone(),
+    };
+    Ok(prepared.into_result(read_set))
+}
+
+fn run_request_blocking(request: ExecRequest) -> Result<ExecResult, ExecError> {
+    match run_request_to_harvest(request)? {
+        PreparedExecCompletion::Succeeded(prepared) => {
+            let read_set = prepared.staged_read_set.clone();
+            Ok(prepared.into_result(read_set))
+        }
+        PreparedExecCompletion::Failed(result) => Ok(result),
+    }
+}
+
+enum PreparedExecCompletion {
+    Succeeded(PreparedExecResult),
+    Failed(ExecResult),
+}
+
+struct PreparedExecResult {
+    exit_code: ExecExitCode,
+    stdout: Vec<u8>,
+    stderr: Vec<u8>,
+    outputs: ExecTree,
+    staged_read_set: ExecReadSet,
+    observation_roots: Vec<ExecPath>,
+    scope_id: ExecPrefixId,
+    tree_events: Vec<ExecTreeEvent>,
+}
+
+impl PreparedExecResult {
+    fn into_result(self, read_set: ExecReadSet) -> ExecResult {
+        ExecResult {
+            exit_code: self.exit_code,
+            stdout: self.stdout,
+            stderr: self.stderr,
+            completion: ExecCompletion::Succeeded(ExecOutcome {
+                outputs: self.outputs,
+                read_set,
+                observation_scopes: vec![ExecObservationScope {
+                    prefix_id: self.scope_id,
+                    roots: self.observation_roots,
+                }],
+                tree_events: self.tree_events,
+            }),
+        }
+    }
+}
+
+fn run_request_to_harvest(request: ExecRequest) -> Result<PreparedExecCompletion, ExecError> {
     let temp = tempfile::Builder::new()
         .prefix("vx-sandboxed-exec-")
         .tempdir()
@@ -111,30 +220,28 @@ fn run_request(request: ExecRequest) -> Result<ExecResult, ExecError> {
                 String::from_utf8_lossy(&stderr)
             ),
         );
-        return Ok(ExecResult {
+        return Ok(PreparedExecCompletion::Failed(ExecResult {
             exit_code: ExecExitCode(exit_code),
             stdout,
             stderr,
             completion: ExecCompletion::Failed(error),
-        });
+        }));
     }
 
     let harvested = harvest_outputs(&request.plan, root, &output.stdout).map_err(harvest_error)?;
     verify_subfile_completions_at_exit(root, &harvested.tree, &harvested.subfiles)
         .map_err(verification_error)?;
-    let tree_events = tree_events_from_subfiles(harvested.subfiles.clone());
-    let outcome = ExecOutcome {
-        outputs: harvested.tree,
-        read_set: observed.into_read_set(),
-        observation_scopes: observation_scopes(&scope_id, &request.mounts),
-        tree_events,
-    };
-    Ok(ExecResult {
+    let observation_roots = observation_roots(&request.mounts);
+    Ok(PreparedExecCompletion::Succeeded(PreparedExecResult {
         exit_code: ExecExitCode(exit_code),
         stdout: output.stdout,
         stderr: output.stderr,
-        completion: ExecCompletion::Succeeded(outcome),
-    })
+        outputs: harvested.tree,
+        staged_read_set: observed.into_read_set(),
+        observation_roots,
+        scope_id,
+        tree_events: tree_events_from_subfiles(harvested.subfiles.clone()),
+    }))
 }
 
 fn failed_without_process(error: ExecError) -> ExecResult {
@@ -163,6 +270,13 @@ fn harvest_error(diagnostic: String) -> ExecError {
 
 fn verification_error(diagnostic: String) -> ExecError {
     exec_error(ExecErrorKind::Verification, diagnostic)
+}
+
+fn observation_error(error: ExecError) -> ExecError {
+    exec_error(
+        ExecErrorKind::Verification,
+        format!("sandboxed exec observation feed: {}", error.diagnostic.0),
+    )
 }
 
 fn spawn_or_unsupported_error(diagnostic: String) -> ExecError {
@@ -503,11 +617,8 @@ fn verify_subfile_completions_at_exit(
     Ok(())
 }
 
-fn observation_scopes(scope_id: &ExecPrefixId, mounts: &[ExecMount]) -> Vec<ExecObservationScope> {
-    vec![ExecObservationScope {
-        prefix_id: scope_id.clone(),
-        roots: mounts.iter().map(|mount| mount.at.clone()).collect(),
-    }]
+fn observation_roots(mounts: &[ExecMount]) -> Vec<ExecPath> {
+    mounts.iter().map(|mount| mount.at.clone()).collect()
 }
 
 fn stage_file(root: &Path, logical: &str, bytes: &[u8]) -> Result<(), String> {
