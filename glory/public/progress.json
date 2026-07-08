@@ -1,9 +1,9 @@
 {
-  "updated": "2026-07-08T14:20:00+02:00",
+  "updated": "2026-07-08T07:40:00+02:00",
   "meta": {
     "title": "PATH TO GLORY",
     "subtitle": "vixen — certifiable builds",
-    "trunk": "rodin @ 489c82114 — queue drained, all lanes folded"
+    "trunk": "rodin @ f40ddb443 — 12 folds; EPOCH 2 charters cut"
   },
   "lanes": {
     "machine": "#4ecdc4",
@@ -94,6 +94,51 @@
         "202/122/69 + clippy clean"
       ],
       "short": "EPOCH CLOSED"
+    },
+    {
+      "id": "rung2-facet-core",
+      "title": "RUNG 2: facet-core built (real build.rs + directives)",
+      "short": "RUNG 2 ✓",
+      "lane": "build-real",
+      "status": "done",
+      "desc": "facet-core end-to-end: autocfg host lib, real build.rs run, pure-vix directive parse (check-cfg/rerun-if), registry deps, receipted rlib+rmeta. In fold.",
+      "deps": [
+        "demo-taxon"
+      ],
+      "evidence": [
+        "cad29f8fe",
+        "suite 231"
+      ]
+    },
+    {
+      "id": "rung3-facet",
+      "title": "RUNG 3: facet itself (proc-macros in anger)",
+      "short": "RUNG 3",
+      "lane": "build-real",
+      "status": "active",
+      "desc": "The ladder's summit: facet with its macro closure — derived proc-macro host units consumed via lazy externs for real.",
+      "deps": [
+        "rung2-facet-core",
+        "proc-macros"
+      ],
+      "evidence": [
+        "demo agent, green-lit"
+      ]
+    },
+    {
+      "id": "epoch2",
+      "title": "EPOCH 2: identity as a field (memory-hash)",
+      "short": "EPOCH 2",
+      "lane": "machine",
+      "status": "active",
+      "desc": "Committee-converged (2 seats, 1 adversarial round): identity slots + zero-padding law implementing now (gates 1-2); map construction = sort-first, persistent Merkle tree if the decomposed residual earns it; Wagner-resistant by design. Kills the ~66% identity-recompute trunk of the 95k× solve multiplier.",
+      "deps": [
+        "epoch-blake3"
+      ],
+      "evidence": [
+        "hash-as-field-proposal @ 0691ac493",
+        "agent c0dbaaca (gates 1-2)"
+      ]
     },
     {
       "id": "molten-drop",
@@ -272,7 +317,7 @@
       "title": "CLAIM: plans the monorepo, oracle-verified",
       "lane": "cargo-model",
       "status": "goal",
-      "desc": "\"vixen resolves and plans the entire facet workspace, continuously verified against cargo itself.\" Sayable when the scale measurement's divergence tables hit zero.",
+      "desc": "Correctness CLOSED at every reachable scale (zero unexplained skew; units 9/10 with the 10th a named oracle-scope artifact). Remaining gate: solve throughput (epoch 2's target). The claim is now compute-bound, not knowledge-bound.",
       "deps": [
         "compose-at-scale"
       ],
