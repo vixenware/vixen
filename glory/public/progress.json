@@ -1,5 +1,5 @@
 {
-  "updated": "2026-07-08T10:55:00+02:00",
+  "updated": "2026-07-08T11:45:00+02:00",
   "meta": {
     "title": "PATH TO GLORY",
     "subtitle": "vixen — certifiable builds",
@@ -112,17 +112,19 @@
     },
     {
       "id": "rung3-facet",
-      "title": "RUNG 3: facet itself (proc-macros in anger)",
-      "short": "RUNG 3",
+      "title": "RUNG 3: FACET BUILT — the ladder is complete",
+      "short": "LADDER ✓✓✓",
       "lane": "build-real",
-      "status": "active",
-      "desc": "The ladder's summit: facet with its macro closure — derived proc-macro host units consumed via lazy externs for real.",
+      "status": "done",
+      "desc": "facet with default features: real build.rs, PROC-MACRO closure for real (facet_macros dylib as host unit → lazy externs), full receipts incl. dylib hash + sealed cc capability. Bonus: found+fixed a receipts hole (store-backed array reads missing observations). The original day-goal ladder — taxon → facet-core → facet — complete.",
       "deps": [
         "rung2-facet-core",
         "proc-macros"
       ],
       "evidence": [
-        "demo agent, green-lit"
+        "6cc73526d (in fold)",
+        "libfacet.rlib 7eb10f22…",
+        "libfacet_macros.dylib 7f14ead9…"
       ]
     },
     {
@@ -419,7 +421,7 @@
       "title": "BUILDS facet-cc for real",
       "lane": "build-real",
       "status": "goal",
-      "desc": "The whole monorepo, real rustc, hermetic, receipts. Our own 8,687-test workspace as the proving ground — one C dependency in the closure. \"vixen builds the code vixen is made of.\"",
+      "desc": "The full-monorepo goal. Its proof-of-concept ladder is COMPLETE (taxon, facet-core, facet all build for real with receipts); remaining distance: scale (all 146 members), driven by the tier-A composition + solve throughput.",
       "deps": [
         "build-scripts",
         "proc-macros",
@@ -505,6 +507,21 @@
         "vixen main b4fe467bf",
         "vx-runner/tests/vix_rpc_composition.rs",
         "116 green"
+      ]
+    },
+    {
+      "id": "exec-overlap",
+      "title": "Stage A: overlap the exec waits",
+      "short": "exec overlap",
+      "lane": "infra",
+      "status": "active",
+      "desc": "Scheduler audit verdict: the driver IS a work-queue scheduler (design's staged rung 1, workers deferred by plan) — but exec drains inline-synchronously, serializing subprocess waits. Stage A: spawn-and-park via existing waiter machinery. I/O overlap, CPU stays serial.",
+      "deps": [
+        "exec-seam"
+      ],
+      "evidence": [
+        "notes/scheduler-design-audit.md",
+        "agent 78b20aee"
       ]
     },
     {
