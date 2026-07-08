@@ -47,3 +47,23 @@ packages; CUDA grammar shippable by anyone); probes run under the machine so pro
 observed/receipted; capability packages resolve via rodin like any dependency — one
 resolver, everywhere; the build system's knowledge of the world is itself built and
 audited by the build system.
+
+## Corrections + the two-tier key (Amos, 2026-07-08, third dictation)
+
+CORRECTION to the lazy-remote-mount consequence: materializable toolchains make scheduling
+CHEAPER, not free — fiber does not erase geography or geopolitics. Latency, bandwidth,
+partitions, and JURISDICTION persist; data residency is a placement constraint, and the
+sovereignty product REQUIRES geographic constraints to be enforceable (an EU-sovereign
+build must not page toolchain blocks from a US store). Ambient capabilities pin work to
+MACHINES; materializable toolchains still bind work to REGIONS/NETWORKS.
+
+**Command grammars compute the TWO-TIER CACHE KEY** — the grammar knows which arguments
+are inputs, which makes the split computable:
+- Tier 1 (computation identity): normalized command + tool identity (capability
+  fingerprint / store hash) + input NAMES — computable before reading any input byte.
+  Cheap stable lookup: "which computation is this."
+- Tier 2 (execution identity): tier 1 + input CONTENT hashes, closed over by the observed
+  read-set for inputs not present in argv (build-script dynamic reads). Declared shape
+  from the grammar; observed content from the VFS.
+Properties: lookup precedes input I/O; normalization prevents path/flag-order cache
+shatter; tier-1-hit + tier-2-miss IS the incremental question, asked by the key itself.
