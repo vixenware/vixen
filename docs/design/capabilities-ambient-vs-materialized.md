@@ -26,3 +26,24 @@ Consequences:
   fingerprint; the watch is the daemon's ambient service).
 - Prior design work on this exists in git history (deleted-daemon era) — recovery scout
   dispatched 2026-07-08 (documents/design only, never code resurrection).
+
+## The ecosystem layer (Amos, 2026-07-08, second dictation)
+
+**All command invocations are typed via a grammar**, whose functions include (list open —
+"et..."): SUMMARIZATION (200 args → the semantic essence receipts/UIs show), NORMALIZATION
+(canonical form: order-insensitivity, path normalization, flag folding → semantically
+identical invocations get identical IDENTITY — cache hits survive argv noise; the grammar
+version participates in identity provenance), CODE INTELLIGENCE (role assignment:
+input/output/codegen-flag/cosmetic — the vix command-role classifier is the embryo; also
+yields EXPECTED read-sets that observation confirms, divergence = finding), VALIDATION
+(unknown flags are loud — the 3% policy at flag granularity).
+
+**Capabilities are defined by PACKAGES**: the command grammar is one vixen package; the
+capability PROBE is another, PARAMETERIZED BY the grammar (one probe engine per toolchain
+family: locate, interrogate, fingerprint). Runner daemon config ENABLES a capability mix,
+defaulted by host OS. Consequences: toolchain support = versioned, content-addressed,
+registry-distributed, overlay-patchable content (enterprises ship internal-compiler
+packages; CUDA grammar shippable by anyone); probes run under the machine so probing is
+observed/receipted; capability packages resolve via rodin like any dependency — one
+resolver, everywhere; the build system's knowledge of the world is itself built and
+audited by the build system.
