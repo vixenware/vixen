@@ -13,14 +13,21 @@ rustdoc-args = ["--html-in-header", "arborium-header.html"]
 
 [dependencies]
 tempfile = { workspace = true }
+tokio = { workspace = true }
 tracing = { workspace = true }
+vox = { workspace = true }
 vx-services = { path = "../vx-services" }
+vx-vfsd = { path = "../vx-vfsd" }
 
 [target.'cfg(target_os = "macos")'.dependencies]
 seatbelt-exec = { path = "../seatbelt-exec" }
 
 [dev-dependencies]
+camino = { workspace = true }
 tokio = { workspace = true }
+tracing-subscriber = { workspace = true }
+vx-vfs-types = { path = "../vx-vfs-types" }
+vx-store = { path = "../vx-store" }
 
 [lints]
 workspace = true

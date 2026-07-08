@@ -8,19 +8,24 @@ use std::path::{Component, Path, PathBuf};
 use std::pin::Pin;
 use std::process::Output;
 use std::sync::Arc;
+use std::time::Duration;
 
 use vx_services::{
-    ByteLen, CapabilityProbeRequest, CapabilityProbeResult, ExecArg, ExecBlake3Hash as Blake3Hash,
-    ExecCompletion, ExecContentHash as ContentHash, ExecDiagnostic, ExecError, ExecErrorKind,
-    ExecExitCode, ExecMount, ExecNodeHash as NodeHash, ExecObservationScope, ExecOutcome, ExecPath,
-    ExecPlan, ExecPrefixId, ExecReadObservation, ExecReadSet, ExecRequest, ExecResult, ExecRole,
-    ExecSubfileCompletion, ExecTree, ExecTreeEvent, ExecTreeFinalization, PlatformArch,
-    PlatformName, RUNNER_PROTOCOL_VERSION, Runner, RunnerCapabilities, RunnerPlatform,
-    RunnerTransport, SandboxCapability, ToolchainCapability, ToolchainKind,
+    BlobRef, ByteLen, CapabilityProbeRequest, CapabilityProbeResult, DirectoryEntryKind, ExecArg,
+    ExecBlake3Hash as Blake3Hash, ExecCompletion, ExecContentHash as ContentHash, ExecDiagnostic,
+    ExecError, ExecErrorKind, ExecExitCode, ExecMount, ExecNodeHash as NodeHash,
+    ExecObservationScope, ExecOutcome, ExecPath, ExecPlan, ExecPrefixId, ExecReadObservation,
+    ExecReadSet, ExecRequest, ExecResult, ExecRole, ExecSubfileCompletion, ExecTree, ExecTreeEvent,
+    ExecTreeFinalization, NodeHash as StoreNodeHash, PlatformArch, PlatformName,
+    RUNNER_PROTOCOL_VERSION, Runner, RunnerCapabilities, RunnerPlatform, RunnerTransport,
+    SandboxCapability, StoreClient, ToolchainCapability, ToolchainKind,
+    cas_tree::{MerkleTreeFile, build_merkle_tree},
+    chunking::{prepare_blob, store_prepared_blob},
     exec_role_embedded_paths, exec_role_env_paths, exec_role_input_paths,
     exec_role_output_dir_paths, exec_role_output_paths, exec_role_search_dir_paths,
     exec_role_stdout_paths,
 };
+use vx_vfsd::protocol::{VfsTrackedObservation, VfsdClient};
 
 const ENV_ALLOWLIST: &[&str] = &["PATH", "HOME", "TMPDIR", "TEMP", "TMP", "SystemRoot"];
 
@@ -33,6 +38,155 @@ pub trait ExecObservationFeed: Send + Sync {
         prefix_id: &'a ExecPrefixId,
         roots: &'a [ExecPath],
     ) -> ExecObservationFuture<'a>;
+}
+
+#[derive(Debug, Clone)]
+pub struct FskitObservationFeed {
+    vfsd_addr: String,
+    connect_timeout: Duration,
+    call_timeout: Duration,
+}
+
+impl FskitObservationFeed {
+    pub fn new(vfsd_addr: impl Into<String>) -> Self {
+        Self {
+            vfsd_addr: vfsd_addr.into(),
+            connect_timeout: Duration::from_secs(2),
+            call_timeout: Duration::from_secs(5),
+        }
+    }
+
+    pub fn with_timeouts(mut self, connect_timeout: Duration, call_timeout: Duration) -> Self {
+        self.connect_timeout = connect_timeout;
+        self.call_timeout = call_timeout;
+        self
+    }
+
+    async fn client(&self) -> Result<VfsdClient, ExecError> {
+        vox::connect_lane::<VfsdClient>(&self.vfsd_addr)
+            .connect_timeout(self.connect_timeout)
+            .wait_for_service(self.connect_timeout)
+            .await
+            .map_err(|err| {
+                exec_error(
+                    ExecErrorKind::Protocol,
+                    format!("fskit observation feed connect {}: {err}", self.vfsd_addr),
+                )
+            })
+    }
+
+    async fn read_set_async(
+        &self,
+        prefix_id: &ExecPrefixId,
+        roots: &[ExecPath],
+    ) -> Result<Option<ExecReadSet>, ExecError> {
+        let roots = exec_roots_to_vfs_roots(roots).map_err(|err| {
+            exec_error(
+                ExecErrorKind::Protocol,
+                format!("fskit observation feed roots: {err}"),
+            )
+        })?;
+        let client = self.client().await?;
+        let observations = tokio::time::timeout(
+            self.call_timeout,
+            client.tracked_observations(prefix_id.0.clone(), roots),
+        )
+        .await
+        .map_err(|_| {
+            exec_error(
+                ExecErrorKind::Protocol,
+                format!(
+                    "fskit observation feed tracked_observations timed out after {:?}",
+                    self.call_timeout
+                ),
+            )
+        })?
+        .map_err(|err| {
+            exec_error(
+                ExecErrorKind::Protocol,
+                format!("fskit observation feed tracked_observations: {err}"),
+            )
+        })?;
+        Ok(Some(vfs_tracked_observations_to_exec_read_set(
+            observations,
+        )))
+    }
+}
+
+impl ExecObservationFeed for FskitObservationFeed {
+    fn read_set<'a>(
+        &'a self,
+        prefix_id: &'a ExecPrefixId,
+        roots: &'a [ExecPath],
+    ) -> ExecObservationFuture<'a> {
+        Box::pin(async move { self.read_set_async(prefix_id, roots).await })
+    }
+}
+
+#[derive(Debug, Clone)]
+pub struct FskitVfsExecutor {
+    vfsd_addr: String,
+    store_addr: String,
+    access_path: PathBuf,
+    observation_feed: FskitObservationFeed,
+    connect_timeout: Duration,
+    call_timeout: Duration,
+}
+
+impl FskitVfsExecutor {
+    pub fn new(
+        vfsd_addr: impl Into<String>,
+        store_addr: impl Into<String>,
+        access_path: impl Into<PathBuf>,
+    ) -> Self {
+        let vfsd_addr = vfsd_addr.into();
+        Self {
+            observation_feed: FskitObservationFeed::new(vfsd_addr.clone()),
+            vfsd_addr,
+            store_addr: store_addr.into(),
+            access_path: access_path.into(),
+            connect_timeout: Duration::from_secs(2),
+            call_timeout: Duration::from_secs(5),
+        }
+    }
+
+    pub fn with_timeouts(mut self, connect_timeout: Duration, call_timeout: Duration) -> Self {
+        self.connect_timeout = connect_timeout;
+        self.call_timeout = call_timeout;
+        self.observation_feed = self
+            .observation_feed
+            .with_timeouts(connect_timeout, call_timeout);
+        self
+    }
+
+    async fn vfsd_client(&self) -> Result<VfsdClient, ExecError> {
+        vox::connect_lane::<VfsdClient>(&self.vfsd_addr)
+            .connect_timeout(self.connect_timeout)
+            .wait_for_service(self.connect_timeout)
+            .await
+            .map_err(|err| {
+                exec_error(
+                    ExecErrorKind::Protocol,
+                    format!("fskit vfs executor connect vfsd {}: {err}", self.vfsd_addr),
+                )
+            })
+    }
+
+    async fn store_client(&self) -> Result<StoreClient, ExecError> {
+        vox::connect_lane::<StoreClient>(&self.store_addr)
+            .connect_timeout(self.connect_timeout)
+            .wait_for_service(self.connect_timeout)
+            .await
+            .map_err(|err| {
+                exec_error(
+                    ExecErrorKind::Protocol,
+                    format!(
+                        "fskit vfs executor connect store {}: {err}",
+                        self.store_addr
+                    ),
+                )
+            })
+    }
 }
 
 #[derive(Clone)]
@@ -70,6 +224,21 @@ impl Default for SandboxedExecutor {
 impl Runner for SandboxedExecutor {
     async fn exec(&self, request: ExecRequest) -> ExecResult {
         match run_request(request, self.observation_feed.as_ref()).await {
+            Ok(result) => result,
+            Err(error) => failed_without_process(error),
+        }
+    }
+
+    async fn capabilities(&self, _request: CapabilityProbeRequest) -> CapabilityProbeResult {
+        CapabilityProbeResult {
+            capabilities: detect_capabilities(),
+        }
+    }
+}
+
+impl Runner for FskitVfsExecutor {
+    async fn exec(&self, request: ExecRequest) -> ExecResult {
+        match run_fskit_vfs_request(request, self).await {
             Ok(result) => result,
             Err(error) => failed_without_process(error),
         }
@@ -121,6 +290,252 @@ fn run_request_blocking(request: ExecRequest) -> Result<ExecResult, ExecError> {
         }
         PreparedExecCompletion::Failed(result) => Ok(result),
     }
+}
+
+async fn run_fskit_vfs_request(
+    request: ExecRequest,
+    executor: &FskitVfsExecutor,
+) -> Result<ExecResult, ExecError> {
+    let vfsd = executor.vfsd_client().await?;
+    let store = executor.store_client().await?;
+    let scope_id = ExecPrefixId(fskit_prefix_id());
+
+    materialize_vfs_mounts(&vfsd, &store, &scope_id, &request, executor.call_timeout).await?;
+    prepare_vfs_output_dirs(&vfsd, &scope_id, &request.plan, executor.call_timeout).await?;
+
+    let prefix_root = executor.access_path.join(&scope_id.0);
+    let env = command_env(&request.plan, &prefix_root).map_err(stage_error)?;
+    let (program, argv) =
+        command_program_and_argv(&request, &env, &prefix_root).map_err(stage_error)?;
+    let write_roots = vfs_write_roots(&request.plan, &prefix_root).map_err(stage_error)?;
+    let output = tokio::task::spawn_blocking({
+        let program = program.clone();
+        let argv = argv.clone();
+        let env = env.clone();
+        let prefix_root = prefix_root.clone();
+        let toolchain_roots = request.toolchain_roots.clone();
+        move || {
+            run_sandboxed_process_without_canonicalizing_profile(
+                &program,
+                &argv,
+                Path::new("/"),
+                &env,
+                &prefix_root,
+                &write_roots,
+                &toolchain_roots,
+            )
+        }
+    })
+    .await
+    .map_err(|err| exec_error(ExecErrorKind::Spawn, format!("fskit vfs exec task: {err}")))?
+    .map_err(spawn_or_unsupported_error)?;
+
+    let exit_code = status_code(&output);
+    if !output.status.success() {
+        let stderr = output.stderr;
+        let stdout = output.stdout;
+        let _ = timeout_vfs_call(executor.call_timeout, vfsd.rm_rf(prefix_path(&scope_id))).await;
+        let error = exec_error(
+            ExecErrorKind::ProcessExit,
+            format!(
+                "fskit vfs exec {} exited with {}: {}",
+                program.display(),
+                exit_code,
+                String::from_utf8_lossy(&stderr)
+            ),
+        );
+        return Ok(ExecResult {
+            exit_code: ExecExitCode(exit_code),
+            stdout,
+            stderr,
+            completion: ExecCompletion::Failed(error),
+        });
+    }
+
+    let harvested =
+        harvest_outputs(&request.plan, &prefix_root, &output.stdout).map_err(harvest_error)?;
+    verify_subfile_completions_at_exit(&prefix_root, &harvested.tree, &harvested.subfiles)
+        .map_err(verification_error)?;
+    let read_set = executor
+        .observation_feed
+        .read_set_async(&scope_id, &observation_roots(&request.mounts))
+        .await?
+        .ok_or_else(|| {
+            exec_error(
+                ExecErrorKind::Protocol,
+                "fskit observation feed returned no read set",
+            )
+        })?;
+    let tree_events = tree_events_from_subfiles(harvested.subfiles.clone());
+    let _ = timeout_vfs_call(executor.call_timeout, vfsd.rm_rf(prefix_path(&scope_id))).await;
+
+    Ok(ExecResult {
+        exit_code: ExecExitCode(exit_code),
+        stdout: output.stdout,
+        stderr: output.stderr,
+        completion: ExecCompletion::Succeeded(ExecOutcome {
+            outputs: harvested.tree,
+            read_set,
+            observation_scopes: observation_scopes(&scope_id, &request.mounts),
+            tree_events,
+        }),
+    })
+}
+
+async fn materialize_vfs_mounts(
+    vfsd: &VfsdClient,
+    store: &StoreClient,
+    scope_id: &ExecPrefixId,
+    request: &ExecRequest,
+    call_timeout: Duration,
+) -> Result<(), ExecError> {
+    for mount in &request.mounts {
+        let executable_paths =
+            executable_paths_under_mount(&request.plan, &mount.at).map_err(stage_error)?;
+        let root = exec_tree_to_cas(store, &mount.tree, &executable_paths)
+            .await
+            .map_err(stage_error)?;
+        let rel = exec_path_to_vfs_path(mount.at.as_str()).map_err(stage_error)?;
+        let path = prefix_child_path(scope_id, &rel);
+        timeout_vfs_call(call_timeout, vfsd.mount(path, root.0))
+            .await
+            .map_err(stage_error)?;
+    }
+    Ok(())
+}
+
+async fn prepare_vfs_output_dirs(
+    vfsd: &VfsdClient,
+    scope_id: &ExecPrefixId,
+    plan: &ExecPlan,
+    call_timeout: Duration,
+) -> Result<(), ExecError> {
+    for ExecArg { value, role } in &plan.argv {
+        let value = value.as_str();
+        for output in exec_role_output_paths(value, *role) {
+            let parent = parent_logical_path(output.as_str());
+            let rel = exec_path_to_vfs_path(&parent).map_err(stage_error)?;
+            if !rel.is_empty() {
+                timeout_vfs_call(call_timeout, vfsd.mkdir(prefix_child_path(scope_id, &rel)))
+                    .await
+                    .map_err(stage_error)?;
+            }
+        }
+        for output_dir in exec_role_output_dir_paths(value, *role) {
+            let rel = exec_path_to_vfs_path(output_dir.as_str()).map_err(stage_error)?;
+            timeout_vfs_call(call_timeout, vfsd.mkdir(prefix_child_path(scope_id, &rel)))
+                .await
+                .map_err(stage_error)?;
+        }
+    }
+    Ok(())
+}
+
+async fn timeout_vfs_call<T, E>(
+    timeout: Duration,
+    call: impl Future<Output = Result<T, E>>,
+) -> Result<T, String>
+where
+    E: std::fmt::Debug,
+{
+    tokio::time::timeout(timeout, call)
+        .await
+        .map_err(|_| format!("vx-vfsd call timed out after {timeout:?}"))?
+        .map_err(|err| format!("{err:?}"))
+}
+
+fn vfs_write_roots(plan: &ExecPlan, prefix_root: &Path) -> Result<Vec<PathBuf>, String> {
+    let mut roots = Vec::new();
+    for ExecArg { value, role } in &plan.argv {
+        let value = value.as_str();
+        for output in exec_role_output_paths(value, *role) {
+            let path = physical_path(output.as_str(), prefix_root)?;
+            if let Some(parent) = path.parent() {
+                roots.push(parent.to_path_buf());
+            }
+        }
+        for output in exec_role_output_dir_paths(value, *role) {
+            roots.push(physical_path(output.as_str(), prefix_root)?);
+        }
+    }
+    roots.push(prefix_root.join("tmp"));
+    Ok(dedup_paths(roots))
+}
+
+fn executable_paths_under_mount(
+    plan: &ExecPlan,
+    mount_at: &ExecPath,
+) -> Result<BTreeSet<String>, String> {
+    let mut paths = BTreeSet::new();
+    let mount_rel = exec_path_to_vfs_path(mount_at.as_str())?;
+    let mount_prefix = if mount_rel.is_empty() {
+        String::new()
+    } else {
+        format!("{mount_rel}/")
+    };
+    for ExecArg { value, role } in &plan.argv {
+        if *role != ExecRole::Executable {
+            continue;
+        }
+        let executable = exec_path_to_vfs_path(value.as_str())?;
+        if mount_rel.is_empty() {
+            paths.insert(executable);
+        } else if let Some(relative) = executable.strip_prefix(&mount_prefix) {
+            paths.insert(relative.to_string());
+        }
+    }
+    Ok(paths)
+}
+
+async fn exec_tree_to_cas(
+    store: &StoreClient,
+    tree: &ExecTree,
+    executable_paths: &BTreeSet<String>,
+) -> Result<StoreNodeHash, String> {
+    let mut files = Vec::with_capacity(tree.entries.len() + tree.blobs.len());
+    for (path, text) in &tree.entries {
+        files.push(
+            exec_tree_file(
+                store,
+                path.as_str(),
+                text.0.as_bytes(),
+                executable_paths.contains(path.as_str()),
+            )
+            .await?,
+        );
+    }
+    for (path, bytes) in &tree.blobs {
+        files.push(
+            exec_tree_file(
+                store,
+                path.as_str(),
+                bytes,
+                executable_paths.contains(path.as_str()),
+            )
+            .await?,
+        );
+    }
+    let (root, _total_size) = build_merkle_tree(store, files).await?;
+    Ok(root)
+}
+
+async fn exec_tree_file(
+    store: &StoreClient,
+    path: &str,
+    bytes: &[u8],
+    executable: bool,
+) -> Result<MerkleTreeFile, String> {
+    let relative = exec_path_to_vfs_path(path)?;
+    let prepared = prepare_blob(bytes);
+    let blob = store_prepared_blob(store, &prepared, bytes).await?;
+    Ok(MerkleTreeFile {
+        path: relative,
+        kind: blob_to_directory_entry_kind(&blob, executable),
+    })
+}
+
+fn blob_to_directory_entry_kind(blob: &BlobRef, executable: bool) -> DirectoryEntryKind {
+    blob.to_dir_entry_kind(executable)
 }
 
 enum PreparedExecCompletion {
@@ -621,6 +1036,120 @@ fn observation_roots(mounts: &[ExecMount]) -> Vec<ExecPath> {
     mounts.iter().map(|mount| mount.at.clone()).collect()
 }
 
+fn observation_scopes(scope_id: &ExecPrefixId, mounts: &[ExecMount]) -> Vec<ExecObservationScope> {
+    vec![ExecObservationScope {
+        prefix_id: scope_id.clone(),
+        roots: observation_roots(mounts),
+    }]
+}
+
+pub fn vfs_tracked_observations_to_exec_read_set(
+    observations: Vec<VfsTrackedObservation>,
+) -> ExecReadSet {
+    let mut read_set = ExecReadSet::default();
+    for observation in observations {
+        match observation {
+            VfsTrackedObservation::File {
+                path,
+                content_hash,
+                blob_node,
+                size,
+            } => {
+                read_set.entries.insert(
+                    vfs_observation_to_exec_path(&path),
+                    ExecReadObservation::File {
+                        content_hash: ContentHash(Blake3Hash(content_hash.0)),
+                        blob_node: blob_node.map(store_node_hash_to_exec),
+                        size: ByteLen(size),
+                    },
+                );
+            }
+            VfsTrackedObservation::Directory {
+                path,
+                directory_node,
+            } => {
+                read_set.entries.insert(
+                    vfs_observation_to_exec_path(&path),
+                    ExecReadObservation::Directory {
+                        directory_node: store_node_hash_to_exec(directory_node),
+                    },
+                );
+            }
+            VfsTrackedObservation::LookupMiss {
+                path,
+                parent_path,
+                directory_node,
+            } => {
+                read_set.entries.insert(
+                    vfs_observation_to_exec_path(&path),
+                    ExecReadObservation::LookupMiss {
+                        parent_path: vfs_observation_to_exec_path(&parent_path),
+                        directory_node: store_node_hash_to_exec(directory_node),
+                    },
+                );
+            }
+        }
+    }
+    read_set
+}
+
+fn store_node_hash_to_exec(hash: StoreNodeHash) -> NodeHash {
+    NodeHash(Blake3Hash(hash.0.0))
+}
+
+fn exec_roots_to_vfs_roots(roots: &[ExecPath]) -> Result<Vec<String>, String> {
+    roots
+        .iter()
+        .map(|root| exec_path_to_vfs_path(root.as_str()))
+        .collect()
+}
+
+fn exec_path_to_vfs_path(path: &str) -> Result<String, String> {
+    let relative = path.trim_start_matches('/');
+    let path = Path::new(relative);
+    if path
+        .components()
+        .any(|component| matches!(component, Component::ParentDir | Component::RootDir))
+    {
+        return Err(format!(
+            "fskit vfs refuses non-relative path `{}`",
+            path.display()
+        ));
+    }
+    Ok(relative.to_string())
+}
+
+fn vfs_observation_to_exec_path(path: &str) -> ExecPath {
+    if path.is_empty() {
+        ExecPath::from("/")
+    } else {
+        ExecPath::from(format!("/{path}"))
+    }
+}
+
+fn fskit_prefix_id() -> String {
+    format!(
+        "exec-{}-{}",
+        std::process::id(),
+        std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map(|duration| duration.as_nanos())
+            .unwrap_or(0)
+    )
+}
+
+fn prefix_path(scope_id: &ExecPrefixId) -> String {
+    format!("/{}", scope_id.0)
+}
+
+fn prefix_child_path(scope_id: &ExecPrefixId, child: &str) -> String {
+    if child.is_empty() {
+        prefix_path(scope_id)
+    } else {
+        format!("/{}/{}", scope_id.0, child)
+    }
+}
+
 fn stage_file(root: &Path, logical: &str, bytes: &[u8]) -> Result<(), String> {
     let physical = physical_path(logical, root)?;
     if let Some(parent) = physical.parent() {
@@ -834,6 +1363,47 @@ fn run_sandboxed_process(
 }
 
 #[cfg(target_os = "macos")]
+fn run_sandboxed_process_without_canonicalizing_profile(
+    program: &Path,
+    argv: &[OsString],
+    current_dir: &Path,
+    env: &[(OsString, OsString)],
+    read_root: &Path,
+    write_roots: &[PathBuf],
+    toolchain_roots: &[ExecPath],
+) -> Result<Output, String> {
+    let mut plan = seatbelt_exec::SeatbeltPlan::new().read_root(read_root);
+    for root in write_roots {
+        plan = plan.write_root(root);
+    }
+    for root in toolchain_roots {
+        plan = plan.toolchain_root(toolchain_root_path(root.as_str(), read_root));
+    }
+    plan = plan.toolchain_root(program);
+    if let Some(interpreter) = shebang_interpreter(program) {
+        if is_macos_shell_selector_interpreter(&interpreter)
+            && Path::new("/private/var/select/sh").exists()
+        {
+            plan = plan.toolchain_root("/private/var/select");
+            plan = plan.toolchain_root("/bin/bash");
+        }
+        plan = plan.toolchain_root(interpreter);
+    }
+    let argv: Vec<String> = argv
+        .iter()
+        .map(|arg| arg.to_string_lossy().to_string())
+        .collect();
+    let mut command = plan.compile().command(program, &argv);
+    command
+        .current_dir(current_dir)
+        .env_clear()
+        .envs(env.iter().cloned());
+    command
+        .output()
+        .map_err(|err| format!("sandboxed exec failed to spawn sandbox-exec: {err}"))
+}
+
+#[cfg(target_os = "macos")]
 fn toolchain_root_path(root: &str, sandbox_root: &Path) -> PathBuf {
     if let Ok(staged) = physical_path(root, sandbox_root)
         && staged.exists()
@@ -864,6 +1434,19 @@ fn is_macos_shell_selector_interpreter(interpreter: &Path) -> bool {
 
 #[cfg(not(target_os = "macos"))]
 fn run_sandboxed_process(
+    _program: &Path,
+    _argv: &[OsString],
+    _current_dir: &Path,
+    _env: &[(OsString, OsString)],
+    _read_root: &Path,
+    _write_roots: &[PathBuf],
+    _toolchain_roots: &[ExecPath],
+) -> Result<Output, String> {
+    Err("sandboxed exec is implemented for macOS seatbelt in stage 1".to_string())
+}
+
+#[cfg(not(target_os = "macos"))]
+fn run_sandboxed_process_without_canonicalizing_profile(
     _program: &Path,
     _argv: &[OsString],
     _current_dir: &Path,
