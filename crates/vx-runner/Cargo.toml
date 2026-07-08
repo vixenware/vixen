@@ -17,6 +17,7 @@ vx-services = { path = "../vx-services" }
 
 [dev-dependencies]
 tempfile = { workspace = true }
+vix = { workspace = true }
 
 [lints]
 workspace = true

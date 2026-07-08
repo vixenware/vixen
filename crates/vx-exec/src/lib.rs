@@ -695,7 +695,17 @@ fn run_sandboxed_process(
         plan = plan.write_root(root);
     }
     for root in toolchain_roots {
-        plan = plan.toolchain_root(root.as_str());
+        plan = plan.toolchain_root(toolchain_root_path(root.as_str(), read_root));
+    }
+    plan = plan.toolchain_root(program);
+    if let Some(interpreter) = shebang_interpreter(program) {
+        if is_macos_shell_selector_interpreter(&interpreter)
+            && Path::new("/private/var/select/sh").exists()
+        {
+            plan = plan.toolchain_root("/private/var/select");
+            plan = plan.toolchain_root("/bin/bash");
+        }
+        plan = plan.toolchain_root(interpreter);
     }
     let argv: Vec<String> = argv
         .iter()
@@ -710,6 +720,35 @@ fn run_sandboxed_process(
     command
         .output()
         .map_err(|err| format!("sandboxed exec failed to spawn sandbox-exec: {err}"))
+}
+
+#[cfg(target_os = "macos")]
+fn toolchain_root_path(root: &str, sandbox_root: &Path) -> PathBuf {
+    if let Ok(staged) = physical_path(root, sandbox_root)
+        && staged.exists()
+    {
+        return staged;
+    }
+    PathBuf::from(root)
+}
+
+#[cfg(target_os = "macos")]
+fn shebang_interpreter(program: &Path) -> Option<PathBuf> {
+    let bytes = fs::read(program).ok()?;
+    let line = bytes
+        .strip_prefix(b"#!")?
+        .split(|byte| *byte == b'\n')
+        .next()?;
+    let line = std::str::from_utf8(line).ok()?.trim();
+    let interpreter = line.split_ascii_whitespace().next()?;
+    interpreter
+        .starts_with('/')
+        .then(|| PathBuf::from(interpreter))
+}
+
+#[cfg(target_os = "macos")]
+fn is_macos_shell_selector_interpreter(interpreter: &Path) -> bool {
+    interpreter == Path::new("/bin/sh") || interpreter == Path::new("/bin/bash")
 }
 
 #[cfg(not(target_os = "macos"))]

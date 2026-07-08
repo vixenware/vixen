@@ -26,6 +26,7 @@ facet-styx = { path = "/Users/amos/oss/facet-cc/facet-styx" }
 margin = { path = "/Users/amos/oss/facet-cc/margin" }
 phon = { path = "/Users/amos/oss/facet-cc/phon/rust/phon" }
 exec-protocol = { path = "/Users/amos/oss/facet-cc/exec-protocol" }
+vix = { path = "/Users/amos/oss/facet-cc/vix", default-features = false, features = ["runner-rpc"] }
 
 
 # cmdline parsing
