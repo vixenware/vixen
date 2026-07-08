@@ -1,6 +1,7 @@
 #![allow(non_snake_case)]
 
 use std::sync::Mutex;
+use std::sync::atomic::{AtomicU64, Ordering};
 
 use objc2::rc::Retained;
 use objc2::runtime::AnyObject;
@@ -47,7 +48,7 @@ struct CachedState {
 pub(super) struct ItemIvars {
     local_item_id: u64,
     backend_item_id: u64,
-    connection_generation: u64,
+    connection_generation: AtomicU64,
     virtual_kind: VirtualKind,
     state: Mutex<CachedState>,
 }
@@ -78,7 +79,7 @@ impl RustItem {
         let this = Self::alloc().set_ivars(ItemIvars {
             local_item_id,
             backend_item_id,
-            connection_generation,
+            connection_generation: AtomicU64::new(connection_generation),
             virtual_kind,
             state: Mutex::new(CachedState {
                 name: fs_filename(name),
@@ -177,7 +178,7 @@ impl RustItem {
     }
 
     pub(super) fn generation(&self) -> u64 {
-        self.ivars().connection_generation
+        self.ivars().connection_generation.load(Ordering::Acquire)
     }
 
     pub(super) fn virtual_kind(&self) -> VirtualKind {
@@ -214,9 +215,13 @@ impl RustItem {
     pub(super) fn update_from_backend(
         &self,
         parent_local_id: u64,
+        connection_generation: u64,
         name: &str,
         attrs: &VfsItemAttributes,
     ) {
+        self.ivars()
+            .connection_generation
+            .store(connection_generation, Ordering::Release);
         let mut state = lock_unpoisoned(&self.ivars().state, "item state");
         state.name = fs_filename(name);
         state.parent_local_id = parent_local_id;
@@ -231,6 +236,12 @@ impl RustItem {
         let mut state = lock_unpoisoned(&self.ivars().state, "item state");
         state.name = fs_filename(name);
         state.parent_local_id = parent_local_id;
+    }
+
+    pub(super) fn update_generation(&self, connection_generation: u64) {
+        self.ivars()
+            .connection_generation
+            .store(connection_generation, Ordering::Release);
     }
 
     /// Store the rendered `status.json` bytes and sync `size` to their length, so a
@@ -281,7 +292,7 @@ impl RustItem {
             self.ivars().local_item_id,
             self.ivars().backend_item_id,
             state.parent_local_id,
-            self.ivars().connection_generation,
+            self.generation(),
             fs_filename_string(&state.name),
             self.virtual_kind().label(),
             state.item_type,

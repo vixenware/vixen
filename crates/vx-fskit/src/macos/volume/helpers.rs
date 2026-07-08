@@ -33,6 +33,7 @@ impl RustVolume {
             items: Mutex::new(items),
             routed: Mutex::new(RoutedItems {
                 by_key: HashMap::new(),
+                prefix_roots: HashMap::new(),
                 next_local_id: ROUTED_ITEM_ID_START,
             }),
         });
@@ -61,9 +62,49 @@ impl RustVolume {
         }
 
         lock_unpoisoned(&self.ivars().items, "volume items").remove(&item_id);
-        lock_unpoisoned(&self.ivars().routed, "volume routed items")
-            .by_key
+        let mut routed = lock_unpoisoned(&self.ivars().routed, "volume routed items");
+        routed.by_key.retain(|_, local_id| *local_id != item_id);
+        routed
+            .prefix_roots
             .retain(|_, local_id| *local_id != item_id);
+    }
+
+    pub(crate) fn prefix_root_local_item_id(&self, prefix: &str) -> u64 {
+        let live_local_ids = lock_unpoisoned(&self.ivars().items, "volume items")
+            .keys()
+            .copied()
+            .collect::<std::collections::HashSet<_>>();
+
+        let mut routed = lock_unpoisoned(&self.ivars().routed, "volume routed items");
+        if let Some(existing) = routed.prefix_roots.get(prefix) {
+            log_event(
+                "debug",
+                format!(
+                    "vixen-fskit prefix_root_local_item_id reuse prefix={prefix} -> local={existing}"
+                ),
+            );
+            return *existing;
+        }
+
+        let local_item_id = loop {
+            let candidate = routed.next_local_id;
+            routed.next_local_id += 1;
+            if !live_local_ids.contains(&candidate) {
+                break candidate;
+            }
+            log_event(
+                "debug",
+                format!("vixen-fskit prefix_root_local_item_id skip collision local={candidate}"),
+            );
+        };
+        routed.prefix_roots.insert(prefix.to_owned(), local_item_id);
+        log_event(
+            "debug",
+            format!(
+                "vixen-fskit prefix_root_local_item_id insert prefix={prefix} -> local={local_item_id}"
+            ),
+        );
+        local_item_id
     }
 
     pub(crate) fn local_item_id(&self, generation: u64, backend_item_id: u64) -> u64 {
@@ -144,7 +185,7 @@ impl RustVolume {
                     item.debug_summary()
                 ),
             );
-            item.update_from_backend(parent_local_id, name, attrs);
+            item.update_from_backend(parent_local_id, generation, name, attrs);
             log_event(
                 "debug",
                 format!(
@@ -176,6 +217,38 @@ impl RustVolume {
         // Each routed item carries the generation of the connection (prefix provider) that
         // owns it; route the call back to that exact provider. A generation that's no longer
         // live means the provider disconnected — the item is stale.
+        if item.virtual_kind() == VirtualKind::None
+            && item.parent_local_id() == ROOT_LOCAL_ID
+            && item.backend_item_id() == ROOT_BACKEND_ID
+        {
+            let prefix = fs_filename_string(&item.fs_name());
+            if let Some((client, live_generation)) = root_peer_state().client_for_prefix(&prefix) {
+                let old_generation = item.generation();
+                if old_generation != live_generation {
+                    log_event(
+                        "info",
+                        format!(
+                            "vixen-fskit refreshed prefix root prefix={prefix} local={} generation={} -> {}",
+                            item.item_id(),
+                            old_generation,
+                            live_generation
+                        ),
+                    );
+                    item.update_generation(live_generation);
+                }
+                return Ok((client, live_generation));
+            }
+
+            log_event(
+                "warn",
+                format!(
+                    "vixen-fskit no live provider for prefix root prefix={prefix} {}",
+                    item.debug_summary()
+                ),
+            );
+            return Err(posix_error(libc::ESTALE));
+        }
+
         let generation = item.generation();
         if generation == 0 {
             // Not tied to any provider (synthetic/root) — shouldn't reach a backend call.
@@ -213,7 +286,7 @@ impl RustVolume {
     /// name. Looking up / enumerating it flows through the generic backend path, which
     /// routes to that provider via the item's generation.
     fn prefix_dir_item(&self, prefix: &str, generation: u64) -> Retained<RustItem> {
-        let local_id = self.local_item_id(generation, ROOT_BACKEND_ID);
+        let local_id = self.prefix_root_local_item_id(prefix);
         let attrs = vx_services::ItemAttributes {
             item_id: ROOT_BACKEND_ID,
             item_type: vx_services::ItemType::Directory,
@@ -298,7 +371,12 @@ impl RustVolume {
             ),
         );
 
-        item.update_from_backend(parent_local_id, &item_name, &result.attrs);
+        item.update_from_backend(
+            parent_local_id,
+            item.generation(),
+            &item_name,
+            &result.attrs,
+        );
         Ok(item.attributes_for_request(request))
     }
 

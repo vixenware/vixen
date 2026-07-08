@@ -11,6 +11,8 @@
 pub mod cas_tree;
 pub mod chunking;
 
+pub use cas_tree::{MerkleTreeFile, build_merkle_tree};
+
 use std::collections::HashMap;
 use std::hash::{BuildHasher, Hasher};
 

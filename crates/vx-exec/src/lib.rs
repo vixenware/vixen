@@ -5,28 +5,57 @@ use std::ffi::OsString;
 use std::fs;
 use std::path::{Component, Path, PathBuf};
 use std::process::Output;
+use std::sync::Arc;
 
+use camino::Utf8PathBuf;
 use vx_services::{
-    ByteLen, CapabilityProbeRequest, CapabilityProbeResult, ExecArg, ExecBlake3Hash as Blake3Hash,
-    ExecCompletion, ExecContentHash as ContentHash, ExecDiagnostic, ExecError, ExecErrorKind,
-    ExecExitCode, ExecMount, ExecNodeHash as NodeHash, ExecObservationScope, ExecOutcome, ExecPath,
-    ExecPlan, ExecPrefixId, ExecReadObservation, ExecReadSet, ExecRequest, ExecResult, ExecRole,
-    ExecSubfileCompletion, ExecTree, ExecTreeEvent, ExecTreeFinalization, PlatformArch,
-    PlatformName, RUNNER_PROTOCOL_VERSION, Runner, RunnerCapabilities, RunnerPlatform,
-    RunnerTransport, SandboxCapability, ToolchainCapability, ToolchainKind,
+    BlobRef, ByteLen, CapabilityProbeRequest, CapabilityProbeResult, DirectoryEntryKind, ExecArg,
+    ExecBlake3Hash, ExecCompletion, ExecContentHash as ContentHash, ExecDiagnostic, ExecError,
+    ExecErrorKind, ExecExitCode, ExecMount, ExecNodeHash, ExecObservationScope, ExecOutcome,
+    ExecPath, ExecPlan, ExecPrefixId, ExecReadObservation, ExecReadSet, ExecRequest, ExecResult,
+    ExecRole, ExecSubfileCompletion, ExecTree, ExecTreeEvent, ExecTreeFinalization, MerkleTreeFile,
+    NodeHash, PlatformArch, PlatformName, RUNNER_PROTOCOL_VERSION, Runner, RunnerCapabilities,
+    RunnerPlatform, RunnerTransport, SandboxCapability, StoreClient, StoreDispatcher,
+    ToolchainCapability, ToolchainKind, build_merkle_tree,
+    chunking::{prepare_blob, store_prepared_blob},
     exec_role_embedded_paths, exec_role_env_paths, exec_role_input_paths,
     exec_role_output_dir_paths, exec_role_output_paths, exec_role_search_dir_paths,
     exec_role_stdout_paths,
 };
+use vx_vfsd::protocol::{VfsTrackedObservation, Vfsd};
 
 const ENV_ALLOWLIST: &[&str] = &["PATH", "HOME", "TMPDIR", "TEMP", "TMP", "SystemRoot"];
 
-#[derive(Debug, Clone, Default)]
-pub struct SandboxedExecutor;
+#[derive(Debug, Clone)]
+pub struct SandboxedExecutor {
+    backend: ExecutorBackend,
+}
+
+#[derive(Debug, Clone)]
+enum ExecutorBackend {
+    Staging,
+    NativeVfs { mount_path: Utf8PathBuf },
+}
+
+impl Default for SandboxedExecutor {
+    fn default() -> Self {
+        Self::new()
+    }
+}
 
 impl SandboxedExecutor {
     pub fn new() -> Self {
-        Self
+        Self {
+            backend: ExecutorBackend::Staging,
+        }
+    }
+
+    pub fn native_vfs(mount_path: impl Into<Utf8PathBuf>) -> Self {
+        Self {
+            backend: ExecutorBackend::NativeVfs {
+                mount_path: mount_path.into(),
+            },
+        }
     }
 
     pub fn exec_blocking(&self, request: ExecRequest) -> ExecResult {
@@ -39,7 +68,15 @@ impl SandboxedExecutor {
 
 impl Runner for SandboxedExecutor {
     async fn exec(&self, request: ExecRequest) -> ExecResult {
-        self.exec_blocking(request)
+        match &self.backend {
+            ExecutorBackend::Staging => self.exec_blocking(request),
+            ExecutorBackend::NativeVfs { mount_path } => {
+                match run_request_native_vfs(request, mount_path.clone()).await {
+                    Ok(result) => result,
+                    Err(error) => failed_without_process(error),
+                }
+            }
+        }
     }
 
     async fn capabilities(&self, _request: CapabilityProbeRequest) -> CapabilityProbeResult {
@@ -47,6 +84,158 @@ impl Runner for SandboxedExecutor {
             capabilities: detect_capabilities(),
         }
     }
+}
+
+async fn run_request_native_vfs(
+    request: ExecRequest,
+    mount_path: Utf8PathBuf,
+) -> Result<ExecResult, ExecError> {
+    let temp = tempfile::Builder::new()
+        .prefix("vx-native-exec-")
+        .tempdir_in("/tmp")
+        .map_err(|err| {
+            exec_error(
+                ExecErrorKind::Staging,
+                format!("native vfs exec tempdir: {err}"),
+            )
+        })?;
+    let root = temp.path();
+    let store_root = Utf8PathBuf::from_path_buf(root.join("store")).map_err(|path| {
+        exec_error(
+            ExecErrorKind::Staging,
+            format!(
+                "native vfs exec store path is not UTF-8: {}",
+                path.display()
+            ),
+        )
+    })?;
+    let store = vx_store::open(store_root).await.map_err(|err| {
+        exec_error(
+            ExecErrorKind::Staging,
+            format!("native vfs exec open store: {err:#}"),
+        )
+    })?;
+    let store_listener = tokio::net::TcpListener::bind("127.0.0.1:0")
+        .await
+        .map_err(|err| {
+            exec_error(
+                ExecErrorKind::Staging,
+                format!("native vfs exec bind store listener: {err}"),
+            )
+        })?;
+    let store_addr = format!(
+        "tcp://{}",
+        store_listener.local_addr().map_err(|err| {
+            exec_error(
+                ExecErrorKind::Staging,
+                format!("native vfs exec store listener addr: {err}"),
+            )
+        })?
+    );
+    let store_server = tokio::spawn(async move {
+        vox::serve_listener(store_listener, StoreDispatcher::new(store))
+            .await
+            .map_err(|error| error.to_string())
+    });
+
+    let cas: StoreClient = vox::connect_lane(&store_addr)
+        .connect_timeout(std::time::Duration::from_millis(100))
+        .wait_for_service(std::time::Duration::from_secs(5))
+        .await
+        .map_err(|err| {
+            exec_error(
+                ExecErrorKind::Staging,
+                format!("native vfs exec connect store at {store_addr}: {err}"),
+            )
+        })?;
+    let service = vx_vfsd::boot_with_store(Arc::new(cas.clone()), &mount_path)
+        .await
+        .map_err(|err| {
+            exec_error(
+                ExecErrorKind::Staging,
+                format!("native vfs exec boot vfsd: {err:#}"),
+            )
+        })?;
+
+    let prefix_id = native_prefix_id();
+    materialize_mounts(&service, &cas, &prefix_id, &request.plan, &request.mounts).await?;
+    prepare_native_output_dirs(&service, &prefix_id, &request.plan).await?;
+
+    let access_path = Vfsd::access_path(&service).await.map_err(stage_error)?;
+    let prefix_root = PathBuf::from(access_path).join(&prefix_id);
+    let env = command_env_native(&request.plan, &prefix_root).map_err(stage_error)?;
+    let (program, argv) =
+        command_program_and_argv_native(&request, &env, &prefix_root).map_err(stage_error)?;
+    let write_roots = native_write_roots(&request.plan, &prefix_root).map_err(stage_error)?;
+    let output = tokio::task::spawn_blocking({
+        let program = program.clone();
+        let argv = argv.clone();
+        let env = env.clone();
+        let prefix_root = prefix_root.clone();
+        let toolchain_roots = request.toolchain_roots.clone();
+        move || {
+            run_sandboxed_process(
+                &program,
+                &argv,
+                &prefix_root,
+                &env,
+                &prefix_root,
+                &write_roots,
+                &toolchain_roots,
+            )
+        }
+    })
+    .await
+    .map_err(|err| exec_error(ExecErrorKind::Spawn, format!("native vfs exec task: {err}")))?
+    .map_err(spawn_or_unsupported_error)?;
+
+    let exit_code = status_code(&output);
+    if !output.status.success() {
+        let stderr = output.stderr;
+        let stdout = output.stdout;
+        let _ = Vfsd::rm_rf(&service, format!("/{prefix_id}")).await;
+        store_server.abort();
+        let error = exec_error(
+            ExecErrorKind::ProcessExit,
+            format!(
+                "native vfs exec {} exited with {}: {}",
+                program.display(),
+                exit_code,
+                String::from_utf8_lossy(&stderr)
+            ),
+        );
+        return Ok(ExecResult {
+            exit_code: ExecExitCode(exit_code),
+            stdout,
+            stderr,
+            completion: ExecCompletion::Failed(error),
+        });
+    }
+
+    let harvested =
+        harvest_outputs(&request.plan, &prefix_root, &output.stdout).map_err(harvest_error)?;
+    verify_subfile_completions_at_exit(&prefix_root, &harvested.tree, &harvested.subfiles)
+        .map_err(verification_error)?;
+    let tracked_roots = tracked_roots(&request.mounts);
+    let tracked = Vfsd::tracked_observations(&service, prefix_id.clone(), tracked_roots)
+        .await
+        .map_err(stage_error)?;
+    let read_set = tracked_observations_to_read_set(tracked);
+    let tree_events = tree_events_from_subfiles(harvested.subfiles.clone());
+    let outcome = ExecOutcome {
+        outputs: harvested.tree,
+        read_set,
+        observation_scopes: observation_scopes(&ExecPrefixId(prefix_id.clone()), &request.mounts),
+        tree_events,
+    };
+    let _ = Vfsd::rm_rf(&service, format!("/{prefix_id}")).await;
+    store_server.abort();
+    Ok(ExecResult {
+        exit_code: ExecExitCode(exit_code),
+        stdout: output.stdout,
+        stderr: output.stderr,
+        completion: ExecCompletion::Succeeded(outcome),
+    })
 }
 
 fn run_request(request: ExecRequest) -> Result<ExecResult, ExecError> {
@@ -137,6 +326,344 @@ fn run_request(request: ExecRequest) -> Result<ExecResult, ExecError> {
     })
 }
 
+async fn materialize_mounts(
+    service: &vx_vfsd::VfsdService,
+    cas: &StoreClient,
+    prefix_id: &str,
+    plan: &ExecPlan,
+    mounts: &[ExecMount],
+) -> Result<(), ExecError> {
+    for mount in mounts {
+        let executable_paths =
+            executable_paths_under_mount(plan, &mount.at).map_err(stage_error)?;
+        let root = exec_tree_to_cas(cas, &mount.tree, &executable_paths)
+            .await
+            .map_err(stage_error)?;
+        let rel = logical_to_prefix_relative(mount.at.as_str()).map_err(stage_error)?;
+        let path = if rel.is_empty() {
+            format!("/{prefix_id}")
+        } else {
+            format!("/{prefix_id}/{rel}")
+        };
+        Vfsd::mount(service, path, root.0)
+            .await
+            .map_err(stage_error)?;
+    }
+    Ok(())
+}
+
+fn executable_paths_under_mount(
+    plan: &ExecPlan,
+    mount_at: &ExecPath,
+) -> Result<BTreeSet<String>, String> {
+    let mut executable_paths = BTreeSet::new();
+    let mount_rel = logical_to_tree_relative(mount_at.as_str())?;
+    let mount_prefix = if mount_rel.is_empty() {
+        String::new()
+    } else {
+        format!("{mount_rel}/")
+    };
+
+    for ExecArg { value, role } in &plan.argv {
+        if *role != ExecRole::Executable {
+            continue;
+        }
+
+        let executable_rel = logical_to_tree_relative(value.as_str())?;
+        if mount_rel.is_empty() {
+            executable_paths.insert(executable_rel);
+        } else if let Some(relative) = executable_rel.strip_prefix(&mount_prefix) {
+            executable_paths.insert(relative.to_string());
+        }
+    }
+
+    Ok(executable_paths)
+}
+
+async fn exec_tree_to_cas(
+    cas: &StoreClient,
+    tree: &ExecTree,
+    executable_paths: &BTreeSet<String>,
+) -> Result<NodeHash, String> {
+    let mut files = Vec::with_capacity(tree.entries.len() + tree.blobs.len());
+    for (path, text) in &tree.entries {
+        let relative = logical_to_tree_relative(path.as_str())?;
+        files.push(
+            exec_tree_file(
+                cas,
+                path.as_str(),
+                text.0.as_bytes(),
+                executable_paths.contains(&relative),
+            )
+            .await?,
+        );
+    }
+    for (path, bytes) in &tree.blobs {
+        let relative = logical_to_tree_relative(path.as_str())?;
+        files.push(
+            exec_tree_file(
+                cas,
+                path.as_str(),
+                bytes,
+                executable_paths.contains(&relative),
+            )
+            .await?,
+        );
+    }
+    let (root, _total_size) = build_merkle_tree(cas, files).await?;
+    Ok(root)
+}
+
+async fn exec_tree_file(
+    cas: &StoreClient,
+    path: &str,
+    bytes: &[u8],
+    executable: bool,
+) -> Result<MerkleTreeFile, String> {
+    let relative = logical_to_tree_relative(path)?;
+    let prepared = prepare_blob(bytes);
+    let blob = store_prepared_blob(cas, &prepared, bytes).await?;
+    Ok(MerkleTreeFile {
+        path: relative,
+        kind: blob_ref_to_dir_entry_kind(&blob, executable),
+    })
+}
+
+fn blob_ref_to_dir_entry_kind(blob: &BlobRef, executable: bool) -> DirectoryEntryKind {
+    blob.to_dir_entry_kind(executable)
+}
+
+async fn prepare_native_output_dirs(
+    service: &vx_vfsd::VfsdService,
+    prefix_id: &str,
+    plan: &ExecPlan,
+) -> Result<(), ExecError> {
+    for ExecArg { value, role } in &plan.argv {
+        let value = value.as_str();
+        for output in exec_role_output_paths(value, *role) {
+            let parent_path = parent_logical_path(output.as_str());
+            let Some(parent) = parent_path.strip_prefix('/') else {
+                continue;
+            };
+            if !parent.is_empty() {
+                Vfsd::mkdir(service, format!("/{prefix_id}/{parent}"))
+                    .await
+                    .map_err(stage_error)?;
+            }
+        }
+        for output_dir in exec_role_output_dir_paths(value, *role) {
+            let rel = logical_to_prefix_relative(output_dir.as_str()).map_err(stage_error)?;
+            Vfsd::mkdir(service, format!("/{prefix_id}/{rel}"))
+                .await
+                .map_err(stage_error)?;
+        }
+    }
+    Vfsd::mkdir(service, format!("/{prefix_id}/tmp"))
+        .await
+        .map_err(stage_error)?;
+    Ok(())
+}
+
+fn command_program_and_argv_native(
+    request: &ExecRequest,
+    env: &[(OsString, OsString)],
+    prefix_root: &Path,
+) -> Result<(PathBuf, Vec<OsString>), String> {
+    if request.program.as_str() == "build_script" {
+        let executable = request
+            .plan
+            .argv
+            .iter()
+            .find(|arg| arg.role == ExecRole::Executable)
+            .map(|arg| native_physical_path(arg.value.as_str(), prefix_root))
+            .transpose()?
+            .ok_or_else(|| "build_script command missing executable role".to_string())?;
+        return Ok((executable, process_argv_native(&request.plan, prefix_root)?));
+    }
+
+    Ok((
+        resolve_program(request.program.as_str(), env)?,
+        process_argv_native(&request.plan, prefix_root)?,
+    ))
+}
+
+fn process_argv_native(plan: &ExecPlan, prefix_root: &Path) -> Result<Vec<OsString>, String> {
+    plan.argv
+        .iter()
+        .filter(|arg| !is_control_arg(arg.value.as_str(), arg.role))
+        .map(|arg| map_arg_native(arg.value.as_str(), arg.role, prefix_root))
+        .collect()
+}
+
+fn command_env_native(
+    plan: &ExecPlan,
+    prefix_root: &Path,
+) -> Result<Vec<(OsString, OsString)>, String> {
+    let mut env = scrubbed_env(prefix_root);
+    for ExecArg { value, role } in &plan.argv {
+        if *role != ExecRole::Env {
+            continue;
+        }
+        let (key, value) = value
+            .as_str()
+            .split_once('=')
+            .ok_or_else(|| format!("env role expected KEY=VALUE, got `{}`", value.as_str()))?;
+        let value = if value.starts_with('/') {
+            native_physical_path(value, prefix_root)?.into_os_string()
+        } else {
+            OsString::from(value)
+        };
+        env.retain(|(existing, _)| existing.to_str() != Some(key));
+        env.push((OsString::from(key), value));
+    }
+    Ok(env)
+}
+
+fn native_write_roots(plan: &ExecPlan, prefix_root: &Path) -> Result<Vec<PathBuf>, String> {
+    let mut write_roots = Vec::new();
+    for ExecArg { value, role } in &plan.argv {
+        let value = value.as_str();
+        for output in exec_role_output_paths(value, *role) {
+            let path = native_physical_path(output.as_str(), prefix_root)?;
+            if let Some(parent) = path.parent() {
+                write_roots.push(parent.to_path_buf());
+            }
+        }
+        for output in exec_role_output_dir_paths(value, *role) {
+            write_roots.push(native_physical_path(output.as_str(), prefix_root)?);
+        }
+    }
+    write_roots.push(prefix_root.join("tmp"));
+    Ok(dedup_paths(write_roots))
+}
+
+fn map_arg_native(arg: &str, role: ExecRole, prefix_root: &Path) -> Result<OsString, String> {
+    match role {
+        ExecRole::Executable
+        | ExecRole::Input
+        | ExecRole::Output
+        | ExecRole::OutputDir
+        | ExecRole::Stdout
+        | ExecRole::SearchDir => Ok(native_physical_path(arg, prefix_root)?.into_os_string()),
+        ExecRole::InputFlag | ExecRole::OutputFlag | ExecRole::Env | ExecRole::SearchDirFlag => {
+            let mut mapped = arg.to_string();
+            let mut paths = exec_role_embedded_paths(arg, role);
+            paths.sort_by_key(|path| std::cmp::Reverse(path.as_str().len()));
+            for path in paths {
+                let physical = native_physical_path(path.as_str(), prefix_root)?;
+                mapped = mapped.replace(path.as_str(), physical.to_string_lossy().as_ref());
+            }
+            Ok(OsString::from(mapped))
+        }
+        ExecRole::Flag => Ok(OsString::from(arg)),
+    }
+}
+
+fn native_physical_path(logical: &str, prefix_root: &Path) -> Result<PathBuf, String> {
+    physical_path(logical, prefix_root)
+}
+
+fn tracked_roots(mounts: &[ExecMount]) -> Vec<String> {
+    mounts
+        .iter()
+        .filter_map(|mount| logical_to_prefix_relative(mount.at.as_str()).ok())
+        .collect()
+}
+
+fn tracked_observations_to_read_set(observations: Vec<VfsTrackedObservation>) -> ExecReadSet {
+    let mut read_set = ExecReadSet::default();
+    for observation in observations {
+        match observation {
+            VfsTrackedObservation::File {
+                path,
+                content_hash,
+                blob_node,
+                size,
+            } => {
+                read_set.entries.insert(
+                    tracked_exec_path(&path),
+                    ExecReadObservation::File {
+                        content_hash: store_content_hash_to_exec(content_hash),
+                        blob_node: blob_node.map(store_node_hash_to_exec),
+                        size: ByteLen(size),
+                    },
+                );
+            }
+            VfsTrackedObservation::Directory {
+                path,
+                directory_node,
+            } => {
+                read_set.entries.insert(
+                    tracked_exec_path(&path),
+                    ExecReadObservation::Directory {
+                        directory_node: store_node_hash_to_exec(directory_node),
+                    },
+                );
+            }
+            VfsTrackedObservation::LookupMiss {
+                path,
+                parent_path,
+                directory_node,
+            } => {
+                read_set.entries.insert(
+                    tracked_exec_path(&path),
+                    ExecReadObservation::LookupMiss {
+                        parent_path: tracked_exec_path(&parent_path),
+                        directory_node: store_node_hash_to_exec(directory_node),
+                    },
+                );
+            }
+        }
+    }
+    read_set
+}
+
+fn store_content_hash_to_exec(hash: vx_services::Blake3Hash) -> ContentHash {
+    ContentHash(ExecBlake3Hash(hash.0))
+}
+
+fn store_node_hash_to_exec(hash: NodeHash) -> ExecNodeHash {
+    ExecNodeHash(ExecBlake3Hash(hash.0.0))
+}
+
+fn tracked_exec_path(path: &str) -> ExecPath {
+    if path.is_empty() {
+        ExecPath::from("/")
+    } else {
+        ExecPath::from(format!("/{path}"))
+    }
+}
+
+fn logical_to_prefix_relative(path: &str) -> Result<String, String> {
+    logical_to_tree_relative(path)
+}
+
+fn logical_to_tree_relative(path: &str) -> Result<String, String> {
+    let relative = path.trim_start_matches('/');
+    let path = Path::new(relative);
+    if path
+        .components()
+        .any(|component| matches!(component, Component::ParentDir | Component::RootDir))
+    {
+        return Err(format!(
+            "native vfs refuses non-relative path `{}`",
+            path.display()
+        ));
+    }
+    Ok(relative.to_string())
+}
+
+fn native_prefix_id() -> String {
+    format!(
+        "exec-{}-{}",
+        std::process::id(),
+        std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map(|duration| duration.as_nanos())
+            .unwrap_or(0)
+    )
+}
+
 fn failed_without_process(error: ExecError) -> ExecResult {
     ExecResult {
         exit_code: ExecExitCode(-1),
@@ -221,7 +748,7 @@ fn detected_toolchains() -> Vec<ToolchainCapability> {
             executable: ExecPath::from(path),
             content_hash: fs::read(path_ref)
                 .ok()
-                .map(|bytes| ContentHash(Blake3Hash::from_bytes(&bytes))),
+                .map(|bytes| ContentHash(ExecBlake3Hash::from_bytes(&bytes))),
         })
     })
     .collect()
@@ -455,7 +982,7 @@ fn harvest_output_dir(
 fn subfile_completion(path: ExecPath, bytes: &[u8]) -> ExecSubfileCompletion {
     ExecSubfileCompletion {
         path,
-        content_hash: ContentHash(Blake3Hash::from_bytes(bytes)),
+        content_hash: ContentHash(ExecBlake3Hash::from_bytes(bytes)),
         size: ByteLen(bytes.len() as u64),
     }
 }
@@ -492,7 +1019,7 @@ fn verify_subfile_completions_at_exit(
                 )
             })?,
         };
-        let exit_hash = ContentHash(Blake3Hash::from_bytes(&bytes));
+        let exit_hash = ContentHash(ExecBlake3Hash::from_bytes(&bytes));
         if exit_hash != subfile.content_hash || ByteLen(bytes.len() as u64) != subfile.size {
             return Err(format!(
                 "sandboxed exec output `{}` changed after close observation",
@@ -517,7 +1044,7 @@ fn stage_file(root: &Path, logical: &str, bytes: &[u8]) -> Result<(), String> {
             .map_err(|err| format!("sandboxed exec create staged parent `{logical}`: {err}"))?;
     }
 
-    let hash = Blake3Hash::from_bytes(bytes);
+    let hash = ExecBlake3Hash::from_bytes(bytes);
     let cas_path = root.join(".vx-exec-cas").join(hash.to_hex());
     if !cas_path.exists() {
         fs::write(&cas_path, bytes)
@@ -878,7 +1405,7 @@ enum MountLookup {
     File(Vec<u8>),
     LookupMiss {
         parent_path: String,
-        directory_node: NodeHash,
+        directory_node: ExecNodeHash,
     },
     Outside,
 }
@@ -923,7 +1450,7 @@ impl<'a> ObservedWorld<'a> {
                 self.read_set.entries.insert(
                     ExecPath::from(path),
                     ExecReadObservation::File {
-                        content_hash: ContentHash(Blake3Hash::from_bytes(&contents)),
+                        content_hash: ContentHash(ExecBlake3Hash::from_bytes(&contents)),
                         blob_node: None,
                         size: ByteLen(contents.len() as u64),
                     },
@@ -979,16 +1506,16 @@ impl<'a> ObservedWorld<'a> {
     }
 }
 
-fn directory_node_hash(names: &[String]) -> NodeHash {
+fn directory_node_hash(names: &[String]) -> ExecNodeHash {
     let mut bytes = Vec::new();
     for name in names {
         bytes.extend_from_slice(&(name.len() as u64).to_le_bytes());
         bytes.extend_from_slice(name.as_bytes());
     }
-    NodeHash(Blake3Hash::from_bytes(&bytes))
+    ExecNodeHash(ExecBlake3Hash::from_bytes(&bytes))
 }
 
-fn directory_node_for_parent(tree: &ExecTree, relative: &str) -> NodeHash {
+fn directory_node_for_parent(tree: &ExecTree, relative: &str) -> ExecNodeHash {
     let parent = relative
         .rsplit_once('/')
         .map(|(parent, _)| parent)
@@ -1037,5 +1564,80 @@ mod tests {
             verify_subfile_completions_at_exit(temp.path(), &ExecTree::default(), &[completion])
                 .expect_err("changed output must fail close-is-provisional verification");
         assert!(error.contains("changed after close observation"));
+    }
+
+    #[test]
+    fn vfs_tracked_observations_convert_to_exec_read_set() {
+        let file_hash = vx_services::Blake3Hash::from_bytes(b"alpha\n");
+        let blob_node = NodeHash(vx_services::Blake3Hash::from_bytes(b"blob-node"));
+        let directory_node = NodeHash(vx_services::Blake3Hash::from_bytes(b"dir-node"));
+
+        let read_set = tracked_observations_to_read_set(vec![
+            VfsTrackedObservation::File {
+                path: "m/in/a.txt".to_string(),
+                content_hash: file_hash,
+                blob_node: Some(blob_node),
+                size: 6,
+            },
+            VfsTrackedObservation::Directory {
+                path: "m/in".to_string(),
+                directory_node,
+            },
+            VfsTrackedObservation::LookupMiss {
+                path: "m/in/missing.txt".to_string(),
+                parent_path: "m/in".to_string(),
+                directory_node,
+            },
+        ]);
+
+        assert_eq!(
+            read_set.entries.get("/m/in/a.txt"),
+            Some(&ExecReadObservation::File {
+                content_hash: ContentHash(ExecBlake3Hash(file_hash.0)),
+                blob_node: Some(ExecNodeHash(ExecBlake3Hash(blob_node.0.0))),
+                size: ByteLen(6),
+            })
+        );
+        assert_eq!(
+            read_set.entries.get("/m/in"),
+            Some(&ExecReadObservation::Directory {
+                directory_node: ExecNodeHash(ExecBlake3Hash(directory_node.0.0)),
+            })
+        );
+        assert_eq!(
+            read_set.entries.get("/m/in/missing.txt"),
+            Some(&ExecReadObservation::LookupMiss {
+                parent_path: ExecPath::from("/m/in"),
+                directory_node: ExecNodeHash(ExecBlake3Hash(directory_node.0.0)),
+            })
+        );
+    }
+
+    #[tokio::test]
+    async fn native_exec_store_dispatcher_accepts_local_vox_client() {
+        let temp = tempfile::Builder::new()
+            .prefix("vx-exec-store-smoke-")
+            .tempdir_in("/tmp")
+            .unwrap();
+        let store_root = Utf8PathBuf::from_path_buf(temp.path().join("store")).unwrap();
+        let store_addr = format!("local://{}", temp.path().join("store.vox").display());
+        let store = vx_store::open(store_root).await.unwrap();
+
+        let server_addr = store_addr.clone();
+        let server = tokio::spawn(async move {
+            vox::serve(server_addr, StoreDispatcher::new(store))
+                .await
+                .expect("store dispatcher should serve");
+        });
+
+        let client: StoreClient = vox::connect_lane(&store_addr)
+            .connect_timeout(std::time::Duration::from_millis(100))
+            .wait_for_service(std::time::Duration::from_secs(5))
+            .await
+            .expect("store client should connect");
+        let missing = NodeHash(vx_services::Blake3Hash::from_bytes(b"missing-node"));
+        assert!(!client.has_node(missing).await.unwrap());
+
+        server.abort();
     }
 }

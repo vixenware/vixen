@@ -35,6 +35,7 @@ objc2-foundation = { version = "0.3.2", default-features = false, features = [
 objc2-fs-kit = "0.3.2"
 vox = { workspace = true }
 vx-services = { workspace = true }
+vx-vfs-types = { workspace = true }
 
 [lints]
 workspace = true

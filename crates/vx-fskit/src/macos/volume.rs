@@ -41,6 +41,7 @@ struct RoutedItemKey {
 
 struct RoutedItems {
     by_key: HashMap<RoutedItemKey, u64>,
+    prefix_roots: HashMap<String, u64>,
     next_local_id: u64,
 }
 

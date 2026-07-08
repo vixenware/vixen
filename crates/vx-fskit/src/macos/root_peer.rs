@@ -2,6 +2,7 @@ use std::collections::HashMap;
 use std::path::PathBuf;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex, OnceLock};
+use std::time::Duration;
 
 use vox::{ClientLogging, ClientLoggingOptions, LaneRequest, PendingLane, ReplySink, acceptor_on};
 use vx_fskit_types::StatusPayload;
@@ -14,6 +15,8 @@ use super::support::{VfsCancellation, lock_unpoisoned, runtime};
 
 static ROOT_PEER_STATE: OnceLock<RootPeerState> = OnceLock::new();
 const STATUS_JSON_SIZE: usize = 8192;
+const PROVIDER_WATCHDOG_INTERVAL: Duration = Duration::from_secs(5);
+const PROVIDER_WATCHDOG_DEADLINE: Duration = Duration::from_secs(15);
 
 #[derive(Clone)]
 pub(super) struct RootPeerState {
@@ -24,6 +27,7 @@ pub(super) struct RootPeerState {
     log_filter_path: PathBuf,
     inner: Arc<Mutex<RootPeerSnapshot>>,
     cancellation_tx: tokio::sync::watch::Sender<VfsCancellation>,
+    listener_stop_tx: tokio::sync::watch::Sender<u64>,
     /// Set once the VFS socket listener has been started. Only the mounting instance
     /// flips this; probe-only instances never do, so they never bind the socket.
     listener_started: Arc<AtomicBool>,
@@ -63,6 +67,7 @@ impl RootPeerState {
                 disconnect_reason: Some("not connected".to_owned()),
             })),
             cancellation_tx: tokio::sync::watch::channel(VfsCancellation::initial()).0,
+            listener_stop_tx: tokio::sync::watch::channel(0).0,
             listener_started: Arc::new(AtomicBool::new(false)),
         };
         // NB: the listener is NOT started here. A single `mount` makes FSKit create the
@@ -90,38 +95,75 @@ impl RootPeerState {
         });
     }
 
+    pub(super) fn stop_listener(&self, reason: impl Into<String>) {
+        let reason = reason.into();
+        if !self.listener_started.swap(false, Ordering::SeqCst) {
+            return;
+        }
+
+        log_event("warn", format!("stopping VFS root listener: {reason}"));
+        self.cancel_inflight(libc::ESTALE, format!("listener stopped: {reason}"));
+        let generation = self.listener_stop_tx.borrow().wrapping_add(1);
+        self.listener_stop_tx.send_replace(generation);
+    }
+
     async fn run_listener(self) {
         let socket_path = self.socket_path_string();
-        let _ = vox::transport::local::remove_endpoint(&socket_path);
         log_event(
             "info",
             format!("starting VFS root listener addr=local://{socket_path}"),
         );
-        let listener = match vox::transport::local::LocalLinkAcceptor::bind(&socket_path) {
-            Ok(listener) => listener,
-            Err(error) => {
-                self.record_disconnect(format!("listener_bind_error:{error}"));
-                log_event(
-                    "error",
-                    format!("failed to bind VFS root listener: {error}"),
-                );
-                return;
-            }
-        };
+        let (listener, _listener_lock) =
+            match vox::transport::local::LocalLinkAcceptor::bind_with_lock(socket_path.clone()) {
+                Ok(bound) => bound,
+                Err(error) => {
+                    self.listener_started.store(false, Ordering::SeqCst);
+                    self.record_disconnect(format!("listener_bind_error:{error}"));
+                    log_event(
+                        "error",
+                        format!("failed to bind VFS root listener with lock: {error}"),
+                    );
+                    return;
+                }
+            };
+        let mut stop_rx = self.listener_stop_tx.subscribe();
+        let stop_generation = *stop_rx.borrow();
 
         loop {
             log_event("debug", "waiting for VFS root peer");
-            match listener.accept().await {
-                Ok(link) => {
-                    let state = self.clone();
-                    tokio::spawn(async move {
-                        state.accept_link(link).await;
-                    });
+            tokio::select! {
+                changed = stop_rx.changed() => {
+                    let current = *stop_rx.borrow();
+                    match changed {
+                        Ok(()) if current != stop_generation => {
+                            log_event(
+                                "info",
+                                format!("VFS root listener stopped generation={current}"),
+                            );
+                            return;
+                        }
+                        Ok(()) => {}
+                        Err(_) => {
+                            log_event("warn", "VFS root listener stop channel closed");
+                            return;
+                        }
+                    }
                 }
-                Err(error) => {
-                    self.record_disconnect(format!("listener_accept_error:{error}"));
-                    log_event("error", format!("VFS root listener accept failed: {error}"));
-                    return;
+                accepted = listener.accept() => {
+                    match accepted {
+                        Ok(link) => {
+                            let state = self.clone();
+                            tokio::spawn(async move {
+                                state.accept_link(link).await;
+                            });
+                        }
+                        Err(error) => {
+                            self.listener_started.store(false, Ordering::SeqCst);
+                            self.record_disconnect(format!("listener_accept_error:{error}"));
+                            log_event("error", format!("VFS root listener accept failed: {error}"));
+                            return;
+                        }
+                    }
                 }
             }
         }
@@ -189,6 +231,44 @@ impl RootPeerState {
         let mut snapshot = lock_unpoisoned(&self.inner, "root peer snapshot");
         if snapshot.clients.is_empty() {
             snapshot.disconnect_reason = Some(reason);
+        }
+    }
+
+    fn provider_generation_is_live(&self, prefix: &str, generation: u64) -> bool {
+        let snapshot = lock_unpoisoned(&self.inner, "root peer snapshot");
+        snapshot
+            .clients
+            .get(prefix)
+            .is_some_and(|entry| entry.generation == generation)
+    }
+
+    async fn watch_provider(&self, prefix: String, generation: u64, client: VfsClient) {
+        loop {
+            tokio::time::sleep(PROVIDER_WATCHDOG_INTERVAL).await;
+            if !self.provider_generation_is_live(&prefix, generation) {
+                return;
+            }
+
+            match tokio::time::timeout(PROVIDER_WATCHDOG_DEADLINE, client.ping()).await {
+                Ok(Ok(_)) => {}
+                Ok(Err(error)) => {
+                    log_event(
+                        "warn",
+                        format!(
+                            "vixen-fskit provider watchdog ping failed prefix={prefix} generation={generation}: {error}"
+                        ),
+                    );
+                }
+                Err(_) => {
+                    log_event(
+                        "warn",
+                        format!(
+                            "vixen-fskit provider watchdog timed out prefix={prefix} generation={generation} deadline_ms={}",
+                            PROVIDER_WATCHDOG_DEADLINE.as_millis()
+                        ),
+                    );
+                }
+            }
         }
     }
 
@@ -355,6 +435,14 @@ impl vox::LaneAcceptor for RootPeerAcceptor {
                     "info",
                     format!("accepted VFS provider prefix={prefix} generation={generation}"),
                 );
+                let watchdog_state = state.clone();
+                let watchdog_prefix = prefix.clone();
+                let watchdog_client = client.clone();
+                tokio::spawn(async move {
+                    watchdog_state
+                        .watch_provider(watchdog_prefix, generation, watchdog_client)
+                        .await;
+                });
                 tokio::spawn(async move {
                     client.caller.closed().await;
                     state.record_closed(&prefix, generation, "caller closed");

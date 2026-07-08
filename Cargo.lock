@@ -3956,11 +3956,16 @@ dependencies = [
 name = "vx-exec"
 version = "0.1.0"
 dependencies = [
+ "camino",
+ "libc",
  "seatbelt-exec",
  "tempfile",
  "tokio",
  "tracing",
+ "vox",
  "vx-services",
+ "vx-store",
+ "vx-vfsd",
 ]
 
 [[package]]
@@ -3981,6 +3986,7 @@ dependencies = [
  "vox",
  "vx-fskit-types",
  "vx-services",
+ "vx-vfs-types",
 ]
 
 [[package]]

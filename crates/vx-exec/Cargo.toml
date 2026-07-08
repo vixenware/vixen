@@ -12,15 +12,20 @@ repository.workspace = true
 rustdoc-args = ["--html-in-header", "arborium-header.html"]
 
 [dependencies]
+camino = { workspace = true }
 tempfile = { workspace = true }
+tokio = { workspace = true }
 tracing = { workspace = true }
+vox = { workspace = true }
 vx-services = { path = "../vx-services" }
+vx-store = { path = "../vx-store" }
+vx-vfsd = { path = "../vx-vfsd" }
 
 [target.'cfg(target_os = "macos")'.dependencies]
 seatbelt-exec = { path = "../seatbelt-exec" }
 
-[dev-dependencies]
-tokio = { workspace = true }
+[target.'cfg(target_os = "macos")'.dev-dependencies]
+libc = { workspace = true }
 
 [lints]
 workspace = true

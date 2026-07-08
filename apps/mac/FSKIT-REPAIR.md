@@ -329,6 +329,47 @@ discovery and enablement.
   should be tested through the real VFS provider path, not a synthetic probe
   that may not match the prefix-routing design.
 
+## Backend Not Connected, Multiple VixenFS Processes
+
+If the mount and status file are healthy but the app reports "backend not
+connected", first check whether socket ownership was stolen by a stale
+`VixenFS.appex` process.
+
+The failure shape is:
+
+- `/.vixenfs/status.json` is readable and the volume is mounted,
+- app/backend retries connect to `vixenfs.sock` and immediately gets closed,
+- more than one `VixenFS` extension process is alive.
+
+Do not start with a rebuild, generated binding regeneration, `killall`, `pkill`,
+or a process-name loop. A stale extension process can still own
+`vixenfs.sock`; if it was built with an older Vox schema it accepts the socket
+connection and then declines the handshake, which looks like a persistent
+backend connection failure.
+
+Repair sequence:
+
+1. Identify extension pids from FSKit/ExtensionKit logs or the app's doctor
+   output. Avoid `ps`, `pgrep`, `pkill`, and `killall` while the mount is
+   suspected wedged.
+2. Kill the stale `VixenFS.appex` pid directly with `kill(2)`. If it is
+   ambiguous which pid is stale, killing all known `VixenFS.appex` pids
+   directly is acceptable; FSKit respawns one fresh instance on the next mount
+   access.
+3. Let the app/backend reconnect to the fresh listener.
+4. Escalate to the direct `/usr/libexec/fskitd` kill switch only if the stale
+   appex kill does not leave a single fresh listener.
+
+The intended invariant is socket ownership is exclusive-or-dead: unload must
+drop the listener, and a fresh listener must take an exclusive lock before
+touching `vixenfs.sock`.
+
+Provider liveness probes are not allowed to be destructive. A ping timeout can
+mean the provider is currently busy serving a kernel lookup/read, or that the
+lane is flow-controlled behind normal work. Treat it as diagnostic signal only.
+The authoritative provider-death event is the Vox connection closing; individual
+wedged operations are contained by per-operation FSKit reply deadlines.
+
 ## What We Learned The Hard Way
 
 - A stuck FSKit mount can poison ordinary commands. Avoid touching the mounted
@@ -342,6 +383,9 @@ discovery and enablement.
 - There can be more than one `VixenFS` process. This usually reflects
   ExtensionKit / `fskit_agent` state, not proof that the app intentionally
   launched duplicate filesystems.
+- More than one `VixenFS` process plus "backend not connected" is a socket
+  ownership incident until proven otherwise. Kill stale extension pids directly
+  and let FSKit respawn before rebuilding or regenerating bindings.
 - Killing `fskitd` can unwedge the system, but it affects all FSKit modules and
   must be the last-resort primitive, not the first button.
 - Mounting at `/Volumes/Vixen/vfs` reduces blast radius compared with mounting

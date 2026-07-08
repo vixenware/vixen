@@ -9,8 +9,8 @@
 use std::time::Duration;
 
 use camino::Utf8Path;
-use moire::process::Command;
 use moire::sync::watch;
+use tokio::process::Command;
 use vox::{ConnectionSettings, Driver, Parity, ServerLogging, ServerLoggingOptions};
 use vx_services::{Vfs, VfsClient, VfsDiskNotify, VfsDispatcher};
 
@@ -18,6 +18,7 @@ use crate::types::{VfsConfig, VfsError, VfsStart};
 
 const CONNECT_TIMEOUT: Duration = Duration::from_secs(2);
 const WAIT_FOR_SERVICE: Duration = Duration::from_secs(10);
+const STATUS_READ_TIMEOUT: Duration = Duration::from_secs(1);
 
 pub(super) async fn mount<T>(config: VfsConfig, vfs: T) -> Result<VfsStart, VfsError>
 where
@@ -140,11 +141,22 @@ async fn read_status(mount_path: &Utf8Path) -> Result<vx_fskit_types::StatusPayl
         "{mount_path}/{}",
         vx_vfs_types::VIXENFS_STATUS_RELATIVE_PATH
     );
-    let output = Command::new("/bin/cat")
-        .arg(&status_path)
-        .output()
-        .await
-        .map_err(|e| format!("failed to read {status_path}: {e}"))?;
+    let output = tokio::time::timeout(STATUS_READ_TIMEOUT, {
+        let mut command = Command::new("/bin/cat");
+        command
+            .arg(&status_path)
+            .kill_on_drop(true)
+            .stdout(std::process::Stdio::piped())
+            .stderr(std::process::Stdio::piped());
+        command.output()
+    })
+    .await
+    .map_err(|_| {
+        format!(
+            "timed out after {STATUS_READ_TIMEOUT:?} reading {status_path}; child was killed, mount is likely zombied"
+        )
+    })?
+    .map_err(|e| format!("failed to read {status_path}: {e}"))?;
 
     if !output.status.success() {
         let stderr = String::from_utf8_lossy(&output.stderr);
