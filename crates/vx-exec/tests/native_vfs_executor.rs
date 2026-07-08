@@ -3,13 +3,18 @@
 use std::fs::File;
 use std::os::fd::AsRawFd;
 use std::path::Path;
+use std::sync::Arc;
+use std::time::Duration;
 
-use vx_exec::SandboxedExecutor;
+use camino::Utf8PathBuf;
+use vx_exec::FskitVfsExecutor;
 use vx_services::{
     ByteLen, ExecArg, ExecArgValue, ExecBlake3Hash as Blake3Hash, ExecCompletion,
     ExecContentHash as ContentHash, ExecExitCode, ExecMount, ExecOutcome, ExecPath, ExecPlan,
     ExecProgram, ExecReadObservation, ExecRequest, ExecRole, ExecText, ExecTree, Runner,
+    StoreClient, StoreDispatcher,
 };
+use vx_vfsd::protocol::{Vfsd, VfsdDispatcher};
 
 const DEFAULT_NATIVE_VFS_MOUNT: &str = "/Volumes/Vixen/vfs";
 const NATIVE_VFS_TEST_LOCK_PATH: &str = "/tmp/vx-exec-native-vfs-test.lock";
@@ -20,18 +25,14 @@ async fn native_vfs_exec_observes_file_directory_and_lookup_miss() {
         return;
     }
     let _guard = NativeVfsTestLock::lock();
-
-    let mount_path = std::env::var("VX_EXEC_NATIVE_VFS_MOUNT")
-        .unwrap_or_else(|_| DEFAULT_NATIVE_VFS_MOUNT.into());
-    if !Path::new(&mount_path).exists() {
-        return;
-    }
+    let harness = NativeVfsHarness::boot().await;
 
     let mut input_tree = ExecTree::default();
     input_tree.insert_bytes("a.txt", b"alpha\n".to_vec());
     input_tree.insert_bytes("b.txt", b"beta\n".to_vec());
 
-    let result = SandboxedExecutor::native_vfs(mount_path)
+    let result = harness
+        .executor()
         .exec(ExecRequest {
             program: ExecProgram::from("/bin/sh"),
             plan: ExecPlan {
@@ -98,12 +99,7 @@ async fn native_vfs_build_script_executes_cas_executable() {
         return;
     }
     let _guard = NativeVfsTestLock::lock();
-
-    let mount_path = std::env::var("VX_EXEC_NATIVE_VFS_MOUNT")
-        .unwrap_or_else(|_| DEFAULT_NATIVE_VFS_MOUNT.into());
-    if !Path::new(&mount_path).exists() {
-        return;
-    }
+    let harness = NativeVfsHarness::boot().await;
 
     let mut input_tree = ExecTree::default();
     input_tree.insert_bytes(
@@ -112,7 +108,8 @@ async fn native_vfs_build_script_executes_cas_executable() {
     );
     input_tree.insert_bytes("data.txt", b"payload\n".to_vec());
 
-    let result = SandboxedExecutor::native_vfs(mount_path)
+    let result = harness
+        .executor()
         .exec(ExecRequest {
             program: ExecProgram::from("build_script"),
             plan: ExecPlan {
@@ -148,6 +145,97 @@ async fn native_vfs_build_script_executes_cas_executable() {
         outcome.read_set.entries.get("/m/in/runner"),
         Some(ExecReadObservation::File { .. })
     ));
+}
+
+struct NativeVfsHarness {
+    vfsd_addr: String,
+    store_addr: String,
+    access_path: Utf8PathBuf,
+    vfsd_server: tokio::task::JoinHandle<()>,
+    store_server: tokio::task::JoinHandle<()>,
+}
+
+impl NativeVfsHarness {
+    async fn boot() -> Self {
+        let mount_path = std::env::var("VX_EXEC_NATIVE_VFS_MOUNT")
+            .unwrap_or_else(|_| DEFAULT_NATIVE_VFS_MOUNT.into());
+        let mount = Utf8PathBuf::from(mount_path);
+        assert!(
+            mount.as_std_path().exists(),
+            "live VixenFS mount is missing at {mount}"
+        );
+
+        let store_root = tempfile::tempdir().expect("store tempdir");
+        let store =
+            vx_store::open(Utf8PathBuf::from_path_buf(store_root.path().to_path_buf()).unwrap())
+                .await
+                .expect("open store");
+        let (store_addr, store_server) = spawn_store_service(store.clone()).await;
+        let cas: StoreClient = vox::connect_lane(&store_addr)
+            .connect_timeout(Duration::from_secs(1))
+            .wait_for_service(Duration::from_secs(5))
+            .await
+            .expect("connect store client");
+        let service = vx_vfsd::boot_with_store(Arc::new(cas), &mount)
+            .await
+            .expect("boot vx-vfsd provider");
+        let access_path = vx_vfsd::effective_access_path(&mount);
+        let (vfsd_addr, vfsd_server) = spawn_vfsd_service(service).await;
+
+        Self {
+            vfsd_addr,
+            store_addr,
+            access_path,
+            vfsd_server,
+            store_server,
+        }
+    }
+
+    fn executor(&self) -> FskitVfsExecutor {
+        FskitVfsExecutor::new(
+            self.vfsd_addr.clone(),
+            self.store_addr.clone(),
+            self.access_path.as_std_path(),
+        )
+        .with_timeouts(Duration::from_secs(1), Duration::from_secs(5))
+    }
+}
+
+impl Drop for NativeVfsHarness {
+    fn drop(&mut self) {
+        self.vfsd_server.abort();
+        self.store_server.abort();
+    }
+}
+
+async fn spawn_vfsd_service(service: impl Vfsd + 'static) -> (String, tokio::task::JoinHandle<()>) {
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
+        .await
+        .expect("bind vfsd test listener");
+    let addr = listener.local_addr().expect("vfsd listener addr");
+    let server = tokio::spawn(async move {
+        let result = vox::serve_listener(listener, VfsdDispatcher::new(service)).await;
+        if let Err(error) = result {
+            tracing::debug!(?error, "vfsd test listener stopped");
+        }
+    });
+    (format!("tcp://{addr}"), server)
+}
+
+async fn spawn_store_service(
+    service: vx_store::StoreService,
+) -> (String, tokio::task::JoinHandle<()>) {
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
+        .await
+        .expect("bind store test listener");
+    let addr = listener.local_addr().expect("store listener addr");
+    let server = tokio::spawn(async move {
+        let result = vox::serve_listener(listener, StoreDispatcher::new(service)).await;
+        if let Err(error) = result {
+            tracing::debug!(?error, "store test listener stopped");
+        }
+    });
+    (format!("tcp://{addr}"), server)
 }
 
 fn arg(value: &str, role: ExecRole) -> ExecArg {

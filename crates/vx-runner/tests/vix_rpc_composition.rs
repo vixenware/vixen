@@ -203,7 +203,12 @@ struct ObservingRun {
 
 impl MachinePendingRun for ObservingRun {
     fn demand_path(&self, path: &str) -> Result<MachinePathDemand, String> {
-        self.inner.demand_path(path)
+        match self.inner.demand_path(path)? {
+            MachinePathDemand::File(_) => Ok(MachinePathDemand::FinishRequired {
+                path: path.to_string(),
+            }),
+            demand => Ok(demand),
+        }
     }
 
     fn flush(&self) -> Result<(Outcome, ExecEvent), String> {
