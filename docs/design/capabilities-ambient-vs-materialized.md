@@ -97,3 +97,8 @@ eliminates the padding-infoleak CVE class (sovereignty-story line item). BOUNDAR
 governs weavy-declared layouts only; facet-DISCOVERED values canonicalize at the bridge
 (copy-in re-layouts anyway — the guarantee is minted there). Feeds the hash-as-field
 proposal as the recommended answer (option a), committee to ratify with the layout work.
+
+ADDENDUM (Amos): do NOT feel beholden to the canonical-payload-encoding hashes — if zeroed
+padding proves viable, identity may MIGRATE to canonical-memory hashing as a SECOND
+sanctioned epoch (its own break, own gates/oracles/committee — not a contortion to preserve
+current bytes). The first epoch's freeze bought durable keys, not encoding worship.
