@@ -102,7 +102,15 @@ Design sketch:
   derivation, addresses are content, and the replay is item-granular. The binary is its
   own flake.
 
-## Ambient-system policy (Amos, 2026-07-07 — DECIDED)
+## Ambient-system policy (Amos, 2026-07-07 — DECIDED; refined 2026-07-08)
+
+**Refinement (Amos, 2026-07-08): ambient toolchains are RUNNER-ADVERTISED CAPABILITIES,
+not ad-hoc checksums.** A build-script unit DECLARES its C-toolchain requirement; the
+runner advertises the toolchain (path + probed identity) in its capability set; the
+receipt records the capability identity. rustc entered exec identity this way (-vV);
+cc follows. Undeclared native tooling stays a loud failure — the declaration is what
+makes it legitimate. This slots between the container interim and the build-the-world
+final: capability advertisement IS the traceability story for whatever ambient remains.
 
 The question "what does a recipe say when build.rs probes the ambient system (pkg-config,
 system libcurl)?" has an interim and a final answer:
