@@ -102,3 +102,13 @@ ADDENDUM (Amos): do NOT feel beholden to the canonical-payload-encoding hashes �
 padding proves viable, identity may MIGRATE to canonical-memory hashing as a SECOND
 sanctioned epoch (its own break, own gates/oracles/committee — not a contortion to preserve
 current bytes). The first epoch's freeze bought durable keys, not encoding worship.
+
+## Toolchain distribution CORRECTION (Amos, 2026-07-08, supersedes recovered v0-Zig narrowing)
+The recovered HERMETIC_TOOLCHAINS design narrowed v0 C/C++ to Zig. SUPERSEDED: (a) Xcode
+remains REQUIRED for serious platform integration (SDKs/frameworks/signing) — it stays in the
+ambient fingerprint+watch+poison class regardless of C compiler choice; (b) the Zig project
+has signaled disinterest in maintaining `zig cc` vs their own stack — do not trust or default
+to their toolchains. INSTEAD: **vixenware distributes its own hermetic gcc/clang builds** as
+CAS artifacts (LLVM redistributable; GCC redistributable with source) — toolchains-as-packages
+through our own registry, identity by construction. The materializable-C answer is
+first-party-distributed gcc/clang; the ambient residue is platform integration only.
