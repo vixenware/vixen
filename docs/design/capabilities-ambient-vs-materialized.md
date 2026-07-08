@@ -83,3 +83,17 @@ field-walk hashing that skips padding (no zeroing tax; "hash the fields" not "ha
 bytes", still stencil-able); (c) packed layouts (doesn't generalize). NOTE: today's identity
 hashes canonical payload ENCODINGS, not raw memory — the memory-repr shortcut is aspiration
 until this is answered. Assigned to the hash-as-field design proposal.
+
+## Padding ANSWERED (Amos directive + analysis, 2026-07-08): CANONICAL ZERO, ALWAYS
+Amos: "I always hated padding in Rust/C ABI, it is a UB landmine." Adopted direction:
+weavy (b)-ABI mandates padding == 0, no exceptions. Cost analysis: near-free for this
+machine's profile — fresh pages are zero; hash-at-intern already touches every byte
+(zeroing rides hot cachelines); field writes preserve the invariant; memcpy PRESERVES
+canonicity; the one recurring tax is enum variant-switch slack-zeroing (bounded, small).
+C/Rust can't mandate this because they don't control all writers; weavy controls every
+writer by construction. Buys: flat-bytes blake3 (no descriptor-walk hashing), memcmp
+equality, bit-exact determinism for replay/differential oracles, wire-ready bytes, and
+eliminates the padding-infoleak CVE class (sovereignty-story line item). BOUNDARY: rule
+governs weavy-declared layouts only; facet-DISCOVERED values canonicalize at the bridge
+(copy-in re-layouts anyway — the guarantee is minted there). Feeds the hash-as-field
+proposal as the recommended answer (option a), committee to ratify with the layout work.
