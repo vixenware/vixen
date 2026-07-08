@@ -8,6 +8,17 @@ institutional product: the thing written into a ministry tender, defended by a
 CISO, or scored by a sovereignty fund. Quick collision notes are public-web
 sanity checks, not EUIPO, WIPO, domain, or legal clearance.
 
+Public-web collision anchors checked: French official cadastre services
+([cadastre.gouv.fr](https://www.cadastre.gouv.fr/),
+[cadastre.data.gouv.fr](https://cadastre.data.gouv.fr/),
+[service-public.fr](https://www.service-public.gouv.fr/particuliers/vosdroits/F14226)),
+[Gateway Digital Probatio](https://www.thegatewaydigital.com/probatio/),
+[Latchset Custodia](https://github.com/latchset/custodia),
+[Tracera](https://tracera.com/),
+[Bastion](https://bastion.tech/), and Evidentia hits including
+[evidentia.ai](https://evidentia.ai/) and
+[evidentia-ai.com](https://evidentia-ai.com/).
+
 ## Persona weighting
 
 1. French public-procurement officer, 40%
