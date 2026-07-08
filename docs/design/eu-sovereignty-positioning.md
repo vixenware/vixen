@@ -59,3 +59,9 @@ structural, not certificational.
   vs designed-spec is always marked, /status/ is the dated ledger.
 - Branding/naming and any visual identity shift: NOT started without Amos — committee
   round on call.
+
+## Naming RESOLVED (Amos, 2026-07-08)
+Mark stays VIXEN; tagline: "vixen — certifiable builds."; CACHET = the sealed receipt
+object (the portable, signed attestation instrument — natural home: the recipe-embedded
+artifact section). Committee memos: naming-committee-{opus,codex}.md. Two-brand
+architecture resolved as mark+descriptor, not dual marks.

@@ -1,8 +1,8 @@
 {
-  "updated": "2026-07-08T10:40:00+02:00",
+  "updated": "2026-07-08T12:10:00+02:00",
   "meta": {
     "title": "PATH TO GLORY",
-    "subtitle": "vixen: from demand machine to sovereign build system",
+    "subtitle": "vixen — certifiable builds",
     "trunk": "rodin @ 489c82114 — queue drained, all lanes folded"
   },
   "lanes": {
@@ -541,14 +541,14 @@
     },
     {
       "id": "branding",
-      "title": "institutional naming",
+      "title": "naming resolved: vixen, certifiable builds",
       "lane": "product",
-      "status": "parked",
-      "desc": "Two-brand architecture: vix + the fox stay the language forever; the fundable product name is open. Committee with EU-procurement personas on call — Amos's trigger.",
+      "status": "done",
+      "desc": "The mark stays vixen (joy is load-bearing); tagline 'certifiable builds'; cachet = the sealed receipt object. Blind committees validated the territory (6/6 French/Latin authenticity instruments) without finding the word.",
       "evidence": [
         "\"maybe it's called fucking MetalGraph or whatever\""
       ],
-      "short": "naming"
+      "short": "certifiable ✓"
     },
     {
       "id": "sovereignty-goal",

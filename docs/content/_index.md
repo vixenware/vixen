@@ -2,6 +2,8 @@
 title = "vixen"
 +++
 
+*certifiable builds.*
+
 **Your build tool does too much work, and you can't tell why.** A comment edit
 triggers a rebuild. A dependency bump reruns every test. CI spends twenty
 minutes proving nothing changed. And when the cache *does* hit, a small voice
