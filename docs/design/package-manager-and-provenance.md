@@ -143,10 +143,9 @@ Enterprises will ask; the answers should be boring and structural:
 
 ## Open questions, ranked (each gates the ones after)
 
-1. **What is a package?** Source-only (crates.io model), artifacts-with-attestations, or
-   both with artifacts as a transparent, verifiable cache layer. The third is the
-   constellation-native answer; it has the largest security surface and the receipts to
-   pay for it.
+1. **What is a package? DECIDED (Amos, 2026-07-08): source is the package; artifacts +
+   attestations ride as a transparent, verifiable cache layer.** The constellation-native
+   answer; the receipts pay its security bill. (Was: the gating open question.)
 2. Overlay composition semantics: pure shadowing (Gentoo) vs patch-level composition
    (overlay carries a diff against upstream content).
 3. Scope→identity→2FA binding; org key lifecycle; key rotation without publish gaps.
