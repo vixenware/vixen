@@ -1,9 +1,9 @@
 {
-  "updated": "2026-07-08T04:10:00+02:00",
+  "updated": "2026-07-08T09:30:00+02:00",
   "meta": {
     "title": "PATH TO GLORY",
     "subtitle": "vixen: from demand machine to sovereign build system",
-    "trunk": "rodin @ 499f3964c — 5 folds landed, suite 214"
+    "trunk": "rodin @ 489c82114 — queue drained, all lanes folded"
   },
   "lanes": {
     "machine": "#4ecdc4",
@@ -255,7 +255,7 @@
       "short": "compose at scale",
       "lane": "cargo-model",
       "status": "active",
-      "desc": "FULL MEMBER RING DONE: 145/145 matches vs Cargo.lock, ZERO version skew, 23.1s (optimized build — the '180s wall' was mostly a debug-profile artifact; ring 64 went 20.3s→3.0s). Now: closure boundary (tokio ordering fix, hitting a Version-ordering language gap) then +direct-deps rings.",
+      "desc": "Ring-8 units: 9/10 exact, 10/10 targets, ZERO vix-only edges (feature emission + ring-rooted oracle fixed; one feature-set-gap pair left). Solve: zero unexplained skew everywhere reachable; perf levers folded (ring-16 171s→81s→retest).",
       "deps": [
         "scale-measure",
         "cfg",
@@ -308,8 +308,8 @@
       "id": "build-scripts",
       "title": "cargo: directives as pure vix",
       "lane": "build-real",
-      "status": "parked",
-      "desc": "Directive parsing (rustc-cfg, env, links/DEP_, rerun-if) as pure vix functions; rerun-if recorded but observed reads stay the invalidation authority. Parked on Tree→String; agent warm.",
+      "status": "done",
+      "desc": "FOLDED: pure-vix cargo:/cargo:: directive parser — cfg/env/link/rerun/DEP_ propagation, loud malformed failure, OUT_DIR as producer/subpath, rerun-if recorded-never-trusted. Rust-side parser now retirement-ready.",
       "deps": [
         "lang-mission",
         "exec-seam"
@@ -326,7 +326,7 @@
       "short": "DEMO: taxon",
       "lane": "build-real",
       "status": "active",
-      "desc": "One end-to-end test: real workspace manifests → rodin solution → derived units → profile flags → lazy extern argv → REAL rustc → verified artifact. Zero hand-authored graph. Ladder target #1.",
+      "desc": "Real rustc built blake3's build-script closure (receipts with blake3 hashes), compiled AND RAN build.rs, stopped at the ambient-C boundary (cc -c blake3_neon.c) — AWAITING AMOS: recorded-ambient-cc / pinned container / pure-Rust blake3. Rebasing onto the drained trunk meanwhile.",
       "deps": [
         "lang-mission",
         "profiles",
@@ -341,8 +341,8 @@
       "id": "proc-macros",
       "title": "proc-macro dylibs for real",
       "lane": "build-real",
-      "status": "active",
-      "desc": "Host-platform lib units spliced into consumers via --extern artifact references. Shape proven with fake backend; real path needs the argv enum.",
+      "status": "done",
+      "desc": "FOLDED: real #[derive] dylib built as host unit by real rustc, consumer uses it via lazy extern, rustc -vV in exec identity. Cross-target case included.",
       "deps": [
         "lang-mission",
         "unit-derive"
@@ -450,7 +450,7 @@
       "title": "runner ∘ daemon ∘ vix: sandboxed builds",
       "lane": "infra",
       "status": "active",
-      "desc": "The vixenware runner implements vix's exec backend over vox RPC: real rustc actually running under VFS mounts + seatbelt with observed read-sets. The composition that makes 'hermetic' true instead of polite.",
+      "desc": "Protocol crate + vix RpcRunnerBackend both FOLDED (loopback-tested: read-sets, tree events, typed failures, cache hits). Remaining: cross-repo integration (vix machine driving the real vixenware runner) + vixenware fold decision (Amos).",
       "deps": [
         "exec-stage2"
       ],
