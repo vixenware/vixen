@@ -1,5 +1,5 @@
 {
-  "updated": "2026-07-08T12:10:00+02:00",
+  "updated": "2026-07-08T14:20:00+02:00",
   "meta": {
     "title": "PATH TO GLORY",
     "subtitle": "vixen — certifiable builds",
@@ -322,19 +322,20 @@
     },
     {
       "id": "demo-taxon",
-      "title": "DEMO: vixen builds taxon, no hands",
-      "short": "DEMO: taxon",
+      "title": "RUNG 1: vixen built taxon, no hands",
+      "short": "TAXON BUILT ✓",
       "lane": "build-real",
-      "status": "active",
-      "desc": "Real rustc built blake3's build-script closure (receipts with blake3 hashes), compiled AND RAN build.rs, stopped at the ambient-C boundary (cc -c blake3_neon.c) — AWAITING AMOS: recorded-ambient-cc / pinned container / pure-Rust blake3. Rebasing onto the drained trunk meanwhile.",
+      "status": "done",
+      "desc": "libtaxon.rlib exists: real manifests → rodin → derived units → real build.rs executed under DECLARED cc capability (identity-receipted: Apple clang 21.0.0) → NEON C → blake3 → taxon. Zero hand-authored graph; undeclared tooling traps loudly. Ladder next: facet-core → facet.",
       "deps": [
         "lang-mission",
         "profiles",
         "unit-derive"
       ],
       "evidence": [
-        "agent 42c8490d",
-        "branch demo-vix-builds-taxon"
+        "branch taxon-real-process @ dc31528e9 (folding)",
+        "cc capability receipt a42725b2…",
+        "libtaxon.rlib ccd99ba6…"
       ]
     },
     {
