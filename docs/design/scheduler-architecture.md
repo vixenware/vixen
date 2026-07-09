@@ -193,7 +193,85 @@ becomes a price.** Absence is properly scoped, too: never "this object doesn't
 exist," always "store S didn't have it at time T," which is exactly the
 first-class Absence witness in `warm-facts-spec.md`.
 
-## 6. The thing that actually frightens me: it has no oracle
+## 6. It has a correctness oracle. It has no performance oracle.
+
+**CORRECTION (Amos, same conversation):** an earlier draft of this section said
+the scheduler has no oracle at all. That hides the easy half.
+
+**The local build is a perfect correctness oracle.** Run the graph on one
+machine; keep the outputs. Run it across a fleet under any placement, any policy,
+any failure, any speculation — the outputs must be **bit-identical**. Placement is
+value-irrelevant; that is the whole design.
+
+So chaos testing here is stronger than any distributed system normally gets. Most
+can only assert *liveness* under fault injection ("it eventually finished"). We
+assert **equality**. Kill nodes mid-compile, expire advertisements, partition the
+store, race two linkers: same artifact. `FOUNDATION.md` already mandates `--chaos`
+from rung 001 for the language; for the scheduler it is not a rung, it is the
+primary test.
+
+Testing therefore splits three ways:
+
+- **Correctness** — differential against the local build, under maximal chaos.
+  Deterministic. Bit-identical.
+- **Constraints** — invariants (below). Checkable on every run, forever.
+- **Performance** — *here* there is no oracle. Only a distribution of outcomes.
+
+### Three instruments for the performance half (Amos)
+
+**Scenarios are the ratchet.** Deterministic, one per doctrine, regression tests
+rather than benchmarks because the simulator is deterministic:
+
+```
+two nodes, one has rustc                -> the rustc island goes there
+policy: EU-only; US node idle and free  -> US receives nothing
+inputs warm on A, cold on B, else equal -> A
+five dependent islands, all placeable   -> all five land on one node (sticky)
+one of 200 compiles is 100x slow        -> speculation fires; loser killed
+node dies mid-job                       -> demand re-placed; billed ONCE
+object only in an unreachable store     -> recompute, don't stall
+plan exceeds budget ceiling             -> refused before dispatch, not after
+advertisement expires mid-graph         -> no dispatch to that node
+```
+
+**The game is a discovery instrument, not a test.** Scheduler pathologies are
+legible to an eye and illegible to a metric — convoying, thrashing, starvation, a
+node that goes cold over and over, a straggler nobody speculated on. You see them
+in an animated Gantt view instantly; you would have to already suspect them to
+measure them. Its output is **new scenarios**, not pass/fail. Second value: *if
+you cannot draw the scheduler's state, it is too complicated.* The game is a
+forcing function on the design.
+
+**Real-world replay is the only thing that can tell you the model is wrong.** A
+simulator validates the scheduler against your beliefs; every bug the model cannot
+express, it certifies.
+
+### The simulator has an oracle, even though the scheduler does not
+
+> **You cannot validate the scheduler. You can validate the environment — and then
+> the environment validates the scheduler.**
+
+Every receipt records the operational trace: node, provider, duration, RSS, bytes
+moved. Feed a recorded trace's *inputs* into the simulator and ask whether it
+predicts the *observed* makespan within tolerance. **Reality is the oracle for the
+simulator.** Ratchet it: simulator fidelity is a score — how many recorded fleet
+traces does it reproduce within 10%? Until that number is respectable, scenario
+outcomes are fiction, and everyone should know it.
+
+The traces come from running the **rust-rdr / cargo-fork workflow** (the stated
+priority demo target) as a standing demand, forever, on our infrastructure. The
+demo, the benchmark corpus, and the simulator's oracle are the same program.
+
+### Speculation is free in correctness, not in dollars
+
+Two nodes race the linker. Do you bill for both? A policy answer, not a technical
+one — and a hard invariant the simulator must check under chaos: **never
+double-count a billable unit.** Not when a node dies mid-job and the demand is
+re-placed; not when speculation runs the same work twice; not when a partition
+heals and both halves report. It is the one place "duplicate work is never wrong"
+stops being true, because duplicate work is exactly what an invoice is for.
+
+### The original framing, retained
 
 Everything else in this system has one. Rodin has `cargo tree`. Manifest ingestion
 has `cargo metadata`. Unit derivation has `--unit-graph`. Version ordering has the
