@@ -55,6 +55,15 @@ result may differ; on-disk files extremely compatible; target/ exempt).
 - **What ships to executors**: canonical AST of the CLOSURE (everything needed): args, env,
   plus an OBSERVER CLOSURE holding the process handle, able to return anything incl. streams.
   Executor runs the observer (needs a runtime); wire format is part of the OPEN contract.
+  > **SUPERSEDED AS SURFACE, CONFIRMED AS LOWERING (round 12, 2026-07-10).** `exec` and
+  > `place` are decoupled and neither mentions the other
+  > (`r[machine.primitive.exec-is-placement-agnostic]`). `exec` returns an ordinary struct
+  > `{ tree, stdout, stderr }` whose stream fields are codata; there is **no observer
+  > parameter**. You consume a process's output remotely by *placing the surrounding block*.
+  > The "OBSERVER CLOSURE holding the process handle, able to return anything incl. streams"
+  > described above is exactly the **lowering** of such a placed block — so this bullet is
+  > right about what ships, and stale about what a programmer writes.
+  > `exec cmd where { observer: … }` does not exist.
 - **Open/proprietary split**: vix language fully open in the facet monorepo (co-founder
   approved): design, parsing, types, lowering, JIT, graph analysis. Proprietary (cloud
   product): VFS, sandboxing, the primitives, version-solving engine. Bring-your-own-runtime is
