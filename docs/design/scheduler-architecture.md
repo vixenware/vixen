@@ -129,16 +129,35 @@ deliver the latency.
 optimum is NP-hard (uncomputable in the contract) and unauditable (the customer
 cannot check it). Price on the graph instead:
 
-> **price = f(the demands actually recomputed, a published rate card)**
+> **price = rate_miss x (fleet demands computed) + rate_hit x (fleet demands served
+> from cache)**, with `rate_hit << rate_miss`.
 
 A rate card keyed by command identity — measured core-seconds per command class,
-learned from our own receipts. Summed over the demands that had to be *computed*
-rather than reused. Deterministic, reproducible, auditable against a published
-table, placement-independent by construction, and reuse visibly shrinks the bill:
-**the product's central claim becomes a line item.**
+learned from our own receipts. Deterministic, reproducible, auditable against a
+published table, placement-independent by construction, and reuse visibly shrinks
+the bill: **the product's central claim becomes a line item.**
 
-Our margin is exactly the gap between the rate card and what the fleet really
-cost — which is precisely what the scheduler should be optimizing.
+**Local builds are never billed** (Amos). Not a hit, not a miss, not ever. The
+meter runs only on our infrastructure. This is also a trust property: a daemon on
+the customer's laptop has no incentive to report anything, because nothing it does
+is billable. Remote is what you buy when you want the latency.
+
+**Cache hits ARE billed**, at a much lower rate, and the margin on a hit is larger
+than on a miss (Amos). Storage, egress and attestation are real costs; free hits
+would create an incentive not to cache; and the hit is where the value is
+delivered. The customer's comparison is not hit-vs-miss — it is a fully-cached
+vixen build against forty minutes of GitHub Actions runner time that did nothing.
+
+**TRAP, and it is load-bearing:** hit/miss must be classified against the LOGICAL
+memo — what the fleet knows, under policy — never against what the chosen node
+happened to have on disk. Otherwise a bad placement converts a hit into a miss and
+the invoice moves, and same-cachet-same-invoice dies. **If the scheduler recomputes
+something it could have fetched, we eat the recompute and bill a hit.** Cache-hit
+rate is therefore a MARGIN metric, never a billing metric — which is precisely the
+incentive we want pointed at ourselves.
+
+Our margin is the gap between the rate card and what the fleet really cost — which
+is precisely what the scheduler should be optimizing.
 
 ### Nobody discovers a sixty-euro build afterwards
 
