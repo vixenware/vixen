@@ -19,23 +19,23 @@ vx-vfs-types = { path = "crates/vx-vfs-types" }
 vx-fskit-types = { path = "crates/vx-fskit-types" }
 
 # facet ecosystem
-facet = { path = "/Users/amos/oss/facet-cc/facet", features = ["jiff02", "camino"] }
-facet-error = { path = "/Users/amos/oss/facet-cc/facet-error" }
-facet-json = { path = "/Users/amos/oss/facet-cc/facet-json" }
-facet-styx = { path = "/Users/amos/oss/facet-cc/facet-styx" }
-margin = { path = "/Users/amos/oss/facet-cc/margin" }
-phon = { path = "/Users/amos/oss/facet-cc/phon/rust/phon" }
-exec-protocol = { path = "/Users/amos/oss/facet-cc/exec-protocol" }
-vix = { path = "/Users/amos/oss/facet-cc/vix", default-features = false, features = ["runner-rpc"] }
+facet = { git = "https://github.com/facet-rs/facet", features = ["jiff02", "camino"] }
+facet-error = { git = "https://github.com/facet-rs/facet" }
+facet-json = { git = "https://github.com/facet-rs/facet" }
+facet-styx = { git = "https://github.com/facet-rs/facet" }
+margin = { git = "https://github.com/facet-rs/facet" }
+phon = { git = "https://github.com/facet-rs/facet" }
+exec-protocol = { git = "https://github.com/facet-rs/facet" }
+vix = { git = "https://github.com/facet-rs/facet", default-features = false, features = ["runner-rpc"] }
 
 
 # cmdline parsing
-figue = { path = "/Users/amos/oss/facet-cc/figue" }
+figue = { git = "https://github.com/facet-rs/facet" }
 
 # vox RPC framework
-vox = { path = "/Users/amos/oss/facet-cc/vox/rust/vox", features = ["transport-tcp", "transport-local"] }
-vox-types = { path = "/Users/amos/oss/facet-cc/vox/rust/vox-types" }
-vox-codegen = { path = "/Users/amos/oss/facet-cc/vox/rust/vox-codegen" }
+vox = { git = "https://github.com/facet-rs/facet", features = ["transport-tcp", "transport-local"] }
+vox-types = { git = "https://github.com/facet-rs/facet" }
+vox-codegen = { git = "https://github.com/facet-rs/facet" }
 
 # copy-and-patch JIT substrate: executable memory + AArch64
 # relocation patching + build-time stencil extraction. Backend-agnostic — no IR.
