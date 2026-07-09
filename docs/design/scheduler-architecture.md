@@ -102,13 +102,43 @@ value-irrelevant.** That is the seam the EU sovereignty positioning sits on.
   cost. Placement-dependent. This is the invoice and the residency audit.
 
 > **If placement leaks into the cachet, two identical builds attest
-> differently.** Two runs of the same recipe under different policies must
-> produce the same cachet and different invoices.
+> differently.** Two runs of the same recipe must produce the same cachet.
 
 That property *is* the product. It is also a tripwire: for any field anyone
 proposes to seal, ask whether a different node would have changed it.
 
 *(This constraint is trust surface and belongs in the open docs too.)*
+
+### AMENDMENT (Amos): the invoice is placement-independent too
+
+Amos: *"we can shield customers from our placement mistakes by fixing their costs
+to what an optimal scheduler would've done (with some margin)."*
+
+An earlier draft of this note said "same cachet, different invoices." That is
+weaker than what we want, and wrong. **Same cachet, same invoice.** Placement
+cannot change the value; it must not change the price either. Two builds of one
+recipe — one on a laptop, one across three continents — cost the same. No cloud
+vendor offers this; variable bills are the thing every customer hates.
+
+It also DELETES an invariant this note previously carried ("never double-count a
+billable unit" under chaos / speculation / partition-heal). That whole bug class
+cannot exist if **the invoice never sees execution**. Race two linkers, eat both,
+deliver the latency.
+
+**But do not price against "what an optimal scheduler would have done."** The
+optimum is NP-hard (uncomputable in the contract) and unauditable (the customer
+cannot check it). Price on the graph instead:
+
+> **price = f(the demands actually recomputed, a published rate card)**
+
+A rate card keyed by command identity — measured core-seconds per command class,
+learned from our own receipts. Summed over the demands that had to be *computed*
+rather than reused. Deterministic, reproducible, auditable against a published
+table, placement-independent by construction, and reuse visibly shrinks the bill:
+**the product's central claim becomes a line item.**
+
+Our margin is exactly the gap between the rate card and what the fleet really
+cost — which is precisely what the scheduler should be optimizing.
 
 ### Nobody discovers a sixty-euro build afterwards
 
@@ -262,14 +292,55 @@ The traces come from running the **rust-rdr / cargo-fork workflow** (the stated
 priority demo target) as a standing demand, forever, on our infrastructure. The
 demo, the benchmark corpus, and the simulator's oracle are the same program.
 
-### Speculation is free in correctness, not in dollars
+### Speculation is free in correctness, and free to the customer
 
-Two nodes race the linker. Do you bill for both? A policy answer, not a technical
-one — and a hard invariant the simulator must check under chaos: **never
-double-count a billable unit.** Not when a node dies mid-job and the demand is
-re-placed; not when speculation runs the same work twice; not when a partition
-heals and both halves report. It is the one place "duplicate work is never wrong"
-stops being true, because duplicate work is exactly what an invoice is for.
+Two nodes race the linker; we eat both. Under graph-priced billing (§2 amendment)
+the invoice never sees execution, so the "never double-count a billable unit"
+invariant this note once carried is not enforced — it is **unstateable**.
+Duplicate work costs margin, never a customer.
+
+### Tier-2: policy search over the model, and the one way it fails
+
+Amos: *"we can simulate builds without actually running them... compress time...
+do that millions of times... feed models so they can suggest policy changes. Not a
+classical optimizer per se, but not too far either."*
+
+That is reinforcement learning against a simulator, whatever we call it, and it has
+one famous failure mode: **you will learn to exploit the simulator.** RL finds the
+model's bugs before it finds the world's structure, and it looks exactly like
+success until deployment. Two guards, both already present:
+
+- **The fidelity ratchet is load-bearing, not hygiene.** Held-out real traces the
+  policy never trained on, scored predicted-vs-observed makespan. A simulator that
+  cannot reproduce a build it has never seen is judging itself.
+- **Learn the soft objective. Never the hard constraints.** Feasibility
+  (capability, residency, tenancy, budget) is structural: the policy chooses among
+  admissible placements and cannot enumerate an inadmissible one. A learned policy
+  may be arbitrarily bad and can never put EU data in Virginia. The hard/soft split
+  of §2 is exactly the safe/unsafe split for learning.
+
+**Methodological rule: vary the policy and the fleet, never the workload.** Take
+real graphs out of tier-0 receipts and simulate different worlds around them. Generate
+synthetic build graphs and you are optimizing against a distribution that does not
+exist, and you will never find out.
+
+### LLMs on traces: nominations, not verdicts
+
+Amos: *"Here's a trace, figure out what was suboptimal."* Good — pathologies are
+pattern recognition over a legible artifact and need no ground truth. But an LLM's
+finding is a **nomination**: it becomes a scenario, and the deterministic simulator
+confirms or refutes it. Otherwise we accumulate plausible stories about why last
+Tuesday was slow. Nomination-never-validation, at the meta level. It also requires
+the trace to be legible to a reader — the same forcing function as the game.
+
+### Why a learned policy is responsible here at all
+
+Correctness is protected because placement is value-irrelevant. The customer is
+protected because the invoice is graph-priced. Therefore a bad learned scheduling
+policy can produce exactly one kind of damage: **our own margin.**
+
+And the actual-vs-ideal delta is simultaneously the margin we manage and the reward
+we train on. The same number.
 
 ### The original framing, retained
 
