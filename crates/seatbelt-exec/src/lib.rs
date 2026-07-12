@@ -11,8 +11,10 @@ use std::path::{Path, PathBuf};
 use std::process::Command;
 
 pub const SYSTEM_SB_PATH: &str = "/System/Library/Sandbox/Profiles/system.sb";
-pub const AUDITED_SYSTEM_SB_SHA256: &str =
-    "180a0356611b5de7a7db84b800ed47a1d2f15ec884d0fb960445366ededac7c8";
+pub const AUDITED_SYSTEM_SB_SHA256S: &[&str] = &[
+    "180a0356611b5de7a7db84b800ed47a1d2f15ec884d0fb960445366ededac7c8",
+    "1b2c4487f32fba48f29ba871bd1fec4f8d74af9543074c8805c3bc7094b9846f",
+];
 pub const AUDITED_SYSTEM_SB_LINES: usize = 311;
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -88,6 +90,7 @@ impl SeatbeltPlan {
         source.push_str("  (subpath \"/usr/share\"))\n");
         source.push_str("(deny file-write*)\n");
         source.push_str("(deny network*)\n");
+        source.push_str("(deny mach-lookup (global-name \"com.apple.espd\"))\n");
         source.push_str("(allow process-fork)\n");
 
         source.push_str("(allow file-read-metadata file-test-existence\n");
@@ -217,6 +220,7 @@ mod tests {
         assert!(source.contains("(deny default)"));
         assert!(source.contains("(import \"system.sb\")"));
         assert!(source.contains("(deny network*)"));
+        assert!(source.contains("(deny mach-lookup (global-name \"com.apple.espd\"))"));
         assert!(source.contains("(subpath \"/Library\")"));
         assert!(source.contains("(subpath \"/private/tmp\")"));
         assert!(source.contains("(subpath \"/usr/share\")"));

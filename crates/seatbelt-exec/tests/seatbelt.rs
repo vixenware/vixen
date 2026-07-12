@@ -5,7 +5,7 @@ use std::path::{Path, PathBuf};
 use std::process::{Command, Output};
 
 use seatbelt_exec::{
-    AUDITED_SYSTEM_SB_LINES, AUDITED_SYSTEM_SB_SHA256, SYSTEM_SB_PATH, SeatbeltPlan,
+    AUDITED_SYSTEM_SB_LINES, AUDITED_SYSTEM_SB_SHA256S, SYSTEM_SB_PATH, SeatbeltPlan,
 };
 
 #[test]
@@ -35,9 +35,9 @@ fn audited_system_sb_hash_matches_this_host() {
         .split_whitespace()
         .next()
         .expect("shasum prints a digest");
-    assert_eq!(
-        actual, AUDITED_SYSTEM_SB_SHA256,
-        "Apple changed system.sb; re-audit every imported allow before trusting this profile"
+    assert!(
+        AUDITED_SYSTEM_SB_SHA256S.contains(&actual),
+        "Apple changed system.sb to {actual}; re-audit every imported allow before trusting this profile"
     );
 }
 
@@ -253,10 +253,11 @@ fn xcrun_find(tool: &str) -> PathBuf {
 
 fn xcode_toolchain_root(clang: &Path) -> PathBuf {
     let marker = Path::new("Contents/Developer/Toolchains/XcodeDefault.xctoolchain");
+    let command_line_tools = Path::new("Library/Developer/CommandLineTools");
     let mut root = PathBuf::new();
     for component in clang.components() {
         root.push(component.as_os_str());
-        if root.ends_with(marker) {
+        if root.ends_with(marker) || root.ends_with(command_line_tools) {
             return root;
         }
     }

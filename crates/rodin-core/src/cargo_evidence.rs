@@ -2582,6 +2582,7 @@ mod tests {
     }
 
     #[test]
+    #[ignore = "requires local facet-cc and crates.io registry source checkouts"]
     fn emit_lock_matches_fresh_facet_cc_lock_for_exact_oracle_rows() -> Result<()> {
         let workspace = Path::new(DEFAULT_FACET_CC);
         let registry_src = Path::new(DEFAULT_REGISTRY_SRC);
