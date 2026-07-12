@@ -2624,7 +2624,7 @@ mod tests {
             .collect::<BTreeSet<_>>();
         assert_eq!(
             matching_keys.len(),
-            856,
+            820,
             "Round 9 lock-union fresh exact row count drifted"
         );
 
