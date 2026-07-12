@@ -186,6 +186,8 @@ fn apply_network_seccomp() -> Result<(), String> {
             (libc::SYS_clone, vec![]),
             (libc::SYS_clone3, vec![]),
             (libc::SYS_vfork, vec![]),
+            (libc::SYS_wait4, vec![]),
+            (libc::SYS_waitid, vec![]),
         ]
         .into(),
         SeccompAction::Errno(libc::EPERM as u32),
