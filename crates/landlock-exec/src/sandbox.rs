@@ -135,6 +135,7 @@ fn apply_network_seccomp() -> Result<(), String> {
             (libc::SYS_open, vec![]),
             (libc::SYS_openat, vec![]),
             (libc::SYS_close, vec![]),
+            (libc::SYS_dup2, vec![]),
             (libc::SYS_stat, vec![]),
             (libc::SYS_fstat, vec![]),
             (libc::SYS_statx, vec![]),
