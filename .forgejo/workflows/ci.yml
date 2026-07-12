@@ -64,7 +64,7 @@ jobs:
 
     linux:
         name: linux
-        runs-on: linux-x86_64
+        runs-on: x86_64-unknown-linux-gnu
         container:
             image: code.vixen.rs/vixen/vixen-ci:latest
             volumes:
