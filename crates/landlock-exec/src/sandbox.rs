@@ -186,7 +186,7 @@ fn apply_network_seccomp() -> Result<(), String> {
             (libc::SYS_clone3, vec![]),
         ]
         .into(),
-        SeccompAction::Trap,
+        SeccompAction::Errno(libc::EPERM as u32),
         SeccompAction::Allow,
         std::env::consts::ARCH
             .try_into()
