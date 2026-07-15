@@ -1,3 +1,9 @@
+> **Superseded:** This document is banked 2026-07-05 historical research. Its
+> Rust-kernel versus Vix-lifecycle topology has been superseded by the
+> repository-level `CLAUDE.md` directive (the only production Rodin is written
+> in Vix) and the Facet `rodin/EXECUTION-PLAN.md`. It is preserved for
+> architectural archaeology, not as a live integration target.
+
 # Rodin in vix: the position (banked 2026-07-05)
 
 ## The question
