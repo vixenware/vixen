@@ -17,20 +17,16 @@ ship and the thing worth making correct and fast.
 Not rodin-core. When you need to know "what is the right answer," you ask cargo
 (`cargo tree --target <triple>`, `cargo generate-lockfile`), not a Rust resolver.
 
-## Reference / oracle-era scaffolding — do NOT treat as production
+## Retired reference / oracle-era scaffolding — do NOT recreate as production
 
-These are Rust scaffolding that predate the vix implementation. Experiments ran
-here because the vix version was not ready yet; everything learned here was
-always meant to be **ported to vix**, and these crates **retired fastest-first**:
+The Rust resolver scaffolding that predated the Vix implementation has been
+pruned from this repository: `crates/vix-solve`, `crates/rodin-core`,
+`crates/rodin-facts`, and `crates/rodin-survey`. Those crates were differential
+stepping stones, not a second production topology.
 
-- `crates/vix-solve` — redundant PubGrub resolver. Slated for deletion.
-- `crates/rodin-core` — CSP-style reference resolver. Port semantics from, then retire.
-- `crates/rodin-facts`, `crates/rodin-survey` — support for the above.
-
-For these crates: do **not** optimize, profile, benchmark, or micro-tune them,
-and do **not** add production features to them "because it's faster in Rust."
-Their runtime does not matter. Their job is to be a differential reference while
-the vix implementation catches up to cargo, then to disappear.
+Do **not** restore, optimize, profile, benchmark, or add production features to
+that retired Rust resolver path. New resolver work belongs in Vix, and Cargo
+remains the behavioral oracle.
 
 What DOES transfer is **knowledge** — how cargo actually resolves (rustc-cfg
 predicates per target, feature activation pulls packages in only via edges not
