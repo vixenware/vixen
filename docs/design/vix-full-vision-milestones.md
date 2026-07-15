@@ -195,7 +195,8 @@ and is required before `FV-C4` can claim the production default on Windows.
 
 **Home:** Facet, plus authority corrections in Vixen documentation.
 
-**Status:** ready for integration audit.
+**Status:** complete. The committee-approved Facet and Vixen objects were
+published and verified at their named remote refs on 2026-07-15.
 
 **Outcome:** the completed Vix runtime/Rodin/Taxon/facet-core work is reachable
 from one clean, pushed integration lineage, with its proof boundaries recorded.
@@ -742,7 +743,7 @@ implementation gate, and committee diff review are all closed.
 
 | ID | Name | State | Plan review | Implementation evidence | Diff review |
 | --- | --- | --- | --- | --- | --- |
-| `FV-00` | Preserve and integrate the proven baseline | ready for integration audit | — | — | — |
+| `FV-00` | Preserve and integrate the proven baseline | complete | [`FV-00.md`](milestones/FV-00.md); architecture `50dd61c5-df0c-4bcb-8739-47f2b5f91ff7` and adversary `167c2441-b5e8-40a4-90ef-06a4392292fe` approved | Facet `8db42feb6ebfb8ed921bba41f9d3b81f43d980e8`; Vixen evidence `e8dce9fd63c6a72cf799471bc5c6be391a31f2c0`; exact remote tips verified | Same committee approved both immutable objects; no blocking findings |
 | `FV-D1` | Observation is not fetch | partial substrate | — | — | — |
 | `FV-D2` | The registry is a real universe | partial; blocked | — | — | — |
 | `FV-D3` | Rodin demands package rows | partial; blocked | — | — | — |
