@@ -20,7 +20,7 @@ facet-value = { git = "https://github.com/facet-rs/facet", rev = "5705fa6c51289b
 hex = "0.4"
 libc = "0.2.180"
 object = "0.39"
-phon = { git = "https://github.com/bearcove/phon-next", rev = "be6e6de5132c9eed3277e9345923117482028b65" }
+phon = { git = "https://github.com/bearcove/phon", rev = "79622e1459b3c6b3ede766abd1e02a505a204504" }
 sha2 = "0.10"
 snark = { git = "https://github.com/bearcove/snark", rev = "e85ba57226f239a1407f496051af7e0c80855d57" }
 snark-dsl = { git = "https://github.com/bearcove/snark", rev = "e85ba57226f239a1407f496051af7e0c80855d57" }
