@@ -29,7 +29,7 @@ facet-format.workspace = true
 facet-json.workspace = true
 facet-toml.workspace = true
 facet-reflect = { workspace = true }
-facet-value = { workspace = true, default-features = false, features = ["alloc"] }
+facet-value = { workspace = true, features = ["alloc"] }
 hex.workspace = true
 blake3.workspace = true
 # reloc_selection.rs walks Mach-O relocations with `object`.

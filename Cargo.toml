@@ -16,7 +16,7 @@ facet-format = { git = "https://github.com/facet-rs/facet", rev = "bbce10cbd1ddd
 facet-json = { git = "https://github.com/facet-rs/facet", rev = "bbce10cbd1ddd535b0d812ccbf9456f7ff7d58cf" }
 facet-reflect = { git = "https://github.com/facet-rs/facet", rev = "bbce10cbd1ddd535b0d812ccbf9456f7ff7d58cf" }
 facet-toml = { git = "https://github.com/facet-rs/facet", rev = "bbce10cbd1ddd535b0d812ccbf9456f7ff7d58cf" }
-facet-value = { git = "https://github.com/facet-rs/facet", rev = "bbce10cbd1ddd535b0d812ccbf9456f7ff7d58cf" }
+facet-value = { git = "https://github.com/facet-rs/facet", rev = "bbce10cbd1ddd535b0d812ccbf9456f7ff7d58cf", default-features = false }
 hex = "0.4"
 libc = "0.2.180"
 object = "0.39"
@@ -24,6 +24,7 @@ phon = { git = "https://github.com/facet-rs/facet", rev = "bbce10cbd1ddd535b0d81
 sha2 = "0.10"
 snark = { git = "https://github.com/bearcove/snark", rev = "1eb112d46bdedc6c9b971bb5f588a9b101bbc618" }
 snark-dsl = { git = "https://github.com/bearcove/snark", rev = "1eb112d46bdedc6c9b971bb5f588a9b101bbc618" }
+taxon = { git = "https://github.com/bearcove/weavy", rev = "5231e74c2532bc0fc6eb807b6b3f504e67ca6ac4" }
 tempfile = "3.23"
 tracing = { version = "0.1.43", default-features = false, features = ["std", "attributes"] }
 weavy = { git = "https://github.com/bearcove/weavy", rev = "5231e74c2532bc0fc6eb807b6b3f504e67ca6ac4" }
