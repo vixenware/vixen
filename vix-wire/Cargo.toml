@@ -6,4 +6,4 @@ description = "The `vix::` facet extension-attribute grammar (wire-type mapping)
 publish = false
 
 [dependencies]
-facet = { path = "../facet" }
+facet.workspace = true

@@ -7,8 +7,7 @@ use snark_dsl::typed_ast::{TypedAstConfig, generate_typed_ast};
 fn main() {
     let manifest = PathBuf::from(env::var("CARGO_MANIFEST_DIR").unwrap());
     let surface_grammar_js = manifest.join("surface/grammar.js");
-    let repo = manifest.parent().unwrap().to_path_buf();
-    let cfg_grammar_js = repo.join("playgrounds/snark/src/bundled/cfg/grammar.js");
+    let cfg_grammar_js = manifest.join("cfg/grammar.js");
     let surface_ann_js = manifest.join("surface_ast.snark.js");
     let out = PathBuf::from(env::var("OUT_DIR").unwrap());
 

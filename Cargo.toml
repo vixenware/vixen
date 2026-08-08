@@ -1,0 +1,49 @@
+[workspace]
+resolver = "3"
+members = ["vix-core", "vix-wire", "vixen-primitives", "vixen-runtime"]
+
+[workspace.package]
+edition = "2024"
+rust-version = "1.92"
+license = "MIT OR Apache-2.0"
+repository = "https://github.com/vixenware/vixen"
+homepage = "https://github.com/vixenware/vixen"
+
+[workspace.dependencies]
+blake3 = { version = "1", default-features = false }
+facet = { git = "https://github.com/facet-rs/facet", rev = "bbce10cbd1ddd535b0d812ccbf9456f7ff7d58cf" }
+facet-format = { git = "https://github.com/facet-rs/facet", rev = "bbce10cbd1ddd535b0d812ccbf9456f7ff7d58cf" }
+facet-json = { git = "https://github.com/facet-rs/facet", rev = "bbce10cbd1ddd535b0d812ccbf9456f7ff7d58cf" }
+facet-reflect = { git = "https://github.com/facet-rs/facet", rev = "bbce10cbd1ddd535b0d812ccbf9456f7ff7d58cf" }
+facet-toml = { git = "https://github.com/facet-rs/facet", rev = "bbce10cbd1ddd535b0d812ccbf9456f7ff7d58cf" }
+facet-value = { git = "https://github.com/facet-rs/facet", rev = "bbce10cbd1ddd535b0d812ccbf9456f7ff7d58cf" }
+hex = "0.4"
+libc = "0.2.180"
+object = "0.39"
+phon = { git = "https://github.com/facet-rs/facet", rev = "bbce10cbd1ddd535b0d812ccbf9456f7ff7d58cf", package = "phon" }
+sha2 = "0.10"
+snark = { git = "https://github.com/bearcove/snark", rev = "1eb112d46bdedc6c9b971bb5f588a9b101bbc618" }
+snark-dsl = { git = "https://github.com/bearcove/snark", rev = "1eb112d46bdedc6c9b971bb5f588a9b101bbc618" }
+tempfile = "3.23"
+tracing = { version = "0.1.43", default-features = false, features = ["std", "attributes"] }
+weavy = { git = "https://github.com/bearcove/weavy", rev = "5231e74c2532bc0fc6eb807b6b3f504e67ca6ac4" }
+windows-sys = "0.61"
+
+[patch."https://github.com/bearcove/weavy"]
+taxon = { git = "https://github.com/bearcove/weavy", rev = "5231e74c2532bc0fc6eb807b6b3f504e67ca6ac4" }
+weavy = { git = "https://github.com/bearcove/weavy", rev = "5231e74c2532bc0fc6eb807b6b3f504e67ca6ac4" }
+
+[workspace.lints.rust]
+unexpected_cfgs = { level = "warn", check-cfg = ["cfg(facet_no_doc)", "cfg(kani)"] }
+
+[workspace.lints.clippy]
+disallowed_methods = "deny"
+
+[profile.dev.package.vix-core]
+opt-level = 2
+
+[profile.dev.package.weavy]
+opt-level = 2
+
+[profile.dev.package.blake3]
+opt-level = 3

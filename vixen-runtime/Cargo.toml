@@ -14,16 +14,16 @@ description = "The runnable Vix system: the vix language with the vixen primitiv
 [dependencies]
 vix = { path = "../vix-core", package = "vix-core" }
 vixen-primitives = { path = "../vixen-primitives" }
-facet = { path = "../facet" }
-facet-json = { path = "../facet-json" }
+facet.workspace = true
+facet-json.workspace = true
 # The machine manifest's config-file spelling (`manifest::MachineManifest::from_toml`).
-facet-toml = { workspace = true }
+facet-toml.workspace = true
 blake3.workspace = true
 # Cross-process resident-set observation for the outer budget runner. Only the
 # unix RSS readers use it, behind typed cfg boundaries in src/budget.rs.
 libc.workspace = true
 # vix lowers to weavy; ratchet threads the weavy lane authority per-executable.
-weavy = { path = "../weavy" }
+weavy.workspace = true
 
 # Cross-process resident-set observation for the outer budget runner on Windows
 # (GetProcessMemoryInfo), confined behind a typed cfg boundary in src/budget.rs.
@@ -45,4 +45,4 @@ semver = "1.0.28"
 tempfile.workspace = true
 tokio = { version = "1", features = ["rt-multi-thread", "macros", "net", "time"] }
 # `cross_lane_differential` selects the native vs interpreter lane explicitly.
-weavy = { path = "../weavy" }
+weavy.workspace = true

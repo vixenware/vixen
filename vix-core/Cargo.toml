@@ -22,29 +22,29 @@ name = "vix"
 rustdoc-args = ["--html-in-header", "arborium-header.html"]
 
 [dependencies]
-snark = { path = "../snark", features = ["json-import"] }
-facet = { path = "../facet" }
+snark = { workspace = true, features = ["json-import"] }
+facet.workspace = true
 vix-wire = { path = "../vix-wire" }
-facet-format = { path = "../facet-format" }
-facet-json = { path = "../facet-json" }
-facet-toml = { path = "../facet-toml" }
+facet-format.workspace = true
+facet-json.workspace = true
+facet-toml.workspace = true
 facet-reflect = { workspace = true }
-facet-value = { path = "../facet-value", default-features = false, features = ["alloc"] }
+facet-value = { workspace = true, default-features = false, features = ["alloc"] }
 hex.workspace = true
 blake3.workspace = true
 # reloc_selection.rs walks Mach-O relocations with `object`.
 object.workspace = true
-phon = { path = "../phon/rust/phon" }
+phon.workspace = true
 rustc-demangle = "0.1.26"
 taxon.workspace = true
 tracing.workspace = true
 # vix lowers to weavy (portability is weavy's concern — constitution
 # A6); the dependency activates when the typed instruction vocabulary
 # lands via the fable-teeth work.
-weavy = { path = "../weavy" }
+weavy.workspace = true
 
 [build-dependencies]
-snark-dsl = { path = "../snark-dsl", features = ["typed-ast"] }
+snark-dsl = { workspace = true, features = ["typed-ast"] }
 
 # The graph demand engine's driver uses only core::future (vix stays
 # wasm-clean); tokio is DEV-only, an executor + timers for the demand tests.
@@ -69,7 +69,7 @@ snark-dsl = { path = "../snark-dsl", features = ["typed-ast"] }
 semver = "1.0.28"
 tempfile.workspace = true
 tokio = { version = "1", features = ["rt-multi-thread", "macros", "net", "time"] }
-weavy = { path = "../weavy" }
+weavy.workspace = true
 
 # The macOS-only Mach-O relocation-walk test (tests/reloc_selection.rs, gated
 # `#![cfg(target_os = "macos")]`) stages temp fixture trees with tempfile. The
