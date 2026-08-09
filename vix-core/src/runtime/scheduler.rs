@@ -21,7 +21,8 @@ use crate::vir::{
 use super::model::TreeEntryKind;
 use super::tree_resident::canonical_resident_tree;
 use super::identity::{
-    DemandKey, DemandPreimage, Digest, Location, LocationId, RecipeId, ValueId, hash_framed,
+    DemandKey, DemandPreimage, Location, LocationId, RecipeId, ValueId,
+    directory_observation_digest, hash_framed,
 };
 use super::identity::{FramedField, FramedNode, FramedValue};
 use super::model::{
@@ -6308,19 +6309,6 @@ fn content_entry_kind(entry: &super::TreeEntry) -> TreeEntryKind {
 // fixture store left core: directory observations are seam vocabulary, served
 // by any adapter's directory verb. Journals recording v1 digests are
 // intentionally invalidated (`PERSISTENT_RUNTIME_JOURNAL_FORMAT` 2).
-fn directory_observation_digest(entries: &[(String, TreeEntryKind)]) -> Digest {
-    let mut fields = Vec::with_capacity(entries.len() * 2);
-    for (name, kind) in entries {
-        fields.push(name.as_bytes());
-        fields.push(match kind {
-            TreeEntryKind::File => b"file".as_slice(),
-            TreeEntryKind::Dir => b"dir".as_slice(),
-            TreeEntryKind::Symlink => b"symlink".as_slice(),
-        });
-    }
-    hash_framed(b"vix.origin.directory-observation.v2", &fields)
-}
-
 /// Type-directed structural rendering of a published snapshot value. It mirrors
 /// the structure of [`realize_structural_node`] — walking a record/tuple/enum/
 /// collection guided by the VIR type — but emits stable text instead of a store

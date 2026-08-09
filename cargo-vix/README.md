@@ -47,12 +47,18 @@ different demand rather than a stale memo hit.
 
 ## Where the road stops now
 
-- **Origin-backed trees cannot be mounted.** A `fixture_tree` is a lazy handle,
-  and enumerating one needs a directory verb on the effect authority that does
-  not exist. Content-identified trees — an `untar`'d archive, another exec's
-  output — mount fine, which is why `hello.vix` writes its source with a shell
-  exec first. This is the next thing to build: without it a build walk cannot
-  read a workspace off disk.
+- ~~**Origin-backed trees cannot be mounted.**~~ **CLOSED.** A `fixture_tree` is
+  a lazy handle and cannot be enumerated from its own bytes, so the mount walks
+  the effect authority's directory verb instead — the same neutral verb a codata
+  drain already had (`EffectCtx::tree_directory`, one witnessed `Directory` read
+  per directory and one `TreePath` read per file, so a mounted workspace is
+  fully in the receipt). A build walk can now read a workspace off disk:
+  `exec_tree_mounts.rs` mounts `small-crate` straight from the fixture root,
+  compiles it with real rustc, and runs the binary. Two bounds remain, both in
+  the origin seam's vocabulary rather than the mount: `TreeEntryKind` carries no
+  executable axis, so an origin-backed file mounts non-executable; and no verb
+  reads a symlink's target, so an origin-backed symlink is a loud refusal rather
+  than a guess.
 - **No declared env** (rung `074-exec-env.vix`, red): the request record has no
   env field. Crates read `CARGO_PKG_*` through `env!`, and build scripts are
   nothing but env.
