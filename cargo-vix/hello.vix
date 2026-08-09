@@ -20,10 +20,13 @@
 // The test `vixen-runtime/tests/exec_tree_mounts.rs` runs THIS FILE with such a
 // manifest built in Rust, so the example and the proof are the same source.
 //
-// The source is written by a shell exec so the tree it lands in is
-// content-identified — mounting an ORIGIN-backed tree (a `fixture_tree`) still
-// needs a directory verb on the effect authority. The braces are octal escapes
-// (\173 \175) because an exec template reads a literal `{` as an interpolation.
+// The source is written by a shell exec so this file stands alone — it needs no
+// fixture root to exist. Mounting an ORIGIN-backed tree (a `fixture_tree`, a
+// workspace read off disk) works too now that the effect authority has a
+// directory verb; see `an_origin_backed_mount_compiles_through_rustc` in
+// `vixen-runtime/tests/exec_tree_mounts.rs` for that shape. The braces are octal
+// escapes (\173 \175) because an exec template reads a literal `{` as an
+// interpolation.
 #[test { budget_wall: 120s, budget_rss: 4096MB }]
 fn hello_world(sh: Sh, rustc: Rustc) -> Stream<Check> {
     let sources = exec sh`-c "mkdir -p src; printf 'fn main() \173 println!(\042hello from vix\042); \175\n' > src/main.rs"`;

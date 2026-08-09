@@ -42,7 +42,7 @@ use crate::rt::{
     ArgRole, EffectCtx, PrimitiveCompletion, PrimitiveDescriptor, PrimitiveField,
     PrimitiveFieldValue, PrimitiveMachineError, PrimitiveMemoPolicy, PrimitivePublication,
     PrimitiveValue, PrimitiveValueBody, ProgressivePublication, RawEffectTicket, RawPrimitive,
-    Receipt, RequestShape, ValueId,
+    Receipt, RequestShape, TreeEntryKind, ValueId,
 };
 
 /// The registered exec primitive. Hand-written on the raw rail rather than the
@@ -326,16 +326,18 @@ fn parse_mounts(
             let resident = tree.resident_bytes();
             // Route the source the way every other tree consumer does
             // (`machine.primitive.origin-routing`): an origin-backed handle is
-            // NOT enumerable from its own bytes, and falling through to content
-            // enumeration would report "malformed bytes" for what is a missing
-            // machine verb. Refuse loudly and name the gap instead.
-            if ctx.tree_handle_name(resident).is_some() {
-                return Err(PrimitiveMachineError::Unavailable {
-                    detail: "mounting an origin-backed tree needs a directory verb on the \
-                             effect authority, which does not exist yet; mount a \
-                             content-identified tree (an untar'd archive or another exec's \
-                             output) for now"
-                        .to_owned(),
+            // NOT enumerable from its own bytes, so it walks the effect
+            // authority's directory verb instead of falling through to content
+            // enumeration, whose parse failure would report "malformed bytes"
+            // for what is a routing answer.
+            if let Some(name) = ctx.tree_handle_name(resident) {
+                let name = core::str::from_utf8(&name)
+                    .map_err(|_| invalid("origin tree name was not UTF-8"))?;
+                let mut entries = Vec::new();
+                collect_origin_mount_entries(ctx, &tree.identity(), name, "", &mut entries)?;
+                return Ok(crate::rt::ExecMount {
+                    path: vix::runtime::exec_mount_path(index),
+                    entries,
                 });
             }
             let tree = tree_from_resident(resident)
@@ -372,6 +374,82 @@ fn parse_mounts(
             })
         })
         .collect()
+}
+
+/// Walk an origin-backed tree into mount entries, depth-first, through the
+/// authority's witnessing directory verb. Every listing is a witnessed
+/// `Directory` read and every file a witnessed `TreePath` read, so the receipt
+/// names the whole materialized set — mounting a workspace observes exactly
+/// what it mounted, and the rerun audit re-verifies all of it.
+///
+/// `rel` is the tree-relative prefix (empty at the root). Projections are
+/// name-relative (`<name>/<rel>`), the spelling the tree-read primitive uses;
+/// mount entry paths are tree-relative, the spelling a content-identified
+/// tree's `walk()` produces. The two coordinate spaces are kept apart
+/// deliberately: one names the origin, the other names the mount.
+fn collect_origin_mount_entries(
+    ctx: &EffectCtx,
+    tree: &ValueId,
+    name: &str,
+    rel: &str,
+    entries: &mut Vec<crate::rt::ExecMountEntry>,
+) -> Result<(), PrimitiveMachineError> {
+    let projection = if rel.is_empty() {
+        name.to_owned()
+    } else {
+        format!("{name}/{rel}")
+    };
+    for (entry, kind) in ctx.tree_directory(tree, &projection)? {
+        let path = if rel.is_empty() {
+            entry
+        } else {
+            format!("{rel}/{entry}")
+        };
+        match kind {
+            TreeEntryKind::File => {
+                let witnessed = ctx.read(
+                    tree,
+                    ReadProjection::TreePath {
+                        path: format!("{name}/{path}"),
+                    },
+                )?;
+                // The origin verbs carry no executable axis — `TreeEntryKind`
+                // is File/Dir/Symlink and nothing else — so every
+                // origin-backed file mounts non-executable. It is a real
+                // difference from a content-identified tree, which carries the
+                // bit, and this is the honest place for it rather than a
+                // guess: the witness records what WAS observed (names and
+                // kinds), so the receipt claims no bit anybody read. Closing it
+                // means a kind verb that reports mode — an origin-seam change.
+                entries.push(crate::rt::ExecMountEntry::File {
+                    path,
+                    bytes: witnessed.bytes,
+                    executable: false,
+                });
+            }
+            // Pushed even though the files under it would create it: an empty
+            // directory is a member of the tree value, and dropping it would
+            // mount something other than what the request named.
+            TreeEntryKind::Dir => {
+                entries.push(crate::rt::ExecMountEntry::Dir { path: path.clone() });
+                collect_origin_mount_entries(ctx, tree, name, &path, entries)?;
+            }
+            // No verb reads a symlink's target through the origin seam, and
+            // mounting it as a regular file (or silently skipping it) would
+            // mount a tree that is not the value the request named. Refuse and
+            // name the entry, as the backend refuses a symlink it cannot
+            // reproduce.
+            TreeEntryKind::Symlink => {
+                return Err(PrimitiveMachineError::Unavailable {
+                    detail: format!(
+                        "mounting the origin-backed tree's symlink `{path}` needs a \
+                         link-target verb on the origin seam, which does not exist yet"
+                    ),
+                });
+            }
+        }
+    }
+    Ok(())
 }
 
 fn child_value(field: &PrimitiveField) -> Option<&PrimitiveValue> {

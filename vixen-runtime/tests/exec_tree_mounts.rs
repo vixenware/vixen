@@ -139,24 +139,63 @@ fn t(sh: Sh) -> Stream<Check> {
 }
 
 #[test]
-fn mounting_an_origin_backed_tree_refuses_loudly() {
-    // NOT YET SUPPORTED, and it says so. Enumerating an origin-backed handle
-    // needs a directory verb on the effect authority; falling through to
-    // content enumeration would report "malformed bytes" for what is a missing
-    // machine verb — the confusing lie `machine.primitive.origin-routing` bans.
-    let source = r#"
+fn an_origin_backed_tree_mounts() {
+    // What a build walk needs: read a workspace off disk and put it in front of
+    // a process. An origin-backed handle is lazy — it cannot be enumerated from
+    // its own bytes — so the mount walks the effect authority's directory verb
+    // instead, one witnessed listing per directory.
+    expect_pass(
+        "origin-mount",
+        r#"
 #[test { budget_wall: 60s, budget_rss: 2048MB }]
 fn t(sh: Sh) -> Stream<Check> {
     let sources = fixture_tree("small-crate");
-    let listed = exec sh`-c "ls {sources}"`;
-    yield expect_eq(listed.stdout.text().trim(), "unreachable");
+    let listed = exec sh`-c "cat {sources}/src/main.rs"`;
+    yield expect_eq(listed.stdout.text().contains("fn main"), true);
 }
-"#;
-    let error = run(source).expect_err("an origin-backed mount is refused");
-    let rendered = format!("{error:?}");
-    assert!(
-        rendered.contains("directory verb"),
-        "the refusal names the missing verb rather than blaming the bytes: {rendered}"
+"#,
+    );
+}
+
+#[test]
+fn an_origin_backed_mount_carries_its_whole_subtree() {
+    // The walk is recursive and its mount paths are tree-relative, so a nested
+    // file arrives where it sits in the fixture — not flattened, and not
+    // prefixed with the origin's own coordinate name.
+    expect_pass(
+        "origin-mount-nested",
+        r#"
+#[test { budget_wall: 60s, budget_rss: 2048MB }]
+fn t(sh: Sh) -> Stream<Check> {
+    let sources = fixture_tree("small-crate");
+    let listed = exec sh`-c "ls {sources}; ls {sources}/src"`;
+    let seen = listed.stdout.text();
+    yield expect_eq(seen.contains("Cargo.toml"), true);
+    yield expect_eq(seen.contains("main.rs"), true);
+    yield expect_eq(seen.contains("lib.rs"), true);
+}
+"#,
+    );
+}
+
+#[test]
+fn an_origin_backed_mount_compiles_through_rustc() {
+    // The north star in miniature: a workspace read off disk, mounted, and
+    // handed to a real compiler. Before the directory verb this shape was
+    // impossible — `hello.vix` has a shell write its own source first so the
+    // tree it mounts is content-identified.
+    expect_pass(
+        "origin-mount-rustc",
+        r#"
+#[test { budget_wall: 120s, budget_rss: 4096MB }]
+fn t(sh: Sh, rustc: Rustc) -> Stream<Check> {
+    let sources = fixture_tree("small-crate");
+    let built = exec rustc`--crate-name small --edition 2021 {sources}/src/main.rs --out-dir .`;
+    let out = built.tree;
+    let ran = exec sh`-c "{out}/small"`;
+    yield expect_eq(ran.stdout.text().trim(), "small-crate");
+}
+"#,
     );
 }
 

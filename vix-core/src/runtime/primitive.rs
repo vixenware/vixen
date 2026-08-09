@@ -471,6 +471,31 @@ pub trait EffectAuthority: Send + Sync {
         let _ = resident;
         None
     }
+
+    /// List a directory of a lazily-backed tree source — the same neutral verb
+    /// [`super::CodataDrainCtx::directory`] gives a codata drain, on the
+    /// raw-effect window. `exec` needs it to mount an origin-backed tree:
+    /// enumeration is the one thing a lazy handle cannot do from its own bytes,
+    /// and without it a build walk cannot read a workspace off disk.
+    ///
+    /// Listings are `(name, TreeEntryKind)` rows — kinds, never contents, so
+    /// nothing is materialized that was not asked for. Paths are name-relative
+    /// (`<name>/<path>`), exactly as the tree-path read is.
+    ///
+    /// r[impl machine.primitive.origin-verbs]
+    fn tree_directory(
+        &self,
+        source: &ValueId,
+        path: &str,
+    ) -> Result<Vec<(String, super::TreeEntryKind)>, PrimitiveMachineError> {
+        let _ = source;
+        Err(PrimitiveMachineError::OriginUnroutable {
+            detail: format!(
+                "directory listing {path} refused: no origin adapter is installed \
+                 for this effect snapshot"
+            ),
+        })
+    }
 }
 
 #[derive(Default)]
@@ -771,6 +796,44 @@ impl EffectAuthority for StagedEffectAuthority {
     fn tree_handle_name(&self, resident: &[u8]) -> Option<Vec<u8>> {
         self.origins.tree_handle_name(resident)
     }
+
+    /// Routed exactly as the tree-path read above is
+    /// (`machine.primitive.origin-routing`) — a content-identified tree is
+    /// refused rather than served, because it enumerates its own members and
+    /// serving it here would give callers two ways to ask one question.
+    fn tree_directory(
+        &self,
+        source: &ValueId,
+        path: &str,
+    ) -> Result<Vec<(String, super::TreeEntryKind)>, PrimitiveMachineError> {
+        let value = self
+            .staged_value(source)
+            .or_else(|| self.admitted_value(source))
+            .ok_or_else(|| PrimitiveMachineError::Unavailable {
+                detail: "staged effect input is absent".to_owned(),
+            })?;
+        if value.schema
+            != Type::Extern(crate::vir::ExternKind::Host(crate::binding::TREE)).schema_ref()
+        {
+            return Err(PrimitiveMachineError::AuthorityViolation {
+                detail: "directory-listing source was not a Tree".to_owned(),
+            });
+        }
+        match self.origins.route_tree(value.resident_bytes()) {
+            super::TreeRouting::ContentIdentified => {
+                Err(PrimitiveMachineError::AuthorityViolation {
+                    detail: "a content-identified tree enumerates its own members; \
+                             the directory verb serves only lazily-backed trees"
+                        .to_owned(),
+                })
+            }
+            super::TreeRouting::Origin(installation) => installation
+                .adapter
+                .tree_directory(value.resident_bytes(), path)
+                .map_err(|error| super::origin_tree_machine_error(error, path)),
+            super::TreeRouting::Unclaimed(refusal) => Err(refusal),
+        }
+    }
 }
 
 /// The scheduler-installed live delivery authority for in-flight progressive
@@ -1042,6 +1105,68 @@ impl EffectCtx {
     #[must_use]
     pub fn tree_handle_name(&self, resident: &[u8]) -> Option<Vec<u8>> {
         self.authority.tree_handle_name(resident)
+    }
+
+    /// List a directory of a lazily-backed tree, recording the listing as a
+    /// witnessed `Directory` read against the source — the raw-effect twin of
+    /// [`CodataDrainCtx::directory`], witnessed identically so a listing
+    /// observed while mounting re-verifies exactly as one observed by a glob.
+    ///
+    /// r[impl machine.primitive.origin-verbs]
+    pub fn tree_directory(
+        &self,
+        source: &ValueId,
+        path: &str,
+    ) -> Result<Vec<(String, super::TreeEntryKind)>, PrimitiveMachineError> {
+        let projection = ReadProjection::TreePath {
+            path: path.to_owned(),
+        };
+        match self.authority.tree_directory(source, path) {
+            Ok(entries) => {
+                self.witness(ReadWitness {
+                    source: source.clone(),
+                    projection,
+                    observation: ReadObservation::Directory {
+                        digest: super::directory_observation_digest(&entries),
+                    },
+                    provenance: None,
+                });
+                Ok(entries)
+            }
+            // Misses are witnessed for the same reason `read` witnesses them:
+            // "the directory was not there" is an observation the rerun audit
+            // re-verifies, not a silent absence.
+            //
+            // r[impl machine.primitive.witness-reverification]
+            Err(error) => {
+                let observation = match &error {
+                    PrimitiveMachineError::ProjectionMissing { .. } => {
+                        Some(ReadObservation::Missing)
+                    }
+                    PrimitiveMachineError::ProjectionWrongKind { found, .. } => {
+                        Some(ReadObservation::Kind(*found))
+                    }
+                    _ => None,
+                };
+                if let Some(observation) = observation {
+                    self.witness(ReadWitness {
+                        source: source.clone(),
+                        projection,
+                        observation,
+                        provenance: None,
+                    });
+                }
+                Err(error)
+            }
+        }
+    }
+
+    fn witness(&self, read: ReadWitness) {
+        self.transaction
+            .lock()
+            .expect("effect transaction mutex poisoned")
+            .reads
+            .push(read);
     }
 
     pub fn observe(&self, observation: JournalObservation) {

@@ -369,6 +369,24 @@ pub(crate) fn hash_framed(domain: &[u8], fields: &[&[u8]]) -> Digest {
     writer.finish()
 }
 
+/// The digest inside `ReadObservation::Directory` — a listing witnessed as
+/// names and kinds, never contents. It lives here rather than beside either
+/// caller because two windows now enumerate directories (a codata drain and
+/// the raw-effect window `exec` mounts through), and one observation must hash
+/// to one digest whichever window observed it.
+pub(crate) fn directory_observation_digest(entries: &[(String, super::TreeEntryKind)]) -> Digest {
+    let mut fields = Vec::with_capacity(entries.len() * 2);
+    for (name, kind) in entries {
+        fields.push(name.as_bytes());
+        fields.push(match kind {
+            super::TreeEntryKind::File => b"file".as_slice(),
+            super::TreeEntryKind::Dir => b"dir".as_slice(),
+            super::TreeEntryKind::Symlink => b"symlink".as_slice(),
+        });
+    }
+    hash_framed(b"vix.origin.directory-observation.v2", &fields)
+}
+
 /// The domain separator of the semantic tree encoding.
 ///
 /// Vix's `TreeHash` and Vixen's storage `NodeHash` are different identities over
