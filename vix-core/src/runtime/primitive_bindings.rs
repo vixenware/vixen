@@ -227,6 +227,23 @@ pub fn exec_request_type(capability: &Type) -> Type {
                     crate::binding::TREE,
                 )))),
             },
+            // The declared environment. A process reads env as an input exactly
+            // as it reads argv, so it belongs in the request for the same
+            // reason the mounts do: `CARGO_PKG_VERSION=0.1` and `=0.2` are two
+            // demands, not one plan with a stale memo hit.
+            //
+            // A `Map` rather than an array of pairs because the environment IS
+            // keyed — one name has one value, and a pair array would let a
+            // request spell a name twice and leave "which wins" to whoever
+            // applies it last. Map keys are canonically ordered (rung 043), so
+            // the identity does not depend on the order they were authored in.
+            RecordField {
+                name: "env".to_owned(),
+                ty: Type::Map {
+                    key: Box::new(Type::String),
+                    value: Box::new(Type::String),
+                },
+            },
         ],
     ))
 }

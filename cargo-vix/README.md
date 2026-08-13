@@ -59,9 +59,15 @@ different demand rather than a stale memo hit.
   executable axis, so an origin-backed file mounts non-executable; and no verb
   reads a symlink's target, so an origin-backed symlink is a loud refusal rather
   than a guess.
-- **No declared env** (rung `074-exec-env.vix`, red): the request record has no
-  env field. Crates read `CARGO_PKG_*` through `env!`, and build scripts are
-  nothing but env.
+- ~~**No declared env**~~ **CLOSED.** `exec … where { env: %{ … } }` lowers to
+  an `env` field on the request record, so the environment is declared surface
+  and identity-bearing: two execs whose plans agree but whose environments
+  differ are two demands, not one with a stale memo hit. A name the capability
+  package's command grammar already owns — carved out of the plan, or named as
+  one of its env ROLES — is refused rather than resolved by precedence, which
+  is also what keeps a target requirement from entering behind
+  `collect_exec_requirements`' back. Rung `074-exec-env.vix` is green and
+  wired.
 - **An exec template cannot contain a literal brace** — `{` always starts an
   interpolation and there is no escape. Harmless for rustc argv; crippling for
   `sh -c` with real shell code (`hello.vix` writes `\173`/`\175` octal escapes

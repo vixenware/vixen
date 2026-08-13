@@ -348,8 +348,21 @@ module.exports = grammar({
     command_template: () => token(seq("`", /[^`\n]*/, "`")),
     // `exec command` demands a process run. Reduced above postfix so a
     // trailing `?` catches the exec demand edge, not the command value.
+    //
+    // The `where` clause declares process-boundary inputs the command template
+    // cannot spell: an argv element is a string, but the environment is a
+    // keyed map, and a build script is nothing but env. It is the same
+    // `where_args` a call takes, so a declared input reads the same wherever
+    // it appears; the admissible keys are the lowering's concern.
     exec_expr: ($) =>
-      prec(PREC.exec, seq("exec", field("command", $.command_expr))),
+      prec(
+        PREC.exec,
+        seq(
+          "exec",
+          field("command", $.command_expr),
+          optional(field("named_args", $.where_args)),
+        ),
+      ),
     // `fail payload` raises a language failure carrying an authored payload.
     // It reduces last, so the payload is the whole expression that follows
     // (`fail Missing { field: name }`, `fail a ++ b`), and the expression has

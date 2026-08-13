@@ -114,6 +114,7 @@ const RUNG_069: &str = include_str!("ratchet/069-exec-memoized.vix");
 const RUNG_070: &str = include_str!("ratchet/070-undeclared-capability.reject.vix");
 const RUNG_071: &str = include_str!("ratchet/071-tree-projection.vix");
 const RUNG_072: &str = include_str!("ratchet/072-glob.vix");
+const RUNG_074: &str = include_str!("ratchet/074-exec-env.vix");
 const RUNG_075: &str = include_str!("ratchet/075-fetch-pinned.vix");
 const RUNG_076: &str = include_str!("ratchet/076-fetch-memoized.vix");
 const RUNG_077: &str = include_str!("ratchet/077-archive-extract.vix");
@@ -6403,6 +6404,43 @@ fn rung_067_exec_echo_runs_through_the_capability_effect_demand() {
                 ..
             }
         )));
+    }
+}
+
+/// Rung 074 — the environment is a declared value, not an ambient leak. The
+/// `where { env: … }` map is a field of the request record, so the child reads
+/// `$GREETING` because the source said so, never because the harness happened
+/// to be running under it.
+#[test]
+fn rung_074_declared_env_reaches_the_process() {
+    let report = run_source(RUNG_074).expect("rung 074 runs");
+    assert!(report.passed(), "rung 074 passes: {report:?}");
+    assert!(report.agrees());
+}
+
+/// The declared env is part of the demand, not a detail applied after it: two
+/// otherwise identical execs that declare different environments are two
+/// demands. Keying on the plan alone would serve the first one's stdout to the
+/// second — the same stale-memo shape the mounts field exists to prevent.
+#[test]
+fn rung_074_a_changed_env_is_a_different_demand() {
+    const SOURCE: &str = r#"
+#[test]
+fn env_is_keyed(sh: Sh) -> Stream<Check> {
+    let first = exec sh`-c "echo $GREETING"` where { env: %{ "GREETING" => "hi" } };
+    let second = exec sh`-c "echo $GREETING"` where { env: %{ "GREETING" => "bye" } };
+    yield expect_eq(first.stdout.text().trim(), "hi");
+    yield expect_eq(second.stdout.text().trim(), "bye");
+}
+"#;
+    let report = run_source(SOURCE).expect("a differing env runs");
+    assert!(report.passed(), "both environments are honored: {report:?}");
+    assert!(report.agrees());
+    for lane in [&report.plain, &report.chaos] {
+        assert_eq!(
+            lane.counters.effect_spawns, 2,
+            "a changed env is a distinct demand, not a memo hit"
+        );
     }
 }
 
