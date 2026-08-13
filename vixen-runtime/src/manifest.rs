@@ -456,8 +456,16 @@ fn collect_exec_requirements(
         let Some(request) = node.inputs.first().copied().and_then(node_by_id) else {
             continue;
         };
-        // `{capability, argv, mounts}` — the mounts are inputs to the process,
-        // not part of its plan, so the requirement scan reads past them.
+        // `{capability, argv, mounts, env}` — the mounts and the declared env
+        // are inputs TO the process, not part of the plan the command grammar
+        // extracts targets from, so the requirement scan reads past both.
+        //
+        // Reading past the env is safe rather than merely convenient: a package
+        // whose grammar carries target roles in the environment names those
+        // roles, and `exec_primitive::compose_env` refuses a declared
+        // assignment to any of them. So a target requirement cannot enter
+        // through the `where` clause behind this scan's back — it is refused at
+        // the seam where the package's vocabulary is known.
         //
         // A shape mismatch here is an INVARIANT BREAK, not a case to skip: the
         // node is already a confirmed exec-primitive invocation, so its request
@@ -465,12 +473,12 @@ fn collect_exec_requirements(
         // reported "no requirements" for programs that had them when the mounts
         // field landed — a refusal that never happens. Fail where the cause is.
         assert!(
-            request.inputs.len() == 3,
-            "an exec request has {{capability, argv, mounts}}; found {} inputs. \
+            request.inputs.len() == 4,
+            "an exec request has {{capability, argv, mounts, env}}; found {} inputs. \
              A request that grows a field must teach this scan what it means.",
             request.inputs.len()
         );
-        let [capability_id, argv_id, _mounts_id] = request.inputs.as_slice() else {
+        let [capability_id, argv_id, _mounts_id, _env_id] = request.inputs.as_slice() else {
             unreachable!("arity asserted above");
         };
         let Some(ty) =

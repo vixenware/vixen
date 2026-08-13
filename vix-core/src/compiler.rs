@@ -9375,6 +9375,71 @@ fn parse_command_template(
         .collect()
 }
 
+/// The environment an `exec`'s `where` clause declares, as a
+/// `Map<String, String>` node. Absent clause and `where { env: %{} }` lower to
+/// the same empty map: "declared nothing" and "declared the empty environment"
+/// are the same request, so they must not be two identities.
+///
+/// An unrecognized key is REFUSED rather than ignored. A dropped declaration
+/// would run the process with an environment the source says it does not have,
+/// and the failure would surface as a missing variable inside the child —
+/// arbitrarily far from the `where` clause that was silently discarded.
+fn lower_exec_env(
+    nodes: &mut Vec<Node>,
+    bindings: &BTreeMap<String, LoweredValue>,
+    context: &ModuleContext<'_>,
+    exec: &ast::ExecExpr,
+    span: Span,
+) -> Result<NodeId, Diagnostics> {
+    let env_ty = Type::Map {
+        key: Box::new(Type::String),
+        value: Box::new(Type::String),
+    };
+    let Some(named) = &exec.named_args else {
+        return Ok(push_node(
+            nodes,
+            span,
+            env_ty,
+            EffectFacts::PURE,
+            Vec::new(),
+            Op::Map,
+        ));
+    };
+    let mut env: Option<LoweredValue> = None;
+    for field in &named.fields {
+        if field.name.value != "env" {
+            return Err(Diagnostics::one(Diagnostic {
+                code: DiagnosticCode::UnknownName,
+                primary: field.name.span,
+                labels: Vec::new(),
+                payload: DiagnosticPayload::Name {
+                    name: field.name.value.clone(),
+                },
+            }));
+        }
+        if env.is_some() {
+            return Err(Diagnostics::one(Diagnostic::unsupported(
+                field.span,
+                "`exec` takes one `env`; a second would leave which one binds to \
+                 whoever applied it last",
+            )));
+        }
+        let value = if let Some(expression) = &field.value {
+            lower_value_expected(nodes, bindings, context, expression, Some(&env_ty))?
+        } else {
+            // Field punning `{ env }` references the in-scope binding `env`.
+            lookup_binding(bindings, &field.name.value, field.name.span)?
+        };
+        require_type(&value, &env_ty, field.span)?;
+        env = Some(value);
+    }
+    Ok(match env {
+        Some(value) => value.node,
+        // `where {}` — an empty clause is the empty environment, not an error.
+        None => push_node(nodes, span, env_ty, EffectFacts::PURE, Vec::new(), Op::Map),
+    })
+}
+
 /// `exec command` — a registered effect demand on the generic rail. The
 /// command grammar runs HERE: the template parses into argv elements and each
 /// element materializes as VIR (string literals, `Int`/`Path` rendering ops,
@@ -9387,7 +9452,7 @@ fn parse_command_template(
 fn lower_exec(
     nodes: &mut Vec<Node>,
     bindings: &BTreeMap<String, LoweredValue>,
-    _context: &ModuleContext<'_>,
+    context: &ModuleContext<'_>,
     exec: &ast::ExecExpr,
 ) -> Result<LoweredValue, Diagnostics> {
     let capability = resolve_command_capability(bindings, &exec.command)?;
@@ -9400,6 +9465,7 @@ fn lower_exec(
     }
     let template = parse_command_template(&exec.command.template, bindings)?;
     let span = exec.span;
+    let env = lower_exec_env(nodes, bindings, context, exec, span)?;
     let mut elements = Vec::with_capacity(template.len());
     // The spliced trees, in splice order. Their positions ARE their mount
     // paths, so the argv is a function of the plan and the mount list is a
@@ -9491,7 +9557,7 @@ fn lower_exec(
         span,
         request_ty,
         EffectFacts::PURE,
-        vec![capability.node, argv, mounts],
+        vec![capability.node, argv, mounts, env],
         Op::Record,
     );
     let ty = exec_outcome_type();

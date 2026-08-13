@@ -3431,7 +3431,50 @@ impl<S: EventSink, Ctx> Runtime<S, Ctx> {
                 )?))
             }
             Op::ArrayConcat => effect_fault("effect island contained an ArrayConcat operation"),
-            Op::Map => effect_fault("effect island contained a Map operation"),
+                Op::Map => {
+                // A materialized map value (a registered effect's declared
+                // env), the keyed twin of the `Op::Array` argv case above. The
+                // inputs are the rows flattened key-first, exactly as
+                // `lower_map` pushes them.
+                let Type::Map { key, value } = &node.ty else {
+                    return effect_fault("effect Map node had a non-map type");
+                };
+                if node.inputs.len() % 2 != 0 {
+                    return effect_fault("effect Map node had an odd number of row halves");
+                }
+                let mut rows = Vec::with_capacity(node.inputs.len() / 2);
+                for row in 0..node.inputs.len() / 2 {
+                    let EffectTerm::Value(key_value) = input(row * 2, self)? else {
+                        return effect_fault("effect Map key was codata");
+                    };
+                    let EffectTerm::Value(value_value) = input(row * 2 + 1, self)? else {
+                        return effect_fault("effect Map value was codata");
+                    };
+                    rows.push((
+                        primitive_value_from_effect(key, &key_value)?,
+                        primitive_value_from_effect(value, &value_value)?,
+                    ));
+                }
+                // `PrimitiveValueBody::OrderedMap` is canonically key-ordered by
+                // contract and nothing downstream re-sorts it — `framed()` maps
+                // rows in place. Sorting by the key's IDENTITY is the same rule
+                // `Op::StreamCollect` above uses, so a map means one value
+                // whichever island built it.
+                rows.sort_by_key(|(key, _)| key.identity());
+                if rows
+                    .windows(2)
+                    .any(|pair| pair[0].0.identity() == pair[1].0.identity())
+                {
+                    return effect_fault("effect Map declared one key twice");
+                }
+                Ok(EffectTerm::Value(effect_value_from_primitive(
+                    &node.ty,
+                    PrimitiveValue {
+                        schema: node.ty.schema_ref(),
+                        body: PrimitiveValueBody::OrderedMap(rows),
+                    },
+                )?))
+            }
             Op::MapWith => effect_fault("effect island contained a Map.with operation"),
             Op::Variant { .. } => effect_fault("effect island contained a Variant operation"),
             _ => Err(Box::new(MachineError::runtime(
@@ -8433,6 +8476,24 @@ fn primitive_value_from_frozen(
                     element_schema: element.schema_ref(),
                     elements,
                 },
+            }),
+        // The keyed twin of the array arm, and the inverse of the
+        // `PrimitiveValueBody::OrderedMap` case in `frozen_from_primitive`.
+        // Rows are carried in the order the frozen value holds them: it was
+        // canonically key-ordered where it was built, and re-sorting on a
+        // round trip could only disagree with that.
+        (Type::Map { key, value }, FrozenValue::OrderedMap(rows)) => rows
+            .iter()
+            .map(|(row_key, row_value)| {
+                Ok((
+                    primitive_value_from_frozen(key, row_key)?,
+                    primitive_value_from_frozen(value, row_value)?,
+                ))
+            })
+            .collect::<Result<Vec<_>, _>>()
+            .map(|rows| PrimitiveValue {
+                schema: ty.schema_ref(),
+                body: PrimitiveValueBody::OrderedMap(rows),
             }),
         _ => effect_fault("frozen value cannot become a primitive value"),
     }

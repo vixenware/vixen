@@ -118,6 +118,16 @@ impl<Ctx> RawPrimitive<Ctx> for ExecPrimitive {
                         vix::binding::TREE,
                     )))),
                 },
+                // The declared env, for the same arity reason as the mounts
+                // above: this list is compared against the request's real
+                // arity, and a shape that under-declares degrades the identity
+                // silently rather than failing.
+                ArgRole::Value {
+                    expected: Type::Map {
+                        key: Box::new(Type::String),
+                        value: Box::new(Type::String),
+                    },
+                },
             ],
             request_ty: exec_request_type(&capability),
             result: exec_outcome_type(),
@@ -239,8 +249,8 @@ fn parse_request(
     let PrimitiveValueBody::Product(fields) = &request.body else {
         return Err(invalid("request was not a record"));
     };
-    let [capability_field, argv_field, mounts_field] = fields.as_slice() else {
-        return Err(invalid("request does not have exactly three fields"));
+    let [capability_field, argv_field, mounts_field, env_field] = fields.as_slice() else {
+        return Err(invalid("request does not have exactly four fields"));
     };
     let capability = child_value(capability_field).ok_or_else(|| invalid("capability field"))?;
     let capability_ty = ctx.type_for_schema(&capability.schema)?;
@@ -285,8 +295,9 @@ fn parse_request(
     // materialized plan (env-shaped packages spell them as leading `NAME=VALUE`
     // elements). The demand preimage already hashed the full normalized plan;
     // this split is host-side value redemption, like the program name itself.
-    let (env_remove, env, argv) = package.split_invocation(argv);
+    let (env_remove, carved_env, argv) = package.split_invocation(argv);
     let mounts = parse_mounts(ctx, mounts_field)?;
+    let env = compose_env(&env_remove, carved_env, parse_env(env_field)?)?;
     Ok(ParsedRequest {
         invocation: ExecInvocation {
             program,
@@ -297,6 +308,80 @@ fn parse_request(
             mounts,
         },
     })
+}
+
+/// The declared environment, read off the request's `env` map.
+///
+/// The map is already canonically key-ordered (`PrimitiveValueBody::OrderedMap`),
+/// so the assignments reach the backend in an order that is a function of the
+/// names alone — two requests that declare the same environment apply it
+/// identically regardless of the order it was authored in.
+fn parse_env(env_field: &PrimitiveField) -> Result<Vec<(String, String)>, PrimitiveMachineError> {
+    let invalid = |detail: &str| PrimitiveMachineError::AuthorityViolation {
+        detail: format!("malformed exec request: {detail}"),
+    };
+    let Some(env_value) = child_value(env_field) else {
+        return Err(invalid("env field"));
+    };
+    let PrimitiveValueBody::OrderedMap(rows) = &env_value.body else {
+        return Err(invalid("env was not a map"));
+    };
+    rows.iter()
+        .map(|(name, value)| {
+            let name = String::from_utf8(name.resident_bytes().to_vec())
+                .map_err(|_| invalid("env name was not UTF-8"))?;
+            let value = String::from_utf8(value.resident_bytes().to_vec())
+                .map_err(|_| invalid("env value was not UTF-8"))?;
+            Ok((name, value))
+        })
+        .collect()
+}
+
+/// The assignments the backend applies: the roles the capability package's
+/// command grammar carved out of the plan, then the ones the source declared.
+///
+/// A declared name that the package claims is REFUSED. Two things make a name
+/// the package's, and both are refused for one reason:
+///
+/// - it was carved out of this plan, so the plan and the `where` clause both
+///   claim it; and
+/// - it is a declared ROLE of the package's grammar (`env_remove` — the names
+///   stripped from the ambient environment so the host cannot supply an unkeyed
+///   target requirement), even when this plan carved no value for it.
+///
+/// The second is the load-bearing one. A role assigned through the `where`
+/// clause would impose a target that `collect_exec_requirements` never saw,
+/// because that scan reads the plan and the roles live in the environment — a
+/// requirement entering behind the manifest's back. Refusing here closes it at
+/// the one seam that knows the package's vocabulary.
+///
+/// Resolution by precedence is not on the table: whichever side won, the answer
+/// would depend on the order this function concatenates in, which is not a rule
+/// anybody could read off the source.
+fn compose_env(
+    env_remove: &[String],
+    carved: Vec<(String, String)>,
+    declared: Vec<(String, String)>,
+) -> Result<Vec<(String, String)>, PrimitiveMachineError> {
+    if let Some((name, claim)) = declared.iter().find_map(|(name, _)| {
+        if carved.iter().any(|(carved, _)| carved == name) {
+            Some((name, "already carves out of the plan"))
+        } else if env_remove.iter().any(|role| role == name) {
+            Some((name, "declares as a command-grammar role"))
+        } else {
+            None
+        }
+    }) {
+        return Err(PrimitiveMachineError::AuthorityViolation {
+            detail: format!(
+                "exec declares `{name}`, which this capability's command grammar {claim}; \
+                 one name cannot have two sources"
+            ),
+        });
+    }
+    let mut env = carved;
+    env.extend(declared);
+    Ok(env)
 }
 
 /// The spliced trees, flattened to the files the backend writes into the
