@@ -326,17 +326,34 @@ impl core::fmt::Display for PackageConflict {
 /// package byte-identical to one already registered is a no-op, and any other
 /// redefinition of a registered name is a [`PackageConflict`].
 ///
+/// All-or-nothing: the whole batch is checked before any of it is registered.
+/// A file whose fourth package contradicts a shipped one must not leave its
+/// first three registered — "a load that failed registered nothing" is the
+/// invariant that lets the compiler config drop this error and still be sure
+/// the nameable set was only ever narrowed, never half-widened.
+///
 /// May be called at any point before the name is first looked up, exactly like
 /// the host-extern registration it mirrors.
 pub fn register_packages(packages: Vec<CapabilityPackage>) -> Result<(), PackageConflict> {
     let mut registry = REGISTRY.lock().expect("package registry is not poisoned");
+    let mut accepted: Vec<CapabilityPackage> = Vec::new();
     for package in packages {
-        if let Some(existing) = registry.iter().find(|known| known.name == package.name) {
-            if **existing == package {
-                continue;
-            }
-            return Err(PackageConflict { name: package.name });
+        // A batch is checked against itself as well as the registry: two
+        // `[[package]]` entries in one file disagreeing under one name is the
+        // same contradiction as two files disagreeing.
+        let agrees = registry
+            .iter()
+            .map(|known| &**known)
+            .chain(accepted.iter())
+            .find(|known| known.name == package.name)
+            .map(|known| *known == package);
+        match agrees {
+            Some(true) => continue,
+            Some(false) => return Err(PackageConflict { name: package.name }),
+            None => accepted.push(package),
         }
+    }
+    for package in accepted {
         registry.push(Box::leak(Box::new(package)));
     }
     Ok(())
@@ -345,14 +362,20 @@ pub fn register_packages(packages: Vec<CapabilityPackage>) -> Result<(), Package
 /// Register [`DEFAULT_PACKAGES_TOML`]. Idempotent, so every entrypoint that
 /// needs a registry can call it without coordinating with the others.
 ///
+/// The conflict an embedder can cause — registering its own `Sh` with a
+/// different grammar before the shipped document loads — is returned, not
+/// panicked: it is the ordinary two-sources-disagree case the design already
+/// has a refusal for, and the caller that can name a path is the one that
+/// should report it.
+///
 /// # Panics
 ///
 /// If the shipped document does not parse, which is a bug in this crate rather
 /// than anything an invoker can cause.
-pub fn register_default_packages() {
+pub fn register_default_packages() -> Result<(), PackageConflict> {
     let packages =
         packages_from_toml(DEFAULT_PACKAGES_TOML).expect("shipped package document parses");
-    register_packages(packages).expect("shipped packages do not conflict with themselves");
+    register_packages(packages)
 }
 
 /// Look one package up by its nominal capability type name.
@@ -391,6 +414,36 @@ fn parse_assignment(element: &str) -> Option<(&str, &str)> {
         return None;
     }
     Some((name, value))
+}
+
+/// Substitute `{os}` and `{arch}` into a target template in one pass.
+///
+/// One pass rather than chained `str::replace` because a role's value is the
+/// tool's word, not the package's: `GOOS={arch}` would otherwise be rewritten
+/// by the second replace into a triple neither the program nor the package
+/// spelled. A dialect word cannot be allowed to name a placeholder — an
+/// invocation deciding its own target spelling is the fabrication the typed
+/// `Target` exists to prevent. An unrecognized `{…}` is left alone: the
+/// package's template said it, so it is a literal.
+fn render_template(template: &str, os: &str, arch: &str) -> String {
+    let mut rendered = String::with_capacity(template.len());
+    let mut rest = template;
+    while let Some(open) = rest.find('{') {
+        rendered.push_str(&rest[..open]);
+        let placeholder = &rest[open..];
+        if let Some(tail) = placeholder.strip_prefix("{os}") {
+            rendered.push_str(os);
+            rest = tail;
+        } else if let Some(tail) = placeholder.strip_prefix("{arch}") {
+            rendered.push_str(arch);
+            rest = tail;
+        } else {
+            rendered.push('{');
+            rest = &placeholder[1..];
+        }
+    }
+    rendered.push_str(rest);
+    rendered
 }
 
 impl CapabilityPackage {
@@ -493,9 +546,11 @@ impl CapabilityPackage {
                 }
                 match (os, arch) {
                     (Some(os), Some(arch)) => {
-                        let target = template
-                            .replace("{os}", os_words.normalize(&os))
-                            .replace("{arch}", arch_words.normalize(&arch));
+                        let target = render_template(
+                            template,
+                            os_words.normalize(&os),
+                            arch_words.normalize(&arch),
+                        );
                         vec![TargetCapture::Literal(Target::new(target))]
                     }
                     // A partial assignment (one role, the other defaulting to
@@ -600,6 +655,23 @@ mod tests {
         );
     }
 
+    /// A dialect word is the tool's, and it does not get to name a template
+    /// placeholder. Chained replaces let `GOARCH` decide where the OS goes,
+    /// which fabricates a triple the manifest then compares against.
+    #[test]
+    fn a_dialect_word_cannot_inject_a_placeholder() {
+        let go = shipped("Go");
+        let captures = go.target_captures(&[
+            PlanElement::Literal("GOOS={arch}".to_owned()),
+            PlanElement::Literal("GOARCH=amd64".to_owned()),
+        ]);
+        assert_eq!(
+            captures,
+            [TargetCapture::Literal(Target::new("x86_64-{arch}"))],
+            "the unmapped word passes through as itself, placeholder-looking or not"
+        );
+    }
+
     /// The point of the whole exercise: a tool nothing in this crate has heard
     /// of is nameable, with a working grammar, without touching Rust.
     #[test]
@@ -683,10 +755,19 @@ protocol = "telepathy"
     /// The nameable-type list and the package registry are two spellings of
     /// one set: a type a program can name must have a package (grammar,
     /// protocol), and a registered package must be nameable.
+    ///
+    /// The nameable side is read through [`crate::capability_types`] — the list
+    /// the compiler is actually handed. Reading both sides off the registry
+    /// would be a tautology, and this test exists to hold the two lists in
+    /// agreement the way the retired hand-maintained pair was held.
     #[test]
     fn every_registered_package_is_nameable() {
-        register_default_packages();
-        for name in registered_package_names() {
+        register_default_packages().expect("the shipped packages register");
+        let nameable: Vec<&str> = crate::capability_types()
+            .iter()
+            .map(|decl| decl.name)
+            .collect();
+        for name in nameable.iter().copied() {
             assert!(
                 capability_package(name).is_some(),
                 "`{name}` is nameable but has no package"
@@ -694,7 +775,7 @@ protocol = "telepathy"
         }
         for shipped in defaults() {
             assert!(
-                registered_package_names().contains(&shipped.name.as_str()),
+                nameable.contains(&shipped.name.as_str()),
                 "shipped package `{}` is not nameable",
                 shipped.name
             );

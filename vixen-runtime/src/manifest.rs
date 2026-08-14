@@ -327,6 +327,10 @@ pub enum PackagesLoadError {
     Malformed { path: String, detail: String },
     /// The declared file redefines an already-registered package.
     Conflict { path: String, name: String },
+    /// An embedder registered a package under a name vix ships, with a
+    /// different grammar, before the shipped document loaded. There is no path
+    /// to name: the other side is Rust in the embedding process.
+    ShippedConflict { name: String },
 }
 
 impl core::fmt::Display for PackagesLoadError {
@@ -343,6 +347,10 @@ impl core::fmt::Display for PackagesLoadError {
             Self::Conflict { path, name } => write!(
                 f,
                 "error[packages]: declared capability packages `{path}` redefines `{name}`, which is already registered with a different grammar"
+            ),
+            Self::ShippedConflict { name } => write!(
+                f,
+                "error[packages]: this embedding registered `{name}` with a grammar that contradicts the one vix ships"
             ),
         }
     }
@@ -361,7 +369,11 @@ impl core::fmt::Display for PackagesLoadError {
 ///
 /// r[impl vixen.capability.package-is-data]
 pub fn declared_packages() -> Result<(), PackagesLoadError> {
-    vixen_primitives::capability_package::register_default_packages();
+    vixen_primitives::capability_package::register_default_packages().map_err(|conflict| {
+        PackagesLoadError::ShippedConflict {
+            name: conflict.name,
+        }
+    })?;
     let Some(path) = std::env::var_os(PACKAGES_ENV) else {
         return Ok(());
     };
@@ -774,8 +786,18 @@ fn collect_exec_requirements(
         else {
             continue;
         };
+        // Also an INVARIANT BREAK rather than a case to skip: a type is
+        // nameable only because a package registered it, and the registry only
+        // grows, so a compiled program naming `ty` with no package cannot
+        // happen. It could not happen at all while the table was compiled in;
+        // now that the set is loaded, saying so out loud is what keeps a
+        // half-loaded registry from reading as "this program demands no
+        // target" — the exec primitive refuses this same lookup miss outright.
         let Some(package) = capability_package(ty) else {
-            continue;
+            panic!(
+                "capability type `{ty}` is nameable but no package is registered for it; \
+                 a program cannot name a type whose package never loaded."
+            );
         };
         let plan: Vec<PlanElement> = match node_by_id(*argv_id) {
             Some(argv) if matches!(argv.op, Op::Array) => argv

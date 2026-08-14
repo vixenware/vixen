@@ -6463,7 +6463,6 @@ fn completed_exec_tree(sh: Sh) -> Stream<Check> {
 /// (`(tree / seg).text()`) — active only when the embedder declares `Tree`.
 fn tree_compiler() -> Compiler {
     vixen_primitives::register_host_types();
-    vixen_primitives::capability_package::register_default_packages();
     Compiler::with_config(CompilerConfig {
         host_types: vixen_primitives::HOST_TYPES,
         // The command packages are declarations now, not core vocabulary: a
