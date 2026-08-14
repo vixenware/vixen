@@ -12,7 +12,7 @@
 //! actually solved the problem.
 //!
 //! That seam is one process-wide variable, so unlike the manifest's environment
-//! tests (issue #14) these hold [`declaration_lock`] for their whole body
+//! tests (issue #14) these hold a [`Declaration`] guard for their whole body
 //! rather than relying on nextest's process-per-test. `nix flake check` runs
 //! nextest either way; the lock is what makes a plain `cargo test`, where the
 //! whole file shares one process, mean the same thing rather than measure
@@ -74,24 +74,59 @@ fn offer(ty: &str, program: &str, targets: &[&str]) -> CapabilityOffer {
 /// variable — one declaration at a time, whichever runner is driving.
 static DECLARATION: std::sync::Mutex<()> = std::sync::Mutex::new(());
 
-/// A test that panics while holding the lock has said everything it has to
-/// say; poisoning the rest of the file on top of that reports one failure as
-/// several.
-fn declaration_lock() -> std::sync::MutexGuard<'static, ()> {
-    DECLARATION
-        .lock()
-        .unwrap_or_else(std::sync::PoisonError::into_inner)
+/// A live declaration: the lock and the variable's prior value, together. The
+/// two cannot come apart — there is no way to set the variable without holding
+/// the lock, and no way to drop the lock without putting back what was there
+/// before, including when a failing assertion unwinds mid-test.
+///
+/// What it restores is whatever was there BEFORE, not "nothing": someone
+/// running `VIX_CAPABILITY_PACKAGES=… cargo test` has declared something about
+/// their own box, and this file gets to borrow the variable, not repossess it.
+struct Declaration {
+    prior: Option<std::ffi::OsString>,
+    _lock: std::sync::MutexGuard<'static, ()>,
 }
 
-/// Declare the packages for the rest of this test process.
+impl Drop for Declaration {
+    fn drop(&mut self) {
+        // SAFETY: the lock is held until this guard is fully dropped, so no
+        // other test is reading or writing the variable.
+        unsafe {
+            match self.prior.take() {
+                Some(prior) => std::env::set_var(PACKAGES_ENV, prior),
+                None => std::env::remove_var(PACKAGES_ENV),
+            }
+        }
+    }
+}
+
+/// Take the declaration lock, remembering what the variable said on the way in.
+///
+/// A test that panics while holding it has said everything it has to say;
+/// poisoning the rest of the file on top of that reports one failure as
+/// several.
+fn hold() -> Declaration {
+    let lock = DECLARATION
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
+    Declaration {
+        prior: std::env::var_os(PACKAGES_ENV),
+        _lock: lock,
+    }
+}
+
+/// Declare the packages for the lifetime of the returned guard.
 ///
 /// # Safety
 ///
-/// The caller holds [`declaration_lock`], so no other test is reading or
-/// writing the variable, and this is called before any runtime thread exists —
-/// the same discipline the manifest's environment tests use.
-fn declare(path: &str) {
+/// The guard holds the lock, so no other test is reading or writing the
+/// variable, and this is called before any runtime thread exists — the same
+/// discipline the manifest's environment tests use.
+#[must_use]
+fn declare(path: &str) -> Declaration {
+    let declaration = hold();
     unsafe { std::env::set_var(PACKAGES_ENV, path) };
+    declaration
 }
 
 /// Declare nothing, explicitly. Same safety argument as [`declare`].
@@ -99,8 +134,11 @@ fn declare(path: &str) {
 /// A test whose claim is "nobody declared this" has to say so rather than
 /// assume it: the variable outlives whichever sibling set it, including that
 /// sibling's since-deleted tempdir path.
-fn undeclare() {
+#[must_use]
+fn undeclare() -> Declaration {
+    let declaration = hold();
     unsafe { std::env::remove_var(PACKAGES_ENV) };
+    declaration
 }
 
 /// The whole point, end to end: `Quartus` is a name no Rust in this workspace
@@ -118,9 +156,8 @@ fn synthesize(q: Quartus) -> Stream<Check> {
     yield expect_eq((out.tree / "bitstream.txt").text(), "fitted");
 }
 "#;
-    let _declaration = declaration_lock();
     let dir = tempfile::tempdir().expect("temp dir");
-    declare(&packages_file(&dir, FOREIGN_PACKAGES));
+    let _declaration = declare(&packages_file(&dir, FOREIGN_PACKAGES));
     let quartus = fake_tool(&dir, "quartus_sh", "printf fitted > bitstream.txt");
     let report = run_source_with_manifest(PROGRAM, manifest(vec![offer("Quartus", &quartus, &[])]))
         .expect("a declared package compiles and runs");
@@ -153,8 +190,7 @@ fn synthesize(q: Nonesuch) -> Stream<Check> {
     yield expect_eq(1, 1);
 }
 "#;
-    let _declaration = declaration_lock();
-    undeclare();
+    let _declaration = undeclare();
     let result = vixen_runtime::ratchet::run_source(PROGRAM);
     let Err(RunError::Diagnostics(diagnostics)) = result else {
         panic!("an undeclared capability type does not resolve, got {result:?}");
@@ -181,9 +217,8 @@ fn build(xc: Xcodebuild) -> Stream<Check> {
     yield expect_eq((out.tree / "app.txt").text(), "built");
 }
 "#;
-    let _declaration = declaration_lock();
     let dir = tempfile::tempdir().expect("temp dir");
-    declare(&packages_file(&dir, FOREIGN_PACKAGES));
+    let _declaration = declare(&packages_file(&dir, FOREIGN_PACKAGES));
     let xcodebuild = fake_tool(&dir, "xcodebuild", "printf built > app.txt");
     let linux_only = manifest(vec![offer(
         "Xcodebuild",
@@ -223,9 +258,8 @@ fn build(xc: Xcodebuild) -> Stream<Check> {
     yield expect_eq((out.tree / "app.txt").text(), "built");
 }
 "#;
-    let _declaration = declaration_lock();
     let dir = tempfile::tempdir().expect("temp dir");
-    declare(&packages_file(&dir, FOREIGN_PACKAGES));
+    let _declaration = declare(&packages_file(&dir, FOREIGN_PACKAGES));
     let xcodebuild = fake_tool(&dir, "xcodebuild", "printf built > app.txt");
     let mac = manifest(vec![offer(
         "Xcodebuild",
@@ -244,7 +278,6 @@ fn build(xc: Xcodebuild) -> Stream<Check> {
 /// r[verify vixen.capability.package-is-data]
 #[test]
 fn a_missing_declared_packages_file_is_a_loud_typed_error() {
-    let _declaration = declaration_lock();
     let dir = tempfile::tempdir().expect("temp dir");
     let missing = dir
         .path()
@@ -252,7 +285,7 @@ fn a_missing_declared_packages_file_is_a_loud_typed_error() {
         .to_str()
         .expect("path is UTF-8")
         .to_owned();
-    declare(&missing);
+    let _declaration = declare(&missing);
     let result = run_source_with_manifest(
         "#[test]\nfn t(s: Sh) -> Stream<Check> { yield expect_eq(1, 1); }\n",
         manifest(vec![offer("Sh", "sh", &[])]),
@@ -270,7 +303,6 @@ fn a_missing_declared_packages_file_is_a_loud_typed_error() {
 /// r[verify vixen.capability.package-is-data]
 #[test]
 fn a_malformed_declared_packages_file_is_a_loud_typed_error() {
-    let _declaration = declaration_lock();
     let dir = tempfile::tempdir().expect("temp dir");
     let path = packages_file(
         &dir,
@@ -280,7 +312,7 @@ name = "Broken"
 protocol = "telepathy"
 "#,
     );
-    declare(&path);
+    let _declaration = declare(&path);
     let result = run_source_with_manifest(
         "#[test]\nfn t(s: Sh) -> Stream<Check> { yield expect_eq(1, 1); }\n",
         manifest(vec![offer("Sh", "sh", &[])]),
@@ -307,7 +339,6 @@ protocol = "telepathy"
 /// r[verify vixen.capability.package-is-data]
 #[test]
 fn redefining_a_registered_package_refuses() {
-    let _declaration = declaration_lock();
     let dir = tempfile::tempdir().expect("temp dir");
     let path = packages_file(
         &dir,
@@ -317,7 +348,7 @@ name = "Sh"
 protocol = "progressive-lines-v1"
 "#,
     );
-    declare(&path);
+    let _declaration = declare(&path);
     let result = run_source_with_manifest(
         "#[test]\nfn t(s: Sh) -> Stream<Check> { yield expect_eq(1, 1); }\n",
         manifest(vec![offer("Sh", "sh", &[])]),

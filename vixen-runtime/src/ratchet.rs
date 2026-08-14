@@ -726,8 +726,10 @@ pub struct PreparedRun {
     /// (`vixen.machine.manifest`). Resolved at preparation through
     /// [`crate::manifest::declared_manifest`]: the file `VIX_MACHINE_MANIFEST`
     /// explicitly declares, or [`MachineManifest::ratchet_default`] when
-    /// nothing is declared. [`PreparedRun::with_manifest`] substitutes an
-    /// explicit machine word.
+    /// nothing is declared. An invoker stating the machine word in Rust goes
+    /// through [`prepare_source_with_manifest`] instead, which never reaches
+    /// the environment — the substitution cannot be an afterthought, because
+    /// by then a declared file has already had its chance to fail the call.
     manifest: crate::manifest::MachineManifest,
 }
 
@@ -793,9 +795,7 @@ pub fn run_source_with_manifest(
     source: &str,
     manifest: crate::manifest::MachineManifest,
 ) -> Result<RatchetReport, RunError> {
-    prepare_source_with_config(source, crate::default_config())?
-        .with_manifest(manifest)
-        .execute()
+    prepare_source_with_manifest(source, manifest)?.execute()
 }
 
 /// Run a root source alongside named library modules (the `//! uses:` harness
@@ -1029,12 +1029,65 @@ fn prepare_source_with_cache(
     prepare_modules_with_cache(source, &[], config, cache)
 }
 
+/// Prepare under an explicit machine manifest. The invoker has stated the
+/// machine word directly, so `VIX_MACHINE_MANIFEST` is not consulted at all —
+/// a declared file, present or missing, cannot reach a run whose manifest was
+/// supplied in Rust.
+pub fn prepare_source_with_manifest(
+    source: &str,
+    manifest: crate::manifest::MachineManifest,
+) -> Result<PreparedRun, RunError> {
+    prepare_modules_with_manifest(source, &[], crate::default_config(), manifest)
+}
+
+/// The module-and-config form of [`prepare_source_with_manifest`], so a stated
+/// machine word composes with the `//! uses:` harness and with shape-selection
+/// experiments rather than forcing a caller back onto the environment-reading
+/// path to get either.
+pub fn prepare_modules_with_manifest(
+    source: &str,
+    modules: &[vix::modules::ModuleSource<'_>],
+    config: CompilerConfig,
+    manifest: crate::manifest::MachineManifest,
+) -> Result<PreparedRun, RunError> {
+    let (compilation, cache) = compile_and_warm(source, modules, config, LoweringCache::default())?;
+    Ok(PreparedRun {
+        compilation,
+        cache,
+        manifest,
+    })
+}
+
 fn prepare_modules_with_cache(
     source: &str,
     modules: &[vix::modules::ModuleSource<'_>],
     config: CompilerConfig,
-    mut cache: LoweringCache,
+    cache: LoweringCache,
 ) -> Result<PreparedRun, RunError> {
+    let (compilation, cache) = compile_and_warm(source, modules, config, cache)?;
+
+    // The machine word this run binds against: the manifest the invoker
+    // DECLARED through `VIX_MACHINE_MANIFEST`, or the harness default when
+    // nothing is declared. A declared file that fails to load is a loud typed
+    // error here at the entrypoint — never a silent default.
+    Ok(PreparedRun {
+        compilation,
+        cache,
+        manifest: crate::manifest::declared_manifest().map_err(RunError::Manifest)?,
+    })
+}
+
+/// Compile the source and lower every island the lanes will demand, leaving the
+/// cache warm. Split out from manifest resolution so an explicitly supplied
+/// machine word can skip the environment entirely — the declared PACKAGE file
+/// is a separate statement and is raised here either way, since it decides
+/// which types are nameable regardless of who states the machine word.
+fn compile_and_warm(
+    source: &str,
+    modules: &[vix::modules::ModuleSource<'_>],
+    config: CompilerConfig,
+    mut cache: LoweringCache,
+) -> Result<(vix::compiler::Compilation, LoweringCache), RunError> {
     // Raise a declared package file that failed to load BEFORE compiling.
     // `default_config` already attempted the same load (it has to, to know
     // which types are nameable) and dropped the error; this is where it
@@ -1082,27 +1135,10 @@ fn prepare_modules_with_cache(
         }
     }
 
-    // The machine word this run binds against: the manifest the invoker
-    // DECLARED through `VIX_MACHINE_MANIFEST`, or the harness default when
-    // nothing is declared. A declared file that fails to load is a loud typed
-    // error here at the entrypoint — never a silent default.
-    // `PreparedRun::with_manifest` still substitutes an explicit Rust value.
-    Ok(PreparedRun {
-        compilation,
-        cache,
-        manifest: crate::manifest::declared_manifest().map_err(RunError::Manifest)?,
-    })
+    Ok((compilation, cache))
 }
 
 impl PreparedRun {
-    /// Substitute the machine manifest the run binds against — the embedder's
-    /// declared machine word replacing the harness default.
-    #[must_use]
-    pub fn with_manifest(mut self, manifest: crate::manifest::MachineManifest) -> Self {
-        self.manifest = manifest;
-        self
-    }
-
     /// Run every declared test twice over the warm cache. The chaos lane discards
     /// the first running task at an edge safepoint and must publish the same
     /// identities. No compilation happens here: every `get_or_lower` is a hit.

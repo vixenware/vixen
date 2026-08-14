@@ -22,7 +22,51 @@ use vixen_runtime::manifest::{
     CapabilityOffer, MachineManifest, RefusalCause, TargetRequirement, ToolchainPin, host_target,
     static_requirements,
 };
-use vixen_runtime::ratchet::{RatchetReport, prepare_source, run_source_with_manifest};
+use vixen_runtime::ratchet::{
+    RatchetReport, prepare_source_with_manifest, run_source_with_manifest,
+};
+
+/// `VIX_MACHINE_MANIFEST` is process-global, and `cargo test` runs a suite's
+/// tests as threads in ONE process — so the two tests that certify env-declared
+/// discovery must not overlap with each other. Every other test in this file
+/// states its machine word in Rust and never reads the variable, which is what
+/// keeps this lock down to two holders. Under nextest each test is its own
+/// process and the lock is uncontended. See issue #14.
+static MANIFEST_ENV_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
+
+/// Run `body` with `VIX_MACHINE_MANIFEST` declaring `path`, holding the lock
+/// across set → run → restore so no other holder observes a half-state. The
+/// restore is a `Drop`, so a failing assertion inside `body` unwinds without
+/// leaving the variable set for whoever runs next. A poisoned lock is taken
+/// anyway: the only state it guards is the variable this guard restores.
+///
+/// What it restores is whatever was there BEFORE, not "nothing" — someone
+/// running `VIX_MACHINE_MANIFEST=… cargo test` has declared something about
+/// their own box, and this file gets to borrow the variable, not repossess it.
+fn with_declared_manifest<T>(path: &str, body: impl FnOnce() -> T) -> T {
+    struct Restore(Option<std::ffi::OsString>);
+    impl Drop for Restore {
+        fn drop(&mut self) {
+            // SAFETY: the lock is held, so no other test thread is reading or
+            // writing the variable.
+            unsafe {
+                match self.0.take() {
+                    Some(prior) => std::env::set_var(vixen_runtime::manifest::MANIFEST_ENV, prior),
+                    None => std::env::remove_var(vixen_runtime::manifest::MANIFEST_ENV),
+                }
+            }
+        }
+    }
+
+    let _guard = MANIFEST_ENV_LOCK
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
+    let _restore = Restore(std::env::var_os(vixen_runtime::manifest::MANIFEST_ENV));
+    // SAFETY: the lock is held, so no other test thread is reading or writing
+    // the variable, and it is set before any runtime thread exists.
+    unsafe { std::env::set_var(vixen_runtime::manifest::MANIFEST_ENV, path) };
+    body()
+}
 
 /// A manifest offering `capabilities` on an `x86_64-unknown-linux-gnu`-style
 /// host — the design note's "Linux-only machine", spelled with the actual
@@ -322,9 +366,8 @@ fn build(go: Go) -> Stream<Check> {
     let tools = tempfile::tempdir().expect("tool dir");
     let go = fake_tool(&tools, "go", "printf clean > target.txt");
     let backend = Arc::new(RecordingExecBackend::default());
-    let report = prepare_source(ENV_DEFAULTS)
+    let report = prepare_source_with_manifest(ENV_DEFAULTS, manifest(vec![offer("Go", &go, &[])]))
         .expect("the env-default case prepares")
-        .with_manifest(manifest(vec![offer("Go", &go, &[])]))
         .execute_with_primitive_services(
             PrimitiveServices::default().with_exec_backend(backend.clone()),
         )
@@ -998,12 +1041,8 @@ fn a_manifest_loaded_from_a_config_file_refuses_the_exe_case() {
 fn the_environment_declared_manifest_reaches_the_runnable_system() {
     let dir = tempfile::tempdir().expect("manifest dir");
     let path = manifest_file(&dir, LINUX_ONLY_TOML);
-    // SAFETY: nextest runs each test in its own process, and the variable is
-    // set before any runtime thread exists.
-    unsafe { std::env::set_var(vixen_runtime::manifest::MANIFEST_ENV, &path) };
-    let report = vixen_runtime::ratchet::run_source(EXE_CASE)
-        .expect("a binding refusal is a report verdict, never a runner error");
-    unsafe { std::env::remove_var(vixen_runtime::manifest::MANIFEST_ENV) };
+    let result = with_declared_manifest(&path, || vixen_runtime::ratchet::run_source(EXE_CASE));
+    let report = result.expect("a binding refusal is a report verdict, never a runner error");
     let refusal = assert_refused(&report);
     assert_eq!(refusal.required_type, "Rustc");
     assert_eq!(
@@ -1029,11 +1068,7 @@ fn a_missing_declared_manifest_is_a_loud_typed_error_never_a_silent_default() {
         .to_str()
         .expect("path is UTF-8")
         .to_owned();
-    // SAFETY: nextest runs each test in its own process, and the variable is
-    // set before any runtime thread exists.
-    unsafe { std::env::set_var(vixen_runtime::manifest::MANIFEST_ENV, &missing) };
-    let result = vixen_runtime::ratchet::run_source(EXE_CASE);
-    unsafe { std::env::remove_var(vixen_runtime::manifest::MANIFEST_ENV) };
+    let result = with_declared_manifest(&missing, || vixen_runtime::ratchet::run_source(EXE_CASE));
     let Err(vixen_runtime::ratchet::RunError::Manifest(
         vixen_runtime::manifest::ManifestLoadError::Unreadable { path, .. },
     )) = result
@@ -1062,7 +1097,7 @@ fn guarded(sh: Sh) -> Stream<Check> {
     yield expect(require(arch == "aarch64") where { message: "this build step needs an aarch64 machine" });
 }
 "#;
-    let report = vixen_runtime::ratchet::run_source(SOURCE)
+    let report = run_source_with_manifest(SOURCE, MachineManifest::ratchet_default())
         .expect("an unsatisfied requirement is a check verdict, never a runner error");
     assert!(
         !report.passed(),
@@ -1120,7 +1155,7 @@ fn guarded(sh: Sh) -> Stream<Check> {
     yield expect(require(arch == "x86_64") where { message: "this build step needs an x86_64 machine" });
 }
 "#;
-    let report = vixen_runtime::ratchet::run_source(SOURCE)
+    let report = run_source_with_manifest(SOURCE, MachineManifest::ratchet_default())
         .expect("a satisfied requirement runs ordinarily");
     assert!(report.passed(), "the satisfied guard passes: {report:#?}");
     assert!(report.agrees(), "lanes agree: {report:#?}");
