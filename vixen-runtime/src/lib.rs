@@ -87,7 +87,12 @@ pub fn default_primitive_dispatcher<Ctx>() -> PrimitiveDispatcher<Ctx> {
     // grammar out of the package registry at effect time, so the shipped
     // packages must be registered before anything dispatches (idempotent; an
     // invoker's own packages are registered at the entrypoint alongside these).
-    vixen_primitives::capability_package::register_default_packages();
+    //
+    // The conflict is dropped here for the same reason as in [`default_config`]
+    // — the entrypoint reports it typed — and a shipped name left unregistered
+    // by it surfaces at effect time as the exec primitive's "capability names
+    // no registered package" refusal, never as the wrong tool running.
+    let _ = vixen_primitives::capability_package::register_default_packages();
     let mut registry = PrimitiveRegistry::default();
     for primitive in builtin_primitives::<Ctx>() {
         registry

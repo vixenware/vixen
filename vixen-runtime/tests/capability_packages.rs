@@ -11,9 +11,12 @@
 //! The API is reachable, but a design whose only entry is a Rust call has not
 //! actually solved the problem.
 //!
-//! Note the same `cargo test` caveat as the manifest's environment tests
-//! (issue #14): these mutate process environment and are only safe under
-//! nextest's process-per-test, which is what `nix flake check` runs.
+//! That seam is one process-wide variable, so unlike the manifest's environment
+//! tests (issue #14) these hold [`declaration_lock`] for their whole body
+//! rather than relying on nextest's process-per-test. `nix flake check` runs
+//! nextest either way; the lock is what makes a plain `cargo test`, where the
+//! whole file shares one process, mean the same thing rather than measure
+//! which test set the variable last.
 
 #![cfg(unix)]
 
@@ -67,15 +70,37 @@ fn offer(ty: &str, program: &str, targets: &[&str]) -> CapabilityOffer {
     }
 }
 
+/// Held for the whole of any test that reads or writes the declaration
+/// variable — one declaration at a time, whichever runner is driving.
+static DECLARATION: std::sync::Mutex<()> = std::sync::Mutex::new(());
+
+/// A test that panics while holding the lock has said everything it has to
+/// say; poisoning the rest of the file on top of that reports one failure as
+/// several.
+fn declaration_lock() -> std::sync::MutexGuard<'static, ()> {
+    DECLARATION
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner)
+}
+
 /// Declare the packages for the rest of this test process.
 ///
 /// # Safety
 ///
-/// nextest runs each test in its own process and this is called before any
-/// runtime thread exists — the same discipline the manifest's environment
-/// tests use.
+/// The caller holds [`declaration_lock`], so no other test is reading or
+/// writing the variable, and this is called before any runtime thread exists —
+/// the same discipline the manifest's environment tests use.
 fn declare(path: &str) {
     unsafe { std::env::set_var(PACKAGES_ENV, path) };
+}
+
+/// Declare nothing, explicitly. Same safety argument as [`declare`].
+///
+/// A test whose claim is "nobody declared this" has to say so rather than
+/// assume it: the variable outlives whichever sibling set it, including that
+/// sibling's since-deleted tempdir path.
+fn undeclare() {
+    unsafe { std::env::remove_var(PACKAGES_ENV) };
 }
 
 /// The whole point, end to end: `Quartus` is a name no Rust in this workspace
@@ -93,6 +118,7 @@ fn synthesize(q: Quartus) -> Stream<Check> {
     yield expect_eq((out.tree / "bitstream.txt").text(), "fitted");
 }
 "#;
+    let _declaration = declaration_lock();
     let dir = tempfile::tempdir().expect("temp dir");
     declare(&packages_file(&dir, FOREIGN_PACKAGES));
     let quartus = fake_tool(&dir, "quartus_sh", "printf fitted > bitstream.txt");
@@ -107,27 +133,34 @@ fn synthesize(q: Quartus) -> Stream<Check> {
     }
 }
 
-/// The counterfactual that keeps the test above honest: without the
-/// declaration, `Quartus` is not a name at all. If this ever starts passing
-/// by accident — a package quietly shipped, the registry pre-seeded — the
-/// acceptance test above would still pass while proving nothing.
+/// The counterfactual that keeps the test above honest: a tool no file
+/// declared is not a name at all. If this ever starts passing by accident — a
+/// package quietly shipped, the registry pre-seeded — the acceptance test above
+/// would still pass while proving nothing.
+///
+/// The undeclared tool is `Nonesuch` rather than `Quartus` on purpose. The
+/// package registry is process-global and only grows, so under plain `cargo
+/// test` a sibling that declared `Quartus` would have made it nameable for the
+/// rest of the process and this test would be measuring test order. The name
+/// under test has to be one nothing in this file ever declares.
 ///
 /// r[verify vixen.capability.package-is-data]
 #[test]
 fn an_undeclared_tool_is_not_nameable() {
     const PROGRAM: &str = r#"
 #[test]
-fn synthesize(q: Quartus) -> Stream<Check> {
+fn synthesize(q: Nonesuch) -> Stream<Check> {
     yield expect_eq(1, 1);
 }
 "#;
-    // Deliberately no `declare(...)`: this is the undeclared case.
+    let _declaration = declaration_lock();
+    undeclare();
     let result = vixen_runtime::ratchet::run_source(PROGRAM);
     let Err(RunError::Diagnostics(diagnostics)) = result else {
         panic!("an undeclared capability type does not resolve, got {result:?}");
     };
     assert!(
-        format!("{diagnostics:?}").contains("Quartus"),
+        format!("{diagnostics:?}").contains("Nonesuch"),
         "the diagnostic names the unresolved type: {diagnostics:?}"
     );
 }
@@ -148,6 +181,7 @@ fn build(xc: Xcodebuild) -> Stream<Check> {
     yield expect_eq((out.tree / "app.txt").text(), "built");
 }
 "#;
+    let _declaration = declaration_lock();
     let dir = tempfile::tempdir().expect("temp dir");
     declare(&packages_file(&dir, FOREIGN_PACKAGES));
     let xcodebuild = fake_tool(&dir, "xcodebuild", "printf built > app.txt");
@@ -189,6 +223,7 @@ fn build(xc: Xcodebuild) -> Stream<Check> {
     yield expect_eq((out.tree / "app.txt").text(), "built");
 }
 "#;
+    let _declaration = declaration_lock();
     let dir = tempfile::tempdir().expect("temp dir");
     declare(&packages_file(&dir, FOREIGN_PACKAGES));
     let xcodebuild = fake_tool(&dir, "xcodebuild", "printf built > app.txt");
@@ -209,6 +244,7 @@ fn build(xc: Xcodebuild) -> Stream<Check> {
 /// r[verify vixen.capability.package-is-data]
 #[test]
 fn a_missing_declared_packages_file_is_a_loud_typed_error() {
+    let _declaration = declaration_lock();
     let dir = tempfile::tempdir().expect("temp dir");
     let missing = dir
         .path()
@@ -234,6 +270,7 @@ fn a_missing_declared_packages_file_is_a_loud_typed_error() {
 /// r[verify vixen.capability.package-is-data]
 #[test]
 fn a_malformed_declared_packages_file_is_a_loud_typed_error() {
+    let _declaration = declaration_lock();
     let dir = tempfile::tempdir().expect("temp dir");
     let path = packages_file(
         &dir,
@@ -270,6 +307,7 @@ protocol = "telepathy"
 /// r[verify vixen.capability.package-is-data]
 #[test]
 fn redefining_a_registered_package_refuses() {
+    let _declaration = declaration_lock();
     let dir = tempfile::tempdir().expect("temp dir");
     let path = packages_file(
         &dir,

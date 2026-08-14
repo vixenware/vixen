@@ -69,20 +69,51 @@ pub const HOST_TYPES: &[vix::binding::HostTypeDecl] = &[
 /// which meant a new tool needed two Rust edits to be usable and one to be
 /// silently unusable.
 ///
+/// The shipped packages are registered here rather than assumed: this function
+/// READS the registry, so a caller that had not registered them yet would be
+/// handed an empty nameable set — a compiler in which `Sh` does not resolve,
+/// reported as the program naming an unknown type. Registration is idempotent,
+/// so the entrypoints that also register lose nothing by it.
+///
 /// The returned slice is leaked because
-/// [`vix::compiler::CompilerConfig::capabilities`] is `&'static` — bounded by
-/// the number of distinct registered sets a process builds a config from.
+/// [`vix::compiler::CompilerConfig::capabilities`] is `&'static`, and memoized
+/// on the name set so the leak really is bounded by the number of distinct
+/// registered sets a process builds a config from rather than by how many
+/// configs it builds.
 ///
 /// r[impl machine.primitive.capabilities-by-identity]
 #[must_use]
 pub fn capability_types() -> &'static [vix::binding::CapabilityTypeDecl] {
-    let decls: Vec<vix::binding::CapabilityTypeDecl> =
-        capability_package::registered_package_names()
-            .into_iter()
-            .map(|name| vix::binding::CapabilityTypeDecl { name })
-            .collect();
-    Box::leak(decls.into_boxed_slice())
+    // An embedder that registered a contradicting `Sh` before this point is a
+    // conflict the entrypoint reports as a typed failure
+    // (`vixen_runtime::manifest::declared_packages`). Dropping it here leaves
+    // that name bound to the embedder's grammar and the rest of the shipped
+    // set registered as usual — it can never bind a name to the wrong package.
+    let _ = capability_package::register_default_packages();
+    let names = capability_package::registered_package_names();
+    let mut memo = CAPABILITY_TYPES.lock().expect("type memo is not poisoned");
+    if let Some((_, decls)) = memo.iter().find(|(registered, _)| *registered == names) {
+        return decls;
+    }
+    let decls: &'static [vix::binding::CapabilityTypeDecl] = Box::leak(
+        names
+            .iter()
+            .map(|&name| vix::binding::CapabilityTypeDecl { name })
+            .collect::<Vec<_>>()
+            .into_boxed_slice(),
+    );
+    memo.push((names, decls));
+    decls
 }
+
+/// The leaked slices [`capability_types`] has already handed out, keyed by the
+/// registered name set they were built from.
+static CAPABILITY_TYPES: std::sync::Mutex<
+    Vec<(
+        Vec<&'static str>,
+        &'static [vix::binding::CapabilityTypeDecl],
+    )>,
+> = std::sync::Mutex::new(Vec::new());
 
 /// Reserve `vixen`'s host-extern type names ([`HOST_TYPES`]) with `vix-core`'s
 /// schema batch — the identity anchor that lets an injected `HostTypeDecl`
