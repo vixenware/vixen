@@ -83,6 +83,11 @@ pub fn default_primitive_dispatcher<Ctx>() -> PrimitiveDispatcher<Ctx> {
     // is the schema-registration seam that keeps `Tree`/`TreeEntry` out of
     // `vix-core`'s hardcoded builtin list (idempotent).
     vixen_primitives::register_host_types();
+    // The exec primitive reads its capability's output protocol and command
+    // grammar out of the package registry at effect time, so the shipped
+    // packages must be registered before anything dispatches (idempotent; an
+    // invoker's own packages are registered at the entrypoint alongside these).
+    vixen_primitives::capability_package::register_default_packages();
     let mut registry = PrimitiveRegistry::default();
     for primitive in builtin_primitives::<Ctx>() {
         registry
@@ -140,11 +145,22 @@ pub fn default_config() -> CompilerConfig {
     // are declared — the schema-registration seam that keeps `Tree`/`TreeEntry`
     // out of `vix-core`'s hardcoded builtin list (idempotent).
     vixen_primitives::register_host_types();
+    // A capability type is nameable because a package is registered for it, so
+    // both the shipped packages and whatever the invoker declared must be
+    // registered before the config reads the set. This is what makes a tool
+    // this workspace has never heard of nameable in a program.
+    //
+    // The error is dropped HERE and raised at the entrypoint
+    // ([`ratchet::prepare_source_with_cache`]), which is the only place that
+    // can report it as a typed failure rather than a panic. A declared file
+    // that fails to load registers nothing, so it can only ever narrow the
+    // nameable set — never widen it wrongly.
+    let _ = crate::manifest::declared_packages();
     CompilerConfig {
         prelude: vixen_primitives::stdlib::PRELUDE_SOURCES,
         methods: vixen_primitives::DOMAIN_METHODS,
         host_types: vixen_primitives::HOST_TYPES,
-        capabilities: vixen_primitives::CAPABILITY_TYPES,
+        capabilities: vixen_primitives::capability_types(),
         // The offline harness's fixture spellings, declared here (the
         // harness half of the system) rather than in `vixen-primitives`:
         // `fixture_tree`/`fixture_registry` name entries of the fixture
