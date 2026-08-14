@@ -1,7 +1,7 @@
-use vixen_runtime::ratchet::{RunError, prepare_source};
 use vix::runtime::{
     PersistentClaimRejectionReason, PersistentRuntimeJournalError, StoreJournalError,
 };
+use vixen_runtime::ratchet::{RunError, prepare_source};
 
 const UNCHANGED_TREE_READ: &str = r#"
 fn manifest_name(tree: Tree) -> String {

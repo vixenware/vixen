@@ -373,7 +373,10 @@ fn t() -> Stream<Check> {
     )
     .expect("two payload types in one island run");
     assert!(run.agrees());
-    assert!(run.plain.checks[0].passed, "the arm that resolves is unaffected");
+    assert!(
+        run.plain.checks[0].passed,
+        "the arm that resolves is unaffected"
+    );
     let payloads = run.plain.checks[1..]
         .iter()
         .map(|check| match check.failure.clone() {
@@ -456,5 +459,8 @@ fn t() -> Stream<Check> {
         interpreter.plain.check_family(),
         "the two authorities raise the same failure, payload identity included",
     );
-    assert_eq!(native.plain.value_family(), interpreter.plain.value_family());
+    assert_eq!(
+        native.plain.value_family(),
+        interpreter.plain.value_family()
+    );
 }

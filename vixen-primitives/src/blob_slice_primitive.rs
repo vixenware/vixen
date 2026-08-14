@@ -21,9 +21,10 @@ use vix::schema::SchemaPattern;
 use vix::vir::{ExternKind, Type};
 
 use crate::rt::{
-    EffectCtx, PrimitiveCompletion, PrimitiveDescriptor, PrimitiveFieldValue, PrimitiveMachineError,
-    PrimitiveMemoPolicy, PrimitiveValue, PrimitiveValueBody, RawEffectTicket, RawPrimitive,
-    ReadProjection, ValueId, blob_slice_primitive_id, blob_slice_request_type,
+    EffectCtx, PrimitiveCompletion, PrimitiveDescriptor, PrimitiveFieldValue,
+    PrimitiveMachineError, PrimitiveMemoPolicy, PrimitiveValue, PrimitiveValueBody,
+    RawEffectTicket, RawPrimitive, ReadProjection, ValueId, blob_slice_primitive_id,
+    blob_slice_request_type,
 };
 
 pub struct BlobSlicePrimitive {
@@ -36,9 +37,7 @@ impl Default for BlobSlicePrimitive {
             descriptor: PrimitiveDescriptor {
                 id: blob_slice_primitive_id(),
                 request_schema: SchemaPattern::exact(&blob_slice_request_type().schema_ref()),
-                response_schema: SchemaPattern::exact(
-                    &Type::Extern(ExternKind::Blob).schema_ref(),
-                ),
+                response_schema: SchemaPattern::exact(&Type::Extern(ExternKind::Blob).schema_ref()),
                 failure_schema: SchemaPattern::Var {
                     name: "BlobSliceFailure".to_owned(),
                 },

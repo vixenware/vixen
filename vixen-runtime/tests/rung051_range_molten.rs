@@ -17,9 +17,9 @@
 
 use vix::compiler::{Compiler, CompilerConfig};
 use vix::lowering::LoweringCache;
-use vixen_runtime::ratchet::{RunError, run_source, run_source_with_config};
 use vix::runtime::EventKind;
 use vix::vir::Op as VirOp;
+use vixen_runtime::ratchet::{RunError, run_source, run_source_with_config};
 use weavy::task::Op as WeavyOp;
 
 // ---------------------------------------------------------------------------

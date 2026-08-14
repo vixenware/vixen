@@ -321,7 +321,9 @@ pub enum ReadObservation {
     ///
     /// r[impl machine.primitive.witness-reverification]
     Missing = 1,
-    Directory { digest: super::identity::Digest } = 2,
+    Directory {
+        digest: super::identity::Digest,
+    } = 2,
     Unverifiable = 3,
     /// The entry exists with this kind, contradicting the projection's
     /// request — a file read that found a directory. Deliberately not a

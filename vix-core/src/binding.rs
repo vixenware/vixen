@@ -388,9 +388,9 @@ impl BindingRegistry {
     /// same-named method never collide.
     #[must_use]
     pub fn prelude(&self, name: &str) -> Option<&Binding> {
-        self.bindings.iter().find(|b| {
-            b.name == name && b.placement == Placement::Prelude && b.receiver.is_none()
-        })
+        self.bindings
+            .iter()
+            .find(|b| b.name == name && b.placement == Placement::Prelude && b.receiver.is_none())
     }
 
     /// Resolve a fully-qualified `module::name` (free-function bindings only).
@@ -491,12 +491,37 @@ const METHOD_BINDINGS: &[(ReceiverType, &str, usize, MethodOp)] = &[
     (ReceiverType::Array, "len", 0, MethodOp::ArrayLen),
     (ReceiverType::Array, "map", 1, MethodOp::ArrayMap),
     (ReceiverType::Array, "fold", 2, MethodOp::ArrayFold),
-    (ReceiverType::Array, "split_last", 0, MethodOp::ArraySplitLast),
+    (
+        ReceiverType::Array,
+        "split_last",
+        0,
+        MethodOp::ArraySplitLast,
+    ),
     (ReceiverType::String, "trim", 0, MethodOp::StringTrim),
-    (ReceiverType::String, "contains", 1, MethodOp::StringContains),
-    (ReceiverType::String, "split_once", 1, MethodOp::StringSplitOnce),
-    (ReceiverType::String, "parse_int", 0, MethodOp::StringParseInt),
-    (ReceiverType::String, "is_numeric", 0, MethodOp::StringIsNumeric),
+    (
+        ReceiverType::String,
+        "contains",
+        1,
+        MethodOp::StringContains,
+    ),
+    (
+        ReceiverType::String,
+        "split_once",
+        1,
+        MethodOp::StringSplitOnce,
+    ),
+    (
+        ReceiverType::String,
+        "parse_int",
+        0,
+        MethodOp::StringParseInt,
+    ),
+    (
+        ReceiverType::String,
+        "is_numeric",
+        0,
+        MethodOp::StringIsNumeric,
+    ),
     (ReceiverType::String, "lines", 0, MethodOp::StringLines),
     (ReceiverType::Array, "sorted", 0, MethodOp::ArraySorted),
     (ReceiverType::Array, "stream", 0, MethodOp::ArrayStream),
@@ -511,10 +536,20 @@ const METHOD_BINDINGS: &[(ReceiverType, &str, usize, MethodOp)] = &[
     (ReceiverType::Set, "len", 0, MethodOp::SetLen),
     (ReceiverType::Set, "values", 0, MethodOp::SetValues),
     (ReceiverType::Stream, "filter", 1, MethodOp::StreamFilter),
-    (ReceiverType::Stream, "filter_map", 1, MethodOp::StreamFilterMap),
+    (
+        ReceiverType::Stream,
+        "filter_map",
+        1,
+        MethodOp::StreamFilterMap,
+    ),
     (ReceiverType::Stream, "flat_map", 1, MethodOp::StreamFlatMap),
     (ReceiverType::Stream, "collect", 0, MethodOp::StreamCollect),
-    (ReceiverType::Stream, "split_min", 0, MethodOp::StreamSplitMin),
+    (
+        ReceiverType::Stream,
+        "split_min",
+        0,
+        MethodOp::StreamSplitMin,
+    ),
     (ReceiverType::Path, "to_string", 0, MethodOp::PathToString),
     (ReceiverType::Int, "to_string", 0, MethodOp::IntToString),
     // The domain methods (`Tree.glob`, `TreeEntry.text`, `Blob.len`,
@@ -787,9 +822,7 @@ static PRELUDE_NAMES: LazyLock<BTreeSet<String>> = LazyLock::new(|| {
     BUILTIN_BINDINGS
         .bindings()
         .iter()
-        .filter(|binding| {
-            binding.placement == Placement::Prelude && binding.receiver.is_none()
-        })
+        .filter(|binding| binding.placement == Placement::Prelude && binding.receiver.is_none())
         .map(|binding| binding.name.clone())
         .collect()
 });
@@ -856,7 +889,10 @@ mod tests {
             "try_json_decode",
             "try_toml_decode",
         ] {
-            assert!(reg.prelude(alias).is_none(), "{alias} is not a core binding");
+            assert!(
+                reg.prelude(alias).is_none(),
+                "{alias} is not a core binding"
+            );
             assert!(
                 reg.qualified(&std, alias).is_none(),
                 "std::{alias} is not a core binding"
@@ -927,7 +963,12 @@ mod tests {
         // …but the injected-aware seam resolves it under `std`, and only there.
         assert!(is_qualified_binding_with(&surfaces, &[], "std", "grab"));
         assert!(!is_qualified_binding_with(&surfaces, &[], "other", "grab"));
-        assert!(!is_qualified_binding_with(&surfaces, &[], "std", "not_injected"));
+        assert!(!is_qualified_binding_with(
+            &surfaces,
+            &[],
+            "std",
+            "not_injected"
+        ));
 
         // The static bundled names still resolve through the same seam.
         assert!(is_qualified_binding_with(&surfaces, &[], "std", "fetch"));
@@ -975,7 +1016,17 @@ mod tests {
         // The qualified-binding seam resolves a declared constant under
         // `std`, and only there — `use std::pinned_note` works like any
         // injected surface's import.
-        assert!(is_qualified_binding_with(&[], &constants, "std", "pinned_note"));
-        assert!(!is_qualified_binding_with(&[], &constants, "other", "pinned_note"));
+        assert!(is_qualified_binding_with(
+            &[],
+            &constants,
+            "std",
+            "pinned_note"
+        ));
+        assert!(!is_qualified_binding_with(
+            &[],
+            &constants,
+            "other",
+            "pinned_note"
+        ));
     }
 }

@@ -448,8 +448,14 @@ fn alias(sh: Sh) -> Stream<Check> {
     // projection publication for the two spellings — the second submission
     // joined the first's demand rather than opening a second serving.
     assert_eq!(
-        report.plain.counters.progressive_effect_protocol_publications
-            + report.plain.counters.progressive_effect_completion_publications
+        report
+            .plain
+            .counters
+            .progressive_effect_protocol_publications
+            + report
+                .plain
+                .counters
+                .progressive_effect_completion_publications
             + report.plain.counters.progressive_effect_replay_publications,
         1,
         "two spellings, one served projection: {:#?}",

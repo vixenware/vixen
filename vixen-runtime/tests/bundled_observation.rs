@@ -6,8 +6,8 @@
 //! framed argument identities) without adding a scheduler edge, so
 //! `demanded_once` distinguishes exact preimages while equal preimages share.
 
-use vixen_runtime::ratchet::run_source;
 use vix::runtime::EventKind;
+use vixen_runtime::ratchet::run_source;
 
 const COSTLY: &str = "fn costly(n: Int) -> Int { n * 1000 }\n";
 

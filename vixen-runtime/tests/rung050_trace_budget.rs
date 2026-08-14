@@ -25,11 +25,13 @@
 
 use std::path::Path;
 
-use vixen_runtime::budget::{BudgetOutcome, Workload, run_source_under_declared_budget, run_under_budget};
 use vix::compiler::Compiler;
 use vix::diagnostic::DiagnosticCode;
-use vixen_runtime::ratchet::run_source;
 use vix::vir::Budget;
+use vixen_runtime::budget::{
+    BudgetOutcome, Workload, run_source_under_declared_budget, run_under_budget,
+};
+use vixen_runtime::ratchet::run_source;
 
 const RUNG_050: &str = include_str!("ratchet/050-deep-tail-recursion.vix");
 

@@ -43,20 +43,34 @@ pub struct PrimitiveDescriptor {
 #[derive(facet::Facet, Clone, Debug, PartialEq, Eq)]
 #[repr(u8)]
 pub enum PrimitiveMachineError {
-    Unavailable { detail: String },
+    Unavailable {
+        detail: String,
+    },
     Cancelled,
-    Exhausted { detail: String },
-    PolicyRejected { detail: String },
-    CorruptCandidate { source: ValueId },
-    InvalidRequest { request: ValueId },
-    AuthorityViolation { detail: String },
+    Exhausted {
+        detail: String,
+    },
+    PolicyRejected {
+        detail: String,
+    },
+    CorruptCandidate {
+        source: ValueId,
+    },
+    InvalidRequest {
+        request: ValueId,
+    },
+    AuthorityViolation {
+        detail: String,
+    },
     /// The origin taxonomy's miss: a coordinate or tree projection found
     /// nothing. Distinct from [`Self::Unavailable`] because a miss is an
     /// *observation* — a multi-origin fetch may fall through it, and
     /// [`EffectCtx`] witnesses it as `ReadObservation::Missing`.
     ///
     /// r[impl machine.primitive.origin-verbs]
-    ProjectionMissing { detail: String },
+    ProjectionMissing {
+        detail: String,
+    },
     /// A tree projection found the entry with a kind contradicting the
     /// request (a file read that found a directory). Not a miss: the entry
     /// exists, and the audit must be able to tell "appeared" from "changed
@@ -72,12 +86,16 @@ pub enum PrimitiveMachineError {
     /// installed — the anti-conjuring answer. Never witnessed: nobody looked.
     ///
     /// r[impl machine.primitive.origin-routing]
-    OriginUnroutable { detail: String },
+    OriginUnroutable {
+        detail: String,
+    },
     /// The origin taxonomy's corruption: a backend served something it knows
     /// is wrong. Stops the demand; never falls through.
     ///
     /// r[impl machine.primitive.origin-verbs]
-    OriginCorrupt { detail: String },
+    OriginCorrupt {
+        detail: String,
+    },
 }
 
 #[derive(facet::Facet, Clone, Debug, PartialEq, Eq)]
@@ -408,11 +426,9 @@ pub trait EffectAuthority: Send + Sync {
             PrimitiveValueBody::Product(_)
             | PrimitiveValueBody::Sequence { .. }
             | PrimitiveValueBody::Variant { .. }
-            | PrimitiveValueBody::OrderedMap(_) => {
-                Err(PrimitiveMachineError::AuthorityViolation {
-                    detail: "effect authority does not admit structural values".to_owned(),
-                })
-            }
+            | PrimitiveValueBody::OrderedMap(_) => Err(PrimitiveMachineError::AuthorityViolation {
+                detail: "effect authority does not admit structural values".to_owned(),
+            }),
         }
     }
 
@@ -645,9 +661,7 @@ impl EffectAuthority for StagedEffectAuthority {
                         }
                     })?;
                     match tree.project(path) {
-                        Some(super::TreeEntry::File { content, .. }) => {
-                            content.as_bytes().to_vec()
-                        }
+                        Some(super::TreeEntry::File { content, .. }) => content.as_bytes().to_vec(),
                         Some(entry) => {
                             let found = match entry {
                                 super::TreeEntry::File { .. } => super::TreeEntryKind::File,
@@ -1078,8 +1092,7 @@ impl EffectCtx {
                     && read.provenance.is_none()
             })
             .ok_or_else(|| PrimitiveMachineError::AuthorityViolation {
-                detail: "provenance attestation names no recorded served-value witness"
-                    .to_owned(),
+                detail: "provenance attestation names no recorded served-value witness".to_owned(),
             })?;
         witness.provenance = Some(provenance);
         Ok(())

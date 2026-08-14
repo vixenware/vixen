@@ -95,7 +95,9 @@ fn unchanged(xs: [Int]) -> [Int] {
         "both discarded arm tails are reported: {warnings:?}"
     );
     assert!(
-        warnings.iter().all(|warning| warning.contains("UnusedMustUse")),
+        warnings
+            .iter()
+            .all(|warning| warning.contains("UnusedMustUse")),
         "{warnings:?}"
     );
 }

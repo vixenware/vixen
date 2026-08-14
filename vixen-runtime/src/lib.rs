@@ -45,8 +45,8 @@ use vix::runtime::{
 };
 use vixen_primitives::{
     BlobGunzipPrimitive, BlobLenPrimitive, BlobSlicePrimitive, BlobTextPrimitive, DecodePrimitive,
-    ExecPrimitive, PinnedFetchPrimitive, RegistryUrlPrimitive, TreeGlobPrimitive, TreeReadPrimitive,
-    TypedAdapter, UntarPrimitive,
+    ExecPrimitive, PinnedFetchPrimitive, RegistryUrlPrimitive, TreeGlobPrimitive,
+    TreeReadPrimitive, TypedAdapter, UntarPrimitive,
 };
 
 /// The built-in registered primitives, as data: this is the *one* place that

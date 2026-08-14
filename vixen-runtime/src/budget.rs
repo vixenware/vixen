@@ -613,9 +613,8 @@ fn resident_bytes(pid: u32) -> Option<u64> {
     // SAFETY: `OpenProcess` is a plain FFI call; it returns a null handle on
     // failure (e.g. the child has exited), which we treat as an unobservable
     // sample. The `0` is the `bInheritHandle` BOOL.
-    let handle = unsafe {
-        OpenProcess(PROCESS_QUERY_LIMITED_INFORMATION | PROCESS_VM_READ, 0, pid)
-    };
+    let handle =
+        unsafe { OpenProcess(PROCESS_QUERY_LIMITED_INFORMATION | PROCESS_VM_READ, 0, pid) };
     if handle.is_null() {
         return None;
     }

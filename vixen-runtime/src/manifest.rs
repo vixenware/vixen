@@ -594,7 +594,11 @@ pub fn test_requirements(partitioned: &PartitionedTest) -> TestRequirements {
         // are mutually exclusive per parameter (the compiler refuses both), so
         // at most one of these adds anything for a given declaration.
         let declared = [
-            capability.constraints.toolchain.as_ref().map(|pin| ToolchainPin::Exact(pin.clone())),
+            capability
+                .constraints
+                .toolchain
+                .as_ref()
+                .map(|pin| ToolchainPin::Exact(pin.clone())),
             capability
                 .constraints
                 .toolchain_range

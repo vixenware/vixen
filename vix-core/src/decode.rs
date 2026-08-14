@@ -554,9 +554,10 @@ fn decode_fields<'de>(
                             // distinguish the two spellings; until it does, this
                             // decoder cannot, and pretending otherwise by
                             // guessing would be worse than saying so.
-                            Some(existing) if format == DecodeFormat::Toml
-                                && as_array(&existing).is_some()
-                                && as_array(&value).is_some() =>
+                            Some(existing)
+                                if format == DecodeFormat::Toml
+                                    && as_array(&existing).is_some()
+                                    && as_array(&value).is_some() =>
                             {
                                 // MOVE both sides in. Cloning the accumulator
                                 // here would deep-copy every record decoded so
@@ -565,8 +566,7 @@ fn decode_fields<'de>(
                                 // work exists to read (a real lock has hundreds).
                                 let (mut first, optional) =
                                     into_array(existing).expect("guarded by as_array");
-                                let (rest, _) =
-                                    into_array(value).expect("guarded by as_array");
+                                let (rest, _) = into_array(value).expect("guarded by as_array");
                                 first.extend(rest);
                                 let merged = DecodedValue::Array(first);
                                 // An `Option<[T]>` field wraps its sequence, so

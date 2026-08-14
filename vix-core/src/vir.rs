@@ -1615,7 +1615,10 @@ pub enum Op {
     /// an unpinned observation), never one the program computed. `root`
     /// declares the publication shape: a root is its own scheduler-published
     /// effect island; a non-root realizes in-frame as a lowered constant.
-    DeclaredConst { bytes: Vec<u8>, root: bool },
+    DeclaredConst {
+        bytes: Vec<u8>,
+        root: bool,
+    },
 }
 
 /// One SSA-like operation. Dependencies are explicit node ids; no Rust
@@ -1937,7 +1940,11 @@ pub enum ProgressiveProjection {
     /// is the response record's field name, `[start, end)` the half-open
     /// range. Served the moment the published frontier covers `end` — while
     /// the producer still runs.
-    StreamRange { stream: String, start: u64, end: u64 },
+    StreamRange {
+        stream: String,
+        start: u64,
+        end: u64,
+    },
 }
 
 /// The described invocation a hoisted value or wire island realizes: the callee
@@ -4966,7 +4973,10 @@ fn canonical_node(node: &Node, function_ids: &BTreeMap<FunctionId, u32>) -> Vec<
         // surfaces on `Op::DeclaredConst`; like exec's 85 they stay
         // unassigned so no historical recipe identity is ever reused. (97,
         // `Op::Untar`, is likewise reserved from its own retirement.)
-        Op::DeclaredConst { bytes: constant, root } => {
+        Op::DeclaredConst {
+            bytes: constant,
+            root,
+        } => {
             op.push(103);
             op.push(u8::from(*root));
             frame(&mut op, constant);

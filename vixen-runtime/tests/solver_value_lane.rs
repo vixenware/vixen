@@ -6,8 +6,8 @@
 //! canonical source intentionally names a fixture provider.
 
 use vix::diagnostic::{DiagnosticCode, DiagnosticPayload};
-use vixen_runtime::ratchet::{RunError, prepare_source, run_source};
 use vix::runtime::{EventKind, MemoVerdict, PersistentClaimRejectionReason};
+use vixen_runtime::ratchet::{RunError, prepare_source, run_source};
 
 const STD_VERSION: &str = include_str!("../std/version.vix");
 const RUNG_085: &str = include_str!("ratchet/085-index-rows.vix");

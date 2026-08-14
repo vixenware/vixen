@@ -544,7 +544,10 @@ mod tests {
         // A strict prefix of an installed namespace: every handle the
         // installed adapter owns would also be claimed by this one.
         assert_eq!(
-            set.install(decl("second", &["b"], Some(b"sample")), Arc::new(NullAdapter)),
+            set.install(
+                decl("second", &["b"], Some(b"sample")),
+                Arc::new(NullAdapter)
+            ),
             Err(OriginInstallError::NamespaceOverlap {
                 first: "first".to_owned(),
                 second: "second".to_owned(),

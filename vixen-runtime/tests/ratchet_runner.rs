@@ -4,12 +4,6 @@ use vix::compiler::{Compiler, CompilerConfig};
 use vix::diagnostic::{DiagnosticCode, DiagnosticPayload, DiagnosticSeverity};
 use vix::lowering::{LoweringCache, attribution_for, source_map_for};
 use vix::modules::ModuleSource;
-use vixen_runtime::ratchet::{
-    RunError, SnapshotExpectations, run_source, run_source_innards, run_source_rerun_audit,
-    run_source_rerun_audit_with_lane, run_source_revision_audit,
-    run_source_revision_audit_with_lane, run_source_with_modules, run_source_with_snapshots,
-    run_source_with_snapshots_and_lane,
-};
 use vix::runtime::{
     DemandState, EventKind, FailureValue, MemoVerdict, ProcessTermination, SnapshotOutcome,
     TaskState,
@@ -19,6 +13,12 @@ use vix::vir::{
     ArrayMapExecutionShape, ArrayMapGrainKey, EffectKind, FunctionId, GeneratorControl,
     GeneratorStep, NodeRef, OPTION_NONE_VARIANT, OPTION_SOME_VARIANT, Op as VirOp, Type as VirType,
     VariantPayload, canonical_recipe,
+};
+use vixen_runtime::ratchet::{
+    RunError, SnapshotExpectations, run_source, run_source_innards, run_source_rerun_audit,
+    run_source_rerun_audit_with_lane, run_source_revision_audit,
+    run_source_revision_audit_with_lane, run_source_with_modules, run_source_with_snapshots,
+    run_source_with_snapshots_and_lane,
 };
 use weavy::task::Op as WeavyOp;
 use weavy::{LaneRequest, PayloadKind, RegionShape, ValueShapeKind, WordKind};
@@ -7250,7 +7250,10 @@ fn rung_061_snapshots_sorted_stream_values_are_canonical() {
 
 /// Run inline snapshot source against an oracle and return the checks in site
 /// order (plain lane); asserts lanes agree so every assertion is lane-stable.
-fn snapshot_checks(source: &str, oracle: &SnapshotExpectations) -> Vec<vixen_runtime::ratchet::CheckRun> {
+fn snapshot_checks(
+    source: &str,
+    oracle: &SnapshotExpectations,
+) -> Vec<vixen_runtime::ratchet::CheckRun> {
     let report = run_source_with_snapshots(source, oracle).expect("snapshot source runs");
     assert!(report.agrees(), "plain and chaos lanes agree");
     report.plain.checks.clone()

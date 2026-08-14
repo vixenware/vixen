@@ -548,8 +548,7 @@ static REGISTERED_HOST_EXTERNS: Mutex<BTreeSet<&'static str>> = Mutex::new(BTree
 
 /// The memoized standalone identity of each registered host extern, so repeated
 /// `builtin_schema` lookups don't re-resolve the same `External` leaf.
-static HOST_EXTERN_SCHEMAS: Mutex<BTreeMap<&'static str, SchemaRef>> =
-    Mutex::new(BTreeMap::new());
+static HOST_EXTERN_SCHEMAS: Mutex<BTreeMap<&'static str, SchemaRef>> = Mutex::new(BTreeMap::new());
 
 /// Register embedder host-extern type names so the core recognizes their nominal
 /// identity — the one remaining schema touchpoint for adding a domain host type.

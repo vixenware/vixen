@@ -292,10 +292,9 @@ impl VersionRange {
     #[must_use]
     pub fn matches(&self, version: &OrderedVersion) -> bool {
         if version.prerelease.is_some()
-            && !self
-                .bounds
-                .iter()
-                .any(|bound| bound.version.prerelease.is_some() && bound.version.same_release(version))
+            && !self.bounds.iter().any(|bound| {
+                bound.version.prerelease.is_some() && bound.version.same_release(version)
+            })
         {
             return false;
         }
@@ -333,7 +332,6 @@ impl core::fmt::Display for VersionRange {
 // second crate, tested while the copy that actually runs was not. Its
 // acceptance test is `machine_manifest::
 // an_exact_pin_that_is_plainly_a_range_is_refused_at_compile_time`.
-
 
 #[cfg(test)]
 mod tests {
@@ -624,7 +622,10 @@ mod tests {
 
     #[test]
     fn a_range_with_no_bounds_is_refused() {
-        assert!(matches!(VersionRange::parse(""), Err(RangeParseError::Empty)));
+        assert!(matches!(
+            VersionRange::parse(""),
+            Err(RangeParseError::Empty)
+        ));
         assert!(matches!(
             VersionRange::parse("   "),
             Err(RangeParseError::Empty)

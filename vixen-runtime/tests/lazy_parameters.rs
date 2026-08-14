@@ -12,8 +12,8 @@ use std::collections::BTreeMap;
 
 use vix::compiler::Compiler;
 use vix::lowering::LoweringCache;
-use vixen_runtime::ratchet::run_source;
 use vix::runtime::{EventKind, FailureValue};
+use vixen_runtime::ratchet::run_source;
 use weavy::task::Op as WeavyOp;
 
 /// Frame-entry counts by callee name — direct evidence of what executed.
