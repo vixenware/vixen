@@ -35,27 +35,36 @@ use vixen_runtime::ratchet::{
 static MANIFEST_ENV_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
 
 /// Run `body` with `VIX_MACHINE_MANIFEST` declaring `path`, holding the lock
-/// across set → run → remove so no other holder observes a half-state. The
-/// removal is a `Drop`, so a failing assertion inside `body` unwinds without
+/// across set → run → restore so no other holder observes a half-state. The
+/// restore is a `Drop`, so a failing assertion inside `body` unwinds without
 /// leaving the variable set for whoever runs next. A poisoned lock is taken
 /// anyway: the only state it guards is the variable this guard restores.
+///
+/// What it restores is whatever was there BEFORE, not "nothing" — someone
+/// running `VIX_MACHINE_MANIFEST=… cargo test` has declared something about
+/// their own box, and this file gets to borrow the variable, not repossess it.
 fn with_declared_manifest<T>(path: &str, body: impl FnOnce() -> T) -> T {
-    struct Restore;
+    struct Restore(Option<std::ffi::OsString>);
     impl Drop for Restore {
         fn drop(&mut self) {
             // SAFETY: the lock is held, so no other test thread is reading or
             // writing the variable.
-            unsafe { std::env::remove_var(vixen_runtime::manifest::MANIFEST_ENV) };
+            unsafe {
+                match self.0.take() {
+                    Some(prior) => std::env::set_var(vixen_runtime::manifest::MANIFEST_ENV, prior),
+                    None => std::env::remove_var(vixen_runtime::manifest::MANIFEST_ENV),
+                }
+            }
         }
     }
 
     let _guard = MANIFEST_ENV_LOCK
         .lock()
         .unwrap_or_else(std::sync::PoisonError::into_inner);
+    let _restore = Restore(std::env::var_os(vixen_runtime::manifest::MANIFEST_ENV));
     // SAFETY: the lock is held, so no other test thread is reading or writing
     // the variable, and it is set before any runtime thread exists.
     unsafe { std::env::set_var(vixen_runtime::manifest::MANIFEST_ENV, path) };
-    let _restore = Restore;
     body()
 }
 

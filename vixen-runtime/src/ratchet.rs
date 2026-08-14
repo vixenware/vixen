@@ -726,8 +726,10 @@ pub struct PreparedRun {
     /// (`vixen.machine.manifest`). Resolved at preparation through
     /// [`crate::manifest::declared_manifest`]: the file `VIX_MACHINE_MANIFEST`
     /// explicitly declares, or [`MachineManifest::ratchet_default`] when
-    /// nothing is declared. [`PreparedRun::with_manifest`] substitutes an
-    /// explicit machine word.
+    /// nothing is declared. An invoker stating the machine word in Rust goes
+    /// through [`prepare_source_with_manifest`] instead, which never reaches
+    /// the environment — the substitution cannot be an afterthought, because
+    /// by then a declared file has already had its chance to fail the call.
     manifest: crate::manifest::MachineManifest,
 }
 
@@ -1035,12 +1037,20 @@ pub fn prepare_source_with_manifest(
     source: &str,
     manifest: crate::manifest::MachineManifest,
 ) -> Result<PreparedRun, RunError> {
-    let (compilation, cache) = compile_and_warm(
-        source,
-        &[],
-        crate::default_config(),
-        LoweringCache::default(),
-    )?;
+    prepare_modules_with_manifest(source, &[], crate::default_config(), manifest)
+}
+
+/// The module-and-config form of [`prepare_source_with_manifest`], so a stated
+/// machine word composes with the `//! uses:` harness and with shape-selection
+/// experiments rather than forcing a caller back onto the environment-reading
+/// path to get either.
+pub fn prepare_modules_with_manifest(
+    source: &str,
+    modules: &[vix::modules::ModuleSource<'_>],
+    config: CompilerConfig,
+    manifest: crate::manifest::MachineManifest,
+) -> Result<PreparedRun, RunError> {
+    let (compilation, cache) = compile_and_warm(source, modules, config, LoweringCache::default())?;
     Ok(PreparedRun {
         compilation,
         cache,
@@ -1060,7 +1070,6 @@ fn prepare_modules_with_cache(
     // DECLARED through `VIX_MACHINE_MANIFEST`, or the harness default when
     // nothing is declared. A declared file that fails to load is a loud typed
     // error here at the entrypoint — never a silent default.
-    // `PreparedRun::with_manifest` still substitutes an explicit Rust value.
     Ok(PreparedRun {
         compilation,
         cache,
@@ -1130,14 +1139,6 @@ fn compile_and_warm(
 }
 
 impl PreparedRun {
-    /// Substitute the machine manifest the run binds against — the embedder's
-    /// declared machine word replacing the harness default.
-    #[must_use]
-    pub fn with_manifest(mut self, manifest: crate::manifest::MachineManifest) -> Self {
-        self.manifest = manifest;
-        self
-    }
-
     /// Run every declared test twice over the warm cache. The chaos lane discards
     /// the first running task at an edge safepoint and must publish the same
     /// identities. No compilation happens here: every `get_or_lower` is a hit.
