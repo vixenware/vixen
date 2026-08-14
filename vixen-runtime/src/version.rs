@@ -58,6 +58,25 @@ impl PartialEq for OrderedVersion {
 
 impl Eq for OrderedVersion {}
 
+/// Hashed over the SIGNIFICANT components, so two equal versions hash alike.
+///
+/// Written rather than derived for the same reason [`PartialEq`] is: `15.2` and
+/// `15.2.0` are one version holding different component vectors. A derived
+/// `Hash` would give them different hashes while `eq` called them equal, which
+/// is the `Hash`/`Eq` contract broken — and a `HashMap` that loses entries
+/// depending on how a manifest happened to spell a version.
+impl core::hash::Hash for OrderedVersion {
+    fn hash<H: core::hash::Hasher>(&self, state: &mut H) {
+        let significant = self
+            .components
+            .iter()
+            .rposition(|component| *component != 0)
+            .map_or(0, |last| last + 1);
+        self.components[..significant].hash(state);
+        self.prerelease.hash(state);
+    }
+}
+
 impl OrderedVersion {
     /// Read a stated version, or `None` when it is not orderable.
     ///
@@ -307,19 +326,13 @@ impl core::fmt::Display for VersionRange {
     }
 }
 
-/// The characters a range bound can start with.
-///
-/// Used to catch `toolchain: ">=1.89"` — an exact pin whose value is plainly a
-/// range. Without this the rename from #17's single `toolchain` key breaks
-/// quietly: the string compares unequal to every stated version, forever, and
-/// the refusal blames the machine for a source bug.
-const COMPARISON_LEADS: [char; 5] = ['>', '<', '=', '^', '~'];
-
-/// Whether this exact-pin text looks like somebody meant a range.
-#[must_use]
-pub fn looks_like_a_range(pin: &str) -> bool {
-    pin.trim().starts_with(COMPARISON_LEADS)
-}
+// The guard that catches `toolchain: ">=1.89"` — an exact pin whose value is
+// plainly a range — lives in `compiler::declare_capability_constraints`, not
+// here. It has to: the refusal is a compile error, and `vix-core` cannot depend
+// on this crate. A mirror of it here would be a second copy of one rule in a
+// second crate, tested while the copy that actually runs was not. Its
+// acceptance test is `machine_manifest::
+// an_exact_pin_that_is_plainly_a_range_is_refused_at_compile_time`.
 
 
 #[cfg(test)]
@@ -682,28 +695,29 @@ mod tests {
     // ---- the exact-pin guard ---------------------------------------------
 
     #[test]
-    fn an_exact_pin_that_is_plainly_a_range_is_recognizable() {
-        // Without this, the rename from a single `toolchain` key breaks
-        // quietly: the string compares unequal to every stated version,
-        // forever, and the refusal blames the machine for a source bug.
-        assert!(looks_like_a_range(">=1.56, <2"));
-        assert!(looks_like_a_range(">1.0"));
-        assert!(looks_like_a_range("<2"));
-        assert!(looks_like_a_range("<=2"));
-        assert!(looks_like_a_range("=1.0"));
-        assert!(looks_like_a_range("^1.2"));
-        assert!(looks_like_a_range("~1.2"));
-        assert!(looks_like_a_range("   <2"));
-    }
+    fn equal_versions_hash_alike() {
+        use std::collections::HashSet;
 
-    #[test]
-    fn a_real_exact_pin_is_not_mistaken_for_a_range() {
-        // Every one of these is a version some tool actually reports.
-        assert!(!looks_like_a_range("22.1std"));
-        assert!(!looks_like_a_range("15.2"));
-        assert!(!looks_like_a_range("19.38.33130.0"));
-        assert!(!looks_like_a_range("1.99.0-nightly"));
-        assert!(!looks_like_a_range("Pro 23.4"));
-        assert!(!looks_like_a_range(""));
+        // The `Hash`/`Eq` contract, which a derived `Hash` would break: these
+        // are one version spelled two ways, and a `HashMap` keyed on them must
+        // not care which spelling a manifest used.
+        let mut seen = HashSet::new();
+        seen.insert(ordered("15.2"));
+        seen.insert(ordered("15.2.0"));
+        seen.insert(ordered("15.2.0.0"));
+        assert_eq!(seen.len(), 1, "one version, however it was spelled");
+        assert!(seen.contains(&ordered("15.2.0")));
+
+        // Zero is the boundary case: every component insignificant.
+        let mut zeros = HashSet::new();
+        zeros.insert(ordered("0"));
+        zeros.insert(ordered("0.0.0"));
+        assert_eq!(zeros.len(), 1);
+
+        // A prerelease is significant and does not collide with its release.
+        let mut channels = HashSet::new();
+        channels.insert(ordered("1.99.0"));
+        channels.insert(ordered("1.99.0-nightly"));
+        assert_eq!(channels.len(), 2);
     }
 }

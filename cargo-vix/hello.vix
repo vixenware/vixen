@@ -51,6 +51,10 @@
 // an ORDERING question and needs both sides to be numbers. `toolchain` asks for
 // one exact string and parses nothing — which is the only honest question about
 // a tool like Quartus, whose version is `22.1std`.
+//
+// Note `toolchain` compares TEXT: `toolchain: "1.56"` would NOT match a machine
+// stating `1.56.0`. To mean one exact version that has an ordering, write
+// `toolchain_range: "=1.56"`.
 #[test { budget_wall: 120s, budget_rss: 4096MB }]
 fn hello_world(sh: Sh, rustc: Rustc where { toolchain_range: ">=1.56, <2" }) -> Stream<Check> {
     let sources = exec sh`-c "mkdir -p src; printf 'fn main() \173 println!(\042hello from vix\042); \175\n' > src/main.rs"`;

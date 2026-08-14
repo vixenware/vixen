@@ -58,9 +58,16 @@ snark-dsl = { workspace = true, features = ["typed-ast"] }
 #
 # Those tests are system tests and now live in `vixen-runtime/tests`, alongside
 # the `.vix` ratchet corpus and `std/` version library they drive. What is left
-# here compiles and runs against the bare language. CI enforces it
-# (`vix-core-bare` in .github/workflows/test-toolchains.yml); re-adding either
-# crate below breaks that job by construction.
+# here compiles and runs against the bare language.
+#
+# NOTHING ENFORCES THIS TODAY. It used to say CI did, naming a `vix-core-bare`
+# job in `.github/workflows/test-toolchains.yml` — there is no `.github` in this
+# repository at all, so the rule was documented as enforced and was not. The
+# claim is worth more than the comment: decisions lean on it (the toolchain
+# version pin lives in `vixen-runtime` rather than here BECAUSE this crate may
+# not take a semver dependency), so a violation would be silent and would
+# invalidate that reasoning. `cargo check -p vix-core --all-targets` in a clean
+# checkout is the check; it wants a CI job when this repository grows one.
 [dev-dependencies]
 # The live-Cargo oracle harness (tests/rodin_fixtures.rs) reads `cargo metadata`
 # and parses it with facet-json — no serde. facet/facet-json/semver are already
