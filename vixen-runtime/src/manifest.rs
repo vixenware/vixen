@@ -184,29 +184,30 @@ impl MachineManifest {
     }
 
     /// Bind one test's requirement set against this manifest. Every
-    /// unsatisfiable requirement — the type absent, or a required `Target`
-    /// the offered value's facts lack — is returned as a typed refusal naming
-    /// both sides. The caller raises them BEFORE submitting any island, so no
-    /// process spawns and no demand parks. A [`TargetRequirement::Computed`]
-    /// requirement is not checkable at bind time and imposes nothing here —
-    /// the static report already degraded it honestly.
+    /// unsatisfiable requirement — the type absent, a required `Target` the
+    /// offered value's facts lack, or a toolchain the offer's stated version
+    /// falls outside — is returned as a typed refusal naming both sides. The
+    /// caller raises them BEFORE submitting any island, so no process spawns
+    /// and no demand parks. A [`TargetRequirement::Computed`] requirement is
+    /// not checkable at bind time and imposes nothing here — the static report
+    /// already degraded it honestly.
     ///
     /// r[impl vixen.machine.binding-fails-before-effects]
+    /// r[impl vixen.machine.version-pin]
     #[must_use]
     pub fn bind(&self, requirements: &TestRequirements) -> Vec<CapabilityRefusal> {
         let mut refusals = Vec::new();
         for capability in &requirements.capabilities {
-            let refuse = |required_target: Option<&Target>, offered: Option<&CapabilityOffer>| {
-                CapabilityRefusal {
+            let refuse =
+                |cause: RefusalCause, offered: Option<&CapabilityOffer>| CapabilityRefusal {
                     test: requirements.test.clone(),
                     parameter: capability.parameter.clone(),
                     required_type: capability.ty.clone(),
-                    required_target: required_target.map(|target| target.as_str().to_owned()),
+                    cause,
                     offered: offered.map(CapabilityOffer::rendered),
-                }
-            };
+                };
             let Some(offer) = self.offer(&capability.ty) else {
-                refusals.push(refuse(None, None));
+                refusals.push(refuse(RefusalCause::TypeAbsent, None));
                 continue;
             };
             for requirement in &capability.targets {
@@ -215,7 +216,17 @@ impl MachineManifest {
                     TargetRequirement::Computed => continue,
                 };
                 if !offer.targets.contains(required) {
-                    refusals.push(refuse(Some(required), Some(offer)));
+                    refusals.push(refuse(
+                        RefusalCause::Target {
+                            required: required.as_str().to_owned(),
+                        },
+                        Some(offer),
+                    ));
+                }
+            }
+            for pin in &capability.toolchain_pins {
+                if let Some(cause) = toolchain_refusal(pin, offer.toolchain.as_deref()) {
+                    refusals.push(refuse(cause, Some(offer)));
                 }
             }
         }
@@ -290,6 +301,46 @@ pub fn declared_manifest() -> Result<MachineManifest, ManifestLoadError> {
     }
 }
 
+/// Compare one demanded version pin against the machine's word for that
+/// capability, returning the refusal when they do not meet.
+///
+/// Both sides must READ as versions before they can be compared, and a side
+/// that does not is its own refusal rather than a silent pass. This is
+/// attribution, never verification (`vixen.machine.version-pin`): nothing here
+/// asks the tool what it is — the manifest's `toolchain` is a human's statement
+/// about the machine, and all this does is hold the program's demand and that
+/// statement up against each other so a mismatch is somebody's, on the record.
+fn toolchain_refusal(pin: &str, stated: Option<&str>) -> Option<RefusalCause> {
+    let requirement = match semver::VersionReq::parse(pin) {
+        Ok(requirement) => requirement,
+        Err(error) => {
+            return Some(RefusalCause::UnreadablePin {
+                pin: pin.to_owned(),
+                detail: error.to_string(),
+            });
+        }
+    };
+    let Some(stated) = stated else {
+        return Some(RefusalCause::ToolchainUnstated {
+            pin: pin.to_owned(),
+        });
+    };
+    let version = match semver::Version::parse(stated) {
+        Ok(version) => version,
+        Err(error) => {
+            return Some(RefusalCause::UnreadableToolchain {
+                pin: pin.to_owned(),
+                stated: stated.to_owned(),
+                detail: error.to_string(),
+            });
+        }
+    };
+    (!requirement.matches(&version)).then(|| RefusalCause::Toolchain {
+        pin: pin.to_owned(),
+        stated: stated.to_owned(),
+    })
+}
+
 /// One requirement a test's plans impose on a capability type, in the shared
 /// vocabulary — `Target` values, never tool strings.
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -302,8 +353,9 @@ pub enum TargetRequirement {
     Computed,
 }
 
-/// One capability parameter's requirement row: presence (the declared type)
-/// plus every target requirement extracted from the test's plans.
+/// One capability parameter's requirement row: presence (the declared type),
+/// every target requirement extracted from the test's plans, and every version
+/// pin its declaring parameters spell.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct CapabilityRequirement {
     /// The declaring parameter's name (diagnostic vocabulary only — binding
@@ -312,6 +364,11 @@ pub struct CapabilityRequirement {
     /// The capability type's nominal name.
     pub ty: String,
     pub targets: Vec<TargetRequirement>,
+    /// Every `where { toolchain: … }` pin declared for this type. Binding is
+    /// nominal, so two parameters of one type bind to one offer; both pins are
+    /// kept and both are checked, because a demand the author wrote down that
+    /// nothing compares is worse than no demand at all.
+    pub toolchain_pins: Vec<String>,
 }
 
 /// One test's requirement set, readable without executing anything.
@@ -319,6 +376,31 @@ pub struct CapabilityRequirement {
 pub struct TestRequirements {
     pub test: String,
     pub capabilities: Vec<CapabilityRequirement>,
+}
+
+/// Why one capability parameter could not bind. Exactly one thing went wrong
+/// per refusal — a target the offer lacks and a toolchain outside the pin are
+/// two refusals, not one carrying two half-filled fields.
+#[derive(facet::Facet, Clone, Debug, PartialEq, Eq)]
+#[repr(u8)]
+pub enum RefusalCause {
+    /// The manifest has no offer of the required type at all.
+    TypeAbsent,
+    /// The offer cannot produce a `Target` the program's plans require.
+    Target { required: String },
+    /// The machine's stated toolchain is outside the demanded version set.
+    Toolchain { pin: String, stated: String },
+    /// The program pins a toolchain and the offer states none, so there is
+    /// nothing to attribute the demand against.
+    ToolchainUnstated { pin: String },
+    /// The demanded pin is not a version requirement.
+    UnreadablePin { pin: String, detail: String },
+    /// The machine's stated toolchain is not a version.
+    UnreadableToolchain {
+        pin: String,
+        stated: String,
+        detail: String,
+    },
 }
 
 /// A typed pre-effect refusal: the vixen half of
@@ -333,11 +415,23 @@ pub struct CapabilityRefusal {
     pub parameter: String,
     /// What the program requires: the capability type's nominal name…
     pub required_type: String,
-    /// …and the required target, when the refusal is finer than presence.
-    pub required_target: Option<String>,
+    /// …and what about the offer failed to meet it.
+    pub cause: RefusalCause,
     /// What the machine offers for that type, facts rendered; `None` when the
     /// manifest has no offer of the type.
     pub offered: Option<String>,
+}
+
+impl CapabilityRefusal {
+    /// The required `Target`, when the refusal is a target refusal — the
+    /// vocabulary the diagnostic and the acceptance tests read it in.
+    #[must_use]
+    pub fn required_target(&self) -> Option<&str> {
+        match &self.cause {
+            RefusalCause::Target { required } => Some(required),
+            _ => None,
+        }
+    }
 }
 
 impl core::fmt::Display for CapabilityRefusal {
@@ -347,12 +441,40 @@ impl core::fmt::Display for CapabilityRefusal {
             "error[capability]: `{}` demands {}",
             self.test, self.required_type
         )?;
-        if let Some(target) = &self.required_target {
-            write!(f, " producing {target}")?;
+        match &self.cause {
+            RefusalCause::TypeAbsent => {}
+            RefusalCause::Target { required } => write!(f, " producing {required}")?,
+            RefusalCause::Toolchain { pin, .. }
+            | RefusalCause::ToolchainUnstated { pin }
+            | RefusalCause::UnreadablePin { pin, .. }
+            | RefusalCause::UnreadableToolchain { pin, .. } => write!(f, " toolchain {pin}")?,
         }
         match &self.offered {
             Some(offered) => write!(f, "\n  machine offers: {offered}")?,
             None => write!(f, "\n  machine offers no {}", self.required_type)?,
+        }
+        // The pin cases say what the machine's word WAS, because that is the
+        // attribution: "we asked for this, they said that".
+        match &self.cause {
+            RefusalCause::Toolchain { stated, .. } => {
+                write!(f, "\n  the machine states toolchain {stated}")?;
+            }
+            RefusalCause::ToolchainUnstated { .. } => {
+                write!(
+                    f,
+                    "\n  the machine states no toolchain, so the pin cannot be attributed"
+                )?;
+            }
+            RefusalCause::UnreadablePin { detail, .. } => {
+                write!(f, "\n  that is not a version requirement: {detail}")?;
+            }
+            RefusalCause::UnreadableToolchain { stated, detail, .. } => {
+                write!(
+                    f,
+                    "\n  the machine states toolchain {stated}, which is not a version: {detail}"
+                )?;
+            }
+            RefusalCause::TypeAbsent | RefusalCause::Target { .. } => {}
         }
         write!(f, "\n  no effect was started")
     }
@@ -402,14 +524,23 @@ pub fn test_requirements(partitioned: &PartitionedTest) -> TestRequirements {
         let Some(ty) = capability_type_name(&capability.ty) else {
             continue;
         };
-        by_type.entry(ty.to_owned()).or_insert_with(|| {
+        let row = *by_type.entry(ty.to_owned()).or_insert_with(|| {
             rows.push(CapabilityRequirement {
                 parameter: capability.name.clone(),
                 ty: ty.to_owned(),
                 targets: Vec::new(),
+                toolchain_pins: Vec::new(),
             });
             rows.len() - 1
         });
+        // Binding is nominal, so a second parameter of the same type folds into
+        // the row the first opened — but its pin is its own demand and joins
+        // the list rather than replacing or being dropped.
+        if let Some(pin) = &capability.constraints.toolchain
+            && !rows[row].toolchain_pins.contains(pin)
+        {
+            rows[row].toolchain_pins.push(pin.clone());
+        }
     }
     // Every exec plan in the test, wherever it was partitioned to.
     let mut islands: Vec<&Island> = Vec::new();
@@ -511,6 +642,7 @@ fn collect_exec_requirements(
                 parameter: ty.to_owned(),
                 ty: ty.to_owned(),
                 targets: Vec::new(),
+                toolchain_pins: Vec::new(),
             });
             rows.len() - 1
         });

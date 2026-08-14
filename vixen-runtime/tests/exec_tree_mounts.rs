@@ -25,7 +25,7 @@ fn manifest_with_rustc() -> MachineManifest {
     manifest.capabilities.push(CapabilityOffer {
         ty: "Rustc".to_owned(),
         program: rustc_program(),
-        toolchain: Some("host".to_owned()),
+        toolchain: Some(rustc_toolchain()),
         targets: vec![host_target()],
     });
     manifest
@@ -33,6 +33,27 @@ fn manifest_with_rustc() -> MachineManifest {
 
 fn rustc_program() -> String {
     std::env::var("RUSTC").unwrap_or_else(|_| "rustc".to_owned())
+}
+
+/// The `toolchain` fact of the offer above, AUTHORED by asking the tool once —
+/// the allowed kind of probe. A machine's word is stated, never conjured, and
+/// this is the moment the statement gets written; the run itself asks nothing
+/// and only compares a program's pin against what was already said. A real
+/// deployment writes this into `machine.toml` by hand or from config
+/// management, which is the same act with a slower loop.
+fn rustc_toolchain() -> String {
+    let output = std::process::Command::new(rustc_program())
+        .arg("--version")
+        .output()
+        .expect("authoring the Rustc offer asks rustc for its version once");
+    // `rustc 1.96.0 (hash date)` — the second field is the version, and a
+    // nightly's `1.99.0-nightly` is an ordinary prerelease.
+    String::from_utf8(output.stdout)
+        .expect("rustc --version is UTF-8")
+        .split_whitespace()
+        .nth(1)
+        .expect("rustc --version names a version")
+        .to_owned()
 }
 
 fn run(source: &str) -> Result<RatchetReport, RunError> {

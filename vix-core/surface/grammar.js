@@ -216,7 +216,19 @@ module.exports = grammar({
 
     generic_params: ($) => seq("<", sepBy(",", field("param", $.identifier)), ">"),
     param_list: ($) => seq("(", sepBy(",", field("param", $.param)), ")"),
-    param: ($) => seq(field("name", $.identifier), ":", field("type", $._type)),
+    // A capability parameter may constrain the machine's offer beyond its
+    // nominal type — `rustc: Rustc where { toolchain: ">=1.89, <1.90" }`. It is
+    // the same `where_args` a call takes, so a named extra reads the same
+    // wherever it appears; which keys are admissible is the lowering's concern.
+    // An absent clause constrains nothing and matches any offer, which is
+    // already how `targets` behaves.
+    param: ($) =>
+      seq(
+        field("name", $.identifier),
+        ":",
+        field("type", $._type),
+        optional(field("constraints", $.where_args)),
+      ),
     where_params: ($) =>
       seq(
         "where",

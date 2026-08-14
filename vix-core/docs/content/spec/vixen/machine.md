@@ -79,6 +79,41 @@ none of it is built now.
 > check is equality or containment over typed values. Version *ranges*,
 > alternative satisfaction, and cross-machine choice are solver work
 > (`FV-E3`), deliberately deferred.
+>
+> **As amended 2026-08-14:** version ranges landed early, as
+> `vixen.machine.version-pin` below. What stays deferred is *alternative
+> satisfaction* and *choice* — the parts that need a solver. Comparing one
+> demand against one machine's word needs none.
+
+> r[vixen.machine.version-pin]
+>
+> [DESIGN] A capability parameter may constrain the offer bound to it, in the
+> same `where` clause a call takes: `rustc: Rustc where { toolchain: ">=1.89,
+> <1.90" }`. The pin is a version *set* (Cargo's requirement grammar), so
+> `1.89.3` satisfies `>=1.89` without the string-equality accidents that make
+> `"15.2" == "15.2.1"` false for stupid reasons. An absent clause constrains
+> nothing and matches any offer, exactly as an absent target requirement does.
+>
+> This is **attribution, never verification.** Nothing is probed to decide
+> anything: the manifest's `toolchain` is a human's statement about the
+> machine, and the check holds the program's demand against that statement.
+> The strongest honest claim it supports is "we asked for 1.89, the machine
+> said 1.89.3, they agree" — which is precisely what is worth having about a
+> toolchain that cannot be hashed. Both sides must READ as versions; a pin or a
+> stated toolchain that does not is its own refusal rather than a silent pass,
+> because a comparison nobody can perform must not look like one that
+> succeeded. A machine that states no toolchain at all cannot satisfy a pin:
+> there is nothing to attribute it to.
+>
+> Prereleases follow Cargo's rule: `1.99.0-nightly` does not satisfy `>=1.89`
+> unless a comparator names that release line. This is kept deliberately — a
+> nightly is a materially different tool from the stable release whose number
+> it carries, and admitting it silently is the pretending the model exists to
+> refuse. Someone who means it says so.
+>
+> Probing to **author** a statement — asking `rustc --version` once, at setup,
+> and writing the answer into the manifest — is fine and is how the statement
+> gets written. Probing to **decide** at build time is not.
 
 > r[vixen.machine.requirements-are-static]
 >
@@ -162,12 +197,17 @@ env-role package and a fact-only package must exercise the same check.
    environment roles hits the same refusal and the same pass — proving the
    mechanism is not flag-shaped.
 4. **Neutral tools run anywhere.** No target capture ⇒ no target requirement.
-5. **The static report.** Requirements (types + literal captures) are
-   reported without executing the program.
+5. **The static report.** Requirements (types + literal captures + version
+   pins) are reported without executing the program.
+6. **The version pin.** A pin the machine's word falls outside refuses
+   pre-effect naming both sides; one it falls inside runs. An unreadable pin,
+   an unreadable stated toolchain, and an unstated one each refuse rather than
+   pass.
 
 ## Explicitly out
 
-The solver (ranges, alternatives, choice), the daemon
+The solver (alternatives, choice — ranges landed, see the amendment above), the
+daemon
 (advertise/watch/poison — ambient-toolchain territory, 0.1 has none),
 package distribution, and any second machine. The manifest format is the
 embedder's config concern (a typed facet value; the styx spelling above is
