@@ -35,6 +35,22 @@ source. Running it through `vx` directly needs a machine manifest offering
 `Rustc` — the default offers only `Echo`/`Sh`/`ProgressiveSh`, so `vx` refuses
 before anything runs. `hello.vix`'s header has the manifest to copy.
 
+The example also **pins the toolchain it needs**:
+`rustc: Rustc where { toolchain: ">=1.56, <2" }`, because `--edition 2021` is a
+demand no argv element expresses. The pin is a version set, not a string, so
+`1.89.3` satisfies `>=1.89`. It is checked against the manifest's stated
+`toolchain` at binding time — attribution, never verification: nothing probes
+the tool to decide anything, and the strongest claim on offer is "we asked for
+this, the machine said that, they agree". A machine that states no toolchain
+refuses the pin rather than quietly satisfying it. The proof test authors its
+own manifest by asking `rustc --version` once, which is the allowed kind of
+probe: writing the statement down, not making a decision with it.
+
+One sharp edge, kept on purpose: a **nightly** states `1.99.0-nightly`, and
+Cargo's prerelease rule means a plain `>=1.89` does not admit it. A nightly is
+a different tool from the stable release whose number it carries, so it has to
+be named (`>=1.99.0-nightly`) rather than slipped through.
+
 Three processes — write the source, compile it with rustc, run the binary it
 produced — and the check reads `hello from vix` off the third one's stdout.
 

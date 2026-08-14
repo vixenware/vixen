@@ -14,12 +14,13 @@
 use std::sync::{Arc, Mutex};
 
 use vix::runtime::{
-    EventLog, ExecBackend, ExecEventSender, ExecInvocation, ExecWorkspace,
-    PrimitiveServices, Runtime,
+    EventLog, ExecBackend, ExecEventSender, ExecInvocation, ExecWorkspace, PrimitiveServices,
+    Runtime,
 };
 use vixen_primitives::capability_package::Target;
 use vixen_runtime::manifest::{
-    CapabilityOffer, MachineManifest, TargetRequirement, host_target, static_requirements,
+    CapabilityOffer, MachineManifest, RefusalCause, TargetRequirement, host_target,
+    static_requirements,
 };
 use vixen_runtime::ratchet::{RatchetReport, prepare_source, run_source_with_manifest};
 
@@ -39,6 +40,14 @@ fn offer(ty: &str, program: &str, targets: &[&str]) -> CapabilityOffer {
         program: program.to_owned(),
         toolchain: None,
         targets: targets.iter().copied().map(Target::new).collect(),
+    }
+}
+
+/// The same offer, with the machine's word about which toolchain it is.
+fn offer_stating(ty: &str, program: &str, toolchain: &str) -> CapabilityOffer {
+    CapabilityOffer {
+        toolchain: Some(toolchain.to_owned()),
+        ..offer(ty, program, &[])
     }
 }
 
@@ -151,7 +160,7 @@ fn the_exe_case_refuses_pre_effect_on_a_linux_only_manifest() {
     let refusal = assert_refused(&report);
     assert_eq!(refusal.required_type, "Rustc");
     assert_eq!(
-        refusal.required_target.as_deref(),
+        refusal.required_target(),
         Some("x86_64-pc-windows-msvc"),
         "the requirement was extracted from the invocation, normalized to a Target"
     );
@@ -259,7 +268,7 @@ fn an_env_role_target_refuses_pre_effect_on_a_linux_only_manifest() {
     let refusal = assert_refused(&report);
     assert_eq!(refusal.required_type, "Go");
     assert_eq!(
-        refusal.required_target.as_deref(),
+        refusal.required_target(),
         Some("x86_64-pc-windows-gnu"),
         "the env roles normalized into Target vocabulary — never GOOS/GOARCH strings"
     );
@@ -459,7 +468,7 @@ fn compile(gcc: MingwGcc) -> Stream<Check> {
     let refusal = assert_refused(&report);
     assert_eq!(refusal.required_type, "MingwGcc");
     assert_eq!(
-        refusal.required_target.as_deref(),
+        refusal.required_target(),
         Some("x86_64-pc-windows-gnu"),
         "no capture exists; the package supplies its fixed target"
     );
@@ -474,6 +483,298 @@ fn compile(gcc: MingwGcc) -> Stream<Check> {
     for lane in [&report.plain, &report.chaos] {
         assert_eq!(lane.counters.effect_spawns, 1);
     }
+}
+
+/// The pin case: the same program shape, now saying out loud which toolchain
+/// it needs. The demand rides the PARAMETER rather than the invocation because
+/// a version is a fact about the tool itself — no argv spells it, which is
+/// exactly the gap `require(…)` used to have to cover.
+const PINNED_CASE: &str = r#"
+#[test]
+fn build(rustc: Rustc where { toolchain: ">=1.89, <1.90" }) -> Stream<Check> {
+    let out = exec rustc`main.rs`;
+    yield expect_eq((out.tree / "main.exe").text(), "exe");
+}
+"#;
+
+/// A pin the machine's word falls outside of refuses pre-effect, and the
+/// diagnostic carries the attribution: what was asked for, what was stated.
+///
+/// r[verify vixen.machine.version-pin]
+/// r[verify vixen.machine.binding-fails-before-effects]
+#[test]
+fn a_toolchain_outside_the_pin_refuses_pre_effect() {
+    let stale = manifest(vec![offer_stating(
+        "Rustc",
+        "rustc-must-never-spawn",
+        "1.88.0",
+    )]);
+    let report = run_source_with_manifest(PINNED_CASE, stale)
+        .expect("a binding refusal is a report verdict, never a runner error");
+    let refusal = assert_refused(&report);
+    assert_eq!(refusal.required_type, "Rustc");
+    assert_eq!(
+        refusal.cause,
+        RefusalCause::Toolchain {
+            pin: ">=1.89, <1.90".to_owned(),
+            stated: "1.88.0".to_owned(),
+        },
+        "both sides of the comparison are on the record"
+    );
+    let diagnostic = refusal.to_string();
+    assert!(
+        diagnostic.contains("demands Rustc toolchain >=1.89, <1.90")
+            && diagnostic.contains("machine states toolchain 1.88.0"),
+        "the refusal reads as attribution: {diagnostic}"
+    );
+}
+
+/// The passing half: the machine's word inside the pin runs the program, and
+/// the pin is a real SET — `1.89.3` satisfies `>=1.89, <1.90` where string
+/// equality against `1.89` would not.
+///
+/// r[verify vixen.machine.version-pin]
+#[test]
+fn a_toolchain_inside_the_pin_runs() {
+    let tools = tempfile::tempdir().expect("tool dir");
+    let rustc = fake_tool(&tools, "rustc", "printf exe > main.exe");
+    let current = manifest(vec![offer_stating("Rustc", &rustc, "1.89.3")]);
+    let report = run_source_with_manifest(PINNED_CASE, current).expect("the pinned case runs");
+    assert!(report.passed(), "1.89.3 is inside the pin: {report:#?}");
+    for lane in [&report.plain, &report.chaos] {
+        assert_eq!(lane.counters.effect_spawns, 1);
+        assert!(lane.refusals.is_empty());
+    }
+}
+
+/// A machine that states no toolchain cannot satisfy a pin. Silently matching
+/// would turn "we asked for 1.89" into a claim nobody ever made — the refusal
+/// says the attribution is missing, which is the honest verdict.
+///
+/// r[verify vixen.machine.version-pin]
+#[test]
+fn an_unstated_toolchain_cannot_satisfy_a_pin() {
+    let silent = manifest(vec![offer("Rustc", "rustc-must-never-spawn", &[])]);
+    let report = run_source_with_manifest(PINNED_CASE, silent)
+        .expect("a binding refusal is a report verdict, never a runner error");
+    let refusal = assert_refused(&report);
+    assert_eq!(
+        refusal.cause,
+        RefusalCause::ToolchainUnstated {
+            pin: ">=1.89, <1.90".to_owned(),
+        }
+    );
+    assert!(
+        refusal.to_string().contains("states no toolchain"),
+        "the diagnostic names the missing side: {refusal}"
+    );
+}
+
+/// An unconstrained parameter constrains nothing: the machine's stated
+/// toolchain is a fact the program never asked about, and the program runs.
+/// This is the same "absent constraint matches any offer" rule the offered
+/// targets already follow.
+///
+/// r[verify vixen.machine.version-pin]
+#[test]
+fn an_unpinned_parameter_ignores_the_stated_toolchain() {
+    const UNPINNED: &str = r#"
+#[test]
+fn build(rustc: Rustc) -> Stream<Check> {
+    let out = exec rustc`main.rs`;
+    yield expect_eq((out.tree / "main.exe").text(), "exe");
+}
+"#;
+    let tools = tempfile::tempdir().expect("tool dir");
+    let rustc = fake_tool(&tools, "rustc", "printf exe > main.exe");
+    let ancient = manifest(vec![offer_stating("Rustc", &rustc, "0.9.0")]);
+    let report = run_source_with_manifest(UNPINNED, ancient).expect("the unpinned case runs");
+    assert!(
+        report.passed(),
+        "no pin, no comparison, no refusal: {report:#?}"
+    );
+}
+
+/// Neither side may be waved through unread. A pin that is not a version
+/// requirement refuses instead of matching everything — the failure mode a
+/// string comparison would have hidden.
+///
+/// r[verify vixen.machine.version-pin]
+#[test]
+fn a_pin_that_is_not_a_version_requirement_refuses() {
+    const NONSENSE_PIN: &str = r#"
+#[test]
+fn build(rustc: Rustc where { toolchain: "newest please" }) -> Stream<Check> {
+    let out = exec rustc`main.rs`;
+    yield expect_eq((out.tree / "main.exe").text(), "exe");
+}
+"#;
+    let report = run_source_with_manifest(
+        NONSENSE_PIN,
+        manifest(vec![offer_stating(
+            "Rustc",
+            "rustc-must-never-spawn",
+            "1.89.0",
+        )]),
+    )
+    .expect("a binding refusal is a report verdict, never a runner error");
+    let refusal = assert_refused(&report);
+    let RefusalCause::UnreadablePin { pin, detail } = &refusal.cause else {
+        panic!("an unreadable pin is its own cause: {refusal:#?}");
+    };
+    assert_eq!(pin, "newest please");
+    assert!(!detail.is_empty(), "the parse failure is carried");
+}
+
+/// The other side of the same rule: a machine that states something that is
+/// not a version refuses a pin rather than being compared by string luck.
+///
+/// r[verify vixen.machine.version-pin]
+#[test]
+fn a_stated_toolchain_that_is_not_a_version_refuses_a_pin() {
+    let vague = manifest(vec![offer_stating(
+        "Rustc",
+        "rustc-must-never-spawn",
+        "host",
+    )]);
+    let report = run_source_with_manifest(PINNED_CASE, vague)
+        .expect("a binding refusal is a report verdict, never a runner error");
+    let refusal = assert_refused(&report);
+    let RefusalCause::UnreadableToolchain { pin, stated, .. } = &refusal.cause else {
+        panic!("an unreadable machine word is its own cause: {refusal:#?}");
+    };
+    assert_eq!(stated, "host");
+    assert_eq!(pin, ">=1.89, <1.90", "the demand stays on the record");
+    assert!(
+        refusal.to_string().contains("which is not a version"),
+        "the diagnostic says which side could not be read: {refusal}"
+    );
+}
+
+/// A prerelease toolchain — `1.99.0-nightly` — does not slip through a plain
+/// range. This is Cargo's rule, kept deliberately: a nightly is a materially
+/// different tool from the stable release whose number it carries, and letting
+/// it satisfy `>=1.89` silently is exactly the pretending the whole model
+/// refuses. Someone who means it says so, by pinning the line
+/// (`>=1.99.0-nightly`) or dropping the pin.
+///
+/// r[verify vixen.machine.version-pin]
+#[test]
+fn a_prerelease_toolchain_does_not_satisfy_a_plain_range() {
+    let nightly = manifest(vec![offer_stating(
+        "Rustc",
+        "rustc-must-never-spawn",
+        "1.99.0-nightly",
+    )]);
+    let report = run_source_with_manifest(PINNED_CASE, nightly)
+        .expect("a binding refusal is a report verdict, never a runner error");
+    let refusal = assert_refused(&report);
+    assert_eq!(
+        refusal.cause,
+        RefusalCause::Toolchain {
+            pin: ">=1.89, <1.90".to_owned(),
+            stated: "1.99.0-nightly".to_owned(),
+        },
+        "the refusal names the prerelease it declined, not a parse failure"
+    );
+}
+
+/// The opt-in half: a pin that names the prerelease line admits it, so the
+/// rule above is a default and not a wall.
+///
+/// r[verify vixen.machine.version-pin]
+#[test]
+fn a_pin_naming_the_prerelease_line_admits_it() {
+    const NIGHTLY_PIN: &str = r#"
+#[test]
+fn build(rustc: Rustc where { toolchain: ">=1.99.0-nightly" }) -> Stream<Check> {
+    let out = exec rustc`main.rs`;
+    yield expect_eq((out.tree / "main.exe").text(), "exe");
+}
+"#;
+    let tools = tempfile::tempdir().expect("tool dir");
+    let rustc = fake_tool(&tools, "rustc", "printf exe > main.exe");
+    let nightly = manifest(vec![offer_stating("Rustc", &rustc, "1.99.0-nightly")]);
+    let report = run_source_with_manifest(NIGHTLY_PIN, nightly).expect("the nightly case runs");
+    assert!(report.passed(), "the pin named the line: {report:#?}");
+}
+
+/// The pin joins the static report: "needs `Rustc` at `>=1.89, <1.90`" is
+/// readable off the compiled module without executing anything, exactly as the
+/// target requirements are.
+///
+/// r[verify vixen.machine.requirements-are-static]
+/// r[verify vixen.machine.version-pin]
+#[test]
+fn the_static_report_carries_the_version_pin() {
+    let module = vixen_runtime::default_compiler()
+        .compile(PINNED_CASE)
+        .expect("the pinned case compiles")
+        .module;
+    let requirements = static_requirements(&module).expect("the report needs no execution");
+    let [test] = requirements.as_slice() else {
+        panic!("one test, one requirement set: {requirements:#?}");
+    };
+    let [rustc] = test.capabilities.as_slice() else {
+        panic!("one capability requirement: {test:#?}");
+    };
+    assert_eq!(rustc.toolchain_pins, vec![">=1.89, <1.90".to_owned()]);
+    assert!(
+        rustc.targets.is_empty(),
+        "this plan spells no target: {rustc:#?}"
+    );
+}
+
+/// A `where` clause is refused where nothing could ever compare it. An
+/// ordinary value parameter has no offer behind it, so a constraint there would
+/// read like a guarantee and enforce nothing.
+#[test]
+fn only_a_capability_parameter_takes_a_where_clause() {
+    const ON_A_VALUE: &str = r#"
+fn double(n: Int where { toolchain: ">=1" }) -> Int {
+    n + n
+}
+#[test]
+fn t(sh: Sh) -> Stream<Check> {
+    yield expect_eq(double(2), 4);
+}
+"#;
+    vixen_runtime::default_compiler()
+        .compile(ON_A_VALUE)
+        .expect_err("a constraint nothing can check is a compile error");
+}
+
+/// An unrecognized key is refused rather than dropped, for the same reason
+/// `exec`'s `where` clause refuses one: a demand the author wrote and nothing
+/// reads is indistinguishable from a satisfied demand.
+#[test]
+fn an_unknown_capability_constraint_is_refused() {
+    const UNKNOWN_KEY: &str = r#"
+#[test]
+fn build(rustc: Rustc where { version: ">=1.89" }) -> Stream<Check> {
+    let out = exec rustc`main.rs`;
+    yield expect_eq((out.tree / "main.exe").text(), "exe");
+}
+"#;
+    vixen_runtime::default_compiler()
+        .compile(UNKNOWN_KEY)
+        .expect_err("`version` is not a capability constraint");
+}
+
+/// A requirement is static, so a pin cannot be an expression the program
+/// computes: the value must be a literal the report can read off the source.
+#[test]
+fn a_computed_pin_is_refused() {
+    const COMPUTED_PIN: &str = r#"
+#[test]
+fn build(rustc: Rustc where { toolchain: "1." + "89" }) -> Stream<Check> {
+    let out = exec rustc`main.rs`;
+    yield expect_eq((out.tree / "main.exe").text(), "exe");
+}
+"#;
+    vixen_runtime::default_compiler()
+        .compile(COMPUTED_PIN)
+        .expect_err("a computed pin is not a static requirement");
 }
 
 /// The embedder-loads-config half of `vixen.machine.manifest`: the TOML
@@ -541,10 +842,7 @@ fn a_manifest_loaded_from_a_config_file_refuses_the_exe_case() {
         .expect("a binding refusal is a report verdict, never a runner error");
     let refusal = assert_refused(&report);
     assert_eq!(refusal.required_type, "Rustc");
-    assert_eq!(
-        refusal.required_target.as_deref(),
-        Some("x86_64-pc-windows-msvc")
-    );
+    assert_eq!(refusal.required_target(), Some("x86_64-pc-windows-msvc"));
     let offered = refusal.offered.as_deref().expect("the offer side is named");
     assert!(
         offered.contains("x86_64-unknown-linux-gnu"),
@@ -571,7 +869,7 @@ fn the_environment_declared_manifest_reaches_the_runnable_system() {
     let refusal = assert_refused(&report);
     assert_eq!(refusal.required_type, "Rustc");
     assert_eq!(
-        refusal.required_target.as_deref(),
+        refusal.required_target(),
         Some("x86_64-pc-windows-msvc"),
         "the declared file's word governed the run"
     );
@@ -628,7 +926,10 @@ fn guarded(sh: Sh) -> Stream<Check> {
 "#;
     let report = vixen_runtime::ratchet::run_source(SOURCE)
         .expect("an unsatisfied requirement is a check verdict, never a runner error");
-    assert!(!report.passed(), "the requirement is unsatisfied: {report:#?}");
+    assert!(
+        !report.passed(),
+        "the requirement is unsatisfied: {report:#?}"
+    );
     let message = "this build step needs an aarch64 machine";
     let string_schema = vix::vir::Type::String.schema_ref();
     let failure_ty = vix::vir::Type::Record(vix::vir::RecordType::new(

@@ -19,6 +19,13 @@ facet-json.workspace = true
 # The machine manifest's config-file spelling (`manifest::MachineManifest::from_toml`).
 facet-toml.workspace = true
 blake3.workspace = true
+# The manifest binder reads a capability parameter's version pin and the
+# machine's stated toolchain with Cargo's own semver implementation, so a pin
+# means exactly what it means in a `Cargo.toml` — the same relation
+# `std/version.vix` ports into vix for the solver's use. Host-side manifest
+# vocabulary, alongside facet-toml: the language itself knows no version
+# algebra.
+semver = "1.0.28"
 # Cross-process resident-set observation for the outer budget runner. Only the
 # unix RSS readers use it, behind typed cfg boundaries in src/budget.rs.
 libc.workspace = true
@@ -41,7 +48,6 @@ windows-sys = { workspace = true, features = [
 # cycle that made the bare language untestable — see the bare-language rule in
 # `vix-core/Cargo.toml`.
 [dev-dependencies]
-semver = "1.0.28"
 tempfile.workspace = true
 tokio = { version = "1", features = ["rt-multi-thread", "macros", "net", "time"] }
 # `cross_lane_differential` selects the native vs interpreter lane explicitly.

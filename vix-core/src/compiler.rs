@@ -19,13 +19,14 @@ use crate::support::{Span, Spanned};
 use crate::surface::{SurfaceParser, ast};
 use crate::vir::DescribedWire;
 use crate::vir::{
-    ArrayMapGrain, ArrayMapGrainKey, Budget, CheckRecipe, ControlRegion, EffectFacts, EffectKind,
-    EnumType, EnumVariant, ExternKind, Function, FunctionId, GeneratorArm, GeneratorBody,
-    GeneratorStep, MatchArm as VirMatchArm, Module, Node, NodeId, OPTION_NONE_VARIANT,
-    OPTION_SOME_VARIANT, ORDERING_GREATER_VARIANT, ORDERING_LESS_VARIANT, Op, OrderedMatchArm,
-    Parameter, ParameterId, ParameterKind, RESULT_ERR_VARIANT, RESULT_OK_VARIANT, RecordField,
-    RecordType, Test, TestMetadata, TraceCheck, Type, VariantPayload, WireArg, WireSelector,
-    YieldSite, YieldSiteId, decode_error_type, decode_primitive_id, decode_request_type,
+    ArrayMapGrain, ArrayMapGrainKey, Budget, CapabilityConstraints, CheckRecipe, ControlRegion,
+    EffectFacts, EffectKind, EnumType, EnumVariant, ExternKind, Function, FunctionId, GeneratorArm,
+    GeneratorBody, GeneratorStep, MatchArm as VirMatchArm, Module, Node, NodeId,
+    OPTION_NONE_VARIANT, OPTION_SOME_VARIANT, ORDERING_GREATER_VARIANT, ORDERING_LESS_VARIANT, Op,
+    OrderedMatchArm, Parameter, ParameterId, ParameterKind, RESULT_ERR_VARIANT, RESULT_OK_VARIANT,
+    RecordField, RecordType, Test, TestMetadata, TraceCheck, Type, VariantPayload, WireArg,
+    WireSelector, YieldSite, YieldSiteId, decode_error_type, decode_primitive_id,
+    decode_request_type,
 };
 
 pub struct Compiler {
@@ -281,6 +282,7 @@ struct ParameterSignature {
     span: Span,
     ty: Type,
     kind: ParameterKind,
+    constraints: CapabilityConstraints,
 }
 
 struct ModuleContext<'a> {
@@ -1866,9 +1868,9 @@ fn declare_function(
             declare_parameter(
                 &mut parameters,
                 &mut names,
-                &parameter.name.value,
-                parameter.name.span,
+                &parameter.name,
                 &parameter.ty,
+                parameter.constraints.as_ref(),
                 ParameterKind::Positional,
                 types,
             )?;
@@ -1917,9 +1919,9 @@ fn declare_value_signature(
         declare_parameter(
             &mut parameters,
             &mut names,
-            &parameter.name.value,
-            parameter.name.span,
+            &parameter.name,
             &parameter.ty,
+            parameter.constraints.as_ref(),
             ParameterKind::Positional,
             types,
         )?;
@@ -1942,9 +1944,11 @@ fn declare_value_signature(
                 declare_parameter(
                     &mut parameters,
                     &mut names,
-                    &parameter.name.value,
-                    parameter.name.span,
+                    &parameter.name,
                     &parameter.ty,
+                    // A named where-parameter is an ordinary value, never a
+                    // capability: `named_param` carries no clause of its own.
+                    None,
                     ParameterKind::Named,
                     types,
                 )?;
@@ -1973,30 +1977,90 @@ fn declare_value_signature(
 fn declare_parameter(
     parameters: &mut Vec<ParameterSignature>,
     names: &mut BTreeSet<String>,
-    name: &str,
-    span: Span,
+    name: &Spanned<String>,
     ty: &ast::Type,
+    constraints: Option<&ast::WhereArgs>,
     kind: ParameterKind,
     types: &BTreeMap<String, Type>,
 ) -> Result<(), Diagnostics> {
-    if !names.insert(name.to_owned()) {
+    if !names.insert(name.value.clone()) {
         return Err(Diagnostics::one(Diagnostic {
             code: DiagnosticCode::DuplicateBinding,
-            primary: span,
+            primary: name.span,
             labels: Vec::new(),
             payload: DiagnosticPayload::Name {
-                name: name.to_owned(),
+                name: name.value.clone(),
             },
         }));
     }
+    let ty = lower_declared_type(ty, types)?;
+    let constraints = declare_capability_constraints(constraints, &ty)?;
     parameters.push(ParameterSignature {
         id: ParameterId(u32::try_from(parameters.len()).expect("parameter count fits u32")),
-        name: name.to_owned(),
-        span,
-        ty: lower_declared_type(ty, types)?,
+        name: name.value.clone(),
+        span: name.span,
+        ty,
         kind,
+        constraints,
     });
     Ok(())
+}
+
+/// The facts a parameter's `where` clause demands of the value bound to it.
+///
+/// Only a capability parameter has an offer to constrain, so the clause is
+/// refused anywhere else rather than accepted and ignored — a constraint that
+/// binds nothing is worse than no constraint, because it reads like a
+/// guarantee. Every key is checked against the admissible set for the same
+/// reason `exec`'s `where` clause checks its own: a dropped demand would
+/// surface as a machine running work it was never cleared for.
+///
+/// The pin's value is a string LITERAL. A requirement is static — it is read
+/// off the source before anything runs (`vixen.machine.requirements-are-static`)
+/// — so it cannot be an expression whose value the program computes.
+fn declare_capability_constraints(
+    constraints: Option<&ast::WhereArgs>,
+    ty: &Type,
+) -> Result<CapabilityConstraints, Diagnostics> {
+    let Some(clause) = constraints else {
+        return Ok(CapabilityConstraints::default());
+    };
+    if !is_capability_type(ty) {
+        return Err(Diagnostics::one(Diagnostic::unsupported(
+            clause.span,
+            "a `where` clause on a parameter that is not a capability",
+        )));
+    }
+    let mut toolchain: Option<String> = None;
+    for field in &clause.fields {
+        if field.name.value != "toolchain" {
+            return Err(Diagnostics::one(Diagnostic {
+                code: DiagnosticCode::UnknownName,
+                primary: field.name.span,
+                labels: Vec::new(),
+                payload: DiagnosticPayload::Name {
+                    name: field.name.value.clone(),
+                },
+            }));
+        }
+        if toolchain.is_some() {
+            return Err(Diagnostics::one(Diagnostic::unsupported(
+                field.span,
+                "a capability takes one `toolchain` pin; the requirement grammar \
+                 already spells conjunction, so write `\">=1.89, <1.90\"` rather \
+                 than two fields",
+            )));
+        }
+        let Some(ast::Expr::Str(pin)) = &field.value else {
+            return Err(type_mismatch(
+                field.span,
+                "a version pin written as a string literal",
+                "a computed value".to_owned(),
+            ));
+        };
+        toolchain = Some(pin.value.clone());
+    }
+    Ok(CapabilityConstraints { toolchain })
 }
 
 fn check_test_signature(
@@ -2388,6 +2452,7 @@ fn lower_function(
             name: parameter.name.clone(),
             ty: parameter.ty.clone(),
             kind: parameter.kind,
+            constraints: parameter.constraints.clone(),
         });
     }
 
@@ -6930,6 +6995,7 @@ fn build_pair_second_closure(
             name: "$argument".to_owned(),
             ty: pair_ty.clone(),
             kind: ParameterKind::Positional,
+            constraints: CapabilityConstraints::default(),
         }],
         return_type: element.clone(),
         nodes: closure_nodes,
@@ -7268,6 +7334,7 @@ fn build_unary_element_closure(
                     name: "$argument".to_owned(),
                     ty: element.clone(),
                     kind: ParameterKind::Positional,
+                    constraints: CapabilityConstraints::default(),
                 }],
                 return_type,
                 nodes: closure_nodes,
@@ -7527,6 +7594,7 @@ fn lower_closure_typed_with_body_kind(
             name: "$argument".to_owned(),
             ty: parameter_ty.clone(),
             kind: ParameterKind::Positional,
+            constraints: CapabilityConstraints::default(),
         }];
         for (index, (name, captured)) in captures.iter().enumerate() {
             let id = ParameterId(u32::try_from(index + 1).expect("closure capture count fits u32"));
@@ -7551,6 +7619,7 @@ fn lower_closure_typed_with_body_kind(
                 name: format!("$capture_{name}"),
                 ty: captured.ty.clone(),
                 kind: ParameterKind::Positional,
+                constraints: CapabilityConstraints::default(),
             });
         }
 

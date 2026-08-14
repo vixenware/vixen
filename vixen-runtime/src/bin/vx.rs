@@ -179,7 +179,9 @@ fn print_report(source: &Path, report: &RatchetReport) {
         }
     }
     for refusal in &report.plain.refusals {
-        println!("REFUSED {refusal:#?}");
+        // Display, not Debug: a refusal's whole job is to name both sides in a
+        // sentence somebody can act on, and the struct dump buries it.
+        println!("{refusal}");
     }
     // A lane disagreement is not a check failure and has no red check to print,
     // so it has to be reported on its own or a nondeterministic program looks

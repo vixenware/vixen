@@ -1639,6 +1639,31 @@ pub enum ParameterKind {
     Named,
 }
 
+/// What a capability parameter demands of the machine's offer BEYOND its
+/// nominal type — the demand-side twin of a [`crate::compiler::capability_type`]
+/// value's facts. Every field is optional and an absent one constrains nothing:
+/// an unconstrained parameter matches any offer of its type, which is already
+/// how the offered targets behave.
+///
+/// The pin is carried as authored TEXT. The language knows no version algebra
+/// and no tool dialect (`machine.capability.no-argv-dialect`); reading a pin as
+/// a set of versions, and comparing it against the offer's stated fact, belongs
+/// to whoever holds the manifest.
+#[derive(facet::Facet, Clone, Debug, Default, PartialEq, Eq)]
+pub struct CapabilityConstraints {
+    /// A version requirement over the offer's `toolchain` fact, as authored.
+    pub toolchain: Option<String>,
+}
+
+impl CapabilityConstraints {
+    /// Whether this parameter constrains nothing — the shape every
+    /// non-capability parameter has.
+    #[must_use]
+    pub fn is_unconstrained(&self) -> bool {
+        self.toolchain.is_none()
+    }
+}
+
 #[derive(facet::Facet, Clone, Debug, PartialEq, Eq)]
 pub struct Parameter {
     pub id: ParameterId,
@@ -1646,6 +1671,9 @@ pub struct Parameter {
     pub name: String,
     pub ty: Type,
     pub kind: ParameterKind,
+    /// The facts this parameter demands of the value bound to it. Empty for
+    /// every parameter that is not a capability.
+    pub constraints: CapabilityConstraints,
 }
 
 #[derive(facet::Facet, Clone, Debug, PartialEq, Eq)]
@@ -1939,6 +1967,9 @@ pub struct PartitionedCapability {
     pub parameter: ParameterId,
     pub name: String,
     pub ty: Type,
+    /// What the declaring parameter demands of the offer beyond its type.
+    /// Read by the binding check before any island of this test is submitted.
+    pub constraints: CapabilityConstraints,
 }
 
 /// One `?` catch: after the operand island publishes (value or typed failure),
@@ -2182,6 +2213,7 @@ impl Module {
                 parameter: parameter.id,
                 name: parameter.name.clone(),
                 ty: parameter.ty.clone(),
+                constraints: parameter.constraints.clone(),
             })
             .collect::<Vec<_>>();
         let capability_ids = function
@@ -3055,6 +3087,7 @@ impl Module {
                     name: format!("$value_{}", value.stable_segment()),
                     ty: node.ty.clone(),
                     kind: ParameterKind::Positional,
+                    constraints: CapabilityConstraints::default(),
                 });
                 value_inputs.push(value);
             } else if let Some(&value) = wires.get(&node.id) {
@@ -3313,6 +3346,7 @@ impl GeneratorTaskBuilder<'_> {
                 name: format!("$value_{}", value.stable_segment()),
                 ty: node.ty.clone(),
                 kind: ParameterKind::Positional,
+                constraints: CapabilityConstraints::default(),
             });
             self.value_inputs.push(value);
             self.shared_parameters.insert(id, remapped);

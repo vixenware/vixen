@@ -13,9 +13,19 @@
 //   [[capability]]
 //   ty = "Rustc"
 //   program = "$(rustup which rustc)"
+//   toolchain = "$(rustc --version | cut -d' ' -f2)"
 //   targets = ["x86_64-unknown-linux-gnu"]
 //   EOF
 //   VIX_MACHINE_MANIFEST=/tmp/machine.toml vx cargo-vix/hello.vix
+//
+// The `toolchain` line is what the `where { toolchain: … }` pin below is held
+// against. Asking `rustc --version` HERE is fine — the answer is being written
+// into a statement, once, by a human running a command. The build never asks;
+// it compares the program's demand against what the machine already said, and
+// refuses on a mismatch. That is attribution, not verification: the strongest
+// honest claim is "we asked for this, the machine said that, they agree".
+// Delete the line and this file refuses — a machine that states no toolchain
+// has nothing to attribute the pin against.
 //
 // The test `vixen-runtime/tests/exec_tree_mounts.rs` runs THIS FILE with such a
 // manifest built in Rust, so the example and the proof are the same source.
@@ -27,8 +37,17 @@
 // `vixen-runtime/tests/exec_tree_mounts.rs` for that shape. The braces are octal
 // escapes (\173 \175) because an exec template reads a literal `{` as an
 // interpolation.
+//
+// `--edition 2021` is the demand on the toolchain that the argv cannot express:
+// a rustc older than 1.56 does not know the edition, and would fail deep in the
+// compile rather than at binding. The pin says it out loud instead.
+//
+// On a NIGHTLY the manifest above states something like `1.99.0-nightly`, and
+// this pin refuses it — Cargo's prerelease rule, kept on purpose: a nightly is
+// a different tool from the stable release whose number it carries. Say you
+// mean it (`toolchain: ">=1.99.0-nightly"`) or drop the pin.
 #[test { budget_wall: 120s, budget_rss: 4096MB }]
-fn hello_world(sh: Sh, rustc: Rustc) -> Stream<Check> {
+fn hello_world(sh: Sh, rustc: Rustc where { toolchain: ">=1.56, <2" }) -> Stream<Check> {
     let sources = exec sh`-c "mkdir -p src; printf 'fn main() \173 println!(\042hello from vix\042); \175\n' > src/main.rs"`;
 
     // A template splices BARE NAMES, so each tree is bound before it is used.
