@@ -321,6 +321,7 @@ pub fn looks_like_a_range(pin: &str) -> bool {
     pin.trim().starts_with(COMPARISON_LEADS)
 }
 
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -329,101 +330,380 @@ mod tests {
         OrderedVersion::parse(text).expect("orderable")
     }
 
+    fn range(text: &str) -> VersionRange {
+        VersionRange::parse(text).expect("a readable range")
+    }
+
+    /// `range` admits `stated`, asked the way the binder asks it.
+    fn admits(range_text: &str, stated: &str) -> bool {
+        range(range_text).matches(&ordered(stated))
+    }
+
+    // ---- parsing ----------------------------------------------------------
+
     #[test]
-    fn real_toolchain_versions_are_orderable_whatever_their_arity() {
-        // The formats #17's strict semver rejected outright.
-        assert_eq!(ordered("15.2").to_string(), "15.2"); // xcodebuild
-        assert_eq!(ordered("19.38.33130.0").to_string(), "19.38.33130.0"); // MSVC
+    fn the_four_real_toolchain_formats_all_read() {
+        // The exact strings that strict semver rejected, which is why this
+        // type exists. Two components, three, four, and a prerelease.
+        assert_eq!(ordered("15.2").to_string(), "15.2"); // xcodebuild -version
+        assert_eq!(ordered("19.38.33130.0").to_string(), "19.38.33130.0"); // MSVC cl
         assert_eq!(ordered("22.1").to_string(), "22.1"); // quartus, numeric edition
         assert_eq!(ordered("1.96.0").to_string(), "1.96.0"); // rustc
+        assert_eq!(ordered("1.99.0-nightly").to_string(), "1.99.0-nightly");
     }
+
+    #[test]
+    fn a_single_component_is_a_version() {
+        assert_eq!(ordered("22"), ordered("22.0.0"));
+        assert!(ordered("22") < ordered("23"));
+    }
+
+    #[test]
+    fn a_non_numeric_component_is_not_orderable() {
+        // Quartus's real spelling, and the shapes near it.
+        assert_eq!(OrderedVersion::parse("22.1std"), None);
+        assert_eq!(OrderedVersion::parse("Pro 23.4"), None);
+        assert_eq!(OrderedVersion::parse("v22.1"), None);
+        assert_eq!(OrderedVersion::parse("2023R2"), None);
+        assert_eq!(OrderedVersion::parse("15.2 beta 2"), None);
+    }
+
+    #[test]
+    fn degenerate_texts_are_not_orderable() {
+        assert_eq!(OrderedVersion::parse(""), None);
+        assert_eq!(OrderedVersion::parse("."), None);
+        assert_eq!(OrderedVersion::parse("1..2"), None);
+        assert_eq!(OrderedVersion::parse("1.2."), None);
+        // A dash with nothing after it is not a prerelease.
+        assert_eq!(OrderedVersion::parse("1.0.0-"), None);
+        // …and nothing before it is not a version.
+        assert_eq!(OrderedVersion::parse("-1.0.0"), None);
+        // Wider than u64.
+        assert_eq!(OrderedVersion::parse("18446744073709551616"), None);
+    }
+
+    #[test]
+    fn leading_zeros_are_just_zeros() {
+        // `1.09` and `1.9` are the same number, however a tool spells it.
+        assert_eq!(ordered("1.09"), ordered("1.9"));
+        assert_eq!(ordered("01.02.03"), ordered("1.2.3"));
+    }
+
+    #[test]
+    fn build_metadata_is_discarded_wherever_it_appears() {
+        // Semver says build metadata does not participate in precedence, and a
+        // toolchain that appends a hash is the same version of the same tool.
+        assert_eq!(ordered("1.96.0+abc123"), ordered("1.96.0"));
+        assert_eq!(ordered("1.96.0-nightly+abc123"), ordered("1.96.0-nightly"));
+        // The `-` inside metadata is not a prerelease marker.
+        assert_eq!(ordered("1.96.0+a-b"), ordered("1.96.0"));
+    }
+
+    #[test]
+    fn a_prerelease_tag_keeps_its_own_dashes_and_dots() {
+        assert_eq!(ordered("1.96.0-beta.2").to_string(), "1.96.0-beta.2");
+        assert_eq!(ordered("1.0.0-alpha-1").to_string(), "1.0.0-alpha-1");
+    }
+
+    // ---- ordering ---------------------------------------------------------
 
     #[test]
     fn a_missing_component_reads_as_zero() {
         assert_eq!(ordered("15.2"), ordered("15.2.0"));
-        assert_eq!(ordered("15.2").cmp(&ordered("15.2.0")), Ordering::Equal);
+        assert_eq!(ordered("15.2"), ordered("15.2.0.0.0"));
         assert!(ordered("15.2") < ordered("15.2.1"));
-        assert!(ordered("15.10") > ordered("15.9"));
+        assert!(ordered("15.2.1") > ordered("15.2"));
     }
 
     #[test]
-    fn a_non_numeric_edition_is_not_orderable() {
-        // Quartus's actual spelling. Refused rather than coerced — see the
-        // module docs. `toolchain: "22.1std"` is how you ask for it.
-        assert_eq!(OrderedVersion::parse("22.1std"), None);
-        assert_eq!(OrderedVersion::parse("Pro 23.4"), None);
-        assert_eq!(OrderedVersion::parse("v22.1"), None);
-        assert_eq!(OrderedVersion::parse(""), None);
+    fn components_compare_as_numbers_not_text() {
+        // The bug string comparison would introduce: "9" > "10" lexically.
+        assert!(ordered("15.9") < ordered("15.10"));
+        assert!(ordered("1.9.0") < ordered("1.89.0"));
+        assert!(ordered("19.37.99999.0") < ordered("19.38.0.0"));
+    }
+
+    #[test]
+    fn equality_agrees_with_the_ordering() {
+        // Derived `PartialEq` would call these unequal (different component
+        // vectors) while `cmp` calls them equal — an inconsistency that reads
+        // fine in a comparison and corrupts a `BTreeMap`.
+        let short = ordered("15.2");
+        let long = ordered("15.2.0");
+        assert_eq!(short, long);
+        assert_eq!(short.cmp(&long), Ordering::Equal);
+        let mut set = std::collections::BTreeSet::new();
+        set.insert(short);
+        set.insert(long);
+        assert_eq!(set.len(), 1, "one version, however it was spelled");
+    }
+
+    #[test]
+    fn the_ordering_is_total_and_sorts() {
+        let mut versions = [
+            ordered("1.99.0"),
+            ordered("15.2"),
+            ordered("1.99.0-nightly"),
+            ordered("1.0"),
+            ordered("19.38.33130.0"),
+            ordered("1.98.0"),
+        ];
+        versions.sort();
+        let rendered: Vec<String> = versions.iter().map(ToString::to_string).collect();
+        assert_eq!(
+            rendered,
+            vec![
+                "1.0",
+                "1.98.0",
+                "1.99.0-nightly",
+                "1.99.0",
+                "15.2",
+                "19.38.33130.0",
+            ]
+        );
+    }
+
+    // ---- prereleases ------------------------------------------------------
+
+    #[test]
+    fn a_prerelease_precedes_its_own_release() {
+        assert!(ordered("1.99.0-nightly") < ordered("1.99.0"));
+        assert!(ordered("1.96.0-beta.2") < ordered("1.96.0"));
+    }
+
+    #[test]
+    fn a_prerelease_still_outranks_an_earlier_release() {
+        assert!(ordered("1.99.0-nightly") > ordered("1.98.0"));
+        assert!(ordered("1.99.0-nightly") > ordered("1.98.9"));
+    }
+
+    #[test]
+    fn prereleases_of_one_release_order_among_themselves() {
+        assert!(ordered("1.0.0-alpha") < ordered("1.0.0-beta"));
+        assert!(ordered("1.0.0-beta") < ordered("1.0.0-nightly"));
+        assert_eq!(ordered("1.0.0-beta"), ordered("1.0.0-beta"));
     }
 
     #[test]
     fn a_suffix_reads_as_a_prerelease_even_when_it_meant_an_increment() {
-        // Pinned so the trap is visible rather than discovered: semver says a
-        // `-suffix` precedes its release, so a service pack sorts BELOW the
-        // version it patches. Correct for `1.99.0-nightly`, backwards for
-        // `2023.09-SP1` — which is why such a tool wants an exact pin.
+        // Pinned so the trap is visible rather than discovered. Semver says a
+        // `-suffix` precedes its release, which is right for `-nightly` and
+        // backwards for a service pack — `2023.9-SP1` is an increment ON
+        // `2023.9`, not a preview of it. Nothing here can tell them apart, so
+        // a tool that versions that way wants an exact pin.
         assert!(ordered("2023.9-SP1") < ordered("2023.9"));
     }
 
     #[test]
-    fn build_metadata_does_not_participate() {
-        assert_eq!(ordered("1.96.0+abc123"), ordered("1.96.0"));
+    fn a_nightly_does_not_satisfy_a_stable_range() {
+        // Cargo's rule, kept deliberately: a nightly is a materially different
+        // tool from the stable release whose number it carries, and admitting
+        // it silently is the pretending this vocabulary exists to refuse.
+        assert!(!admits(">=1.89", "1.99.0-nightly"));
+        assert!(!admits(">=1.89, <2", "1.99.0-nightly"));
+        assert!(!admits("<2", "1.99.0-nightly"));
+        assert!(!admits(">=1.0", "1.99.0-nightly"));
+        // Even when the numbers alone would sit comfortably inside.
+        assert!(!admits(">=1.98, <2.0", "1.99.0-nightly"));
     }
 
     #[test]
-    fn a_prerelease_precedes_its_release() {
-        assert!(ordered("1.99.0-nightly") < ordered("1.99.0"));
-        assert!(ordered("1.99.0-nightly") > ordered("1.98.0"));
+    fn a_nightly_named_by_the_bound_is_admitted() {
+        assert!(admits(">=1.99.0-nightly", "1.99.0-nightly"));
+        assert!(admits("=1.99.0-nightly", "1.99.0-nightly"));
+        assert!(admits(">=1.99.0-nightly, <2", "1.99.0-nightly"));
     }
 
     #[test]
-    fn ranges_admit_and_refuse_by_comparison() {
-        let range = VersionRange::parse(">=1.56, <2").expect("range");
-        assert!(range.matches(&ordered("1.96.0")));
-        assert!(range.matches(&ordered("1.56")));
-        assert!(!range.matches(&ordered("1.55.9")));
-        assert!(!range.matches(&ordered("2.0.0")));
+    fn naming_a_prerelease_of_a_different_release_does_not_admit_this_one() {
+        // The bound must name a prerelease of the SAME numeric core. Otherwise
+        // `>=1.98.0-nightly` would quietly open the door to every later
+        // nightly, which is the blanket admission the rule exists to prevent.
+        assert!(!admits(">=1.98.0-nightly", "1.99.0-nightly"));
+        assert!(!admits(">=1.98.0-nightly, <2", "1.99.0-nightly"));
     }
 
     #[test]
-    fn a_two_component_range_bounds_a_four_component_version() {
-        // The MSVC shape: the machine states four components, the pin says two.
-        let range = VersionRange::parse(">=19.38").expect("range");
-        assert!(range.matches(&ordered("19.38.33130.0")));
-        assert!(!range.matches(&ordered("19.37.99999.0")));
+    fn one_bound_naming_the_prerelease_is_enough_to_consider_it() {
+        // The gate asks whether ANY bound names this release's prerelease;
+        // the bounds themselves are still all enforced afterwards.
+        assert!(admits(">=1.99.0-nightly, <2.0", "1.99.0-nightly"));
+        // Considered, then refused on the numbers: below the lower bound.
+        assert!(!admits(">=1.99.1-nightly, <2.0", "1.99.1-alpha"));
     }
 
     #[test]
-    fn a_nightly_needs_naming_and_then_is_admitted() {
-        let stable = VersionRange::parse(">=1.56, <2").expect("range");
-        assert!(!stable.matches(&ordered("1.99.0-nightly")));
-        let named = VersionRange::parse(">=1.99.0-nightly").expect("range");
-        assert!(named.matches(&ordered("1.99.0-nightly")));
+    fn a_prerelease_bound_does_not_disturb_stable_versions() {
+        // The gate only applies to a prerelease STATED version. A stable
+        // toolchain compares against a prerelease bound on the numbers, where
+        // a release outranks its own prerelease.
+        assert!(admits(">=1.99.0-nightly", "1.99.0"));
+        assert!(admits(">=1.99.0-nightly", "2.0.0"));
+        assert!(!admits(">=1.99.0-nightly", "1.98.0"));
+    }
+
+    #[test]
+    fn a_named_nightly_still_answers_to_the_bounds() {
+        // `<1.0.0` does NOT exclude it: a prerelease precedes its release, so
+        // `1.0.0-nightly` really is below `1.0.0`. Naming it admits it and the
+        // numbers then agree.
+        assert!(admits(">=1.0.0-nightly, <1.0.0", "1.0.0-nightly"));
+        // An upper bound below the prerelease does exclude it, though — the
+        // gate decides whether it is CONSIDERED, never whether it passes.
+        assert!(!admits(">=0.9, <1.0.0-alpha", "1.0.0-nightly"));
+    }
+
+    #[test]
+    fn rustc_channel_shapes_round_trip() {
+        // The three things `rustc --version` actually reports.
+        assert!(admits(">=1.56, <2", "1.96.0"));
+        assert!(!admits(">=1.56, <2", "1.96.0-nightly"));
+        assert!(!admits(">=1.56, <2", "1.96.0-beta.2"));
+        assert!(admits(">=1.96.0-beta.2", "1.96.0-beta.2"));
+    }
+
+    // ---- ranges -----------------------------------------------------------
+
+    #[test]
+    fn every_comparison_admits_what_it_says() {
+        assert!(admits(">1.0", "1.0.1"));
+        assert!(!admits(">1.0", "1.0"));
+        assert!(admits(">=1.0", "1.0"));
+        assert!(!admits(">=1.0", "0.9"));
+        assert!(admits("<1.0", "0.9"));
+        assert!(!admits("<1.0", "1.0"));
+        assert!(admits("<=1.0", "1.0"));
+        assert!(!admits("<=1.0", "1.0.1"));
+        assert!(admits("=1.0", "1.0.0"));
+        assert!(!admits("=1.0", "1.0.1"));
+    }
+
+    #[test]
+    fn bounds_conjoin() {
+        assert!(admits(">=1.56, <2", "1.96.0"));
+        assert!(!admits(">=1.56, <2", "1.55.0"));
+        assert!(!admits(">=1.56, <2", "2.0.0"));
+        // Three bounds, all enforced.
+        assert!(admits(">=1.0, <2.0, =1.5", "1.5"));
+        assert!(!admits(">=1.0, <2.0, =1.5", "1.6"));
+    }
+
+    #[test]
+    fn a_range_and_a_version_may_differ_in_arity_either_way() {
+        // MSVC: four stated components, a two-component bound.
+        assert!(admits(">=19.38", "19.38.33130.0"));
+        assert!(!admits(">=19.38", "19.37.99999.0"));
+        // And the other direction: two stated, four in the bound.
+        assert!(admits(">=15.2.0.0", "15.2"));
+        assert!(!admits(">15.2.0.0", "15.2"));
+    }
+
+    #[test]
+    fn whitespace_around_bounds_is_not_significant() {
+        assert!(admits("  >=1.89 ,  <1.90  ", "1.89.5"));
+        assert!(admits(">= 1.89", "1.89.5"));
+    }
+
+    #[test]
+    fn a_trailing_comma_is_not_an_empty_bound() {
+        assert!(admits(">=1.89,", "1.96.0"));
+    }
+
+    #[test]
+    fn a_range_with_no_bounds_is_refused() {
+        assert!(matches!(VersionRange::parse(""), Err(RangeParseError::Empty)));
+        assert!(matches!(
+            VersionRange::parse("   "),
+            Err(RangeParseError::Empty)
+        ));
+        assert!(matches!(
+            VersionRange::parse(",,,"),
+            Err(RangeParseError::Empty)
+        ));
     }
 
     #[test]
     fn a_bare_bound_is_refused_rather_than_guessed() {
+        // `1.56` reads as caret to Cargo and as equality to everyone else, and
+        // those two disagree about whether `1.57` satisfies it. The spelling
+        // that means one of them should say which.
+        let error = VersionRange::parse("1.56").expect_err("bare");
+        assert!(matches!(error, RangeParseError::MissingComparison { .. }));
+        assert!(error.to_string().contains(">=1.56"));
         assert!(matches!(
-            VersionRange::parse("1.56"),
+            VersionRange::parse(">=1.0, 2.0"),
             Err(RangeParseError::MissingComparison { .. })
         ));
     }
 
     #[test]
-    fn an_unorderable_bound_is_refused_with_the_exact_pin_as_the_way_out() {
-        let error = VersionRange::parse(">=22.1std").expect_err("unorderable");
-        assert!(matches!(error, RangeParseError::UnorderableBound { .. }));
-        assert!(error.to_string().contains("pin it exactly"));
+    fn caret_and_tilde_are_not_comparisons_here() {
+        // Absent on purpose: `^1.2.3` bounds at `2.0.0` because semver fixes
+        // which position is major, and with free arity nobody can say whether
+        // `^15.2` stops at `16` or at `15.3`.
+        assert!(matches!(
+            VersionRange::parse("^1.2"),
+            Err(RangeParseError::MissingComparison { .. })
+        ));
+        assert!(matches!(
+            VersionRange::parse("~1.2"),
+            Err(RangeParseError::MissingComparison { .. })
+        ));
     }
 
     #[test]
+    fn an_unorderable_bound_is_refused_and_names_the_way_out() {
+        let error = VersionRange::parse(">=22.1std").expect_err("unorderable");
+        assert!(matches!(error, RangeParseError::UnorderableBound { .. }));
+        assert!(
+            error.to_string().contains("pin it exactly"),
+            "the message points at the exact pin: {error}"
+        );
+        assert!(matches!(
+            VersionRange::parse(">=1.0, <22.1std"),
+            Err(RangeParseError::UnorderableBound { .. })
+        ));
+    }
+
+    #[test]
+    fn a_comparison_with_no_version_is_refused() {
+        assert!(matches!(
+            VersionRange::parse(">="),
+            Err(RangeParseError::UnorderableBound { .. })
+        ));
+    }
+
+    #[test]
+    fn a_range_renders_back_to_its_meaning() {
+        assert_eq!(range(">=1.89, <1.90").to_string(), ">=1.89, <1.90");
+        assert_eq!(range("  >= 1.89  ").to_string(), ">=1.89");
+    }
+
+    // ---- the exact-pin guard ---------------------------------------------
+
+    #[test]
     fn an_exact_pin_that_is_plainly_a_range_is_recognizable() {
-        // The guard that keeps #17's `toolchain: ">=1.56, <2"` from silently
-        // becoming a string nothing equals.
+        // Without this, the rename from a single `toolchain` key breaks
+        // quietly: the string compares unequal to every stated version,
+        // forever, and the refusal blames the machine for a source bug.
         assert!(looks_like_a_range(">=1.56, <2"));
+        assert!(looks_like_a_range(">1.0"));
+        assert!(looks_like_a_range("<2"));
+        assert!(looks_like_a_range("<=2"));
+        assert!(looks_like_a_range("=1.0"));
         assert!(looks_like_a_range("^1.2"));
-        assert!(looks_like_a_range(" <2"));
+        assert!(looks_like_a_range("~1.2"));
+        assert!(looks_like_a_range("   <2"));
+    }
+
+    #[test]
+    fn a_real_exact_pin_is_not_mistaken_for_a_range() {
+        // Every one of these is a version some tool actually reports.
         assert!(!looks_like_a_range("22.1std"));
         assert!(!looks_like_a_range("15.2"));
+        assert!(!looks_like_a_range("19.38.33130.0"));
+        assert!(!looks_like_a_range("1.99.0-nightly"));
+        assert!(!looks_like_a_range("Pro 23.4"));
+        assert!(!looks_like_a_range(""));
     }
 }
