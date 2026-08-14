@@ -18,7 +18,7 @@
 //   EOF
 //   VIX_MACHINE_MANIFEST=/tmp/machine.toml vx cargo-vix/hello.vix
 //
-// The `toolchain` line is what the `where { toolchain: … }` pin below is held
+// The `toolchain` line is what the `where { toolchain_range: … }` pin below is held
 // against. Asking `rustc --version` HERE is fine — the answer is being written
 // into a statement, once, by a human running a command. The build never asks;
 // it compares the program's demand against what the machine already said, and
@@ -45,9 +45,14 @@
 // On a NIGHTLY the manifest above states something like `1.99.0-nightly`, and
 // this pin refuses it — Cargo's prerelease rule, kept on purpose: a nightly is
 // a different tool from the stable release whose number it carries. Say you
-// mean it (`toolchain: ">=1.99.0-nightly"`) or drop the pin.
+// mean it (`toolchain_range: ">=1.99.0-nightly"`) or drop the pin.
+//
+// Two spellings, because they ask different questions. `toolchain_range` asks
+// an ORDERING question and needs both sides to be numbers. `toolchain` asks for
+// one exact string and parses nothing — which is the only honest question about
+// a tool like Quartus, whose version is `22.1std`.
 #[test { budget_wall: 120s, budget_rss: 4096MB }]
-fn hello_world(sh: Sh, rustc: Rustc where { toolchain: ">=1.56, <2" }) -> Stream<Check> {
+fn hello_world(sh: Sh, rustc: Rustc where { toolchain_range: ">=1.56, <2" }) -> Stream<Check> {
     let sources = exec sh`-c "mkdir -p src; printf 'fn main() \173 println!(\042hello from vix\042); \175\n' > src/main.rs"`;
 
     // A template splices BARE NAMES, so each tree is bound before it is used.

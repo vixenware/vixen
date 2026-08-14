@@ -1651,8 +1651,20 @@ pub enum ParameterKind {
 /// to whoever holds the manifest.
 #[derive(facet::Facet, Clone, Debug, Default, PartialEq, Eq)]
 pub struct CapabilityConstraints {
-    /// A version requirement over the offer's `toolchain` fact, as authored.
+    /// The offer's `toolchain` fact, demanded EXACTLY — string equality against
+    /// the machine's word, parsing neither side. This is the pin for a tool
+    /// whose version cannot be put on a number line: Quartus states `22.1std`,
+    /// and "is it that one" is the only honest question about it.
     pub toolchain: Option<String>,
+    /// The offer's `toolchain` fact, demanded as an ordered RANGE
+    /// (`">=1.89, <1.90"`). Both sides must read as versions for the question
+    /// to mean anything, so a range held against `22.1std` is a refusal rather
+    /// than a false.
+    ///
+    /// Two keys rather than one that guesses: a value like `">=1.89"` read as
+    /// an exact pin compares unequal to every version forever, and the refusal
+    /// would blame the machine for a source bug.
+    pub toolchain_range: Option<String>,
 }
 
 impl CapabilityConstraints {
@@ -1660,7 +1672,7 @@ impl CapabilityConstraints {
     /// non-capability parameter has.
     #[must_use]
     pub fn is_unconstrained(&self) -> bool {
-        self.toolchain.is_none()
+        self.toolchain.is_none() && self.toolchain_range.is_none()
     }
 }
 

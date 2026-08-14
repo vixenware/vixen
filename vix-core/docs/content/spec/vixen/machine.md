@@ -88,11 +88,32 @@ none of it is built now.
 > r[vixen.machine.version-pin]
 >
 > [DESIGN] A capability parameter may constrain the offer bound to it, in the
-> same `where` clause a call takes: `rustc: Rustc where { toolchain: ">=1.89,
-> <1.90" }`. The pin is a version *set* (Cargo's requirement grammar), so
-> `1.89.3` satisfies `>=1.89` without the string-equality accidents that make
-> `"15.2" == "15.2.1"` false for stupid reasons. An absent clause constrains
-> nothing and matches any offer, exactly as an absent target requirement does.
+> same `where` clause a call takes. There are two pins, and they ask different
+> questions:
+>
+> - `toolchain_range: ">=1.89, <1.90"` — an ORDERING question. The pin is a
+>   version *set*, so `1.89.3` satisfies `>=1.89` without the string-equality
+>   accidents that make `"15.2" == "15.2.1"` false for stupid reasons. Both
+>   sides must read as versions for the question to mean anything.
+> - `toolchain: "22.1std"` — one exact string, parsing neither side.
+>
+> A toolchain version is NOT a package version, and the vocabulary says so.
+> Component arity is free, because `xcodebuild -version` says `15.2` and MSVC
+> says `19.38.33130.0`; a missing component reads as zero, so `15.2` and
+> `15.2.0` are one version. And a toolchain may have no ordering at all —
+> Quartus states `22.1std` — for which the exact pin is the only honest
+> question. Holding such a tool to a range is a refusal, never a false: saying
+> "no" would imply somebody had performed the comparison.
+>
+> The two are separate keys rather than one that guesses, because the guess has
+> no safe default. A range read as an exact pin matches nothing, forever, and
+> blames the machine for a source bug; an exact pin read as a range asks an
+> unanswerable question. A `toolchain` value beginning with a comparison
+> character is therefore refused at compile time, naming `toolchain_range` as
+> the key that would work.
+>
+> An absent clause constrains nothing and matches any offer, exactly as an
+> absent target requirement does.
 >
 > This is **attribution, never verification.** Nothing is probed to decide
 > anything: the manifest's `toolchain` is a human's statement about the
