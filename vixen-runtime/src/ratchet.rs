@@ -295,6 +295,11 @@ pub enum RunError {
     /// only the undeclared case, never a declared file that cannot be read
     /// or parsed (`vixen.machine.manifest`).
     Manifest(crate::manifest::ManifestLoadError),
+    /// The capability packages the invoker DECLARED (`VIX_CAPABILITY_PACKAGES`)
+    /// failed to load. Loud and typed for the same reason a manifest is: a
+    /// declared file that cannot be read or parsed must never degrade into
+    /// running with fewer tools nameable (`vixen.capability.package-is-data`).
+    Packages(crate::manifest::PackagesLoadError),
 }
 
 /// The stable provenance key of a published check: the yield site's selector
@@ -1030,6 +1035,14 @@ fn prepare_modules_with_cache(
     config: CompilerConfig,
     mut cache: LoweringCache,
 ) -> Result<PreparedRun, RunError> {
+    // Raise a declared package file that failed to load BEFORE compiling.
+    // `default_config` already attempted the same load (it has to, to know
+    // which types are nameable) and dropped the error; this is where it
+    // becomes a typed refusal. Ordering matters for the message: after
+    // compilation the same broken file reads as "unknown capability type",
+    // which blames the program for the invoker's mistake.
+    crate::manifest::declared_packages().map_err(RunError::Packages)?;
+
     // The injected surfaces are what make `untar` resolve: it is a primitive in
     // `vixen-primitives` now, not an intrinsic `vix-core` knows the name of.
     let compilation = Compiler::with_config_and_primitive_surfaces(

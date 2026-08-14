@@ -16,6 +16,9 @@ vix = { path = "../vix-core", package = "vix-core" }
 facet.workspace = true
 facet-reflect.workspace = true
 facet-json.workspace = true
+# Capability packages are data (`vixen.capability.package-is-data`): the
+# shipped set and an invoker's own are one TOML document format.
+facet-toml.workspace = true
 hex.workspace = true
 sha2.workspace = true
 blake3.workspace = true

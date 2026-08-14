@@ -303,6 +303,94 @@ pub fn declared_manifest() -> Result<MachineManifest, ManifestLoadError> {
     }
 }
 
+/// The environment variable through which an invoker DECLARES a capability
+/// package file — the same "stated, never conjured" discipline as
+/// [`MANIFEST_ENV`], for the other half of the pair.
+///
+/// The two are deliberately separate files because they answer different
+/// questions. A manifest is a fact about THIS box (`Rustc` lives here, at this
+/// version). A package is how a tool is *spoken to* — its flag for targets, its
+/// output protocol — which is identical on every box that has the tool. Fleet
+/// scale is where this earns itself: one package file ships everywhere and each
+/// machine states only its own offers.
+pub const PACKAGES_ENV: &str = "VIX_CAPABILITY_PACKAGES";
+
+/// A typed package-loading failure — the same two loud sides as
+/// [`ManifestLoadError`], plus the registration conflict, which cannot arise
+/// for a manifest because a manifest is one whole value rather than an
+/// addition to a registry.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum PackagesLoadError {
+    /// The declared path could not be read.
+    Unreadable { path: String, detail: String },
+    /// The declared file read, but is not a valid package document.
+    Malformed { path: String, detail: String },
+    /// The declared file redefines an already-registered package.
+    Conflict { path: String, name: String },
+}
+
+impl core::fmt::Display for PackagesLoadError {
+    fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
+        match self {
+            Self::Unreadable { path, detail } => write!(
+                f,
+                "error[packages]: declared capability packages `{path}` cannot be read: {detail}"
+            ),
+            Self::Malformed { path, detail } => write!(
+                f,
+                "error[packages]: declared capability packages `{path}` is not a package document: {detail}"
+            ),
+            Self::Conflict { path, name } => write!(
+                f,
+                "error[packages]: declared capability packages `{path}` redefines `{name}`, which is already registered with a different grammar"
+            ),
+        }
+    }
+}
+
+/// Register the capability packages an invoker declares, on top of the shipped
+/// ones. Nothing declared is not an error — it is the ordinary case of running
+/// with only the packages vix ships.
+///
+/// This is what makes a proprietary toolchain nameable without recompiling vix:
+/// the invoker writes the tool's grammar in a file, and from then on a program
+/// may take it as a parameter and a manifest may offer it.
+///
+/// Must run before the compiler config reads the nameable set
+/// ([`vixen_primitives::capability_types`]).
+///
+/// r[impl vixen.capability.package-is-data]
+pub fn declared_packages() -> Result<(), PackagesLoadError> {
+    vixen_primitives::capability_package::register_default_packages();
+    let Some(path) = std::env::var_os(PACKAGES_ENV) else {
+        return Ok(());
+    };
+    let path = path
+        .to_str()
+        .ok_or_else(|| PackagesLoadError::Unreadable {
+            path: path.to_string_lossy().into_owned(),
+            detail: "the declared path is not valid UTF-8".to_owned(),
+        })?
+        .to_owned();
+    let source = std::fs::read_to_string(&path).map_err(|error| PackagesLoadError::Unreadable {
+        path: path.clone(),
+        detail: error.to_string(),
+    })?;
+    let packages =
+        vixen_primitives::capability_package::packages_from_toml(&source).map_err(|detail| {
+            PackagesLoadError::Malformed {
+                path: path.clone(),
+                detail,
+            }
+        })?;
+    vixen_primitives::capability_package::register_packages(packages).map_err(|conflict| {
+        PackagesLoadError::Conflict {
+            path,
+            name: conflict.name,
+        }
+    })
+}
+
 /// Compare one demanded version pin against the machine's word for that
 /// capability, returning the refusal when they do not meet.
 ///

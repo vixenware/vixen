@@ -55,33 +55,34 @@ pub const HOST_TYPES: &[vix::binding::HostTypeDecl] = &[
     },
 ];
 
-/// The capability packages `vixen` declares — the command packages a program
-/// may receive as `#[test]` parameters — injected into the compiler through
+/// The capability types a program may receive as `#[test]` parameters,
+/// injected into the compiler through
 /// [`vix::compiler::CompilerConfig::capabilities`]. They live here for the same
 /// reason `untar` does: a tool name is a capability package's, never the
 /// machine's, and `machine.capability.no-argv-dialect` bans a per-tool arm in
 /// machine code. `vix-core` now spells none of these names.
 ///
-/// The three are the ratchet corpus's v1 packages. `Echo` and `Sh` speak the
-/// exit-only output protocol; `ProgressiveSh` speaks `vix-ready\t<path>`
-/// readiness lines, which the exec primitive — not the machine — reads off the
-/// capability's typed content.
+/// This is *derived*, not declared: the nameable types are exactly the
+/// registered packages ([`capability_package::registered_package_names`]), so
+/// registering a package is the single act that makes a tool nameable. The two
+/// used to be separate hand-maintained lists that a test held in agreement,
+/// which meant a new tool needed two Rust edits to be usable and one to be
+/// silently unusable.
+///
+/// The returned slice is leaked because
+/// [`vix::compiler::CompilerConfig::capabilities`] is `&'static` — bounded by
+/// the number of distinct registered sets a process builds a config from.
 ///
 /// r[impl machine.primitive.capabilities-by-identity]
-pub const CAPABILITY_TYPES: &[vix::binding::CapabilityTypeDecl] = &[
-    vix::binding::CapabilityTypeDecl { name: "Echo" },
-    vix::binding::CapabilityTypeDecl { name: "Sh" },
-    vix::binding::CapabilityTypeDecl {
-        name: "ProgressiveSh",
-    },
-    // The machine-manifest generality packages (`vixen.machine.requirements-
-    // from-use`): flag-shaped, env-shaped, and fact-shaped target disciplines.
-    // Their grammars are data in [`capability_package::CAPABILITY_PACKAGES`];
-    // this list only makes the names nameable as `#[test]` parameters.
-    vix::binding::CapabilityTypeDecl { name: "Rustc" },
-    vix::binding::CapabilityTypeDecl { name: "Go" },
-    vix::binding::CapabilityTypeDecl { name: "MingwGcc" },
-];
+#[must_use]
+pub fn capability_types() -> &'static [vix::binding::CapabilityTypeDecl] {
+    let decls: Vec<vix::binding::CapabilityTypeDecl> =
+        capability_package::registered_package_names()
+            .into_iter()
+            .map(|name| vix::binding::CapabilityTypeDecl { name })
+            .collect();
+    Box::leak(decls.into_boxed_slice())
+}
 
 /// Reserve `vixen`'s host-extern type names ([`HOST_TYPES`]) with `vix-core`'s
 /// schema batch — the identity anchor that lets an injected `HostTypeDecl`

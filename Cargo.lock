@@ -1063,6 +1063,7 @@ dependencies = [
  "facet",
  "facet-json",
  "facet-reflect",
+ "facet-toml",
  "flate2",
  "hex",
  "sha2",
