@@ -20,6 +20,8 @@
 use std::collections::BTreeMap;
 
 use vix::vir::{Island, Module, Node, Op, PartitionedTest, Type};
+
+use crate::version::{OrderedVersion, VersionRange};
 use vixen_primitives::capability_package::{
     PlanElement, Target, TargetCapture, capability_package,
 };
@@ -310,35 +312,50 @@ pub fn declared_manifest() -> Result<MachineManifest, ManifestLoadError> {
 /// asks the tool what it is — the manifest's `toolchain` is a human's statement
 /// about the machine, and all this does is hold the program's demand and that
 /// statement up against each other so a mismatch is somebody's, on the record.
-fn toolchain_refusal(pin: &str, stated: Option<&str>) -> Option<RefusalCause> {
-    let requirement = match semver::VersionReq::parse(pin) {
-        Ok(requirement) => requirement,
-        Err(error) => {
-            return Some(RefusalCause::UnreadablePin {
-                pin: pin.to_owned(),
-                detail: error.to_string(),
-            });
-        }
-    };
-    let Some(stated) = stated else {
-        return Some(RefusalCause::ToolchainUnstated {
-            pin: pin.to_owned(),
-        });
-    };
-    let version = match semver::Version::parse(stated) {
-        Ok(version) => version,
-        Err(error) => {
-            return Some(RefusalCause::UnreadableToolchain {
-                pin: pin.to_owned(),
+fn toolchain_refusal(pin: &ToolchainPin, stated: Option<&str>) -> Option<RefusalCause> {
+    match pin {
+        // Exact: no parsing on either side, which is the whole point. A tool
+        // whose version is `22.1std` can still be pinned, and a machine that
+        // states something unreadable can still satisfy it.
+        ToolchainPin::Exact(wanted) => {
+            let Some(stated) = stated else {
+                return Some(RefusalCause::ToolchainUnstated {
+                    pin: wanted.clone(),
+                });
+            };
+            (stated != wanted).then(|| RefusalCause::Toolchain {
+                pin: wanted.clone(),
                 stated: stated.to_owned(),
-                detail: error.to_string(),
-            });
+            })
         }
-    };
-    (!requirement.matches(&version)).then(|| RefusalCause::Toolchain {
-        pin: pin.to_owned(),
-        stated: stated.to_owned(),
-    })
+        ToolchainPin::Range(text) => {
+            // The pin is read BEFORE the machine's word, so a malformed range
+            // — a source bug, wrong on every machine — is not reported as this
+            // particular machine failing to measure up.
+            let range = match VersionRange::parse(text) {
+                Ok(range) => range,
+                Err(error) => {
+                    return Some(RefusalCause::UnreadablePin {
+                        pin: text.clone(),
+                        detail: error.to_string(),
+                    });
+                }
+            };
+            let Some(stated) = stated else {
+                return Some(RefusalCause::ToolchainUnstated { pin: text.clone() });
+            };
+            let Some(version) = OrderedVersion::parse(stated) else {
+                return Some(RefusalCause::UnorderableToolchain {
+                    pin: text.clone(),
+                    stated: stated.to_owned(),
+                });
+            };
+            (!range.matches(&version)).then(|| RefusalCause::Toolchain {
+                pin: text.clone(),
+                stated: stated.to_owned(),
+            })
+        }
+    }
 }
 
 /// One requirement a test's plans impose on a capability type, in the shared
@@ -364,11 +381,39 @@ pub struct CapabilityRequirement {
     /// The capability type's nominal name.
     pub ty: String,
     pub targets: Vec<TargetRequirement>,
-    /// Every `where { toolchain: … }` pin declared for this type. Binding is
-    /// nominal, so two parameters of one type bind to one offer; both pins are
-    /// kept and both are checked, because a demand the author wrote down that
-    /// nothing compares is worse than no demand at all.
-    pub toolchain_pins: Vec<String>,
+    /// Every toolchain pin declared for this type. Binding is nominal, so two
+    /// parameters of one type bind to one offer; both pins are kept and both
+    /// are checked, because a demand the author wrote down that nothing
+    /// compares is worse than no demand at all.
+    pub toolchain_pins: Vec<ToolchainPin>,
+}
+
+/// What a parameter demands of the offer's stated toolchain, and therefore
+/// which question gets asked of it.
+///
+/// The two are separate spellings rather than one that guesses, because the
+/// guess has no safe default: reading `">=1.89"` as an exact version yields a
+/// pin nothing can ever satisfy, and reading `22.1std` as a range yields a
+/// comparison nobody can perform.
+#[derive(facet::Facet, Clone, Debug, PartialEq, Eq)]
+#[repr(u8)]
+pub enum ToolchainPin {
+    /// `toolchain: "22.1std"` — string equality against the machine's word,
+    /// parsing neither side.
+    Exact(String),
+    /// `toolchain_range: ">=1.89, <1.90"` — an ordering question, which both
+    /// sides must be able to answer.
+    Range(String),
+}
+
+impl ToolchainPin {
+    /// The pin as authored, whichever question it asks.
+    #[must_use]
+    pub fn as_str(&self) -> &str {
+        match self {
+            Self::Exact(pin) | Self::Range(pin) => pin,
+        }
+    }
 }
 
 /// One test's requirement set, readable without executing anything.
@@ -393,14 +438,12 @@ pub enum RefusalCause {
     /// The program pins a toolchain and the offer states none, so there is
     /// nothing to attribute the demand against.
     ToolchainUnstated { pin: String },
-    /// The demanded pin is not a version requirement.
+    /// The demanded range could not be read as one.
     UnreadablePin { pin: String, detail: String },
-    /// The machine's stated toolchain is not a version.
-    UnreadableToolchain {
-        pin: String,
-        stated: String,
-        detail: String,
-    },
+    /// A range was demanded and the machine's stated toolchain cannot be put on
+    /// a number line — `>=1.89` against `22.1std`. Refused rather than answered
+    /// "no": saying no would imply somebody had performed the comparison.
+    UnorderableToolchain { pin: String, stated: String },
 }
 
 /// A typed pre-effect refusal: the vixen half of
@@ -447,7 +490,7 @@ impl core::fmt::Display for CapabilityRefusal {
             RefusalCause::Toolchain { pin, .. }
             | RefusalCause::ToolchainUnstated { pin }
             | RefusalCause::UnreadablePin { pin, .. }
-            | RefusalCause::UnreadableToolchain { pin, .. } => write!(f, " toolchain {pin}")?,
+            | RefusalCause::UnorderableToolchain { pin, .. } => write!(f, " toolchain {pin}")?,
         }
         match &self.offered {
             Some(offered) => write!(f, "\n  machine offers: {offered}")?,
@@ -466,12 +509,14 @@ impl core::fmt::Display for CapabilityRefusal {
                 )?;
             }
             RefusalCause::UnreadablePin { detail, .. } => {
-                write!(f, "\n  that is not a version requirement: {detail}")?;
+                write!(f, "\n  that is not a version range: {detail}")?;
             }
-            RefusalCause::UnreadableToolchain { stated, detail, .. } => {
+            RefusalCause::UnorderableToolchain { stated, .. } => {
                 write!(
                     f,
-                    "\n  the machine states toolchain {stated}, which is not a version: {detail}"
+                    "\n  the machine states toolchain {stated}, which has no ordering, \
+                     so a range cannot be compared against it; pin it exactly with \
+                     `toolchain: \"{stated}\"` if that is the one you mean"
                 )?;
             }
             RefusalCause::TypeAbsent | RefusalCause::Target { .. } => {}
@@ -535,11 +580,21 @@ pub fn test_requirements(partitioned: &PartitionedTest) -> TestRequirements {
         });
         // Binding is nominal, so a second parameter of the same type folds into
         // the row the first opened — but its pin is its own demand and joins
-        // the list rather than replacing or being dropped.
-        if let Some(pin) = &capability.constraints.toolchain
-            && !rows[row].toolchain_pins.contains(pin)
-        {
-            rows[row].toolchain_pins.push(pin.clone());
+        // the list rather than replacing or being dropped. The two spellings
+        // are mutually exclusive per parameter (the compiler refuses both), so
+        // at most one of these adds anything for a given declaration.
+        let declared = [
+            capability.constraints.toolchain.as_ref().map(|pin| ToolchainPin::Exact(pin.clone())),
+            capability
+                .constraints
+                .toolchain_range
+                .as_ref()
+                .map(|pin| ToolchainPin::Range(pin.clone())),
+        ];
+        for pin in declared.into_iter().flatten() {
+            if !rows[row].toolchain_pins.contains(&pin) {
+                rows[row].toolchain_pins.push(pin);
+            }
         }
     }
     // Every exec plan in the test, wherever it was partitioned to.

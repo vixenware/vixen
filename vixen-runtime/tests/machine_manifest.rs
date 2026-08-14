@@ -19,7 +19,7 @@ use vix::runtime::{
 };
 use vixen_primitives::capability_package::Target;
 use vixen_runtime::manifest::{
-    CapabilityOffer, MachineManifest, RefusalCause, TargetRequirement, host_target,
+    CapabilityOffer, MachineManifest, RefusalCause, TargetRequirement, ToolchainPin, host_target,
     static_requirements,
 };
 use vixen_runtime::ratchet::{RatchetReport, prepare_source, run_source_with_manifest};
@@ -491,7 +491,7 @@ fn compile(gcc: MingwGcc) -> Stream<Check> {
 /// exactly the gap `require(…)` used to have to cover.
 const PINNED_CASE: &str = r#"
 #[test]
-fn build(rustc: Rustc where { toolchain: ">=1.89, <1.90" }) -> Stream<Check> {
+fn build(rustc: Rustc where { toolchain_range: ">=1.89, <1.90" }) -> Stream<Check> {
     let out = exec rustc`main.rs`;
     yield expect_eq((out.tree / "main.exe").text(), "exe");
 }
@@ -604,7 +604,7 @@ fn build(rustc: Rustc) -> Stream<Check> {
 fn a_pin_that_is_not_a_version_requirement_refuses() {
     const NONSENSE_PIN: &str = r#"
 #[test]
-fn build(rustc: Rustc where { toolchain: "newest please" }) -> Stream<Check> {
+fn build(rustc: Rustc where { toolchain_range: "newest please" }) -> Stream<Check> {
     let out = exec rustc`main.rs`;
     yield expect_eq((out.tree / "main.exe").text(), "exe");
 }
@@ -640,14 +640,133 @@ fn a_stated_toolchain_that_is_not_a_version_refuses_a_pin() {
     let report = run_source_with_manifest(PINNED_CASE, vague)
         .expect("a binding refusal is a report verdict, never a runner error");
     let refusal = assert_refused(&report);
-    let RefusalCause::UnreadableToolchain { pin, stated, .. } = &refusal.cause else {
+    let RefusalCause::UnorderableToolchain { pin, stated, .. } = &refusal.cause else {
         panic!("an unreadable machine word is its own cause: {refusal:#?}");
     };
     assert_eq!(stated, "host");
     assert_eq!(pin, ">=1.89, <1.90", "the demand stays on the record");
     assert!(
-        refusal.to_string().contains("which is not a version"),
+        refusal.to_string().contains("which has no ordering"),
         "the diagnostic says which side could not be read: {refusal}"
+    );
+    assert!(
+        refusal.to_string().contains(r#"toolchain: "host""#),
+        "and names the exact pin that WOULD reach this machine: {refusal}"
+    );
+}
+
+/// The case the whole vocabulary exists for: a tool whose version cannot be
+/// put on a number line. Quartus states `22.1std`; strict semver rejects it and
+/// so does any range. An EXACT pin parses neither side and reaches it.
+///
+/// r[verify vixen.machine.version-pin]
+#[test]
+fn an_exact_pin_reaches_a_tool_whose_version_has_no_ordering() {
+    const SOURCE: &str = r#"
+#[test]
+fn build(rustc: Rustc where { toolchain: "22.1std" }) -> Stream<Check> {
+    let out = exec rustc`--version`;
+    yield expect_eq(out.stdout.text().trim(), "unreachable");
+}
+"#;
+    // Asked of the binder directly: a pin that BINDS lets the run proceed to
+    // the spawn, and the placeholder program is not a thing on disk. What is
+    // under test is the refusal set, so that is what gets read.
+    assert!(
+        refusals_for(SOURCE, "22.1std").is_empty(),
+        "an exact pin matching the machine's word binds"
+    );
+
+    let refusals = refusals_for(SOURCE, "22.1pro");
+    let [refusal] = refusals.as_slice() else {
+        panic!("a differing exact pin is one refusal: {refusals:#?}");
+    };
+    let RefusalCause::Toolchain { pin, stated } = &refusal.cause else {
+        panic!("a differing exact pin is a toolchain refusal: {refusal:#?}");
+    };
+    assert_eq!(pin, "22.1std");
+    assert_eq!(stated, "22.1pro");
+}
+
+/// Bind one source against a machine stating `toolchain`, without running it.
+/// A satisfied pin would otherwise carry on into a spawn, and what is under
+/// test here is the binding, not the process.
+fn refusals_for(source: &str, stated: &str) -> Vec<vixen_runtime::manifest::CapabilityRefusal> {
+    let module = vixen_runtime::default_compiler()
+        .compile(source)
+        .expect("the pinned case compiles")
+        .module;
+    let requirements = static_requirements(&module).expect("the report needs no execution");
+    let machine = manifest(vec![offer_stating("Rustc", "rustc-must-never-spawn", stated)]);
+    requirements
+        .iter()
+        .flat_map(|test| machine.bind(test))
+        .collect()
+}
+
+/// The rename's trap, caught at compile time. `toolchain:` is exact, so a value
+/// that is plainly a range would compare unequal to every version forever and
+/// blame the machine for it.
+#[test]
+fn an_exact_pin_that_is_plainly_a_range_is_refused_at_compile_time() {
+    const SOURCE: &str = r#"
+#[test]
+fn build(rustc: Rustc where { toolchain: ">=1.89" }) -> Stream<Check> {
+    let out = exec rustc`--version`;
+    yield expect_eq(out.stdout.text().trim(), "unreachable");
+}
+"#;
+    let diagnostics = vixen_runtime::default_compiler()
+        .compile(SOURCE)
+        .expect_err("a range under the exact key is refused");
+    let rendered = format!("{diagnostics:?}");
+    assert!(
+        rendered.contains("toolchain_range"),
+        "the diagnostic names the key that WOULD work: {rendered}"
+    );
+}
+
+/// One question per pin: a parameter cannot ask both.
+#[test]
+fn a_parameter_pins_exactly_or_by_range_never_both() {
+    const SOURCE: &str = r#"
+#[test]
+fn build(rustc: Rustc where { toolchain: "1.89.0", toolchain_range: ">=1.89" }) -> Stream<Check> {
+    let out = exec rustc`--version`;
+    yield expect_eq(out.stdout.text().trim(), "unreachable");
+}
+"#;
+    let diagnostics = vixen_runtime::default_compiler()
+        .compile(SOURCE)
+        .expect_err("two pins on one parameter are refused");
+    let rendered = format!("{diagnostics:?}");
+    assert!(
+        rendered.contains("never both"),
+        "the diagnostic says why: {rendered}"
+    );
+}
+
+/// Arity is free on both sides. MSVC states four components and Xcode states
+/// two; a range written with two bounds either one.
+///
+/// r[verify vixen.machine.version-pin]
+#[test]
+fn a_range_spans_versions_of_any_arity() {
+    const SOURCE: &str = r#"
+#[test]
+fn build(rustc: Rustc where { toolchain_range: ">=19.38" }) -> Stream<Check> {
+    let out = exec rustc`--version`;
+    yield expect_eq(out.stdout.text().trim(), "unreachable");
+}
+"#;
+    // The MSVC shape: `19.38.33130.0` against a two-component bound.
+    assert!(
+        refusals_for(SOURCE, "19.38.33130.0").is_empty(),
+        "four stated components satisfy a two-component bound"
+    );
+    assert!(
+        !refusals_for(SOURCE, "19.37.99999.0").is_empty(),
+        "and the comparison is on the numbers, not the text"
     );
 }
 
@@ -687,7 +806,7 @@ fn a_prerelease_toolchain_does_not_satisfy_a_plain_range() {
 fn a_pin_naming_the_prerelease_line_admits_it() {
     const NIGHTLY_PIN: &str = r#"
 #[test]
-fn build(rustc: Rustc where { toolchain: ">=1.99.0-nightly" }) -> Stream<Check> {
+fn build(rustc: Rustc where { toolchain_range: ">=1.99.0-nightly" }) -> Stream<Check> {
     let out = exec rustc`main.rs`;
     yield expect_eq((out.tree / "main.exe").text(), "exe");
 }
@@ -718,7 +837,7 @@ fn the_static_report_carries_the_version_pin() {
     let [rustc] = test.capabilities.as_slice() else {
         panic!("one capability requirement: {test:#?}");
     };
-    assert_eq!(rustc.toolchain_pins, vec![">=1.89, <1.90".to_owned()]);
+    assert_eq!(rustc.toolchain_pins, vec![ToolchainPin::Range(">=1.89, <1.90".to_owned())]);
     assert!(
         rustc.targets.is_empty(),
         "this plan spells no target: {rustc:#?}"

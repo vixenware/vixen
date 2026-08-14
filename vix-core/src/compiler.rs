@@ -2032,23 +2032,31 @@ fn declare_capability_constraints(
         )));
     }
     let mut toolchain: Option<String> = None;
+    let mut toolchain_range: Option<String> = None;
     for field in &clause.fields {
-        if field.name.value != "toolchain" {
-            return Err(Diagnostics::one(Diagnostic {
-                code: DiagnosticCode::UnknownName,
-                primary: field.name.span,
-                labels: Vec::new(),
-                payload: DiagnosticPayload::Name {
-                    name: field.name.value.clone(),
-                },
-            }));
-        }
-        if toolchain.is_some() {
+        let slot = match field.name.value.as_str() {
+            "toolchain" => &mut toolchain,
+            "toolchain_range" => &mut toolchain_range,
+            _ => {
+                return Err(Diagnostics::one(Diagnostic {
+                    code: DiagnosticCode::UnknownName,
+                    primary: field.name.span,
+                    labels: Vec::new(),
+                    payload: DiagnosticPayload::Name {
+                        name: field.name.value.clone(),
+                    },
+                }));
+            }
+        };
+        if slot.is_some() {
             return Err(Diagnostics::one(Diagnostic::unsupported(
                 field.span,
-                "a capability takes one `toolchain` pin; the requirement grammar \
-                 already spells conjunction, so write `\">=1.89, <1.90\"` rather \
-                 than two fields",
+                format!(
+                    "a capability takes one `{}`; a range already spells \
+                     conjunction, so write `\">=1.89, <1.90\"` rather than two \
+                     fields",
+                    field.name.value
+                ),
             )));
         }
         let Some(ast::Expr::Str(pin)) = &field.value else {
@@ -2058,9 +2066,39 @@ fn declare_capability_constraints(
                 "a computed value".to_owned(),
             ));
         };
-        toolchain = Some(pin.value.clone());
+        *slot = Some(pin.value.clone());
     }
-    Ok(CapabilityConstraints { toolchain })
+    // One question per pin. `toolchain` asks "is it exactly this" and
+    // `toolchain_range` asks "is it within this"; a parameter that asked both
+    // would be answered by whichever the binder happened to check first.
+    if toolchain.is_some() && toolchain_range.is_some() {
+        return Err(Diagnostics::one(Diagnostic::unsupported(
+            clause.span,
+            "a capability pins its toolchain exactly (`toolchain`) or by range \
+             (`toolchain_range`), never both",
+        )));
+    }
+    // An exact pin that is plainly a range is a source bug, and a silent one:
+    // `toolchain: \">=1.89\"` compares unequal to every version a machine could
+    // state, forever, and the refusal reads as the machine's fault. Caught
+    // here by its first character, which is not version algebra — the language
+    // still knows no version vocabulary (`machine.capability.no-argv-dialect`),
+    // and reading the pin as a set stays with whoever holds the manifest.
+    if let Some(pin) = &toolchain
+        && pin.trim().starts_with(['>', '<', '=', '^', '~'])
+    {
+        return Err(Diagnostics::one(Diagnostic::unsupported(
+            clause.span,
+            format!(
+                "`toolchain: \"{pin}\"` reads as an exact version and would match \
+                 nothing; write `toolchain_range: \"{pin}\"` to compare by order"
+            ),
+        )));
+    }
+    Ok(CapabilityConstraints {
+        toolchain,
+        toolchain_range,
+    })
 }
 
 fn check_test_signature(

@@ -36,8 +36,8 @@ source. Running it through `vx` directly needs a machine manifest offering
 before anything runs. `hello.vix`'s header has the manifest to copy.
 
 The example also **pins the toolchain it needs**:
-`rustc: Rustc where { toolchain: ">=1.56, <2" }`, because `--edition 2021` is a
-demand no argv element expresses. The pin is a version set, not a string, so
+`rustc: Rustc where { toolchain_range: ">=1.56, <2" }`, because `--edition 2021`
+is a demand no argv element expresses. The pin is a version set, not a string, so
 `1.89.3` satisfies `>=1.89`. It is checked against the manifest's stated
 `toolchain` at binding time — attribution, never verification: nothing probes
 the tool to decide anything, and the strongest claim on offer is "we asked for
@@ -45,6 +45,17 @@ this, the machine said that, they agree". A machine that states no toolchain
 refuses the pin rather than quietly satisfying it. The proof test authors its
 own manifest by asking `rustc --version` once, which is the allowed kind of
 probe: writing the statement down, not making a decision with it.
+
+There are two spellings because they ask different questions.
+`toolchain_range: ">=1.89"` asks an ORDERING question, so both sides have to be
+numbers. `toolchain: "22.1std"` asks for one exact string and parses neither
+side — which is the only honest question about a tool like Quartus, whose
+version has no ordering at all. Arity is free on both sides, so Xcode's `15.2`
+and MSVC's `19.38.33130.0` are ordinary versions rather than parse failures.
+
+Writing a range under the exact key is refused at compile time: `toolchain:
+">=1.89"` would compare unequal to every version forever and the refusal would
+read as the machine's fault.
 
 One sharp edge, kept on purpose: a **nightly** states `1.99.0-nightly`, and
 Cargo's prerelease rule means a plain `>=1.89` does not admit it. A nightly is

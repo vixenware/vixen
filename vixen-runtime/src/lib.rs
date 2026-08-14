@@ -27,6 +27,7 @@ pub mod host_exec;
 pub mod manifest;
 pub mod module_graph;
 pub mod ratchet;
+pub mod version;
 
 use std::sync::Arc;
 
