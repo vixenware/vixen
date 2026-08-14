@@ -57,6 +57,12 @@ Writing a range under the exact key is refused at compile time: `toolchain:
 ">=1.89"` would compare unequal to every version forever and the refusal would
 read as the machine's fault.
 
+The exact pin compares TEXT, so `toolchain: "1.89"` does not match a machine
+stating `1.89.0` — same version, different strings, and the exact pin was asked
+about the string. When the version has an ordering, `toolchain_range: "=1.89"`
+is the way to say "exactly this version" and compares as versions. Reach for
+the exact pin when there is no ordering to compare.
+
 One sharp edge, kept on purpose: a **nightly** states `1.99.0-nightly`, and
 Cargo's prerelease rule means a plain `>=1.89` does not admit it. A nightly is
 a different tool from the stable release whose number it carries, so it has to

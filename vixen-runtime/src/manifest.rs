@@ -492,9 +492,15 @@ impl core::fmt::Display for CapabilityRefusal {
             | RefusalCause::UnreadablePin { pin, .. }
             | RefusalCause::UnorderableToolchain { pin, .. } => write!(f, " toolchain {pin}")?,
         }
-        match &self.offered {
-            Some(offered) => write!(f, "\n  machine offers: {offered}")?,
-            None => write!(f, "\n  machine offers no {}", self.required_type)?,
+        // An unreadable pin is a property of the SOURCE — it is wrong on every
+        // machine — so what this one happens to offer is not evidence and
+        // naming it would read as though the machine were implicated. Every
+        // other cause is genuinely about this machine's word.
+        if !matches!(self.cause, RefusalCause::UnreadablePin { .. }) {
+            match &self.offered {
+                Some(offered) => write!(f, "\n  machine offers: {offered}")?,
+                None => write!(f, "\n  machine offers no {}", self.required_type)?,
+            }
         }
         // The pin cases say what the machine's word WAS, because that is the
         // attribution: "we asked for this, they said that".
@@ -509,7 +515,11 @@ impl core::fmt::Display for CapabilityRefusal {
                 )?;
             }
             RefusalCause::UnreadablePin { detail, .. } => {
-                write!(f, "\n  that is not a version range: {detail}")?;
+                write!(
+                    f,
+                    "\n  that is not a version range: {detail}\
+                     \n  this is the source, not the machine — no machine could satisfy it"
+                )?;
             }
             RefusalCause::UnorderableToolchain { stated, .. } => {
                 write!(

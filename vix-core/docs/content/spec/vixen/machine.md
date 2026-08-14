@@ -97,6 +97,13 @@ none of it is built now.
 >   sides must read as versions for the question to mean anything.
 > - `toolchain: "22.1std"` — one exact string, parsing neither side.
 >
+> Because the exact pin compares TEXT, `toolchain: "1.89"` does not match a
+> machine stating `1.89.0`: they are the same version and different strings, and
+> the exact pin was asked about the string. For a version that has an ordering,
+> `toolchain_range: "=1.89"` is the pin that means "exactly this version" and
+> compares as versions. The exact pin is for the versions that have no ordering
+> to compare.
+>
 > A toolchain version is NOT a package version, and the vocabulary says so.
 > Component arity is free, because `xcodebuild -version` says `15.2` and MSVC
 > says `19.38.33130.0`; a missing component reads as zero, so `15.2` and

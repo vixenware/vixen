@@ -624,6 +624,18 @@ fn build(rustc: Rustc where { toolchain_range: "newest please" }) -> Stream<Chec
     };
     assert_eq!(pin, "newest please");
     assert!(!detail.is_empty(), "the parse failure is carried");
+    // An unreadable pin is wrong on EVERY machine, so the diagnostic must not
+    // implicate this one: naming what it offers would read as though a
+    // different machine might have satisfied the pin. None could.
+    let rendered = refusal.to_string();
+    assert!(
+        rendered.contains("this is the source, not the machine"),
+        "the diagnostic places the fault: {rendered}"
+    );
+    assert!(
+        !rendered.contains("machine offers"),
+        "and does not cite an offer as though it were evidence: {rendered}"
+    );
 }
 
 /// The other side of the same rule: a machine that states something that is
