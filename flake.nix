@@ -111,11 +111,7 @@
             }
           );
 
-          # No `cargoFmt` check on purpose. The tree is not rustfmt-clean at
-          # HEAD — 77 diffs across 34 files under the pinned 1.96 toolchain,
-          # none of them in this branch's changes — so the gate would be red on
-          # arrival and would say nothing about any given change. Add it back in
-          # the commit that formats the tree, not before.
+          fmt = craneLib.cargoFmt { inherit src; };
 
           # `exec_tree_mounts` compiles and runs a real Rust binary through the
           # exec rail, so the test environment needs a rustc of its own and the

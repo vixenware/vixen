@@ -9,9 +9,9 @@
 //! `ValueId`.
 
 use vix::compiler::{Compiler, CompilerConfig};
-use vixen_runtime::ratchet::{run_source, run_source_with_config};
 use vix::runtime::EventKind;
 use vix::vir::{Op as VirOp, PartitionedRecipe};
+use vixen_runtime::ratchet::{run_source, run_source_with_config};
 
 const RUNG_051: &str = include_str!("ratchet/051-molten-accumulator.vix");
 

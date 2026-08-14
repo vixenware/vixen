@@ -220,11 +220,7 @@ pub fn archive_directory(root: &Path, mount_count: usize) -> Result<Vec<u8>, Str
         }
     }
 
-    fn collect(
-        directory: &Path,
-        root: &Path,
-        captured: &mut Vec<Captured>,
-    ) -> Result<(), String> {
+    fn collect(directory: &Path, root: &Path, captured: &mut Vec<Captured>) -> Result<(), String> {
         let mut entries = std::fs::read_dir(directory)
             .map_err(|error| {
                 format!(
@@ -270,7 +266,10 @@ pub fn archive_directory(root: &Path, mount_count: usize) -> Result<Vec<u8>, Str
                 let target = target
                     .to_str()
                     .ok_or_else(|| {
-                        format!("exec output symlink `{}` has a non-UTF-8 target", path.display())
+                        format!(
+                            "exec output symlink `{}` has a non-UTF-8 target",
+                            path.display()
+                        )
                     })?
                     .to_owned();
                 captured.push(Captured::Symlink { path, target });
@@ -344,10 +343,12 @@ pub fn archive_directory(root: &Path, mount_count: usize) -> Result<Vec<u8>, Str
     captured.sort_by(|left, right| left.path().cmp(right.path()));
     let mut archive = Vec::new();
     for entry in captured {
-        let relative = entry
-            .path()
-            .strip_prefix(root)
-            .map_err(|_| format!("exec output `{}` escaped its workspace", entry.path().display()))?;
+        let relative = entry.path().strip_prefix(root).map_err(|_| {
+            format!(
+                "exec output `{}` escaped its workspace",
+                entry.path().display()
+            )
+        })?;
         let relative = relative
             .components()
             .map(|component| component.as_os_str().to_string_lossy())
@@ -364,7 +365,9 @@ pub fn archive_directory(root: &Path, mount_count: usize) -> Result<Vec<u8>, Str
         let mut header = [0u8; 512];
         header[..relative.len()].copy_from_slice(relative.as_bytes());
         header[100..108].copy_from_slice(match &entry {
-            Captured::File { executable: true, .. } => b"0000755\0",
+            Captured::File {
+                executable: true, ..
+            } => b"0000755\0",
             Captured::File { .. } => b"0000644\0",
             Captured::Dir { .. } => b"0000755\0",
             Captured::Symlink { .. } => b"0000777\0",
@@ -382,7 +385,9 @@ pub fn archive_directory(root: &Path, mount_count: usize) -> Result<Vec<u8>, Str
         };
         if let Captured::Symlink { target, .. } = &entry {
             if target.len() > 100 {
-                return Err(format!("exec output symlink target `{target}` exceeds ustar v1"));
+                return Err(format!(
+                    "exec output symlink target `{target}` exceeds ustar v1"
+                ));
             }
             header[157..157 + target.len()].copy_from_slice(target.as_bytes());
         }

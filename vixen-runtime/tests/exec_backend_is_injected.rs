@@ -106,7 +106,11 @@ fn a_substituted_backend_receives_the_invocation_instead() {
         "the substituted backend's refusal reaches the caller"
     );
     let asked = backend.asked.lock().expect("invocation recorder mutex");
-    assert_eq!(asked.len(), 1, "the invocation went to the installed backend");
+    assert_eq!(
+        asked.len(),
+        1,
+        "the invocation went to the installed backend"
+    );
     assert_eq!(asked[0].program, "sh", "…with the plan the program spelled");
     assert_eq!(asked[0].argv, vec!["-c".to_owned(), "echo ran".to_owned()]);
 }

@@ -80,7 +80,12 @@ fn serve(pin: PinnedBlobRef, ctx: &EffectCtx) -> Result<ValueId, PrimitiveMachin
                 // the receipt shows the same serving shape as a store hit,
                 // and the verified digest attests onto it.
                 ctx.read(&admitted, ReadProjection::Whole)?;
-                attest_upstream(ctx, &admitted, &ReadProjection::Whole, pin.upstream.as_ref())?;
+                attest_upstream(
+                    ctx,
+                    &admitted,
+                    &ReadProjection::Whole,
+                    pin.upstream.as_ref(),
+                )?;
                 return Ok(admitted);
             }
         }
@@ -424,9 +429,7 @@ mod origin_fallthrough {
             OriginAdapterDecl {
                 name: "scripted".to_owned(),
                 schemes: vec!["stub".to_owned()],
-                capability: SchemaPattern::exact(
-                    &Type::Extern(ExternKind::Registry).schema_ref(),
-                ),
+                capability: SchemaPattern::exact(&Type::Extern(ExternKind::Registry).schema_ref()),
                 tree_namespace: None,
             },
             adapter.clone(),
@@ -451,9 +454,11 @@ mod origin_fallthrough {
         staged_in_store: bool,
         persistence: Option<Arc<dyn ValuePersistence>>,
     ) -> (PrimitivePublication, ValueId, ValueId) {
-        let target =
-            FramedNode::leaf(Type::Extern(ExternKind::Blob).schema_ref(), payload.to_vec())
-                .identity();
+        let target = FramedNode::leaf(
+            Type::Extern(ExternKind::Blob).schema_ref(),
+            payload.to_vec(),
+        )
+        .identity();
         let capability = registry_capability();
         let request = PinnedFetchRequest {
             pin: PinnedBlobRef {
@@ -523,12 +528,19 @@ mod origin_fallthrough {
             PrimitiveCompletion::Ok(target.clone())
         );
         assert_eq!(
-            *adapter.asked.lock().expect("scripted origin mutex poisoned"),
+            *adapter
+                .asked
+                .lock()
+                .expect("scripted origin mutex poisoned"),
             ["stub://miss-a", "stub://miss-b", "stub://serves"],
             "each origin is tried in declaration order"
         );
         let reads = &publication.receipt.reads;
-        assert_eq!(reads.len(), 3, "every attempt is in the receipt: {reads:#?}");
+        assert_eq!(
+            reads.len(),
+            3,
+            "every attempt is in the receipt: {reads:#?}"
+        );
         for (read, coordinate) in reads.iter().zip(["stub://miss-a", "stub://miss-b"]) {
             assert_eq!(read.source, capability);
             assert_eq!(
@@ -578,7 +590,10 @@ mod origin_fallthrough {
             publication.completion
         );
         assert_eq!(
-            *adapter.asked.lock().expect("scripted origin mutex poisoned"),
+            *adapter
+                .asked
+                .lock()
+                .expect("scripted origin mutex poisoned"),
             ["stub://corrupt"],
             "the loop stops at the corruption; later origins are never asked"
         );
@@ -685,9 +700,11 @@ mod origin_fallthrough {
     #[test]
     fn a_persistence_candidate_attests_the_verified_upstream_digest() {
         let payload = b"payload";
-        let target =
-            FramedNode::leaf(Type::Extern(ExternKind::Blob).schema_ref(), payload.to_vec())
-                .identity();
+        let target = FramedNode::leaf(
+            Type::Extern(ExternKind::Blob).schema_ref(),
+            payload.to_vec(),
+        )
+        .identity();
         let (origins, adapter) = scripted_set([("stub://unused", payload.to_vec())]);
         let (publication, target_again, _capability) = run_fetch(
             origins,
@@ -703,7 +720,10 @@ mod origin_fallthrough {
             })),
         );
 
-        assert_eq!(publication.completion, PrimitiveCompletion::Ok(target_again));
+        assert_eq!(
+            publication.completion,
+            PrimitiveCompletion::Ok(target_again)
+        );
         assert!(
             adapter
                 .asked
@@ -756,7 +776,10 @@ mod origin_fallthrough {
             publication.completion
         );
         assert_eq!(
-            *adapter.asked.lock().expect("scripted origin mutex poisoned"),
+            *adapter
+                .asked
+                .lock()
+                .expect("scripted origin mutex poisoned"),
             ["stub://serves"],
         );
         assert!(

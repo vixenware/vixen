@@ -709,7 +709,11 @@ fn refusals_for(source: &str, stated: &str) -> Vec<vixen_runtime::manifest::Capa
         .expect("the pinned case compiles")
         .module;
     let requirements = static_requirements(&module).expect("the report needs no execution");
-    let machine = manifest(vec![offer_stating("Rustc", "rustc-must-never-spawn", stated)]);
+    let machine = manifest(vec![offer_stating(
+        "Rustc",
+        "rustc-must-never-spawn",
+        stated,
+    )]);
     requirements
         .iter()
         .flat_map(|test| machine.bind(test))
@@ -849,7 +853,10 @@ fn the_static_report_carries_the_version_pin() {
     let [rustc] = test.capabilities.as_slice() else {
         panic!("one capability requirement: {test:#?}");
     };
-    assert_eq!(rustc.toolchain_pins, vec![ToolchainPin::Range(">=1.89, <1.90".to_owned())]);
+    assert_eq!(
+        rustc.toolchain_pins,
+        vec![ToolchainPin::Range(">=1.89, <1.90".to_owned())]
+    );
     assert!(
         rustc.targets.is_empty(),
         "this plan spells no target: {rustc:#?}"

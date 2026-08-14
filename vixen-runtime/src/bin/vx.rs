@@ -66,16 +66,19 @@ fn main() -> ExitCode {
         .expect("one origin adapter cannot overlap itself")
         .with_exec_backend(Arc::new(HostExecBackend));
 
-    let report = match prepare_source(&source).and_then(|run| {
-        run.execute_with_primitive_services(services)
-    }) {
+    let report = match prepare_source(&source)
+        .and_then(|run| run.execute_with_primitive_services(services))
+    {
         Ok(report) => report,
         Err(error) => {
             // The typed diagnostic set IS the error message. Rendering it as a
             // pretty report is a real feature and deliberately not attempted
             // here — a shim that half-renders diagnostics is worse than one
             // that shows them whole.
-            eprintln!("vx: {}: run failed\n{error:#?}", invocation.source.display());
+            eprintln!(
+                "vx: {}: run failed\n{error:#?}",
+                invocation.source.display()
+            );
             return ExitCode::from(1);
         }
     };

@@ -18,13 +18,12 @@ use crate::vir::{
     ExternKind, Function, FunctionId, Island, IslandId, NodeId, Op, Type, VariantPayload,
 };
 
-use super::model::TreeEntryKind;
-use super::tree_resident::canonical_resident_tree;
 use super::identity::{
     DemandKey, DemandPreimage, Location, LocationId, RecipeId, ValueId,
     directory_observation_digest, hash_framed,
 };
 use super::identity::{FramedField, FramedNode, FramedValue};
+use super::model::TreeEntryKind;
 use super::model::{
     DemandRecord, DemandState, FailureContext, FailureValue, MemoVerdict, ReadObservation,
     ReadProjection, ReadWitness, Receipt, TaskId, TaskRecord, TaskState,
@@ -37,6 +36,7 @@ use super::store::{
     FrozenValue, Handle, Interned, Store, StoreEntry, StoreJournal, StoreJournalError,
     StoreJournalLoadReport,
 };
+use super::tree_resident::canonical_resident_tree;
 use super::{
     CallbackError, EffectCtx, PrimitiveCompletion, PrimitiveDispatcher, PrimitiveField,
     PrimitiveFieldValue, PrimitiveMachineError, PrimitiveMemoPolicy, PrimitiveValue,
@@ -141,9 +141,7 @@ impl super::CodataDrainCtx for GlobDrainCtx<'_> {
                         // the kind that contradicts the listing request.
                         // r[impl machine.primitive.witness-reverification]
                         let observation = match &error {
-                            super::OriginTreeError::Missing => {
-                                Some(ReadObservation::Missing)
-                            }
+                            super::OriginTreeError::Missing => Some(ReadObservation::Missing),
                             super::OriginTreeError::WrongKind { found } => {
                                 Some(ReadObservation::Kind(*found))
                             }
@@ -912,7 +910,9 @@ pub enum PersistentClaimRejectionReason {
 #[derive(facet::Facet, Clone, Debug, PartialEq, Eq)]
 #[repr(u8)]
 pub enum PersistentRuntimeJournalError {
-    Json { detail: String },
+    Json {
+        detail: String,
+    },
     Store(Box<StoreJournalError>),
     /// The journal predates the current format (a `None` is the versionless
     /// past) or postdates it. Rejection is intentional invalidation, never a
@@ -1329,9 +1329,7 @@ impl<S: EventSink, Ctx> Runtime<S, Ctx> {
                         ReadObservation::Directory { digest } => installation
                             .adapter
                             .tree_directory(&resident, path)
-                            .is_ok_and(|entries| {
-                                directory_observation_digest(&entries) == *digest
-                            }),
+                            .is_ok_and(|entries| directory_observation_digest(&entries) == *digest),
                         // "Still the contradicting kind" holds; any change —
                         // to the requested kind, another kind, or absence —
                         // breaks the witness and recomputes.
@@ -3431,7 +3429,7 @@ impl<S: EventSink, Ctx> Runtime<S, Ctx> {
                 )?))
             }
             Op::ArrayConcat => effect_fault("effect island contained an ArrayConcat operation"),
-                Op::Map => {
+            Op::Map => {
                 // A materialized map value (a registered effect's declared
                 // env), the keyed twin of the `Op::Array` argv case above. The
                 // inputs are the rows flattened key-first, exactly as
@@ -4293,8 +4291,10 @@ impl<S: EventSink, Ctx> Runtime<S, Ctx> {
             })
             .collect::<Vec<_>>();
         self.serve_parked_effect_projections(demand, &retained)?;
-        self.effect_stream_ready.retain(|(key, _), _| *key != demand);
-        self.effect_progress_ready.retain(|(key, _), _| *key != demand);
+        self.effect_stream_ready
+            .retain(|(key, _), _| *key != demand);
+        self.effect_progress_ready
+            .retain(|(key, _), _| *key != demand);
         self.completed_effect_progress.insert(demand, retained);
         Ok(())
     }

@@ -558,7 +558,10 @@ fn publish_stream_extension(
     bytes: Vec<u8>,
 ) -> Result<(), PrimitiveMachineError> {
     let end = offset + bytes.len() as u64;
-    let value = ctx.intern(&Type::Extern(vix::vir::ExternKind::Blob).schema_ref(), &bytes)?;
+    let value = ctx.intern(
+        &Type::Extern(vix::vir::ExternKind::Blob).schema_ref(),
+        &bytes,
+    )?;
     ctx.publish_progress(ProgressivePublication {
         projection: ReadProjection::StreamRange {
             stream: stream.to_owned(),

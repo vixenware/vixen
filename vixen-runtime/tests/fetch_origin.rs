@@ -563,8 +563,7 @@ fn pinned_fetch_rejects_vix_identity_mismatch() {
     let upstream = vixen_primitives::sha256_pin(&bytes);
     let server = BlobServer::start(bytes);
     let fixtures = TempDir::new().expect("create fixture root");
-    let services =
-        harness_origins(fixture_store(&fixtures, &server.url(), &claimed, &upstream));
+    let services = harness_origins(fixture_store(&fixtures, &server.url(), &claimed, &upstream));
 
     let error = prepare_source(FETCH_MUST_FAIL)
         .expect("prepare Vix identity-mismatch source")
@@ -596,8 +595,10 @@ fn pinned_fetch_rejects_upstream_digest_mismatch_at_every_tier() {
         store_server.url_for("/must-not-be-contacted"),
         identity.content.hex(),
     );
-    let store_services =
-        harness_origins(fixture_store_with_manifest(&store_fixtures, &store_manifest));
+    let store_services = harness_origins(fixture_store_with_manifest(
+        &store_fixtures,
+        &store_manifest,
+    ));
     let store_error = prepare_source(FETCH_STORE_THEN_UPSTREAM_CONTRADICTION)
         .expect("prepare Store-tier upstream source")
         .execute_with_primitive_services(store_services)
@@ -721,8 +722,7 @@ fn a_manifest_pin_that_is_not_a_pin_fails_at_the_manifest() {
     ] {
         let server = BlobServer::start(bytes.clone());
         let fixtures = TempDir::new().expect("create fixture root");
-        let services =
-            harness_origins(fixture_store(&fixtures, &server.url(), &identity, bad));
+        let services = harness_origins(fixture_store(&fixtures, &server.url(), &identity, bad));
         let error = prepare_source(FETCH_ONLY)
             .expect("prepare source")
             .execute_with_primitive_services(services)

@@ -16,7 +16,11 @@ use vixen_runtime::ratchet::run_source;
 
 fn run(label: &str, source: &str, checks: usize) {
     let report = run_source(source).unwrap_or_else(|error| panic!("{label}: {error:#?}"));
-    assert!(report.passed(), "{label} checks pass: {:?}", report.plain.checks);
+    assert!(
+        report.passed(),
+        "{label} checks pass: {:?}",
+        report.plain.checks
+    );
     assert!(report.agrees(), "{label} agrees across lanes");
     assert_eq!(report.plain.checks.len(), checks, "{label} check count");
 }

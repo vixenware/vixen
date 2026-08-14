@@ -43,9 +43,9 @@ fn a_registered_host_type_compiles() {
         host_types: TREE,
         ..CompilerConfig::default()
     });
-    compiler
-        .compile(PROGRAM)
-        .unwrap_or_else(|diagnostics| panic!("a reserved host type name compiles: {diagnostics:#?}"));
+    compiler.compile(PROGRAM).unwrap_or_else(|diagnostics| {
+        panic!("a reserved host type name compiles: {diagnostics:#?}")
+    });
 }
 
 const CORE_COLLIDING: &[HostTypeDecl] = &[HostTypeDecl { name: "Blob" }];
@@ -115,7 +115,9 @@ fn tree_text_projection_requires_the_declared_tree_host_type() {
         constants: TEST_TREE,
         ..CompilerConfig::default()
     });
-    compiler.compile(TREE_TEXT_PROGRAM).unwrap_or_else(|diagnostics| {
-        panic!("the projection read is active once `Tree` is declared: {diagnostics:#?}")
-    });
+    compiler
+        .compile(TREE_TEXT_PROGRAM)
+        .unwrap_or_else(|diagnostics| {
+            panic!("the projection read is active once `Tree` is declared: {diagnostics:#?}")
+        });
 }
