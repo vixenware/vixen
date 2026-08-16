@@ -1,0 +1,8 @@
+[package]
+name = "dup-name-crate"
+version = "0.1.0"
+edition = "2021"
+
+[dependencies]
+bitflags_v1 = { package = "bitflags", version = "1" }
+bitflags_v2 = { package = "bitflags", version = "2" }

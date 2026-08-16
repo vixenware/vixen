@@ -90,15 +90,88 @@ fn fetch_pin(pkg: LockPackage) -> Option<String> {
 
 // --------------------------------------------------------------- the build order
 
+// A package's identity in the lock. The NAME ALONE IS NOT ONE: a real lock may
+// hold one name at two versions, and cargo then writes that package's
+// `dependencies` entries as `"name version"` rather than bare `"name"`. A walk
+// keyed on the name collapses the duplicates in its done-set AND stops matching
+// the disambiguated entries, so nothing ever becomes ready and the walk returns
+// a short order — indistinguishable from a genuine cycle.
+struct PackageId {
+    name: String,
+    version: String,
+}
+
+fn package_id(pkg: LockPackage) -> PackageId {
+    PackageId { name: pkg.name, version: pkg.version }
+}
+
+// A bare dependency entry naming zero packages, or several. Cargo writes the
+// bare form ONLY when the name is unique in the lock, so either count is a
+// malformed lock. It fails rather than yielding an id that matches nothing,
+// because an unmatchable id would truncate the walk and put us straight back to
+// a short order that reads as a cycle.
+struct UnresolvableDependency {
+    entry: String,
+    matches: Int,
+}
+
+// Resolve one `dependencies` entry to the package it names. The disambiguated
+// form is parsed — the space is cargo's own separator and a semver carries none,
+// so the FIRST space splits it — and the bare form is RESOLVED AGAINST THE LOCK
+// rather than parsed, because "the name is unique here" is exactly what writing
+// it bare asserts.
+//
+// Two fields, never three: lock v1/v2 wrote a third `"(source)"` component, and
+// v3 dropped it. Nothing here reads those older locks anyway — a v1 lock has no
+// top-level `version` key at all, so `Lockfile` refuses it before this runs.
+fn dependency_id(entry: String) where { packages: [LockPackage] } -> PackageId {
+    if entry.contains(" ") {
+        let (name, version) = entry.split_once(" ");
+        PackageId { name: name, version: version }
+    } else {
+        let none: [PackageId] = [];
+        let named = packages.fold(none, |acc, pkg| if pkg.name == entry {
+            acc + package_id(pkg)
+        } else {
+            acc
+        });
+        if named.len() == 1 {
+            named[0]
+        } else {
+            fail UnresolvableDependency { entry: entry, matches: named.len() }
+        }
+    }
+}
+
+fn dependency_ids(pkg: LockPackage) where { packages: [LockPackage] } -> [PackageId] {
+    dependencies_of(pkg).map(|dep| dependency_id(dep) where { packages: packages })
+}
+
+// One package with its dependency entries already resolved to identities.
+// Resolution is a whole-lock question — a bare entry is answered by scanning the
+// packages — and the walk asks it once per package here rather than once per
+// package PER ROUND.
+struct LockNode {
+    id: PackageId,
+    deps: [PackageId],
+}
+
+fn lock_graph(packages: [LockPackage]) -> [LockNode] {
+    packages.map(|pkg| LockNode {
+        id: package_id(pkg),
+        deps: dependency_ids(pkg) where { packages: packages }
+    })
+}
+
 // The packages whose dependencies are all already ordered, and which are not
 // ordered themselves. One Kahn round.
-fn ready_after(packages: [LockPackage]) where { done: [String] } -> [String] {
-    let none: [String] = [];
-    packages.fold(none, |ready, pkg| if done.contains(pkg.name) {
+fn ready_after(nodes: [LockNode]) where { done: [PackageId] } -> [PackageId] {
+    let none: [PackageId] = [];
+    nodes.fold(none, |ready, node| if done.contains(node.id) {
         ready
     } else {
-        if dependencies_of(pkg).all(|dep| done.contains(dep)) {
-            ready + pkg.name
+        if node.deps.all(|dep| done.contains(dep)) {
+            ready + node.id
         } else {
             ready
         }
@@ -109,25 +182,21 @@ fn ready_after(packages: [LockPackage]) where { done: [String] } -> [String] {
 // the walk, so a SHORT order comes back rather than a loop, and the caller sees
 // the truncation by comparing lengths.
 //
-// TWO causes produce a short order, and this walk cannot tell them apart: a
-// genuine cycle, and DUPLICATE PACKAGE NAMES. A real lock may hold one name at
-// two versions, and its `dependencies` entries then read `"name version"`
-// rather than `"name"` — the duplicates collapse in `done` and the names stop
-// matching. Keying on name+version is the fix and it waits for a fixture that
-// needs it; until then the length check is what keeps the failure loud instead
-// of silently building the wrong thing.
-fn order_after(done: [String]) where { packages: [LockPackage] } -> [String] {
-    let ready = ready_after(packages) where { done: done };
+// With the walk keyed on `PackageId`, a short order now has ONE cause — a
+// genuine cycle. The other one, duplicate package names, is gone; a malformed
+// lock fails loudly in `dependency_id` instead of quietly shortening the order.
+fn order_after(done: [PackageId]) where { nodes: [LockNode] } -> [PackageId] {
+    let ready = ready_after(nodes) where { done: done };
     if ready.len() == 0 {
         done
     } else {
-        order_after(done ++ ready) where { packages: packages }
+        order_after(done ++ ready) where { nodes: nodes }
     }
 }
 
-fn build_order(packages: [LockPackage]) -> [String] {
-    let none: [String] = [];
-    order_after(none) where { packages: packages }
+fn build_order(packages: [LockPackage]) -> [PackageId] {
+    let none: [PackageId] = [];
+    order_after(none) where { nodes: lock_graph(packages) }
 }
 
 // ------------------------------------------------------------------ the targets
@@ -196,15 +265,23 @@ fn rlib_name(name: String) -> String {
 
 // One `--extern name=libname.rlib` pair per dependency, in lock order. Two argv
 // elements each, the way cargo spells it.
-fn extern_argv(deps: [String]) -> [String] {
+//
+// KNOWN AND BOUNDED: the rlib name is derived from the package NAME, so a lock
+// holding one name at two versions plans the same `--extern` twice. Cargo
+// disambiguates with a `-C metadata` hash in the filename, which is an artifact
+// LAYOUT decision this file does not make yet — there is no out-dir scheme here
+// at all (`--out-dir .`). Naming it here rather than inventing a scheme: the
+// identity to key it on now exists (`PackageId`), so this is a naming question,
+// not a graph one.
+fn extern_argv(deps: [PackageId]) -> [String] {
     let none: [String] = [];
-    deps.fold(none, |argv, dep| argv + "--extern" + (crate_ident(dep) + "=" + rlib_name(dep)))
+    deps.fold(none, |argv, dep| argv + "--extern" + (crate_ident(dep.name) + "=" + rlib_name(dep.name)))
 }
 
 // The argv rustc wants for one unit. This is the value that would be handed
 // straight to `exec rustc`; it is rendered as data instead so the plan can be
 // asserted without the process existing.
-fn rustc_argv(unit: Unit) where { deps: [String] } -> [String] {
+fn rustc_argv(unit: Unit) where { deps: [PackageId] } -> [String] {
     ["--crate-name", unit.name]
         + "--edition"
         + unit.edition
@@ -271,7 +348,41 @@ fn orders_the_locked_packages() -> Stream<Check> {
     // Every package is ordered — a short order would mean a cycle.
     yield expect_eq(order.len(), lock.package.len());
     // Dependencies before the dependent that names them.
-    yield expect_eq(order, ["libc", "log", "small-crate"]);
+    yield expect_eq(order, [
+        PackageId { name: "libc", version: "0.2.155" },
+        PackageId { name: "log", version: "0.4.22" },
+        PackageId { name: "small-crate", version: "0.1.0" }
+    ]);
+    // This lock has no duplicated name, so cargo wrote every dependency bare —
+    // and the bare form still resolves.
+    yield expect_eq(
+        dependency_ids(lock.package[2]) where { packages: lock.package },
+        [
+            PackageId { name: "libc", version: "0.2.155" },
+            PackageId { name: "log", version: "0.4.22" }
+        ]
+    );
+}
+
+// The case the name-keyed walk could not do: one name at two versions. Cargo
+// then writes the root's dependencies as `"bitflags 1.3.2"` / `"bitflags
+// 2.13.1"`, which is the whole reason the identity carries a version.
+#[test]
+fn orders_a_lock_holding_one_name_at_two_versions() -> Stream<Check> {
+    let source = fixture_tree("dup-name-crate");
+    let lock = lockfile(source);
+    let order = build_order(lock.package);
+
+    // Load-bearing: keyed on the name this came back with two of three, and the
+    // truncation was indistinguishable from a cycle.
+    yield expect_eq(order.len(), lock.package.len());
+    yield expect_eq(order, [
+        PackageId { name: "bitflags", version: "1.3.2" },
+        PackageId { name: "bitflags", version: "2.13.1" },
+        PackageId { name: "dup-name-crate", version: "0.1.0" }
+    ]);
+    // The disambiguated spelling is what the entries actually are.
+    yield expect_eq(dependencies_of(lock.package[2]), ["bitflags 1.3.2", "bitflags 2.13.1"]);
 }
 
 #[test]
@@ -293,8 +404,8 @@ fn plans_the_rustc_invocations() -> Stream<Check> {
     let source = fixture_tree("small-crate");
     let lock = lockfile(source);
     let found = units(source);
-    let deps = dependencies_of(lock.package[2]);
-    let none: [String] = [];
+    let deps = dependency_ids(lock.package[2]) where { packages: lock.package };
+    let none: [PackageId] = [];
 
     // A dependency compiles with no externs of its own.
     yield expect_eq(
