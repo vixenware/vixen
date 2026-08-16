@@ -1,6 +1,6 @@
 [workspace]
 resolver = "3"
-members = ["vix-core", "vix-wire", "vixen-primitives", "vixen-runtime"]
+members = ["exec-protocol", "vix-core", "vix-wire", "vixen-primitives", "vixen-runtime"]
 
 [workspace.package]
 edition = "2024"
@@ -27,6 +27,17 @@ snark-dsl = { git = "https://github.com/bearcove/snark", rev = "e85ba57226f239a1
 taxon = { git = "https://github.com/bearcove/weavy", rev = "743a7abe8f999ab4122df1cc02e2441849210a23" }
 tempfile = "3.23"
 tracing = { version = "0.1.43", default-features = false, features = ["std", "attributes"] }
+# The transport `exec-protocol`'s `#[vox::service]` rides. It stays a facet
+# thing and is depended on rather than vendored — same facet rev as everything
+# else here, so one checkout serves the whole workspace.
+#
+# `runtime` and nothing else, which is the measured minimum: without it
+# `#[vox::service]` fails to resolve `Caller`/`Driver` (they are `#[cfg(feature
+# = "runtime")]` in vox's lib.rs), and vox's DEFAULT set adds three transports
+# — tcp, local, websocket — that pull a whole tungstenite stack for a crate
+# that declares a protocol and opens no sockets. Which transports a RUNNER
+# wants is the runner's call; add them here when #12 brings one.
+vox = { git = "https://github.com/facet-rs/facet", rev = "5705fa6c51289bea49f5729c52dc5e23cedce4f8", default-features = false, features = ["runtime"] }
 weavy = { git = "https://github.com/bearcove/weavy", rev = "743a7abe8f999ab4122df1cc02e2441849210a23" }
 windows-sys = "0.61"
 

@@ -1,14 +1,14 @@
+# The runner execution protocol. It came along in the standalone-workspace
+# extraction as a verbatim copy of the facet-rs/facet crate and was never wired
+# up; this is that crate adopted deliberately (#6). The types are vix-shaped —
+# `SandboxCapability`, `ToolchainKind`, `RunnerCapabilities` — so they live
+# here, while `vox`, the transport they ride, stays a facet thing.
+
 [package]
 name = "exec-protocol"
-version.workspace = true
-edition.workspace = true
-rust-version.workspace = true
-license.workspace = true
-repository.workspace = true
-homepage.workspace = true
-documentation.workspace = true
-keywords.workspace = true
-categories.workspace = true
+version = "0.1.0"
+edition = "2024"
+publish = false
 description = "Public runner execution protocol types"
 
 [package.metadata]
