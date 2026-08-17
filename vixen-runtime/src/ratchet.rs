@@ -1127,7 +1127,8 @@ fn compile_and_warm(
         for site in &partitioned.sites {
             match &site.recipe {
                 PartitionedRecipe::Value { island }
-                | PartitionedRecipe::Snapshot { island, .. } => {
+                | PartitionedRecipe::Snapshot { island, .. }
+                | PartitionedRecipe::Failure { island, .. } => {
                     cache.get_or_lower(&partitioned.islands[*island])?;
                 }
                 PartitionedRecipe::Trace(_) => {}
@@ -1622,6 +1623,64 @@ fn evaluate_snapshot_site(
         failure_context: None,
         trace_failure: None,
         snapshot: Some(capture),
+    })
+}
+
+/// Evaluate one `expect_fail` site: demand its subject island and pass exactly
+/// when that demand RAISED a payload of the expected schema.
+///
+/// The subject is an ordinary demand — the same island, memo path, and identity
+/// an `expect_eq` operand gets — so the plain and chaos lanes and the native and
+/// interpreter lanes agree on the outcome, and the verdict is a function of that
+/// outcome alone.
+///
+/// Three ways to be red, and they are the point of the constructor:
+/// * the demand published a value — nothing collapsed;
+/// * it collapsed into a MACHINE failure (`MissingKey`, `ProcessFailure`, a
+///   missing fixture path, …), which carries no authored payload and so matches
+///   no expected schema. A typo in the subject cannot satisfy the check;
+/// * it raised a payload of a different type than the one named.
+///
+/// A green check reports no failure: the collapse was the assertion, so
+/// attaching it would make a passing run read as a failing one to every reader
+/// that treats `failure.is_some()` as red. A red one reports whatever it did get
+/// — the wrong failure, or nothing at all when the subject published.
+fn evaluate_failure_site(
+    runtime: &mut Runtime<EventLog>,
+    cache: &mut LoweringCache,
+    context: &SiteContext<'_>,
+    island: &vix::vir::Island,
+    site: u32,
+    expected_payload: &vix::schema::SchemaRef,
+    chaos: ChaosPolicy,
+) -> Result<CheckRun, RunError> {
+    let (submission, pending) = submit_value_site(runtime, cache, context, island, site, chaos)?;
+    let evaluation = match submission {
+        RootSubmission::Ready(evaluation) => *evaluation,
+        RootSubmission::Pending(root) => runtime.run_until_any(&[root])?.1,
+    };
+    runtime.finish_root_batch();
+    let raised_expected = matches!(
+        &evaluation.failure,
+        Some(FailureValue::Raised { payload, .. }) if payload.schema == *expected_payload
+    );
+    Ok(CheckRun {
+        provenance: pending.provenance,
+        identity: Some(evaluation.identity),
+        arguments: pending.argument_identities,
+        passed: raised_expected,
+        failure: if raised_expected {
+            None
+        } else {
+            evaluation.failure
+        },
+        failure_context: if raised_expected {
+            None
+        } else {
+            evaluation.failure_context
+        },
+        trace_failure: None,
+        snapshot: None,
     })
 }
 
@@ -2232,6 +2291,28 @@ fn run_lane(
                             }
                             checks.push(check);
                         }
+                        PartitionedRecipe::Failure { island, payload } => {
+                            let misses_before = runtime.counters().memo_misses;
+                            let check = evaluate_failure_site(
+                                &mut runtime,
+                                cache,
+                                &SiteContext {
+                                    test_name: &partitioned.name,
+                                    source_revision,
+                                    module,
+                                    wire_lookup: &wire_lookup,
+                                    published_values: &published_values,
+                                },
+                                &partitioned.islands[*island],
+                                site,
+                                payload,
+                                ChaosPolicy::default(),
+                            )?;
+                            if runtime.counters().memo_misses > misses_before {
+                                evaluated_islands.push(*island);
+                            }
+                            checks.push(check);
+                        }
                         PartitionedRecipe::Trace(trace) => {
                             if evaluate_trace_checks {
                                 deferred_traces.push(DeferredTrace {
@@ -2303,6 +2384,32 @@ fn run_lane(
                                 name,
                                 expectations,
                                 &mut seen_snapshot_names,
+                                ChaosPolicy {
+                                    kill_first_running_task: kill_available,
+                                    ..ChaosPolicy::default()
+                                },
+                            )?;
+                            if runtime.counters().memo_misses > misses_before {
+                                evaluated_islands.push(*island);
+                            }
+                            checks.push(check);
+                            kill_available = false;
+                        }
+                        PartitionedRecipe::Failure { island, payload } => {
+                            let misses_before = runtime.counters().memo_misses;
+                            let check = evaluate_failure_site(
+                                &mut runtime,
+                                cache,
+                                &SiteContext {
+                                    test_name: &partitioned.name,
+                                    source_revision,
+                                    module,
+                                    wire_lookup: &wire_lookup,
+                                    published_values: &published_values,
+                                },
+                                &partitioned.islands[*island],
+                                site,
+                                payload,
                                 ChaosPolicy {
                                     kill_first_running_task: kill_available,
                                     ..ChaosPolicy::default()

@@ -72,7 +72,7 @@ fn the_shipped_cargo_vix_is_green() {
     // nothing is exactly what a broken decode looks like from out here.
     assert_eq!(
         report.plain.checks.len(),
-        28,
+        29,
         "every check in cargo.vix ran"
     );
 }

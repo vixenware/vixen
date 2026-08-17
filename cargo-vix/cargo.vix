@@ -4,7 +4,7 @@
 // one needs.
 //
 // Run it: `vx cargo-vix/cargo.vix`, or let the suite do it —
-// `vixen-runtime/tests/cargo_vix.rs` runs THIS file and asserts all 28 checks,
+// `vixen-runtime/tests/cargo_vix.rs` runs THIS file and asserts all 29 checks,
 // so an edit here that breaks decode or the walk fails the build.
 //
 // The lock is the load-bearing input, not the manifest: the 0.1 north star is
@@ -384,6 +384,24 @@ fn orders_a_lock_holding_one_name_at_two_versions() -> Stream<Check> {
     ]);
     // The disambiguated spelling is what the entries actually are.
     yield expect_eq(dependencies_of(lock.package[2]), ["bitflags 1.3.2", "bitflags 2.13.1"]);
+}
+
+// The refusal, pinned in the file that declares it. `trees/ambiguous-lock` is
+// the dup-name lock with its bare dependency entry put back, so `"bitflags"`
+// names two packages and nothing chooses between them. The old shape of this
+// bug is why it matters: an unmatchable id truncates the Kahn walk, and a short
+// order is indistinguishable from a cycle — the failure has to be loud HERE, at
+// the entry that cannot be resolved, or it arrives later wearing a lie.
+//
+// The payload TYPE is what the check names. A machine failure — a missing
+// fixture, a lock that is not UTF-8 — carries no authored payload and can never
+// satisfy this, so the check cannot go green on a broken fixture.
+#[test]
+fn a_bare_entry_naming_two_packages_is_refused() -> Stream<Check> {
+    let source = fixture_tree("ambiguous-lock");
+    let lock = lockfile(source);
+
+    yield expect_fail(build_order(lock.package), UnresolvableDependency);
 }
 
 #[test]

@@ -17,7 +17,7 @@ cargo build -p vixen-runtime --bin vx
 ```
 
 Both files in here are also run by the Rust suite, so neither can rot:
-`vixen-runtime/tests/cargo_vix.rs` runs `cargo.vix`'s 28 checks and
+`vixen-runtime/tests/cargo_vix.rs` runs `cargo.vix`'s 29 checks and
 `exec_tree_mounts.rs` runs `hello.vix`. They read the shipped files off disk
 rather than copying them, so the example and the proof are one artifact. The
 Rust runner has to root the harness `FixtureStore` at `cargo-vix/` the way `vx`
@@ -153,6 +153,11 @@ Recorded where they were hit, so they are not rediscovered:
   packages or several raises `UnresolvableDependency` rather than yielding an id
   that matches nothing, so a short order keeps its one remaining meaning. The
   length check in `orders_the_locked_packages` stays — it is what pins that.
+  The refusal is now pinned in this file too, rather than by hand out of tree:
+  `expect_fail(build_order(lock.package), UnresolvableDependency)` over
+  `trees/ambiguous-lock` — the same lock with its bare entry put back. The check
+  names the payload TYPE, so a broken fixture (a machine failure, which carries
+  no authored payload) cannot satisfy it.
   One bound left: `extern_argv` derives the rlib name from the package NAME, so
   a duplicated name plans the same `--extern` twice. Cargo disambiguates with a
   `-C metadata` hash in the filename, which is an artifact-layout decision this
