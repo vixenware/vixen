@@ -3,7 +3,9 @@
 // the locked packages into a build sequence, and plan the rustc invocation each
 // one needs.
 //
-// Run it: `vx cargo-vix/cargo.vix`
+// Run it: `vx cargo-vix/cargo.vix`, or let the suite do it —
+// `vixen-runtime/tests/cargo_vix.rs` runs THIS file and asserts all 28 checks,
+// so an edit here that breaks decode or the walk fails the build.
 //
 // The lock is the load-bearing input, not the manifest: the 0.1 north star is
 // "an existing Cargo.lock → a built binary", so nothing here resolves a version
@@ -12,13 +14,12 @@
 // every fetch.
 //
 // WHAT IS AND IS NOT HERE. Everything up to and including the argv plan is real
-// and runs. The invocations are still plans HERE, for one reason: mounting a
-// tree into an exec now works (see hello.vix, which really does compile and run
-// a binary), but only for a CONTENT-IDENTIFIED tree. `fixture_tree` is an
-// origin-backed handle, and enumerating one needs a directory verb on the
-// effect authority that does not exist yet. So this file can read a workspace
-// and plan its build, and hello.vix can compile sources it generated — joining
-// the two is the next rung. See cargo-vix/README.md.
+// and runs; the invocations are still PLANS, asserted as data. The bound that
+// used to stop them being run is gone — an origin-backed tree mounts now
+// (`exec_tree_mounts.rs` compiles `trees/small-crate` with real rustc off the
+// fixture root) — so what remains is artifact LAYOUT: every unit here plans
+// `--out-dir .` and derives its rlib name from the package name alone, which
+// two versions of one name collide in. See cargo-vix/README.md.
 
 // ---------------------------------------------------------------- the manifest
 

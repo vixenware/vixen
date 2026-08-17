@@ -16,6 +16,13 @@ cargo build -p vixen-runtime --bin vx
 ./target/debug/vx cargo-vix/cargo.vix
 ```
 
+Both files in here are also run by the Rust suite, so neither can rot:
+`vixen-runtime/tests/cargo_vix.rs` runs `cargo.vix`'s 28 checks and
+`exec_tree_mounts.rs` runs `hello.vix`. They read the shipped files off disk
+rather than copying them, so the example and the proof are one artifact. The
+Rust runner has to root the harness `FixtureStore` at `cargo-vix/` the way `vx`
+does, or `fixture_tree` resolves against the runtime crate's own fixtures.
+
 `vx` is a shim (`vixen-runtime/src/bin/vx.rs`), not a product: it runs one file's
 `#[test]` declarations through the same production path the ratchet drives and
 reports the checks. It roots the harness `FixtureStore` at the `.vix` file's own
