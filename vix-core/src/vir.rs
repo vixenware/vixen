@@ -365,6 +365,7 @@ impl YieldSite {
         match &self.recipe {
             CheckRecipe::Value { check } => Some(*check),
             CheckRecipe::Snapshot { value, .. } => Some(*value),
+            CheckRecipe::Failure { subject, .. } => Some(*subject),
             CheckRecipe::Trace(_) => None,
         }
     }
@@ -385,6 +386,25 @@ pub enum CheckRecipe {
     /// The recipe root is the value node itself (a publication, not a boolean),
     /// so the island realizes the value and the harness renders it type-directed.
     Snapshot { value: NodeId, name: String },
+    /// `expect_fail(subject, PayloadType)` — the check whose subject is EXPECTED
+    /// to collapse. Like a snapshot the recipe root is the subject value node
+    /// rather than a boolean, because the assertion is about the demand's
+    /// outcome and a raised demand publishes no boolean to inspect.
+    ///
+    /// `payload` is the schema of the authored payload the raise must carry,
+    /// resolved from a named type at compile time — nothing is demanded to know
+    /// it. It is what keeps the check from being satisfied by ANY collapse: a
+    /// machine failure (`MissingKey`, `ProcessFailure`, …) carries no authored
+    /// payload at all, so it can never match, and a raise of a different payload
+    /// type is as red as no raise.
+    ///
+    /// This does NOT serve the machine-failure plane, and deliberately leaves it
+    /// alone: rungs 132/133/136/141/142/143 declare `failed_with(subject,
+    /// "message")` and `failure_span_in(subject, f)` for that, keyed on the
+    /// machine's own stable message and the raising function's span. Those are
+    /// still unimplemented, and matching on a payload schema is not a way to
+    /// spell either of them.
+    Failure { subject: NodeId, payload: SchemaRef },
     /// A post-run assertion over the frozen completed-run snapshot.
     Trace(TraceCheck),
 }
@@ -2049,6 +2069,7 @@ pub struct PartitionedSite {
 pub enum PartitionedRecipe {
     Value { island: usize },
     Snapshot { island: usize, name: String },
+    Failure { island: usize, payload: SchemaRef },
     Trace(TraceCheck),
 }
 
@@ -2668,6 +2689,29 @@ impl Module {
                     PartitionedRecipe::Snapshot {
                         island,
                         name: name.clone(),
+                    }
+                }
+                CheckRecipe::Failure { subject, payload } => {
+                    // The subject is published like a snapshot's value — the
+                    // island realizes it — but the interesting outcome is the
+                    // one where it never publishes at all. `Snapshot` purpose
+                    // rather than `Check`: a check island must output
+                    // `Type::Check`, and this root is the subject's own type.
+                    let island = islands.len();
+                    islands.push(self.partition_function_output_with_shared(
+                        function,
+                        *subject,
+                        IslandId(u32::try_from(island).expect("island index fits u32")),
+                        IslandPurpose::Snapshot,
+                        &IslandBoundary {
+                            shared: &published_ids,
+                            wires: &wire_ids,
+                            lazy_arg_reps: &lazy_arg_reps,
+                        },
+                    ));
+                    PartitionedRecipe::Failure {
+                        island,
+                        payload: payload.clone(),
                     }
                 }
                 CheckRecipe::Trace(trace) => PartitionedRecipe::Trace(trace.clone()),
@@ -4030,6 +4074,7 @@ fn remap_test_nodes(test: &Test, map: &BTreeMap<NodeId, NodeId>) -> Test {
                 GeneratorStep::Yield(site) => match &mut site.recipe {
                     CheckRecipe::Value { check } => *check = remap(*check),
                     CheckRecipe::Snapshot { value, .. } => *value = remap(*value),
+                    CheckRecipe::Failure { subject, .. } => *subject = remap(*subject),
                     CheckRecipe::Trace(trace) => remap_trace(trace, remap),
                 },
                 GeneratorStep::Match { scrutinee, arms } => {

@@ -2643,6 +2643,7 @@ fn lower_generator_body(
                     let published = match &site.recipe {
                         CheckRecipe::Value { check } => Some(*check),
                         CheckRecipe::Snapshot { value, .. } => Some(*value),
+                        CheckRecipe::Failure { subject, .. } => Some(*subject),
                         CheckRecipe::Trace(_) => None,
                     };
                     if top_level && let Some(published) = published {
@@ -2690,8 +2691,14 @@ fn lower_yield_check_site(
     span: Span,
 ) -> Result<YieldSite, Diagnostics> {
     let recipe = lower_check(nodes, bindings, context, value)?;
-    if let CheckRecipe::Value { check } = &recipe {
-        yielded_checks.push(*check);
+    match &recipe {
+        CheckRecipe::Value { check } => yielded_checks.push(*check),
+        // An `expect_fail` subject is demanded exactly as a value check's
+        // condition is — the harness roots an island on it — so it is consumed,
+        // and a `must_use` value asserted to collapse must not also be reported
+        // as discarded.
+        CheckRecipe::Failure { subject, .. } => yielded_checks.push(*subject),
+        CheckRecipe::Snapshot { .. } | CheckRecipe::Trace(_) => {}
     }
     let id = YieldSiteId(*site_counter);
     *site_counter = site_counter
@@ -3060,6 +3067,9 @@ fn lower_check(
     if call.callee.value == "expect_snapshot" {
         return lower_snapshot_check(nodes, bindings, context, call);
     }
+    if call.callee.value == "expect_fail" {
+        return lower_failure_check(nodes, bindings, context, call);
+    }
     if call.named_args.is_some() {
         return Err(Diagnostics::one(Diagnostic::unsupported(
             call.span,
@@ -3285,6 +3295,66 @@ fn lower_snapshot_check(
     Ok(CheckRecipe::Snapshot {
         value: value.node,
         name: literal.value.clone(),
+    })
+}
+
+/// `expect_fail (subject, PayloadType)` — assert that demanding `subject`
+/// raises, and that the raise carries a payload of the named type.
+///
+/// The first component is lowered without a type constraint and becomes the
+/// recipe root, exactly as a snapshot's subject does: the check is about the
+/// demand's OUTCOME, and a raised demand publishes no boolean for an
+/// `Op::Expect` to consume.
+///
+/// The second component is a TYPE, not a value. It is read from the surface and
+/// resolved against the module's named types at compile time, so knowing what
+/// the check expects demands nothing — the same discipline as the snapshot
+/// name's string literal and a trace check's integer bound. Resolving it to a
+/// schema here is also what makes the check refutable: the runner compares the
+/// raised payload's schema against this one, so a raise of a different payload,
+/// a machine failure carrying no authored payload, and an ordinary successful
+/// publication are all red.
+fn lower_failure_check(
+    nodes: &mut Vec<Node>,
+    bindings: &BTreeMap<String, LoweredValue>,
+    context: &ModuleContext<'_>,
+    call: &ast::Call,
+) -> Result<CheckRecipe, Diagnostics> {
+    if call.named_args.is_some() {
+        return Err(Diagnostics::one(Diagnostic::unsupported(
+            call.span,
+            "named arguments on a check constructor",
+        )));
+    }
+    check_arity(call, 2)?;
+    let subject = lower_value(nodes, bindings, context, &call.args.args[0])?;
+    let expected = &call.args.args[1];
+    let ast::Expr::Identifier(identifier) = expected else {
+        return Err(Diagnostics::one(Diagnostic::unsupported(
+            expr_span(expected),
+            "the expected failure names a payload type",
+        )));
+    };
+    // A name that resolves to no declared type is the ordinary unknown-name
+    // diagnostic rather than an `unsupported`: the author meant a type, and
+    // naming which one is missing is the useful half.
+    let payload = context
+        .types
+        .get(&identifier.value)
+        .ok_or_else(|| {
+            Diagnostics::one(Diagnostic {
+                code: DiagnosticCode::UnknownName,
+                primary: identifier.span,
+                labels: Vec::new(),
+                payload: DiagnosticPayload::Name {
+                    name: identifier.value.clone(),
+                },
+            })
+        })?
+        .schema_ref();
+    Ok(CheckRecipe::Failure {
+        subject: subject.node,
+        payload,
     })
 }
 
